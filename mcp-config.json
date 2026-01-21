@@ -1,0 +1,72 @@
+{
+  "mcpServers": {
+    "backbone-trading": {
+      "command": "node",
+      "args": ["src/mcp/trading-server.js"],
+      "description": "Trading and portfolio management via Alpaca",
+      "tools": [
+        "get_portfolio",
+        "get_positions",
+        "buy_stock",
+        "sell_stock",
+        "get_ticker_analysis",
+        "get_trading_signals",
+        "enable_auto_trading",
+        "get_trade_history"
+      ]
+    },
+    "backbone-health": {
+      "command": "node",
+      "args": ["src/mcp/health-server.js"],
+      "description": "Health data from Oura Ring",
+      "tools": [
+        "get_sleep_data",
+        "get_readiness_score",
+        "get_activity_data",
+        "get_health_summary"
+      ]
+    },
+    "backbone-linkedin": {
+      "command": "node",
+      "args": ["src/mcp/linkedin-server.js"],
+      "description": "LinkedIn profile and messages",
+      "tools": [
+        "get_linkedin_profile",
+        "scrape_linkedin_profile",
+        "get_linkedin_messages"
+      ]
+    },
+    "backbone-email": {
+      "command": "node",
+      "args": ["src/mcp/email-server.js"],
+      "description": "Email integration (Gmail/Outlook)",
+      "tools": [
+        "get_recent_emails",
+        "get_unread_count",
+        "search_emails"
+      ]
+    },
+    "backbone-calendar": {
+      "command": "node",
+      "args": ["src/mcp/calendar-server.js"],
+      "description": "Calendar events",
+      "tools": [
+        "get_today_events",
+        "get_upcoming_events",
+        "create_event"
+      ]
+    }
+  },
+  "externalMCPServers": {
+    "oura": {
+      "url": "https://mcp.oura.com",
+      "apiKey": "${OURA_ACCESS_TOKEN}",
+      "description": "Official Oura MCP if available"
+    },
+    "alpaca": {
+      "url": "https://mcp.alpaca.markets",
+      "apiKey": "${ALPACA_KEY}",
+      "description": "Official Alpaca MCP if available"
+    }
+  }
+}

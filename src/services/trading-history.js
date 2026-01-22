@@ -46,34 +46,34 @@ const saveStoredHistory = (history) => {
 };
 
 /**
- * Get the most recent Saturday (start of current week)
- * Week runs Saturday 00:00:00 to following Friday 23:59:59
+ * Get the most recent Sunday (start of current week)
+ * Week runs Sunday 00:00:00 to following Saturday 23:59:59
  */
-const getMostRecentSaturday = () => {
+const getMostRecentSunday = () => {
   const now = new Date();
   const currentDay = now.getDay(); // 0 = Sunday, 6 = Saturday
 
-  // Calculate days since last Saturday
-  // If today is Saturday (6), days back = 0
-  // If today is Sunday (0), days back = 1
-  // If today is Monday (1), days back = 2
+  // Calculate days since last Sunday
+  // If today is Sunday (0), days back = 0
+  // If today is Monday (1), days back = 1
   // etc.
-  const daysSinceSaturday = currentDay === 6 ? 0 : currentDay + 1;
+  const daysSinceSunday = currentDay;
 
-  const saturday = new Date(now);
-  saturday.setDate(now.getDate() - daysSinceSaturday);
-  saturday.setHours(0, 0, 0, 0);
+  const sunday = new Date(now);
+  sunday.setDate(now.getDate() - daysSinceSunday);
+  sunday.setHours(0, 0, 0, 0);
 
-  return saturday;
+  return sunday;
 };
 
 /**
- * Get the Saturday boundaries for 8 weeks (current week + 7 past weeks)
+ * Get week boundaries for 8 weeks (current week + 7 past weeks)
+ * Week runs Sunday to Saturday
  * Returns weeks in descending order (most recent first)
  */
 const getWeekBoundaries = (weeksBack = WEEKS_TO_SHOW) => {
   const weeks = [];
-  const currentWeekStart = getMostRecentSaturday();
+  const currentWeekStart = getMostRecentSunday();
 
   // Build weeks from most recent to oldest
   for (let i = 0; i < weeksBack; i++) {
@@ -81,7 +81,7 @@ const getWeekBoundaries = (weeksBack = WEEKS_TO_SHOW) => {
     weekStart.setDate(currentWeekStart.getDate() - (i * 7));
 
     const weekEnd = new Date(weekStart);
-    weekEnd.setDate(weekStart.getDate() + 6); // Friday
+    weekEnd.setDate(weekStart.getDate() + 6); // Saturday
     weekEnd.setHours(23, 59, 59, 999);
 
     weeks.push({
@@ -161,7 +161,7 @@ const fetchSPYHistory = async (config, startDate, endDate) => {
 
 /**
  * Calculate weekly P&L from portfolio history
- * For each week: find equity on Saturday (start) and Friday (end)
+ * For each week: find equity on Sunday (start) and Saturday (end)
  */
 const calculateWeeklyPnL = (portfolioHistory, weeks) => {
   const { timestamp, equity } = portfolioHistory;
@@ -184,7 +184,7 @@ const calculateWeeklyPnL = (portfolioHistory, weeks) => {
   });
 
   return weeks.map(week => {
-    // Find start equity - look for Saturday or nearest trading day after
+    // Find start equity - look for Sunday or nearest trading day after
     let startEquity = null;
     for (let d = new Date(week.start); d <= week.end; d.setDate(d.getDate() + 1)) {
       const dateStr = d.toISOString().split("T")[0];
@@ -194,7 +194,7 @@ const calculateWeeklyPnL = (portfolioHistory, weeks) => {
       }
     }
 
-    // Find end equity - look for Friday or nearest trading day before
+    // Find end equity - look for Saturday or nearest trading day before
     let endEquity = null;
     for (let d = new Date(week.end); d >= week.start; d.setDate(d.getDate() - 1)) {
       const dateStr = d.toISOString().split("T")[0];

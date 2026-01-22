@@ -190,8 +190,7 @@ const ChatPanelBase = ({ commands, onSubmit, onTypingChange }) => {
       borderStyle: "round",
       borderColor,
       padding: 1,
-      height: 6,
-      overflow: "hidden"
+      minHeight: 6
     },
     // Header with mode indicator
     e(

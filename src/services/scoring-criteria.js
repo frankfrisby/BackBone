@@ -11,15 +11,15 @@
  */
 
 /**
- * Scoring thresholds for buy/sell signals
+ * Scoring thresholds for buy/sell signals (0-10 scale)
  */
 export const THRESHOLDS = {
-  // Score thresholds
-  STRONG_BUY: 85,
-  BUY: 75,
-  HOLD: 50,
-  SELL: 35,
-  STRONG_SELL: 25,
+  // Score thresholds (0-10 scale)
+  STRONG_BUY: 8.5,
+  BUY: 7.5,
+  HOLD: 5.0,
+  SELL: 3.5,
+  STRONG_SELL: 2.5,
 
   // RSI thresholds
   RSI_OVERBOUGHT: 70,
@@ -109,7 +109,7 @@ export const calculateComprehensiveScore = (data, riskProfile = "conservative") 
     sigmaBonus = 5;
   }
 
-  // Weighted score calculation
+  // Weighted score calculation (0-100 internally)
   const rawScore =
     momentum * weights.momentum +
     volume * weights.volume +
@@ -119,7 +119,9 @@ export const calculateComprehensiveScore = (data, riskProfile = "conservative") 
     rsiScore * weights.rsi +
     sigmaBonus;
 
-  return Math.round(Math.max(0, Math.min(100, rawScore)));
+  // Convert to 0-10 scale with 1 decimal
+  const score = Math.max(0, Math.min(100, rawScore)) / 10;
+  return Math.round(score * 10) / 10;
 };
 
 /**

@@ -264,7 +264,118 @@ const calculateVolumeScore = (bars) => {
 };
 
 /**
- * Build full ticker analysis
+ * Calculate RSI from price history
+ */
+const calculateRSI = (prices, period = 14) => {
+  if (!prices || prices.length < period + 1) {
+    return 50; // Neutral
+  }
+
+  const changes = [];
+  for (let i = 1; i < prices.length; i++) {
+    changes.push(prices[i] - prices[i - 1]);
+  }
+
+  const recentChanges = changes.slice(-period);
+  const gains = recentChanges.filter(c => c > 0);
+  const losses = recentChanges.filter(c => c < 0).map(c => Math.abs(c));
+
+  const avgGain = gains.length > 0 ? gains.reduce((a, b) => a + b, 0) / period : 0;
+  const avgLoss = losses.length > 0 ? losses.reduce((a, b) => a + b, 0) / period : 0;
+
+  if (avgLoss === 0) return avgGain > 0 ? 100 : 50;
+
+  const rs = avgGain / avgLoss;
+  return Math.round(100 - (100 / (1 + rs)));
+};
+
+/**
+ * Calculate price position in 60-day range (-1.5 to +1.5)
+ */
+const calculatePricePosition = (currentPrice, prices) => {
+  if (!prices || prices.length < 5) return 0;
+
+  const validPrices = prices.filter(p => p !== null && p !== undefined);
+  const min60d = Math.min(...validPrices);
+  const max60d = Math.max(...validPrices);
+
+  if (max60d === min60d) return 0;
+
+  const position = (currentPrice - min60d) / (max60d - min60d);
+
+  // Oversold (bullish) vs overbought (bearish)
+  if (position <= 0.1) return 1.5;  // Deeply oversold - bullish
+  if (position >= 0.9) return -1.5; // Deeply overbought - bearish
+
+  // Linear interpolation
+  return 1.5 - (position * 3);
+};
+
+/**
+ * Calculate psychological adjustment from price momentum (-3.5 to +3.5)
+ */
+const calculatePsychological = (percentChange) => {
+  if (!percentChange) return 0;
+
+  const absPercent = Math.abs(percentChange);
+  const direction = percentChange >= 0 ? 1 : -1;
+
+  let adjustment = 0;
+  if (absPercent < 1) adjustment = 0;
+  else if (absPercent < 3) adjustment = (absPercent - 1) / 2 * 1.5;
+  else if (absPercent < 5) adjustment = 1.5;
+  else if (absPercent < 10) adjustment = 2.0;
+  else if (absPercent < 15) adjustment = 3.0;
+  else adjustment = 3.5;
+
+  return adjustment * direction;
+};
+
+/**
+ * Calculate MACD adjustment score (-2.5 to +2.5)
+ */
+const calculateMACDScore = (macdData) => {
+  if (!macdData || macdData.histogram === null) return 0;
+
+  const { histogram, macd, signal, trend } = macdData;
+
+  let score = 0;
+  if (histogram > 0.5) {
+    score = Math.min(1, histogram / 2);
+  } else if (histogram < -0.5) {
+    score = Math.max(-1, histogram / 2);
+  } else {
+    score = histogram / 0.5 * 0.5;
+  }
+
+  // Trend confirmation bonus
+  if (trend === "bullish" && macd > signal) {
+    score += 0.25;
+  } else if (trend === "bearish" && macd < signal) {
+    score -= 0.25;
+  }
+
+  return Math.max(-2.5, Math.min(2.5, score * 2.5));
+};
+
+/**
+ * Calculate volume sigma score (-1.5 to +1.5)
+ */
+const calculateVolumeSigmaScore = (sigma, priceDirection = 0) => {
+  if (!sigma || sigma === 1) return 0;
+
+  let score = 2.5 * (sigma - 1) / 10;
+
+  // Dampen positive volume on declining price
+  if (score > 0 && priceDirection < 0) {
+    score = score * 0.3;
+  }
+
+  return Math.max(-1.5, Math.min(1.5, score));
+};
+
+/**
+ * Build full ticker analysis with comprehensive scoring
  */
 const buildTickerAnalysis = async (symbol, quote) => {
   // Use historical data already fetched with quote
@@ -273,16 +384,47 @@ const buildTickerAnalysis = async (symbol, quote) => {
     volume: quote.historicalVolumes?.[i]
   })) || [];
 
+  const closes = bars.map(b => b.close).filter(c => c !== null);
   const macd = calculateMACD(bars);
-  const volumeScore = calculateVolumeScore(bars);
+  const volumeScoreData = calculateVolumeScore(bars);
 
-  // Calculate overall score
-  let score = 50;
-  if (macd.trend === "bullish") score += 15;
-  else if (macd.trend === "bearish") score -= 15;
-  if (volumeScore.score) score += (volumeScore.score - 50) * 0.3;
-  if (quote.changePercent) score += Math.min(15, Math.max(-15, quote.changePercent * 3));
-  score = Math.min(100, Math.max(0, score));
+  // Calculate RSI
+  const rsi = calculateRSI(closes);
+
+  // Calculate volume sigma
+  let volumeSigma = 1.0;
+  if (volumeScoreData.ratio) {
+    volumeSigma = Math.round(volumeScoreData.ratio * 100) / 100;
+  }
+
+  // === COMPREHENSIVE SCORING (matching score-engine.js) ===
+
+  // 1. Technical Score (0-10) from RSI
+  const technicalScore = (100 - Math.abs(50 - rsi)) / 10;
+
+  // 2. MACD Score (-2.5 to +2.5)
+  const macdScore = calculateMACDScore(macd);
+
+  // 3. Volume Sigma Score (-1.5 to +1.5)
+  const volumeScore = calculateVolumeSigmaScore(volumeSigma, quote.regularMarketChangePercent);
+
+  // 4. Price Position Score (-1.5 to +1.5)
+  const pricePositionScore = calculatePricePosition(quote.regularMarketPrice, closes);
+
+  // 5. Psychological Adjustment (-3.5 to +3.5)
+  const psychologicalScore = calculatePsychological(quote.regularMarketChangePercent);
+
+  // Base score: average of technical and a neutral prediction (5.5) plus psychological
+  const baseScore = (technicalScore + 5.5 + psychologicalScore) / 2;
+
+  // Apply adjustments
+  const rawScore = baseScore +
+    macdScore +
+    volumeScore +
+    (pricePositionScore * 1.25);
+
+  // Clamp to 0-10 with 1 decimal
+  const score = Math.round(Math.max(0, Math.min(10, rawScore)) * 10) / 10;
 
   return {
     symbol: quote.symbol,
@@ -296,8 +438,10 @@ const buildTickerAnalysis = async (symbol, quote) => {
     high: quote.regularMarketDayHigh,
     low: quote.regularMarketDayLow,
     macd,
-    volumeScore,
-    score: Math.round(score)
+    volumeScore: volumeScoreData,
+    volumeSigma,
+    rsi,
+    score
   };
 };
 

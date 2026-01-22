@@ -125,4 +125,17 @@ const ConversationPanelBase = ({ messages, isLoading, streamingText }) => {
   );
 };
 
-export const ConversationPanel = React.memo(ConversationPanelBase);
+// Custom comparison to prevent unnecessary re-renders
+const arePropsEqual = (prevProps, nextProps) => {
+  // Only re-render if these specific things change
+  if (prevProps.isLoading !== nextProps.isLoading) return false;
+  if (prevProps.streamingText !== nextProps.streamingText) return false;
+  if (prevProps.messages.length !== nextProps.messages.length) return false;
+  // Check if the last message changed (most common case)
+  const prevLast = prevProps.messages[prevProps.messages.length - 1];
+  const nextLast = nextProps.messages[nextProps.messages.length - 1];
+  if (prevLast?.content !== nextLast?.content) return false;
+  return true;
+};
+
+export const ConversationPanel = React.memo(ConversationPanelBase, arePropsEqual);

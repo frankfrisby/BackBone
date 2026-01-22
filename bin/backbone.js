@@ -5,6 +5,13 @@ import { render } from "ink";
 import App from "../src/app.js";
 import { loadLinkedInProfile } from "../src/services/linkedin-scraper.js";
 
+// Force color support for Windows terminals
+if (process.platform === "win32") {
+  process.env.FORCE_COLOR = "1";
+  // Enable ANSI escape code support
+  process.env.TERM = process.env.TERM || "xterm-256color";
+}
+
 // Set initial console title
 const setConsoleTitle = (title) => {
   if (process.platform === "win32") {

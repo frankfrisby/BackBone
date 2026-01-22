@@ -1,9 +1,16 @@
-import React from "react";
+import React, { memo } from "react";
 import { Box, Text } from "ink";
 
 const e = React.createElement;
 
-// Source colors
+// Task states: WHITE = running, GREEN = done, RED = error
+const TASK_STATE = {
+  RUNNING: "#f8fafc",   // White - in progress
+  DONE: "#22c55e",      // Green - completed
+  ERROR: "#ef4444"      // Red - error
+};
+
+// Source colors (for identifying source, secondary to status)
 const SOURCE_COLORS = {
   alpaca: "#22c55e",
   linkedin: "#0077b5",
@@ -18,9 +25,19 @@ const SOURCE_COLORS = {
 };
 
 /**
- * Work Log Panel - Activity feed with AI thoughts
+ * Get status color: white=running, green=done, red=error
  */
-export const WorkLogPanel = ({ entries = [], title = "Activity / Thoughts", maxItems = 10 }) => {
+const getStatusColor = (status) => {
+  if (status === "error" || status === "failed") return TASK_STATE.ERROR;
+  if (status === "done" || status === "completed" || status === "success") return TASK_STATE.DONE;
+  return TASK_STATE.RUNNING; // pending, running, or any other status
+};
+
+/**
+ * Work Log Panel - Activity feed with AI thoughts
+ * Colors: WHITE = running, GREEN = done, RED = error
+ */
+const WorkLogPanelBase = ({ entries = [], title = "Activity / Thoughts", maxItems = 10 }) => {
   const displayEntries = entries.slice(0, maxItems);
 
   return e(
@@ -37,25 +54,24 @@ export const WorkLogPanel = ({ entries = [], title = "Activity / Thoughts", maxI
       { marginBottom: 1 },
       e(Text, { color: "#64748b" }, title)
     ),
-    // Entries
+    // Entries - each entry updates in place, not regenerated
     displayEntries.length === 0
       ? e(Text, { color: "#475569", dimColor: true }, "Waiting for action...")
       : e(
           Box,
           { flexDirection: "column" },
           ...displayEntries.map((entry, i) => {
-            const color = SOURCE_COLORS[entry.source] || "#64748b";
-            const icon = entry.status === "error" ? "\u25BC" :
-                        entry.status === "pending" ? "\u25CB" : "\u25CF";
-            const iconColor = entry.status === "error" ? "#ef4444" :
-                             entry.status === "pending" ? "#eab308" : color;
+            // Status determines color: white=running, green=done, red=error
+            const statusColor = getStatusColor(entry.status);
+            const icon = entry.status === "error" || entry.status === "failed" ? "✕" :
+                        entry.status === "done" || entry.status === "completed" ? "✓" : "●";
 
             return e(
               Box,
-              { key: entry.id || i, flexDirection: "row", gap: 1 },
-              e(Text, { color: iconColor }, icon),
+              { key: entry.id || `entry-${i}`, flexDirection: "row", gap: 1 },
+              e(Text, { color: statusColor }, icon),
               e(Text, { color: "#475569" }, entry.time || "--:--"),
-              e(Text, { color: "#94a3b8", wrap: "truncate" }, (entry.title || "").slice(0, 25))
+              e(Text, { color: statusColor, wrap: "truncate" }, (entry.title || "").slice(0, 25))
             );
           })
         )
@@ -64,18 +80,50 @@ export const WorkLogPanel = ({ entries = [], title = "Activity / Thoughts", maxI
 
 /**
  * Compact Work Log - Minimal version
+ * Colors: WHITE = running, GREEN = done, RED = error
  */
-export const WorkLogCompact = ({ entries = [], maxItems = 5 }) => {
+const WorkLogCompactBase = ({ entries = [], maxItems = 5 }) => {
   return e(
     Box,
     { flexDirection: "column" },
-    ...entries.slice(0, maxItems).map((entry, i) => e(
-      Box,
-      { key: entry.id || i, flexDirection: "row", gap: 1 },
-      e(Text, { color: SOURCE_COLORS[entry.source] || "#64748b" }, "\u25CF"),
-      e(Text, { color: "#94a3b8" }, (entry.title || "").slice(0, 20))
-    ))
+    ...entries.slice(0, maxItems).map((entry, i) => {
+      const statusColor = getStatusColor(entry.status);
+      const icon = entry.status === "error" || entry.status === "failed" ? "✕" :
+                  entry.status === "done" || entry.status === "completed" ? "✓" : "●";
+      return e(
+        Box,
+        { key: entry.id || `compact-${i}`, flexDirection: "row", gap: 1 },
+        e(Text, { color: statusColor }, icon),
+        e(Text, { color: statusColor }, (entry.title || "").slice(0, 20))
+      );
+    })
   );
 };
+
+/**
+ * Custom comparison for WorkLogPanel
+ */
+const areWorkLogPropsEqual = (prevProps, nextProps) => {
+  if (prevProps.title !== nextProps.title) return false;
+  if (prevProps.maxItems !== nextProps.maxItems) return false;
+
+  const prevEntries = prevProps.entries || [];
+  const nextEntries = nextProps.entries || [];
+
+  if (prevEntries.length !== nextEntries.length) return false;
+
+  // Compare entry IDs and statuses
+  for (let i = 0; i < Math.min(10, prevEntries.length); i++) {
+    if (prevEntries[i]?.id !== nextEntries[i]?.id) return false;
+    if (prevEntries[i]?.status !== nextEntries[i]?.status) return false;
+    if (prevEntries[i]?.title !== nextEntries[i]?.title) return false;
+  }
+
+  return true;
+};
+
+// Memoized exports to prevent flickering
+export const WorkLogPanel = memo(WorkLogPanelBase, areWorkLogPropsEqual);
+export const WorkLogCompact = memo(WorkLogCompactBase);
 
 export default WorkLogPanel;

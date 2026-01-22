@@ -1,30 +1,53 @@
-import React from "react";
+import React, { memo } from "react";
 import { Box, Text } from "ink";
 import Spinner from "ink-spinner";
 
 const e = React.createElement;
 
-// Status colors from engine-state
+// Task states: WHITE = running, GREEN = done, RED = error
+const TASK_STATE = {
+  RUNNING: "#f8fafc",   // White - in progress
+  DONE: "#22c55e",      // Green - completed
+  ERROR: "#ef4444"      // Red - error
+};
+
+// Status colors - simplified to running/done/error model
 const STATUS_COLORS = {
-  starting: "#f59e0b",
-  researching: "#38bdf8",
-  thinking: "#a78bfa",
-  planning: "#60a5fa",
-  building: "#22c55e",
-  working: "#f97316",
-  reflecting: "#ec4899",
-  updating: "#eab308",
-  connecting: "#06b6d4",
-  connecting_agent: "#8b5cf6",
-  connecting_provider: "#3b82f6",
-  running_cron: "#64748b",
-  closing: "#ef4444",
-  idle: "#22c55e",
-  waiting: "#94a3b8",
-  analyzing: "#14b8a6",
-  executing: "#22c55e",
-  learning: "#f472b6",
-  syncing: "#06b6d4"
+  // Running states (white)
+  starting: TASK_STATE.RUNNING,
+  researching: TASK_STATE.RUNNING,
+  thinking: TASK_STATE.RUNNING,
+  planning: TASK_STATE.RUNNING,
+  building: TASK_STATE.RUNNING,
+  working: TASK_STATE.RUNNING,
+  reflecting: TASK_STATE.RUNNING,
+  updating: TASK_STATE.RUNNING,
+  connecting: TASK_STATE.RUNNING,
+  connecting_agent: TASK_STATE.RUNNING,
+  connecting_provider: TASK_STATE.RUNNING,
+  running_cron: TASK_STATE.RUNNING,
+  analyzing: TASK_STATE.RUNNING,
+  executing: TASK_STATE.RUNNING,
+  learning: TASK_STATE.RUNNING,
+  syncing: TASK_STATE.RUNNING,
+  waiting: TASK_STATE.RUNNING,
+  // Done states (green)
+  idle: TASK_STATE.DONE,
+  // Error states (red)
+  closing: TASK_STATE.ERROR,
+  error: TASK_STATE.ERROR
+};
+
+// Cache timestamp to prevent re-renders
+let cachedTime = "";
+let lastTimeUpdate = 0;
+const getCachedTime = () => {
+  const now = Date.now();
+  if (now - lastTimeUpdate > 60000 || !cachedTime) {
+    cachedTime = new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" });
+    lastTimeUpdate = now;
+  }
+  return cachedTime;
 };
 
 // Status icons
@@ -75,9 +98,9 @@ const STATUS_LABELS = {
 
 /**
  * Engine Status Panel - Shows what the AI is currently doing
- * Replaces the generic "Actions" panel with meaningful status
+ * Colors: WHITE = running, GREEN = done, RED = error
  */
-export const EngineStatusPanel = ({
+const EngineStatusPanelBase = ({
   status = {},
   currentPlan = null,
   currentWork = null,
@@ -123,7 +146,7 @@ export const EngineStatusPanel = ({
         isActive && e(Text, { color: statusColor }, "·"),
         isActive && e(Spinner, { type: "dots" })
       ),
-      e(Text, { color: "#475569" }, new Date().toLocaleTimeString())
+      e(Text, { color: "#475569" }, getCachedTime())
     ),
 
     // Current Status Display
@@ -191,11 +214,12 @@ export const EngineStatusPanel = ({
 
 /**
  * Compact status line for header/footer use
+ * Colors: WHITE = running, GREEN = done, RED = error
  */
-export const EngineStatusLine = ({ status = {}, showSpinner = true }) => {
+const EngineStatusLineBase = ({ status = {}, showSpinner = true }) => {
   const statusId = status?.id || "idle";
   const statusDetail = status?.detail || null;
-  const statusColor = STATUS_COLORS[statusId] || "#64748b";
+  const statusColor = STATUS_COLORS[statusId] || TASK_STATE.DONE;
   const statusIcon = STATUS_ICONS[statusId] || "●";
   const statusLabel = STATUS_LABELS[statusId] || "Ready";
   const isActive = statusId !== "idle" && statusId !== "waiting";
@@ -210,5 +234,32 @@ export const EngineStatusLine = ({ status = {}, showSpinner = true }) => {
     statusDetail && e(Text, { color: "#64748b" }, `· ${statusDetail.slice(0, 25)}`)
   );
 };
+
+/**
+ * Custom comparison for EngineStatusPanel
+ */
+const areEngineStatusPropsEqual = (prevProps, nextProps) => {
+  // Only re-render if actual status changes
+  if (prevProps.status?.id !== nextProps.status?.id) return false;
+  if (prevProps.status?.detail !== nextProps.status?.detail) return false;
+  if (prevProps.compact !== nextProps.compact) return false;
+  if (prevProps.currentWork !== nextProps.currentWork) return false;
+
+  // Compare plans length and content
+  const prevPlan = prevProps.currentPlan || [];
+  const nextPlan = nextProps.currentPlan || [];
+  if (prevPlan.length !== nextPlan.length) return false;
+
+  // Compare projects length
+  const prevProjects = prevProps.projects || [];
+  const nextProjects = nextProps.projects || [];
+  if (prevProjects.length !== nextProjects.length) return false;
+
+  return true;
+};
+
+// Memoized exports to prevent flickering
+export const EngineStatusPanel = memo(EngineStatusPanelBase, areEngineStatusPropsEqual);
+export const EngineStatusLine = memo(EngineStatusLineBase);
 
 export default EngineStatusPanel;

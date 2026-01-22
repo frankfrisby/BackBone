@@ -4,38 +4,47 @@ import Spinner from "ink-spinner";
 
 const e = React.createElement;
 
-// Task states: WHITE = running, GREEN = done, RED = error
+// Task states: WHITE = observation, GRAY = working, GREEN = done, RED = error
 const TASK_STATE = {
-  RUNNING: "#f8fafc",   // White - in progress
-  DONE: "#22c55e",      // Green - completed
-  ERROR: "#ef4444"      // Red - error
+  OBSERVATION: "#f8fafc",  // White - observation/output
+  WORKING: "#64748b",      // Gray - starting/working
+  DONE: "#22c55e",         // Green - completed
+  ERROR: "#ef4444"         // Red - error
 };
 
-// Status colors - simplified to running/done/error model
+// Status colors - WHITE=observation, GRAY=working, GREEN=done, RED=error
 const STATUS_COLORS = {
-  // Running states (white)
-  starting: TASK_STATE.RUNNING,
-  researching: TASK_STATE.RUNNING,
-  thinking: TASK_STATE.RUNNING,
-  planning: TASK_STATE.RUNNING,
-  building: TASK_STATE.RUNNING,
-  working: TASK_STATE.RUNNING,
-  reflecting: TASK_STATE.RUNNING,
-  updating: TASK_STATE.RUNNING,
-  connecting: TASK_STATE.RUNNING,
-  connecting_agent: TASK_STATE.RUNNING,
-  connecting_provider: TASK_STATE.RUNNING,
-  running_cron: TASK_STATE.RUNNING,
-  analyzing: TASK_STATE.RUNNING,
-  executing: TASK_STATE.RUNNING,
-  learning: TASK_STATE.RUNNING,
-  syncing: TASK_STATE.RUNNING,
-  waiting: TASK_STATE.RUNNING,
+  // Working states (gray)
+  starting: TASK_STATE.WORKING,
+  researching: TASK_STATE.WORKING,
+  thinking: TASK_STATE.WORKING,
+  planning: TASK_STATE.WORKING,
+  building: TASK_STATE.WORKING,
+  working: TASK_STATE.WORKING,
+  reflecting: TASK_STATE.WORKING,
+  updating: TASK_STATE.WORKING,
+  connecting: TASK_STATE.WORKING,
+  connecting_agent: TASK_STATE.WORKING,
+  connecting_provider: TASK_STATE.WORKING,
+  running_cron: TASK_STATE.WORKING,
+  analyzing: TASK_STATE.WORKING,
+  executing: TASK_STATE.WORKING,
+  learning: TASK_STATE.WORKING,
+  syncing: TASK_STATE.WORKING,
+  waiting: TASK_STATE.WORKING,
+  // Observation states (white)
+  observing: TASK_STATE.OBSERVATION,
+  output: TASK_STATE.OBSERVATION,
+  result: TASK_STATE.OBSERVATION,
   // Done states (green)
   idle: TASK_STATE.DONE,
+  done: TASK_STATE.DONE,
+  completed: TASK_STATE.DONE,
+  success: TASK_STATE.DONE,
   // Error states (red)
   closing: TASK_STATE.ERROR,
-  error: TASK_STATE.ERROR
+  error: TASK_STATE.ERROR,
+  failed: TASK_STATE.ERROR
 };
 
 // Cache timestamp to prevent re-renders
@@ -91,12 +100,32 @@ const ACTION_LABELS = {
  * Format action for display: ● Action([target])
  * @param {string} action - The action type (search, read, write, etc.)
  * @param {string} target - The target (url, file path, etc.)
- * @param {string} status - running, done, error
+ * @param {string} status - observation, working, done, error
  */
-const formatAction = (action, target, status = "running") => {
-  const icon = status === "error" ? "✕" : status === "done" ? "✓" : "●";
-  const color = status === "error" ? TASK_STATE.ERROR :
-                status === "done" ? TASK_STATE.DONE : TASK_STATE.RUNNING;
+const formatAction = (action, target, status = "working") => {
+  let icon, color;
+  switch (status) {
+    case "error":
+    case "failed":
+      icon = "✕";
+      color = TASK_STATE.ERROR;
+      break;
+    case "done":
+    case "completed":
+    case "success":
+      icon = "✓";
+      color = TASK_STATE.DONE;
+      break;
+    case "observation":
+    case "output":
+    case "result":
+      icon = "●";
+      color = TASK_STATE.OBSERVATION;
+      break;
+    default: // working, starting, etc.
+      icon = "●";
+      color = TASK_STATE.WORKING;
+  }
   const label = ACTION_LABELS[action?.toLowerCase()] || action || "Action";
   const shortTarget = target ? `(${target.length > 30 ? "..." + target.slice(-27) : target})` : "";
   return { icon, color, text: `${label}${shortTarget}` };
@@ -127,7 +156,7 @@ const STATUS_LABELS = {
 
 /**
  * Engine Status Panel - Shows what the AI is currently doing
- * Colors: WHITE = running, GREEN = done, RED = error
+ * Colors: WHITE = observation, GRAY = working, GREEN = done, RED = error
  */
 const EngineStatusPanelBase = ({
   status = {},
@@ -251,7 +280,7 @@ const EngineStatusPanelBase = ({
 
 /**
  * Compact status line for header/footer use
- * Colors: WHITE = running, GREEN = done, RED = error
+ * Colors: WHITE = observation, GRAY = working, GREEN = done, RED = error
  */
 const EngineStatusLineBase = ({ status = {}, showSpinner = true }) => {
   const statusId = status?.id || "idle";

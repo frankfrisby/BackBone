@@ -3,11 +3,12 @@ import { Box, Text } from "ink";
 
 const e = React.createElement;
 
-// Task states: WHITE = running, GREEN = done, RED = error
+// Task states: WHITE = observation, GRAY = working, GREEN = done, RED = error
 const TASK_STATE = {
-  RUNNING: "#f8fafc",   // White - in progress
-  DONE: "#22c55e",      // Green - completed
-  ERROR: "#ef4444"      // Red - error
+  OBSERVATION: "#f8fafc",  // White - observation/output
+  WORKING: "#64748b",      // Gray - starting/working
+  DONE: "#22c55e",         // Green - completed
+  ERROR: "#ef4444"         // Red - error
 };
 
 // Source colors (for identifying source, secondary to status)
@@ -25,12 +26,13 @@ const SOURCE_COLORS = {
 };
 
 /**
- * Get status color: white=running, green=done, red=error
+ * Get status color: white=observation, gray=working, green=done, red=error
  */
 const getStatusColor = (status) => {
   if (status === "error" || status === "failed") return TASK_STATE.ERROR;
   if (status === "done" || status === "completed" || status === "success") return TASK_STATE.DONE;
-  return TASK_STATE.RUNNING; // pending, running, or any other status
+  if (status === "observation" || status === "output" || status === "result") return TASK_STATE.OBSERVATION;
+  return TASK_STATE.WORKING; // pending, running, working, or any other status
 };
 
 /**
@@ -62,7 +64,7 @@ const formatEntryTitle = (entry) => {
 
 /**
  * Work Log Panel - Activity feed with AI thoughts
- * Colors: WHITE = running, GREEN = done, RED = error
+ * Colors: WHITE = observation, GRAY = working, GREEN = done, RED = error
  */
 const WorkLogPanelBase = ({ entries = [], title = "Activity / Thoughts", maxItems = 10 }) => {
   const displayEntries = entries.slice(0, maxItems);
@@ -108,7 +110,7 @@ const WorkLogPanelBase = ({ entries = [], title = "Activity / Thoughts", maxItem
 
 /**
  * Compact Work Log - Minimal version
- * Colors: WHITE = running, GREEN = done, RED = error
+ * Colors: WHITE = observation, GRAY = working, GREEN = done, RED = error
  */
 const WorkLogCompactBase = ({ entries = [], maxItems = 5 }) => {
   return e(

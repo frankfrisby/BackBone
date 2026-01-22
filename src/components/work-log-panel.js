@@ -34,6 +34,33 @@ const getStatusColor = (status) => {
 };
 
 /**
+ * Format entry title as Action([target])
+ * Examples: Search([url]), Read([file_path]), Update([file_path])
+ */
+const formatEntryTitle = (entry) => {
+  const title = entry.title || "";
+  const action = entry.action || entry.type || "";
+  const target = entry.target || entry.path || entry.url || "";
+
+  // If we have action and target, format as Action([target])
+  if (action && target) {
+    const shortTarget = target.length > 25 ? "..." + target.slice(-22) : target;
+    return `${action}([${shortTarget}])`;
+  }
+
+  // If title contains a colon, try to parse it
+  const match = title.match(/^(\w+):\s*(.+)$/);
+  if (match) {
+    const [, act, tgt] = match;
+    const shortTgt = tgt.length > 25 ? "..." + tgt.slice(-22) : tgt;
+    return `${act}([${shortTgt}])`;
+  }
+
+  // Default: just return the title
+  return title.slice(0, 30);
+};
+
+/**
  * Work Log Panel - Activity feed with AI thoughts
  * Colors: WHITE = running, GREEN = done, RED = error
  */
@@ -54,7 +81,7 @@ const WorkLogPanelBase = ({ entries = [], title = "Activity / Thoughts", maxItem
       { marginBottom: 1 },
       e(Text, { color: "#64748b" }, title)
     ),
-    // Entries - each entry updates in place, not regenerated
+    // Entries - format: ● Action([target]) - each entry updates in place
     displayEntries.length === 0
       ? e(Text, { color: "#475569", dimColor: true }, "Waiting for action...")
       : e(
@@ -65,13 +92,14 @@ const WorkLogPanelBase = ({ entries = [], title = "Activity / Thoughts", maxItem
             const statusColor = getStatusColor(entry.status);
             const icon = entry.status === "error" || entry.status === "failed" ? "✕" :
                         entry.status === "done" || entry.status === "completed" ? "✓" : "●";
+            const formattedTitle = formatEntryTitle(entry);
 
             return e(
               Box,
               { key: entry.id || `entry-${i}`, flexDirection: "row", gap: 1 },
               e(Text, { color: statusColor }, icon),
               e(Text, { color: "#475569" }, entry.time || "--:--"),
-              e(Text, { color: statusColor, wrap: "truncate" }, (entry.title || "").slice(0, 25))
+              e(Text, { color: statusColor, wrap: "truncate" }, formattedTitle)
             );
           })
         )

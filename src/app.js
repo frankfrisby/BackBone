@@ -600,9 +600,18 @@ const App = ({ updateConsoleTitle }) => {
 
       goalTracker.on("progress-updated", updateGoals);
 
-      // Listen for work log events
+      // Listen for work log events (with change detection)
       workLog.on("entry", () => {
-        setWorkLogEntries(workLog.getDisplayData(15));
+        setWorkLogEntries((prev) => {
+          const next = workLog.getDisplayData(15);
+          // Only update if entries actually changed
+          if (prev.length === next.length &&
+              prev[0]?.id === next[0]?.id &&
+              prev[0]?.status === next[0]?.status) {
+            return prev;
+          }
+          return next;
+        });
       });
 
       // Update work log entries periodically
@@ -1137,20 +1146,20 @@ Return ONLY a JSON array, no other text.`;
   }, []);
 
   // Life feed updates - reduced frequency to prevent flickering
+  // Only update if there's actually new content
+  const lifeFeedRef = useRef(null);
   useEffect(() => {
     const interval = setInterval(() => {
       if (pauseUpdatesRef.current || isTypingRef.current) {
         return;
       }
-      setLifeFeed((prev) => [buildLifeEvent(), ...prev].slice(0, 12));
-      setLifeUpdatedAt(
-        new Date().toLocaleTimeString("en-US", {
-          hour: "2-digit",
-          minute: "2-digit",
-          second: "2-digit"
-        })
-      );
-    }, 10_000); // Increased from 3.5s to 10s to reduce flickering
+      const newEvent = buildLifeEvent();
+      // Only add if it's actually different from the last event
+      if (lifeFeedRef.current !== newEvent.id) {
+        lifeFeedRef.current = newEvent.id;
+        setLifeFeed((prev) => [newEvent, ...prev].slice(0, 12));
+      }
+    }, 15_000); // Increased from 10s to 15s to reduce flickering further
 
     return () => clearInterval(interval);
   }, []);

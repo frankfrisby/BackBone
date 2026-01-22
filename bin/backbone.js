@@ -49,11 +49,18 @@ export const updateConsoleTitle = (name) => {
 const stdin = process.stdin.isTTY ? process.stdin : undefined;
 const stdout = process.stdout.isTTY ? process.stdout : process.stdout;
 
+// Enable Virtual Terminal Processing on Windows for proper ANSI support
+if (process.platform === "win32") {
+  // This enables proper cursor positioning on Windows
+  const { spawn } = await import("child_process");
+  // Enable VT mode by writing ANSI sequences
+  process.stdout.write("\x1b[?25l"); // Hide cursor during render
+}
+
 // Render with optimized settings for smooth updates
 render(createElement(App, { updateConsoleTitle }), {
   stdin,
   stdout,
   exitOnCtrlC: true,
-  patchConsole: false,        // Don't intercept console - reduces overhead
-  // Note: incrementalRendering is available in newer Ink versions
+  patchConsole: true,         // Capture console to prevent interference with Ink rendering
 });

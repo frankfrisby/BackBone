@@ -73,9 +73,38 @@ const STATUS_ICONS = {
   syncing: "↺"
 };
 
+// Action type labels - format: Action([target])
+const ACTION_LABELS = {
+  search: "Search",
+  read: "Read",
+  write: "Write",
+  update: "Update",
+  delete: "Delete",
+  fetch: "Fetch",
+  analyze: "Analyze",
+  execute: "Execute",
+  connect: "Connect",
+  sync: "Sync"
+};
+
+/**
+ * Format action for display: ● Action([target])
+ * @param {string} action - The action type (search, read, write, etc.)
+ * @param {string} target - The target (url, file path, etc.)
+ * @param {string} status - running, done, error
+ */
+const formatAction = (action, target, status = "running") => {
+  const icon = status === "error" ? "✕" : status === "done" ? "✓" : "●";
+  const color = status === "error" ? TASK_STATE.ERROR :
+                status === "done" ? TASK_STATE.DONE : TASK_STATE.RUNNING;
+  const label = ACTION_LABELS[action?.toLowerCase()] || action || "Action";
+  const shortTarget = target ? `(${target.length > 30 ? "..." + target.slice(-27) : target})` : "";
+  return { icon, color, text: `${label}${shortTarget}` };
+};
+
 // Status labels for display
 const STATUS_LABELS = {
-  starting: "Starting up Engine",
+  starting: "Starting",
   researching: "Researching",
   thinking: "Thinking",
   planning: "Planning",
@@ -84,10 +113,10 @@ const STATUS_LABELS = {
   reflecting: "Reflecting",
   updating: "Updating",
   connecting: "Connecting",
-  connecting_agent: "Connecting to Agent",
-  connecting_provider: "Connecting to Provider",
-  running_cron: "Running Cron Services",
-  closing: "Closing Down Engine",
+  connecting_agent: "Connect(Agent)",
+  connecting_provider: "Connect(Provider)",
+  running_cron: "Cron",
+  closing: "Closing",
   idle: "Ready",
   waiting: "Waiting",
   analyzing: "Analyzing",
@@ -114,15 +143,29 @@ const EngineStatusPanelBase = ({
   const statusLabel = STATUS_LABELS[statusId] || "Ready";
   const isActive = statusId !== "idle" && statusId !== "waiting";
 
+  // Parse action and target from status detail (format: "action:target" or just detail)
+  const parseAction = (detail) => {
+    if (!detail) return null;
+    const match = detail.match(/^(\w+):(.+)$/);
+    if (match) {
+      return { action: match[1], target: match[2] };
+    }
+    return { action: statusId, target: detail };
+  };
+
+  const parsedAction = parseAction(statusDetail);
+  const actionDisplay = parsedAction
+    ? formatAction(parsedAction.action, parsedAction.target, isActive ? "running" : "done")
+    : null;
+
   if (compact) {
     return e(
       Box,
       { flexDirection: "row", gap: 1, paddingX: 1 },
-      isActive
-        ? e(Spinner, { type: "dots" })
-        : e(Text, { color: statusColor }, statusIcon),
-      e(Text, { color: statusColor, bold: isActive }, statusLabel),
-      statusDetail && e(Text, { color: "#94a3b8" }, ` · ${statusDetail.slice(0, 30)}`)
+      e(Text, { color: statusColor }, isActive ? "●" : "✓"),
+      actionDisplay
+        ? e(Text, { color: statusColor, bold: isActive }, actionDisplay.text)
+        : e(Text, { color: statusColor, bold: isActive }, statusLabel)
     );
   }
 
@@ -149,20 +192,14 @@ const EngineStatusPanelBase = ({
       e(Text, { color: "#475569" }, getCachedTime())
     ),
 
-    // Current Status Display
+    // Current Status Display - format: ● Action([target])
     e(
       Box,
       { flexDirection: "row", gap: 1, marginBottom: 1 },
-      e(Text, { color: statusColor, bold: true }, statusIcon),
-      e(Text, { color: statusColor, bold: true }, statusLabel),
-      statusDetail && e(Text, { color: "#94a3b8" }, "..."),
-    ),
-
-    // Status Detail (what specifically is being done)
-    statusDetail && e(
-      Box,
-      { marginBottom: 1, marginLeft: 2 },
-      e(Text, { color: "#e2e8f0" }, statusDetail)
+      e(Text, { color: statusColor, bold: true }, isActive ? "●" : "✓"),
+      actionDisplay
+        ? e(Text, { color: statusColor, bold: true }, actionDisplay.text)
+        : e(Text, { color: statusColor, bold: true }, statusLabel)
     ),
 
     // Current Plan (if any)

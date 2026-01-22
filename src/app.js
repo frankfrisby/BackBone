@@ -72,7 +72,7 @@ import { getDataFreshnessChecker } from "./services/data-freshness-checker.js";
 import { getGoalsStatus, launchGoalsVoiceApp } from "./services/goals-voice.js";
 import { loadTradingStatus, saveTradingStatus, buildTradingStatusDisplay, recordTradeAttempt, resetTradingStatus } from "./services/trading-status.js";
 import { deleteAllData, getResetSummary, RESET_STEPS } from "./services/reset.js";
-import { sendMessage as sendMultiAI, getAIStatus } from "./services/multi-ai.js";
+import { sendMessage as sendMultiAI, getAIStatus, getMultiAIConfig, getCurrentModel, MODELS, TASK_TYPES, isAgenticTask, executeAgenticTask, getAgenticCapabilities } from "./services/multi-ai.js";
 import { formatToolsList, getToolsSummary, enableServer, disableServer } from "./services/mcp-tools.js";
 import { loadActionsQueue, getActionsDisplay, queueAction, startNextAction, completeAction, initializeDefaultActions, ACTION_TYPES } from "./services/actions-engine.js";
 import { loadProfileSections, updateFromLinkedIn, updateFromHealth, updateFromPortfolio, getProfileSectionDisplay, getProfileOverview, PROFILE_SECTIONS } from "./services/profile-sections.js";
@@ -93,7 +93,7 @@ import { SetupOverlay, getAlpacaSetupTabs, getLinkedInSetupTabs, getOuraSetupTab
 import { openAlpacaKeys, openOuraKeys, openLLMKeys, readAlpacaKeysFile, watchKeysFile, saveToEnv, SETUP_TYPES } from "./services/setup-manager.js";
 import { buildLifeEvent, buildLifeFeed, buildLifeChanges } from "./data/life-engine.js";
 import { DiagnosticsPanel, STATUS_TYPES } from "./components/diagnostics-panel.js";
-import { createProject, createProjectAction, listProjects, createProjectsFromGoals } from "./services/projects.js";
+import { createProject, createProjectAction, listProjects, createProjectsFromGoals, appendProjectResearch } from "./services/projects.js";
 import { calculateComprehensiveScore, getSignal, WEIGHT_PROFILES, THRESHOLDS } from "./services/scoring-criteria.js";
 import { getRiskyTickers, fetchAllRiskyK8Filings, getSignificantK8Tickers } from "./services/edgar-k8.js";
 import {
@@ -117,7 +117,7 @@ import { TradingHistoryPanel } from "./components/trading-history-panel.js";
 import { TestRunnerPanel } from "./components/test-runner-panel.js";
 import { SettingsPanel } from "./components/settings-panel.js";
 import { LinkedInDataViewer } from "./components/linkedin-data-viewer.js";
-import { loadUserSettings, saveUserSettings, updateSettings as updateUserSettings, getModelConfig, isProviderConfigured } from "./services/user-settings.js";
+import { loadUserSettings, saveUserSettings, updateSettings as updateUserSettings, updateSetting, getModelConfig, isProviderConfigured } from "./services/user-settings.js";
 import { loadFineTuningConfig, saveFineTuningConfig, runFineTuningPipeline, queryFineTunedModel } from "./services/fine-tuning.js";
 import { monitorAndTrade, loadConfig as loadTradingConfig, setTradingEnabled } from "./services/auto-trader.js";
 import { isMarketOpen } from "./services/trading-status.js";
@@ -137,6 +137,11 @@ import { EnhancedActionsPanel, CompletedActionsList } from "./components/enhance
 import { ApprovalOverlay, QuickApprovalBar } from "./components/approval-overlay.js";
 import { ConnectionBar, ConnectionPanel } from "./components/connection-bar.js";
 import { WealthPanel, WealthCompact, ConnectionsStatusPanel } from "./components/wealth-panel.js";
+import OuraHealthPanel from "./components/oura-health-panel.js";
+import { OnboardingPanel } from "./components/onboarding-panel.js";
+import { SplashScreen } from "./components/splash-screen.js";
+import { ToolActionsPanel } from "./components/tool-actions-panel.js";
+import { resizeForOnboarding, resizeForMainApp } from "./services/terminal-resize.js";
 import { processAndSaveContext, buildContextForAI } from "./services/conversation-context.js";
 import { MENTORS, MENTOR_CATEGORIES, getMentorsByCategory, getDailyWisdom, formatMentorDisplay, getAllMentorsDisplay, getMentorAdvice } from "./services/mentors.js";
 import { generateDailyInsights, generateWeeklyReport, formatInsightsDisplay, formatWeeklyReportDisplay, getQuickStatus } from "./services/insights-engine.js";
@@ -150,6 +155,13 @@ import { getLifeDashboard, formatDashboardDisplay, getQuickDashboard } from "./s
 import { getAccountabilityStatus, formatAccountabilityDisplay, recordCheckIn, addCommitment, completeCommitment, getActiveCommitments, getMorningBriefing, addPartner } from "./services/accountability.js";
 import { startSession, endSession, pauseSession, resumeSession, getSessionStatus, formatFocusDisplay, getTodayStats as getFocusTodayStats } from "./services/focus-timer.js";
 import { addLearningItem, startLearning, updateProgress, completeLearning, addNote, getInProgress, getReadingList, formatLearningDisplay, getCurrentlyReading } from "./services/learning-tracker.js";
+import { getCurrentFirebaseUser, signOutFirebase } from "./services/firebase-auth.js";
+import { initializeRemoteConfig } from "./services/firebase-config.js";
+import { isOuraConfigured, syncOuraData, getNextSyncTime, getHealthSummary, loadOuraData } from "./services/oura-service.js";
+import { isEmailConfigured, syncEmailCalendar, getEmailSummary, getUpcomingEvents } from "./services/email-calendar-service.js";
+import { getPersonalCapitalService } from "./services/personal-capital.js";
+import { getPlaidService, isPlaidConfigured, syncPlaidData } from "./services/plaid-service.js";
+import { runUserEvaluationCycle } from "./services/analysis-scheduler.js";
 
 // Engine state and new panels
 import { getEngineStateManager, ENGINE_STATUS } from "./services/engine-state.js";
@@ -190,6 +202,7 @@ const chunkSymbols = (symbols, size) => {
 const YAHOO_FINANCE_REFRESH_MS = 180000; // 3 minutes
 
 const App = ({ updateConsoleTitle }) => {
+  const [isInitializing, setIsInitializing] = useState(true);
   const [activeCommand, setActiveCommand] = useState("/account");
   const [lastAction, setLastAction] = useState("Ready");
   const [currentTier, setCurrentTier] = useState(() => getCurrentTier());
@@ -197,7 +210,164 @@ const App = ({ updateConsoleTitle }) => {
   const [viewMode, setViewMode] = useState(VIEW_MODES.CORE); // Core is default
   const [showTestRunner, setShowTestRunner] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
-  const [userSettings, setUserSettings] = useState(() => loadUserSettings());
+  const initialSettingsRef = useRef(loadUserSettings());
+  const [userSettings, setUserSettings] = useState(initialSettingsRef.current);
+  const [showOnboarding, setShowOnboarding] = useState(!initialSettingsRef.current.onboardingComplete);
+  const [firebaseUser, setFirebaseUser] = useState(() => initialSettingsRef.current.firebaseUser || getCurrentFirebaseUser());
+  const firebaseUserDisplay = useMemo(() => {
+    if (!firebaseUser) return "";
+    const nameOrEmail = firebaseUser.name || firebaseUser.email || "User";
+    const email = firebaseUser.email;
+    return email && !nameOrEmail.includes(email)
+      ? `${nameOrEmail} (${email})`
+      : nameOrEmail;
+  }, [firebaseUser]);
+
+  const syncUserSettings = useCallback(() => {
+    setUserSettings(loadUserSettings());
+  }, []);
+
+  useEffect(() => {
+    if (!showOnboarding) {
+      syncUserSettings();
+    }
+  }, [showOnboarding, syncUserSettings]);
+
+  useEffect(() => {
+    const latestUser = userSettings?.firebaseUser || getCurrentFirebaseUser();
+    setFirebaseUser(latestUser);
+  }, [userSettings]);
+
+  // Initialize app: load remote config from Firebase, then show main app
+  useEffect(() => {
+    const init = async () => {
+      // Load API keys from Firebase (Plaid, Google, Alpaca, OpenAI)
+      await initializeRemoteConfig();
+
+      // Wait minimum 2 seconds for splash screen
+      setTimeout(() => {
+        setIsInitializing(false);
+      }, 2000);
+    };
+    init();
+  }, []);
+
+  const resizeTimersRef = useRef([]);
+  const scheduleResize = useCallback(() => {
+    resizeTimersRef.current.forEach((id) => clearTimeout(id));
+    const delays = [0, 400, 900, 1500];
+    resizeTimersRef.current = delays.map((delay) => {
+      const timeout = setTimeout(() => resizeForMainApp(), delay);
+      return timeout;
+    });
+  }, []);
+
+  // Resize terminal to full size only after onboarding completes
+  useEffect(() => {
+    if (showOnboarding || isInitializing) {
+      resizeTimersRef.current.forEach((id) => clearTimeout(id));
+      resizeTimersRef.current = [];
+      resizeForOnboarding();
+      return () => {
+        resizeTimersRef.current.forEach((id) => clearTimeout(id));
+        resizeTimersRef.current = [];
+      };
+    }
+
+    scheduleResize();
+    return () => {
+      resizeTimersRef.current.forEach((id) => clearTimeout(id));
+      resizeTimersRef.current = [];
+    };
+  }, [showOnboarding, isInitializing, scheduleResize]);
+
+  // Oura Ring data sync scheduler (8am and 8pm daily)
+  useEffect(() => {
+    if (!isOuraConfigured()) return;
+
+    const scheduleNextSync = () => {
+      const nextSync = getNextSyncTime();
+      const msUntilSync = nextSync.getTime() - Date.now();
+
+      return setTimeout(async () => {
+        await syncOuraData();
+        // Schedule the next sync after this one completes
+        scheduleNextSync();
+      }, msUntilSync);
+    };
+
+    // Initial sync on startup
+    syncOuraData();
+    const timerId = scheduleNextSync();
+
+    return () => clearTimeout(timerId);
+  }, []);
+
+  // Email & Calendar sync scheduler (every 15 minutes)
+  useEffect(() => {
+    if (!isEmailConfigured()) return;
+
+    // Initial sync on startup
+    syncEmailCalendar();
+
+    // Sync every 15 minutes
+    const intervalId = setInterval(() => {
+      syncEmailCalendar();
+    }, 15 * 60 * 1000);
+
+    return () => clearInterval(intervalId);
+  }, []);
+
+  // Personal Capital sync scheduler (once daily at 6am, and on startup)
+  useEffect(() => {
+    const pcService = getPersonalCapitalService();
+    const config = pcService.getConfig();
+    if (!config.authenticated) return;
+
+    // Sync on startup if data is stale
+    if (pcService.isStale()) {
+      pcService.fetchAll();
+    }
+
+    // Schedule daily sync at 6am
+    const scheduleNextSync = () => {
+      const now = new Date();
+      const next6am = new Date(now);
+      next6am.setHours(6, 0, 0, 0);
+      if (now >= next6am) {
+        next6am.setDate(next6am.getDate() + 1);
+      }
+      const msUntilSync = next6am.getTime() - now.getTime();
+
+      return setTimeout(async () => {
+        await pcService.fetchAll();
+        scheduleNextSync();
+      }, msUntilSync);
+    };
+
+    const timerId = scheduleNextSync();
+    return () => clearTimeout(timerId);
+  }, []);
+
+  // Plaid sync scheduler (every 4 hours, and on startup)
+  useEffect(() => {
+    if (!isPlaidConfigured()) return;
+
+    const plaidService = getPlaidService();
+
+    // Sync on startup if data is stale
+    if (plaidService.isStale()) {
+      syncPlaidData();
+    }
+
+    // Sync every 4 hours
+    const intervalId = setInterval(() => {
+      syncPlaidData();
+    }, 4 * 60 * 60 * 1000);
+
+    return () => clearInterval(intervalId);
+  }, []);
+
   const [fineTuningStatus, setFineTuningStatus] = useState(() => loadFineTuningConfig());
   const { stdout } = useStdout();
 
@@ -205,9 +375,28 @@ const App = ({ updateConsoleTitle }) => {
   const engineState = useMemo(() => getEngineStateManager(), []);
   const [engineStatus, setEngineStatus] = useState(() => engineState.getDisplayData());
 
+  // Typing state refs - declared early so keyboard shortcuts can check them
+  const isTypingRef = useRef(false);
+  const typingTimeoutRef = useRef(null);
+
   // Handle keyboard shortcuts: Ctrl+T (tier), Ctrl+R (test runner), Ctrl+P (private mode), Ctrl+U (view mode), Ctrl+S (settings)
+  // NOTE: These shortcuts only work when NOT typing in the chat input
   useInput((input, key) => {
-    // Don't process shortcuts if test runner or settings is open (they handle their own input)
+    // Skip all shortcuts while user is typing in chat
+    if (isTypingRef.current) return;
+
+    const lower = input.toLowerCase();
+    if (!showTestRunner && !showSettings) {
+      if (lower === "l" && !firebaseUser) {
+        setShowOnboarding(true);
+        setLastAction("Sign-in requested");
+        return;
+      }
+      if (lower === "o" && firebaseUser) {
+        handleLogout();
+        return;
+      }
+    }
     if (showTestRunner || showSettings) return;
 
     if (key.ctrl && input === "t") {
@@ -242,11 +431,34 @@ const App = ({ updateConsoleTitle }) => {
         return next;
       });
     }
+    if (key.ctrl && !key.shift && lower === "s") {
+      // Ctrl+S: Open onboarding/setup wizard
+      setShowOnboarding(true);
+      setLastAction("Setup wizard opened");
+    }
+    if (key.ctrl && key.shift && lower === "s") {
+      // Ctrl+Shift+S: Open settings panel
+      setShowSettings(true);
+      setLastAction("Settings opened");
+    }
   });
   const [pauseUpdates, setPauseUpdates] = useState(false);
-  const isTypingRef = useRef(false);
   const pauseUpdatesRef = useRef(false); // Use ref to avoid re-renders in intervals
-  const typingTimeoutRef = useRef(null);
+  const handleLogout = useCallback(() => {
+    signOutFirebase();
+    const currentSettings = loadUserSettings();
+    updateUserSettings({
+      firebaseUser: null,
+      onboardingComplete: false,
+      connections: { ...currentSettings.connections, google: false }
+    });
+    syncUserSettings();
+    pauseUpdatesRef.current = true;
+    setPauseUpdates(true);
+    setShowOnboarding(true);
+    setFirebaseUser(null);
+    setLastAction("Logged out");
+  }, [syncUserSettings]);
   const [weights, setWeights] = useState(() => buildDefaultWeights());
   const [setupOverlay, setSetupOverlay] = useState({
     active: false,
@@ -303,6 +515,10 @@ const App = ({ updateConsoleTitle }) => {
   const [linkedInProfile, setLinkedInProfile] = useState(null);
   const [linkedInMessages, setLinkedInMessages] = useState([]);
   const [ouraHealth, setOuraHealth] = useState(null);
+  const [ouraHistory, setOuraHistory] = useState(() => {
+    const stored = loadOuraData();
+    return stored?.history || [];
+  });
   const [personalCapitalData, setPersonalCapitalData] = useState(null);
   const [socialConnections, setSocialConnections] = useState(null);
 
@@ -346,6 +562,29 @@ const App = ({ updateConsoleTitle }) => {
   const [showApprovalOverlay, setShowApprovalOverlay] = useState(false);
   const [selectedActionIndex, setSelectedActionIndex] = useState(0);
   const [connectionStatuses, setConnectionStatuses] = useState({});
+  const evaluationContextRef = useRef({
+    tickers: [],
+    portfolio: null,
+    oura: null,
+    profile: null,
+    linkedIn: null,
+    goals: [],
+    emails: null,
+    projects: []
+  });
+
+  useEffect(() => {
+    evaluationContextRef.current = {
+      tickers: tickers.slice(0, 6),
+      portfolio,
+      oura: ouraHealth,
+      profile,
+      linkedIn: linkedInProfile,
+      goals,
+      emails: getEmailSummary(),
+      projects
+    };
+  }, [tickers, portfolio, ouraHealth, profile, linkedInProfile, goals, projects]);
 
   // Actions queue (persistent)
   const [actionsDisplay, setActionsDisplay] = useState(() => {
@@ -377,7 +616,8 @@ const App = ({ updateConsoleTitle }) => {
   const [alpacaStatus, setAlpacaStatus] = useState("Not connected");
   const [alpacaMode, setAlpacaMode] = useState(DEFAULTS.alpaca.environment);
   const alpacaConfigRef = useRef(loadAlpacaConfig());
-  const [lastQuoteUpdate, setLastQuoteUpdate] = useState("--:--:--");
+  const [lastQuoteUpdate, setLastQuoteUpdate] = useState("--:--");
+  const lastQuoteUpdateRef = useRef("--:--");
   const [lifeFeed, setLifeFeed] = useState(() => buildLifeFeed(12)); // Doubled from 6
   const [lifeUpdatedAt, setLifeUpdatedAt] = useState("--:--:--");
   const isLive = alpacaStatus === "Live";
@@ -389,11 +629,120 @@ const App = ({ updateConsoleTitle }) => {
   const [messages, setMessages] = useState([]);
   const [isProcessing, setIsProcessing] = useState(false);
   const [streamingText, setStreamingText] = useState("");
+  const [actionStreamingText, setActionStreamingText] = useState("");
+  const [actionStreamingTitle, setActionStreamingTitle] = useState("");
+  const actionStreamBufferRef = useRef("");
+  const actionStreamTimerRef = useRef(null);
+  const currentActionIdRef = useRef(null);
+  const [toolEvents, setToolEvents] = useState([]);
+  const toolEventsRef = useRef([]);
+  const toolEventKeysRef = useRef(new Set());
+  const [uiClock, setUiClock] = useState(() => Date.now());
 
-  // Check Claude connection on mount
+  // Current AI model tracking for display
+  const [currentModelInfo, setCurrentModelInfo] = useState(() => {
+    const initial = getCurrentModel();
+    return { ...initial.model, taskType: initial.taskType };
+  });
+
+  // Check AI model connection on mount
   useEffect(() => {
-    const config = getClaudeConfig();
-    setClaudeStatus(config.ready ? "Connected" : "Missing key");
+    const claudeConfig = getClaudeConfig();
+    const multiConfig = getMultiAIConfig();
+    if (claudeConfig.ready) {
+      setClaudeStatus("Connected");
+    } else if (multiConfig.gptMini?.ready || multiConfig.gptAgentic?.ready) {
+      setClaudeStatus("OpenAI");
+    } else {
+      setClaudeStatus("Missing key");
+    }
+  }, []);
+
+  // UI clock tick for time displays (twice per minute)
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setUiClock(Date.now());
+    }, 30_000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const resetActionStream = useCallback((title = "") => {
+    actionStreamBufferRef.current = "";
+    if (actionStreamTimerRef.current) {
+      clearTimeout(actionStreamTimerRef.current);
+      actionStreamTimerRef.current = null;
+    }
+    setActionStreamingText("");
+    setActionStreamingTitle(title);
+  }, []);
+
+  const resetToolEvents = useCallback(() => {
+    toolEventKeysRef.current = new Set();
+    toolEventsRef.current = [];
+    setToolEvents([]);
+  }, []);
+
+  const addToolEvent = useCallback((event) => {
+    const next = [event, ...toolEventsRef.current].slice(0, 12);
+    toolEventsRef.current = next;
+    setToolEvents(next);
+  }, []);
+
+  const updateToolEvent = useCallback((id, updates) => {
+    const next = toolEventsRef.current.map((entry) => (
+      entry.id === id ? { ...entry, ...updates } : entry
+    ));
+    toolEventsRef.current = next;
+    setToolEvents(next);
+  }, []);
+
+  const TOOL_REGEX = /\b(WebSearch|WebFetch|Fetch|Grep|Glob|Read|Bash|Copy|Mkdir|Write|Edit|Delete)\s*\(([^)]{0,200})\)/g;
+
+  const extractToolEvents = useCallback((chunk, source = "claude-code") => {
+    if (!chunk) return;
+    const lines = chunk.split(/\r?\n/);
+    let match;
+    while ((match = TOOL_REGEX.exec(chunk)) !== null) {
+      const tool = match[1];
+      const target = match[2]?.trim() || "";
+      const key = `${tool}:${target}`;
+      if (toolEventKeysRef.current.has(key)) {
+        continue;
+      }
+      toolEventKeysRef.current.add(key);
+      addToolEvent({
+        id: `${Date.now()}_${Math.random().toString(36).slice(2)}`,
+        tool,
+        target,
+        status: "working",
+        startedAt: Date.now(),
+        source,
+        tokens: "n/a",
+        diffLines: []
+      });
+    }
+
+    const diffLines = lines.filter((line) => line.startsWith("+") || line.startsWith("-") || line.startsWith("@@"));
+    if (diffLines.length > 0 && toolEventsRef.current.length > 0) {
+      const latest = toolEventsRef.current[0];
+      updateToolEvent(latest.id, {
+        diffLines: [...(latest.diffLines || []), ...diffLines].slice(-10)
+      });
+    }
+  }, [addToolEvent, updateToolEvent]);
+
+  const appendActionStream = useCallback((chunk) => {
+    if (!chunk) return;
+    actionStreamBufferRef.current += chunk;
+    if (actionStreamBufferRef.current.length > 2000) {
+      actionStreamBufferRef.current = actionStreamBufferRef.current.slice(-2000);
+    }
+    if (!actionStreamTimerRef.current) {
+      actionStreamTimerRef.current = setTimeout(() => {
+        actionStreamTimerRef.current = null;
+        setActionStreamingText(actionStreamBufferRef.current);
+      }, 50);
+    }
   }, []);
 
   // Run startup diagnostics
@@ -460,6 +809,12 @@ const App = ({ updateConsoleTitle }) => {
 
   // ===== INITIALIZE AUTONOMOUS SYSTEM =====
   useEffect(() => {
+      const handleTaskOutput = ({ taskId, output }) => {
+        if (!currentActionIdRef.current || taskId !== currentActionIdRef.current) return;
+        appendActionStream(output);
+        extractToolEvents(output, "claude-code");
+      };
+
     const initAutonomousSystem = async () => {
       // Log system startup
       workLog.logSystem("BACKBONE Started", "Autonomous system initializing");
@@ -512,12 +867,25 @@ const App = ({ updateConsoleTitle }) => {
       autonomousEngine.registerExecutor(EXECUTION_TOOLS.CLAUDE_API, async (action) => {
         workLog.logAction(LOG_SOURCE.CLAUDE, `API Task: ${action.title}`, "", LOG_STATUS.PENDING);
         try {
-          const result = await sendMultiAI(action.executionPlan.prompt, {
+          let output = "";
+          let streamError = null;
+          await streamMessage(action.executionPlan.prompt, (chunk) => {
+            if (chunk.type === "text") {
+              output += chunk.text;
+              appendActionStream(chunk.text);
+              extractToolEvents(chunk.text, "claude-api");
+            } else if (chunk.type === "error") {
+              streamError = chunk.error || "Streaming error";
+            }
+          }, {
             portfolio: portfolioRef.current,
             goals: goalTracker.getDisplayData()
           });
+          if (streamError) {
+            throw new Error(streamError);
+          }
           workLog.logResult(LOG_SOURCE.CLAUDE, `Completed: ${action.title}`, "", LOG_STATUS.SUCCESS);
-          return { success: true, output: result.response };
+          return { success: true, output };
         } catch (error) {
           workLog.logError(LOG_SOURCE.CLAUDE, `Failed: ${action.title}`, error.message);
           return { success: false, error: error.message };
@@ -527,17 +895,45 @@ const App = ({ updateConsoleTitle }) => {
       // Listen for autonomous engine events
       autonomousEngine.on("action-started", (action) => {
         workLog.logAction(LOG_SOURCE.AUTONOMOUS, `Started: ${action.title}`, action.type, LOG_STATUS.PENDING);
+        currentActionIdRef.current = action.id;
+        resetActionStream(action.title);
+        resetToolEvents();
         setAutonomousState(autonomousEngine.getDisplayData());
       });
 
       autonomousEngine.on("action-completed", (action) => {
         workLog.logResult(LOG_SOURCE.AUTONOMOUS, `Completed: ${action.title}`, "", LOG_STATUS.SUCCESS);
+        currentActionIdRef.current = null;
+        resetActionStream("");
+        setToolEvents((prev) => prev.map((entry) => (
+          entry.status === "working"
+            ? { ...entry, status: "done", endedAt: Date.now() }
+            : entry
+        )));
+        if (action?.result?.output) {
+          const projectId = engineState.state?.activeProject?.id;
+          if (projectId) {
+            appendProjectResearch(projectId, {
+              actionId: action.id,
+              title: action.title,
+              type: action.type,
+              output: action.result.output.slice(0, 4000)
+            });
+          }
+        }
         setAutonomousState(autonomousEngine.getDisplayData());
         setCompletedActions(autonomousEngine.getRecentCompleted(10));
       });
 
       autonomousEngine.on("action-failed", (action) => {
         workLog.logError(LOG_SOURCE.AUTONOMOUS, `Failed: ${action.title}`, action.error);
+        currentActionIdRef.current = null;
+        resetActionStream("");
+        setToolEvents((prev) => prev.map((entry) => (
+          entry.status === "working"
+            ? { ...entry, status: "error", endedAt: Date.now() }
+            : entry
+        )));
         setAutonomousState(autonomousEngine.getDisplayData());
       });
 
@@ -567,6 +963,8 @@ const App = ({ updateConsoleTitle }) => {
       engineState.on("work-updated", updateEngineStatus);
       engineState.on("project-started", updateEngineStatus);
       engineState.on("project-completed", updateEngineStatus);
+
+      claudeCodeBackend.on("task-output", handleTaskOutput);
 
       // Sync autonomous engine actions with engine state
       autonomousEngine.on("action-started", (action) => {
@@ -631,8 +1029,52 @@ const App = ({ updateConsoleTitle }) => {
     return () => {
       autonomousEngine.stop();
       mobileService.stopWebDashboard();
+      claudeCodeBackend.off("task-output", handleTaskOutput);
     };
   }, []);
+
+  const runEvaluationJob = useCallback(() => {
+    if (!autonomousEngine) return 0;
+    const context = evaluationContextRef.current || {};
+    try {
+      const added = runUserEvaluationCycle(autonomousEngine, context);
+      if (added > 0) {
+        setLastAction(`Evaluation queued ${added} actions`);
+      }
+      return added;
+    } catch (error) {
+      console.error("[Evaluation Job] Failed:", error);
+      setLastAction("Evaluation job failed - check logs");
+      return 0;
+    }
+  }, [autonomousEngine]);
+
+  useEffect(() => {
+    if (!autonomousEngine) return () => {};
+
+    let intervalId;
+    let timeoutId;
+
+    const now = new Date();
+    const minutes = now.getMinutes();
+    const seconds = now.getSeconds();
+    const ms = now.getMilliseconds();
+    const remainder = minutes % 30;
+    const offsetMinutes = remainder === 0 ? 30 : 30 - remainder;
+    const delay = offsetMinutes * 60000 - seconds * 1000 - ms;
+
+    runEvaluationJob();
+
+    timeoutId = setTimeout(() => {
+      runEvaluationJob();
+      intervalId = setInterval(() => runEvaluationJob(), 30 * 60 * 1000);
+    }, Math.max(0, delay));
+
+    return () => {
+      if (timeoutId) clearTimeout(timeoutId);
+      if (intervalId) clearInterval(intervalId);
+    };
+  }, [autonomousEngine, runEvaluationJob]);
 
   // Sync goals and life scores with portfolio/health data
   useEffect(() => {
@@ -825,21 +1267,76 @@ Return ONLY a JSON array, no other text.`;
   }, []);
 
 
-  // Initialize Oura health data
+  // Initialize Oura health data - check both env var and file-based token
   useEffect(() => {
     const initOura = async () => {
+      // First try env var approach
       const config = getOuraConfig();
       if (config.ready) {
         try {
           const health = await buildOuraHealthSummary(config);
           setOuraHealth(health);
+          return;
         } catch (error) {
-          console.error("Oura init failed:", error.message);
+          console.error("Oura init from env failed:", error.message);
+        }
+      }
+
+      // Fall back to file-based token (oura-service.js)
+      if (isOuraConfigured()) {
+        try {
+          const stored = loadOuraData();
+          if (stored?.latest) {
+            // Transform stored data to match expected format
+            const latestSleep = stored.latest.sleep?.[stored.latest.sleep.length - 1];
+            const latestReadiness = stored.latest.readiness?.[stored.latest.readiness.length - 1];
+            const latestActivity = stored.latest.activity?.[stored.latest.activity.length - 1];
+
+            // Calculate week averages
+            const avgSleepScore = stored.latest.sleep?.length
+              ? Math.round(stored.latest.sleep.reduce((sum, d) => sum + (d.score || 0), 0) / stored.latest.sleep.length)
+              : null;
+            const avgReadinessScore = stored.latest.readiness?.length
+              ? Math.round(stored.latest.readiness.reduce((sum, d) => sum + (d.score || 0), 0) / stored.latest.readiness.length)
+              : null;
+            const avgActivityScore = stored.latest.activity?.length
+              ? Math.round(stored.latest.activity.reduce((sum, d) => sum + (d.score || 0), 0) / stored.latest.activity.length)
+              : null;
+
+            setOuraHealth({
+              connected: true,
+              today: {
+                sleepScore: latestSleep?.score || null,
+                readinessScore: latestReadiness?.score || null,
+                activityScore: latestActivity?.score || null,
+                totalSleepHours: latestSleep?.total_sleep_duration
+                  ? (latestSleep.total_sleep_duration / 3600).toFixed(1)
+                  : null,
+                steps: latestActivity?.steps || null,
+                activeCalories: latestActivity?.active_calories || null
+              },
+              weekAverage: {
+                sleepScore: avgSleepScore,
+                readinessScore: avgReadinessScore,
+                activityScore: avgActivityScore
+              },
+              lastUpdated: stored.lastUpdated || stored.latest.fetchedAt
+            });
+          }
+        } catch (error) {
+          console.error("Oura init from file failed:", error.message);
         }
       }
     };
     initOura();
   }, []);
+
+  useEffect(() => {
+    const stored = loadOuraData();
+    if (stored?.history) {
+      setOuraHistory(stored.history);
+    }
+  }, [ouraHealth]);
 
   // Initialize social connections
   useEffect(() => {
@@ -985,13 +1482,16 @@ Return ONLY a JSON array, no other text.`;
 
   const handleAIMessage = useCallback(
     async (userMessage) => {
-      const config = getClaudeConfig();
-      if (!config.ready) {
+      const claudeConfig = getClaudeConfig();
+      const multiAIConfig = getMultiAIConfig();
+
+      // Check if any AI model is available
+      if (!claudeConfig.ready && !multiAIConfig.ready) {
         setMessages((prev) => [
           ...prev,
           {
             role: "assistant",
-            content: "Claude API key not configured. Add ANTHROPIC_API_KEY to your .env file.",
+            content: "No AI model configured. Add ANTHROPIC_API_KEY or OPENAI_API_KEY to your .env file.",
             timestamp: new Date()
           }
         ]);
@@ -1018,13 +1518,65 @@ Return ONLY a JSON array, no other text.`;
         // Silently fail context extraction
       }
 
+      // Check if this is an agentic task that requires code execution
+      const needsAgentic = isAgenticTask(userMessage);
+
+      if (needsAgentic) {
+        // Check if agentic tools are available
+        const agenticCaps = await getAgenticCapabilities();
+
+        if (agenticCaps.available) {
+          setIsProcessing(true);
+          engineState.setStatus("working", "Running agentic task...");
+          setActionStreamingTitle(agenticCaps.claudeCode ? "Claude Code" : "Codex");
+          setActionStreamingText("Starting task...");
+
+          // Execute agentic task with streaming output
+          const result = await executeAgenticTask(
+            userMessage,
+            process.cwd(),
+            (event) => {
+              if (event.type === "stdout" || event.type === "stderr") {
+                // Show last 500 chars of output
+                const displayText = event.output.slice(-500);
+                setActionStreamingText(displayText);
+              } else if (event.type === "done") {
+                setActionStreamingText("");
+                setActionStreamingTitle("");
+              }
+            }
+          );
+
+          // Add result as assistant message
+          const resultMessage = result.success
+            ? `Task completed successfully.\n\n${result.output.slice(-1000)}`
+            : `Task failed: ${result.error}\n\n${result.output.slice(-500)}`;
+
+          setMessages((prev) => [
+            ...prev,
+            {
+              role: "assistant",
+              content: resultMessage,
+              timestamp: new Date(),
+              isAgentic: true,
+              tool: result.tool
+            }
+          ]);
+
+          setIsProcessing(false);
+          engineState.setStatus("idle");
+          return;
+        }
+        // If no agentic tools, fall through to regular AI response
+      }
+
       setIsProcessing(true);
       setStreamingText("");
 
       // Set engine state to thinking
       engineState.setStatus("thinking", "Processing your message...");
 
-      // Build context from current state
+      // Build context from current state (includes conversation history for profile building)
       const savedUserContext = buildContextForAI(); // Include previously extracted user context
       const context = {
         portfolio: {
@@ -1037,56 +1589,93 @@ Return ONLY a JSON array, no other text.`;
         topTickers: tickers.slice(0, 5).map((t) => ({ symbol: t.symbol, score: t.score })),
         health: ouraHealth?.today || null,
         education: profile.education || null,
-        userContext: savedUserContext // Previously learned user information
+        userContext: savedUserContext, // Previously learned user information
+        recentMessages: messages.slice(-10).map(m => ({ role: m.role, content: m.content.slice(0, 200) })) // Include recent conversation for context
       };
 
-      try {
-        let fullText = "";
-        await streamMessage(
-          userMessage,
-          (chunk) => {
-            if (chunk.type === "text") {
-              fullText += chunk.text;
-              setStreamingText(fullText);
-            } else if (chunk.type === "done") {
-              setMessages((prev) => [
-                ...prev,
-                {
-                  role: "assistant",
-                  content: fullText,
-                  timestamp: new Date()
-                }
-              ]);
-              setStreamingText("");
-              setIsProcessing(false);
-              engineState.setStatus("idle");
-            } else if (chunk.type === "error") {
-              setMessages((prev) => [
-                ...prev,
-                {
-                  role: "assistant",
-                  content: `Error: ${chunk.error}`,
-                  timestamp: new Date()
-                }
-              ]);
-              setStreamingText("");
-              setIsProcessing(false);
-              engineState.setStatus("idle");
+      // Use Claude streaming if available, otherwise use multi-ai (OpenAI fallback)
+      if (claudeConfig.ready) {
+        try {
+          let fullText = "";
+          await streamMessage(
+            userMessage,
+            (chunk) => {
+              if (chunk.type === "text") {
+                fullText += chunk.text;
+                setStreamingText(fullText);
+              } else if (chunk.type === "done") {
+                setMessages((prev) => [
+                  ...prev,
+                  {
+                    role: "assistant",
+                    content: fullText,
+                    timestamp: new Date()
+                  }
+                ]);
+                setStreamingText("");
+                setIsProcessing(false);
+                engineState.setStatus("idle");
+              } else if (chunk.type === "error") {
+                setMessages((prev) => [
+                  ...prev,
+                  {
+                    role: "assistant",
+                    content: `Error: ${chunk.error}`,
+                    timestamp: new Date()
+                  }
+                ]);
+                setStreamingText("");
+                setIsProcessing(false);
+                engineState.setStatus("idle");
+              }
+            },
+            context
+          );
+        } catch (error) {
+          setMessages((prev) => [
+            ...prev,
+            {
+              role: "assistant",
+              content: `Error: ${error.message}`,
+              timestamp: new Date()
             }
-          },
-          context
-        );
-      } catch (error) {
-        setMessages((prev) => [
-          ...prev,
-          {
-            role: "assistant",
-            content: `Error: ${error.message}`,
-            timestamp: new Date()
+          ]);
+          setStreamingText("");
+          setIsProcessing(false);
+          engineState.setStatus("idle");
+        }
+      } else {
+        // Use OpenAI via multi-ai service (GPT-5.2)
+        try {
+          const result = await sendMultiAI(userMessage, context, "auto");
+          // Update model info for display
+          if (result.modelInfo) {
+            setCurrentModelInfo({ ...result.modelInfo, taskType: result.taskType });
           }
-        ]);
-        setIsProcessing(false);
-        engineState.setStatus("idle");
+          setMessages((prev) => [
+            ...prev,
+            {
+              role: "assistant",
+              content: result.response,
+              timestamp: new Date(),
+              model: result.model,
+              modelInfo: result.modelInfo
+            }
+          ]);
+          setIsProcessing(false);
+          engineState.setStatus("idle");
+        } catch (error) {
+          setMessages((prev) => [
+            ...prev,
+            {
+              role: "assistant",
+              content: `Error: ${error.message}`,
+              timestamp: new Date()
+            }
+          ]);
+          setIsProcessing(false);
+          engineState.setStatus("idle");
+        }
       }
     },
     [portfolio, profile.goals, profile.education, tickers, ouraHealth, engineState]
@@ -1386,13 +1975,14 @@ Return ONLY a JSON array, no other text.`;
           });
           // Only update timestamp if tickers actually changed
           if (didChange) {
-            setLastQuoteUpdate(
-              new Date().toLocaleTimeString("en-US", {
-                hour: "2-digit",
-                minute: "2-digit",
-                second: "2-digit"
-              })
-            );
+            const nextTime = new Date().toLocaleTimeString("en-US", {
+              hour: "2-digit",
+              minute: "2-digit"
+            });
+            if (nextTime !== lastQuoteUpdateRef.current) {
+              lastQuoteUpdateRef.current = nextTime;
+              setLastQuoteUpdate(nextTime);
+            }
           }
         }
       } catch (error) {
@@ -1483,7 +2073,17 @@ Return ONLY a JSON array, no other text.`;
         setMessages([]);
         setLastAction("Conversation cleared");
         return;
+      }
 
+      if (resolved === "/setup") {
+        setShowOnboarding(true);
+        setLastAction("Setup wizard opened");
+        return;
+      }
+
+      if (resolved === "/logout") {
+        handleLogout();
+        return;
       }
 
       if (resolved === "/connect") {
@@ -3835,6 +4435,10 @@ Folder: ${result.action.id}`,
   // Use full terminal height
   const appHeight = terminalHeight - 1;
   const isCompact = terminalWidth < minWidth;
+  // Responsive mode: narrow/sidebar layout when width < 80
+  const isNarrow = terminalWidth < 80;
+  // Medium width: hide some panels but keep horizontal layout
+  const isMedium = terminalWidth >= 80 && terminalWidth < 140;
 
   // Action approval handlers
   const handleApproveAction = useCallback((actionId) => {
@@ -3888,22 +4492,98 @@ Folder: ${result.action.id}`,
   ].filter(Boolean);
 
 
-  // Show simple view if terminal is too small
-  if (terminalWidth < 100 || terminalHeight < 25) {
+  // Show splash screen during initialization
+  if (isInitializing) {
+    return e(SplashScreen, { message: "Initializing" });
+  }
+
+  // Show onboarding wizard for first-time users or when requested
+  if (showOnboarding) {
+    return e(
+      Box,
+      { flexDirection: "column", paddingTop: 1, paddingX: 2 },
+      e(OnboardingPanel, {
+        userDisplay: firebaseUserDisplay,
+        onComplete: () => {
+          updateSetting("onboardingComplete", true);
+          setShowOnboarding(false);
+          pauseUpdatesRef.current = false;
+          setPauseUpdates(false);
+          setLastAction("Setup complete!");
+        }
+      })
+    );
+  }
+
+  // Show simple view if terminal is too small (minimum 40x20 for sidebar mode)
+  if (terminalWidth < 40 || terminalHeight < 20) {
     return e(
       Box,
       { flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%" },
-      e(Text, { color: "#f59e0b", bold: true }, "BACKBONE ENGINE"),
+      e(Text, { color: "#f59e0b", bold: true }, "BACKBONE"),
       e(Text, { color: "#64748b" }, ""),
-      e(Text, { color: "#94a3b8" }, "Please resize your terminal"),
-      e(Text, { color: "#64748b" }, `Current: ${terminalWidth}x${terminalHeight}`),
-      e(Text, { color: "#64748b" }, "Minimum: 100x25"),
-      e(Text, { color: "#64748b" }, "Recommended: 200x60")
+      e(Text, { color: "#94a3b8" }, "Resize terminal"),
+      e(Text, { color: "#64748b" }, `${terminalWidth}x${terminalHeight}`),
+      e(Text, { color: "#64748b" }, "Min: 40x20")
     );
   }
 
   // Calculate available height (terminal height minus header/footer)
   const contentHeight = Math.max(20, appHeight - 6);
+
+  // Narrow/sidebar layout - stacks vertically with scrolling
+  if (isNarrow) {
+    return e(
+      Box,
+      { flexDirection: "column", height: appHeight, overflow: "hidden" },
+      // Compact header
+      e(
+        Box,
+        { flexDirection: "row", justifyContent: "space-between", paddingX: 1, borderStyle: "single", borderColor: "#1e293b", borderBottom: true, borderTop: false, borderLeft: false, borderRight: false },
+        e(Text, { color: "#f59e0b", bold: true }, "BACKBONE"),
+        e(Text, { color: "#64748b" }, firebaseUserDisplay ? firebaseUserDisplay.split(" ")[0] : "")
+      ),
+      // Scrollable content area
+      e(
+        Box,
+        { flexDirection: "column", flexGrow: 1, overflow: "hidden", paddingX: 1 },
+        // Oura Health Panel (compact)
+        e(OuraHealthPanel, { data: ouraHealth, history: ouraHistory, compact: true }),
+        // Life Scores (compact)
+        e(LifeScoresPanel, { data: lifeScoresData, title: "Progress", compact: true }),
+        // Goals (compact)
+        e(GoalProgressPanel, { goals: goals.slice(0, 2), title: "Goals" }),
+        // Portfolio (compact)
+        e(PortfolioPanel, {
+          portfolio: { ...portfolio, status: alpacaStatus, mode: alpacaMode },
+          formatPercent,
+          tradingStatus,
+          lastUpdatedAgo: portfolioLastUpdated ? formatTimeAgo(portfolioLastUpdated) : null,
+          nextTradeTime: nextTradeTimeDisplay,
+          privateMode,
+          tickerScores: tickers.reduce((acc, t) => {
+            if (t.symbol && typeof t.score === "number") acc[t.symbol] = t.score;
+            return acc;
+          }, {})
+        }),
+        // Ticker scores (compact list)
+        e(TickerScoresPanel, {
+          tickers: topTickers,
+          title: "Top Tickers",
+          viewMode: VIEW_MODES.MINIMAL,
+          maxItems: 5,
+          compact: true,
+          timestamp: uiClock
+        }),
+        // Conversation/Chat at bottom
+        e(ConversationPanel, { messages, isLoading: isProcessing, streamingText, actionStreamingText, actionStreamingTitle }),
+        // Chat input
+        setupOverlay.active
+          ? e(SetupOverlay, { title: "Setup", tabs: [], onCancel: closeSetupOverlay, onComplete: closeSetupOverlay })
+          : e(ChatPanel, { commands: COMMANDS, onSubmit, onTypingChange: handleTypingChange, modelInfo: currentModelInfo })
+      )
+    );
+  }
 
   return e(
     Box,
@@ -3912,16 +4592,19 @@ Folder: ${result.action.id}`,
     e(ConnectionBar, {
       connections: connectionStatuses,
       title: "BACKBONE",
-      version: "3.0.0"
+      version: "3.0.0",
+      userDisplay: firebaseUserDisplay
     }),
     e(
       Box,
       { flexDirection: "row", height: contentHeight, overflow: "hidden" },
       // ===== LEFT COLUMN: Progress, Goals, Tickers (based on view mode) =====
-      viewMode !== VIEW_MODES.MINIMAL && e(
+      // Hide left column in medium width mode to give more space to chat
+      viewMode !== VIEW_MODES.MINIMAL && !isMedium && e(
         Box,
         { flexDirection: "column", width: "25%", paddingRight: 1, overflow: "hidden" },
         e(LifeScoresPanel, { data: lifeScoresData, title: "Progress", compact: true }),
+        e(OuraHealthPanel, { data: ouraHealth, history: ouraHistory }),
         e(GoalProgressPanel, { goals: goals.slice(0, 2), title: "Goals" }),
         // Ticker scores panel (shows based on view mode)
         e(TickerScoresPanel, {
@@ -3929,7 +4612,8 @@ Folder: ${result.action.id}`,
           title: "Ticker Scores",
           viewMode: viewMode,
           maxItems: viewMode === VIEW_MODES.MINIMAL ? 3 : viewMode === VIEW_MODES.ADVANCED ? 20 : 10,
-          compact: viewMode === VIEW_MODES.MINIMAL
+          compact: viewMode === VIEW_MODES.MINIMAL,
+          timestamp: uiClock
         }),
         // Projects panel in advanced mode
         viewMode === VIEW_MODES.ADVANCED && e(ProjectsPanel, {
@@ -3941,17 +4625,19 @@ Folder: ${result.action.id}`,
       // ===== CENTER COLUMN: Engine Status, Chat =====
       e(
         Box,
-        { flexDirection: "column", width: viewMode === VIEW_MODES.MINIMAL ? "75%" : "50%", paddingX: 1, overflow: "hidden" },
+        { flexDirection: "column", width: viewMode === VIEW_MODES.MINIMAL || isMedium ? "75%" : "50%", paddingX: 1, overflow: "hidden" },
+        e(ToolActionsPanel, { items: toolEvents }),
         // Engine Status Panel - shows what AI is doing (replaces Actions)
         e(EngineStatusPanel, {
           status: engineStatus.status,
           currentPlan: engineStatus.status.currentPlan,
           currentWork: engineStatus.status.currentWork,
           projects: engineStatus.projects,
-          compact: viewMode === VIEW_MODES.MINIMAL
+          compact: viewMode === VIEW_MODES.MINIMAL,
+          actionStreamingText: actionStreamingText
         }),
         // Conversation Panel
-        e(ConversationPanel, { messages, isLoading: isProcessing, streamingText }),
+        e(ConversationPanel, { messages, isLoading: isProcessing, streamingText, actionStreamingText, actionStreamingTitle }),
         // LinkedIn Data Viewer overlay
         showLinkedInViewer && e(LinkedInDataViewer, {
           data: linkedInViewerData,
@@ -4257,11 +4943,12 @@ Folder: ${result.action.id}`,
           : e(ChatPanel, {
               commands: COMMANDS,
               onSubmit,
-              onTypingChange: handleTypingChange
+              onTypingChange: handleTypingChange,
+              modelInfo: currentModelInfo
             })
       ),
-      // ===== RIGHT COLUMN: Portfolio, Wealth =====
-      e(
+      // ===== RIGHT COLUMN: Portfolio, Wealth (hidden in medium width) =====
+      !isMedium && e(
         Box,
         { flexDirection: "column", width: "25%", paddingLeft: 1, overflow: "hidden" },
         // Portfolio Panel
@@ -4287,7 +4974,8 @@ Folder: ${result.action.id}`,
         // Trading History Panel (8 weeks)
         viewMode !== VIEW_MODES.MINIMAL && e(TradingHistoryPanel, {
           tradingHistory,
-          isConnected: alpacaStatus === "Live"
+          isConnected: alpacaStatus === "Live",
+          timestamp: uiClock
         }),
         // Wealth Panel or Connections Panel
         personalCapitalData?.connected

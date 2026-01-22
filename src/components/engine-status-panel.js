@@ -1,6 +1,5 @@
 import React, { memo } from "react";
 import { Box, Text } from "ink";
-import Spinner from "ink-spinner";
 
 const e = React.createElement;
 
@@ -93,7 +92,13 @@ const ACTION_LABELS = {
   analyze: "Analyze",
   execute: "Execute",
   connect: "Connect",
-  sync: "Sync"
+  sync: "Sync",
+  researching: "Research"
+};
+
+const titleCase = (value) => {
+  if (!value) return "Action";
+  return value.charAt(0).toUpperCase() + value.slice(1);
 };
 
 /**
@@ -122,9 +127,13 @@ const formatAction = (action, target, status = "working") => {
     default: // working, starting, etc.
       color = TASK_STATE.WORKING;
   }
-  const label = ACTION_LABELS[action?.toLowerCase()] || action || "Action";
-  const shortTarget = target ? `(${target.length > 30 ? "..." + target.slice(-27) : target})` : "";
-  return { icon: "●", color, text: `${label}${shortTarget}` };
+  const normalized = action?.toLowerCase();
+  const label = ACTION_LABELS[normalized] || titleCase(action);
+  const trimmedTarget = target
+    ? (target.length > 60 ? `${target.slice(0, 57)}...` : target)
+    : "";
+  const targetText = trimmedTarget ? `('${trimmedTarget}')` : "";
+  return { icon: "●", color, text: `${label}${targetText}` };
 };
 
 // Status labels for display
@@ -159,7 +168,8 @@ const EngineStatusPanelBase = ({
   currentPlan = null,
   currentWork = null,
   projects = [],
-  compact = false
+  compact = false,
+  actionStreamingText = ""
 }) => {
   const statusId = status?.id || "idle";
   const statusDetail = status?.detail || null;
@@ -167,6 +177,17 @@ const EngineStatusPanelBase = ({
   const statusIcon = STATUS_ICONS[statusId] || "●";
   const statusLabel = STATUS_LABELS[statusId] || "Ready";
   const isActive = statusId !== "idle" && statusId !== "waiting";
+  const borderColor = isActive ? "#1e293b" : "#0f172a";
+  const containerProps = compact
+    ? { flexDirection: "row", gap: 1, paddingX: 1 }
+    : {
+        flexDirection: "column",
+        borderStyle: "single",
+        borderColor,
+        paddingX: 1,
+        paddingY: 1,
+        marginBottom: 1
+      };
 
   // Parse action and target from status detail (format: "action:target" or just detail)
   const parseAction = (detail) => {
@@ -186,7 +207,7 @@ const EngineStatusPanelBase = ({
   if (compact) {
     return e(
       Box,
-      { flexDirection: "row", gap: 1, paddingX: 1 },
+      containerProps,
       e(Text, { color: statusColor }, isActive ? "●" : "✓"),
       actionDisplay
         ? e(Text, { color: statusColor, bold: isActive }, actionDisplay.text)
@@ -196,13 +217,7 @@ const EngineStatusPanelBase = ({
 
   return e(
     Box,
-    {
-      flexDirection: "column",
-      borderStyle: "round",
-      borderColor: isActive ? statusColor : "#1e293b",
-      padding: 1,
-      marginBottom: 1
-    },
+    containerProps,
     // Header with status
     e(
       Box,
@@ -212,7 +227,7 @@ const EngineStatusPanelBase = ({
         { flexDirection: "row", gap: 1, alignItems: "center" },
         e(Text, { color: "#64748b" }, "Engine Status"),
         isActive && e(Text, { color: statusColor }, "·"),
-        isActive && e(Spinner, { type: "dots" })
+        isActive && e(Text, { color: TASK_STATE.OBSERVATION }, "...")
       ),
       e(Text, { color: "#475569" }, getCachedTime())
     ),
@@ -221,10 +236,20 @@ const EngineStatusPanelBase = ({
     e(
       Box,
       { flexDirection: "row", gap: 1, marginBottom: 1 },
-      e(Text, { color: statusColor, bold: true }, isActive ? "●" : "✓"),
+      isActive && actionDisplay
+        ? e(Text, { color: TASK_STATE.OBSERVATION }, "...")
+        : e(Text, { color: statusColor, bold: true }, isActive ? "●" : "✓"),
       actionDisplay
-        ? e(Text, { color: statusColor, bold: true }, actionDisplay.text)
+        ? e(Text, { color: isActive ? "#94a3b8" : statusColor, bold: isActive }, actionDisplay.text)
         : e(Text, { color: statusColor, bold: true }, statusLabel)
+    ),
+
+    // Live action output (streaming)
+    actionStreamingText && e(
+      Box,
+      { flexDirection: "row", gap: 1, marginBottom: 1 },
+      e(Text, { color: TASK_STATE.OBSERVATION }, "..."),
+      e(Text, { color: "#94a3b8", wrap: "wrap" }, actionStreamingText.slice(-160))
     ),
 
     // Current Plan (if any)
@@ -290,7 +315,7 @@ const EngineStatusLineBase = ({ status = {}, showSpinner = true }) => {
     Box,
     { flexDirection: "row", gap: 1 },
     isActive && showSpinner
-      ? e(Spinner, { type: "dots" })
+      ? e(Text, { color: TASK_STATE.OBSERVATION }, "...")
       : e(Text, { color: statusColor }, statusIcon),
     e(Text, { color: statusColor, bold: isActive }, statusLabel),
     statusDetail && e(Text, { color: "#64748b" }, `· ${statusDetail.slice(0, 25)}`)
@@ -306,6 +331,7 @@ const areEngineStatusPropsEqual = (prevProps, nextProps) => {
   if (prevProps.status?.detail !== nextProps.status?.detail) return false;
   if (prevProps.compact !== nextProps.compact) return false;
   if (prevProps.currentWork !== nextProps.currentWork) return false;
+  if (prevProps.actionStreamingText !== nextProps.actionStreamingText) return false;
 
   // Compare plans length and content
   const prevPlan = prevProps.currentPlan || [];
@@ -325,3 +351,4 @@ export const EngineStatusPanel = memo(EngineStatusPanelBase, areEngineStatusProp
 export const EngineStatusLine = memo(EngineStatusLineBase);
 
 export default EngineStatusPanel;
+

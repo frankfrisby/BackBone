@@ -1,6 +1,5 @@
 import React from "react";
 import { Box, Text } from "ink";
-import Spinner from "ink-spinner";
 
 const e = React.createElement;
 
@@ -11,31 +10,95 @@ const formatTimestamp = (date) => {
   });
 };
 
-const MessageBubble = ({ message, isUser, timestamp }) => {
-  const bubbleColor = isUser ? "#1e40af" : "#4a5568";
-  const textColor = isUser ? "#93c5fd" : "#e2e8f0";
-  const label = isUser ? "You" : "BackBone";
-  const labelColor = isUser ? "#60a5fa" : "#22c55e";
-
+/**
+ * User Message - has background highlight
+ */
+const UserMessage = ({ message, timestamp }) => {
   return e(
     Box,
     { flexDirection: "column", marginBottom: 1, width: "100%" },
     e(
       Box,
-      { flexDirection: "row", gap: 1 },
-      e(Text, { color: labelColor, bold: true }, label),
-      e(Text, { color: "#718096", dimColor: true }, formatTimestamp(timestamp))
+      { flexDirection: "row", gap: 1, marginBottom: 0 },
+      e(Text, { color: "#60a5fa", bold: true }, "You"),
+      e(Text, { color: "#475569", dimColor: true }, formatTimestamp(timestamp))
     ),
     e(
       Box,
       {
         paddingX: 1,
         paddingY: 0,
-        borderStyle: "round",
-        borderColor: bubbleColor,
+        backgroundColor: "#1e293b",
         width: "100%"
       },
-      e(Text, { color: textColor, wrap: "wrap" }, message)
+      e(Text, { color: "#e2e8f0", wrap: "wrap" }, message)
+    )
+  );
+};
+
+/**
+ * AI Message - white dot indicator, no background
+ */
+const AIMessage = ({ message, timestamp, modelInfo }) => {
+  return e(
+    Box,
+    { flexDirection: "column", marginBottom: 1, width: "100%" },
+    e(
+      Box,
+      { flexDirection: "row", gap: 1, marginBottom: 0 },
+      e(Text, { color: "#ffffff" }, "●"),
+      e(Text, { color: "#22c55e", bold: true }, "Backbone"),
+      modelInfo && e(Text, { color: "#475569", dimColor: true }, `(${modelInfo.shortName || modelInfo.name || "AI"})`),
+      e(Text, { color: "#475569", dimColor: true }, formatTimestamp(timestamp))
+    ),
+    e(
+      Box,
+      { paddingLeft: 2, width: "100%" },
+      e(Text, { color: "#94a3b8", wrap: "wrap" }, message)
+    )
+  );
+};
+
+/**
+ * Streaming AI response indicator
+ */
+const StreamingMessage = ({ text, title }) => {
+  return e(
+    Box,
+    { flexDirection: "column", marginBottom: 1, width: "100%" },
+    e(
+      Box,
+      { flexDirection: "row", gap: 1 },
+      e(Text, { color: "#f59e0b" }, "◐"),
+      e(Text, { color: "#22c55e", bold: true }, title || "Backbone"),
+      e(Text, { color: "#f59e0b" }, "thinking...")
+    ),
+    e(
+      Box,
+      { paddingLeft: 2, width: "100%" },
+      e(Text, { color: "#94a3b8", wrap: "wrap" }, text || "...")
+    )
+  );
+};
+
+/**
+ * Action streaming (for agentic tasks)
+ */
+const ActionStreamingMessage = ({ text, title }) => {
+  return e(
+    Box,
+    { flexDirection: "column", marginBottom: 1, width: "100%" },
+    e(
+      Box,
+      { flexDirection: "row", gap: 1 },
+      e(Text, { color: "#8b5cf6" }, "◉"),
+      e(Text, { color: "#8b5cf6", bold: true }, title || "Running task"),
+      e(Text, { color: "#64748b" }, "...")
+    ),
+    e(
+      Box,
+      { paddingLeft: 2, width: "100%", borderLeft: true, borderColor: "#8b5cf6", borderStyle: "single", borderTop: false, borderBottom: false, borderRight: false },
+      e(Text, { color: "#cbd5e1", wrap: "wrap" }, text || "Executing...")
     )
   );
 };
@@ -44,82 +107,83 @@ const LoadingIndicator = () => {
   return e(
     Box,
     { flexDirection: "row", gap: 1, marginBottom: 1 },
-    e(Text, { color: "#22c55e" }, e(Spinner, { type: "dots" })),
-    e(Text, { color: "#718096" }, "Thinking...")
+    e(Text, { color: "#f59e0b" }, "◐"),
+    e(Text, { color: "#64748b" }, "Thinking...")
   );
 };
 
-const ConversationPanelBase = ({ messages, isLoading, streamingText }) => {
-  const hasMessages = messages.length > 0 || isLoading || streamingText;
+const BORDER_COLOR = "#0f172a";
+
+const ConversationPanelBase = ({ messages, isLoading, streamingText, actionStreamingText, actionStreamingTitle }) => {
+  const hasMessages = messages.length > 0 || isLoading || streamingText || actionStreamingText;
 
   if (!hasMessages) {
     return e(
       Box,
       {
         flexDirection: "column",
-        borderStyle: "round",
-        borderColor: "#4a5568",
-        padding: 1,
+        paddingX: 1,
+        paddingY: 1,
         overflow: "hidden",
         width: "100%",
-        height: 8
+        height: 8,
+        borderStyle: "single",
+        borderColor: BORDER_COLOR
       },
-      e(Text, { color: "#718096" }, "Conversation"),
       e(
         Box,
-        { flexDirection: "column", alignItems: "center", justifyContent: "center" },
-        e(Text, { color: "#4a5568" }, "No messages yet"),
-        e(Text, { color: "#718096", dimColor: true }, "Type a message or use /ask")
+        { flexDirection: "row", justifyContent: "space-between", marginBottom: 1 },
+        e(Text, { color: "#64748b" }, "Conversation"),
+        e(Text, { color: "#475569", dimColor: true }, "Ready")
+      ),
+      e(
+        Box,
+        { flexDirection: "column", paddingLeft: 1 },
+        e(Text, { color: "#475569" }, "Ask anything to get started"),
+        e(Text, { color: "#334155", dimColor: true }, 'Try: "What should I focus on today?"')
       )
     );
   }
 
-  // Show only last 3 messages to keep panel compact
-  const visibleMessages = messages.slice(-3);
+  // Show only last 4 messages to keep panel compact
+  const visibleMessages = messages.slice(-4);
 
   return e(
     Box,
     {
       flexDirection: "column",
-      borderStyle: "round",
-      borderColor: "#4a5568",
-      padding: 1,
+      paddingX: 1,
+      paddingY: 1,
       overflow: "hidden",
       width: "100%",
-      height: 10
+      borderStyle: "single",
+      borderColor: BORDER_COLOR
     },
     e(
       Box,
       { flexDirection: "row", justifyContent: "space-between", marginBottom: 1, width: "100%" },
-      e(Text, { color: "#718096" }, "Conversation"),
-      e(Text, { color: "#718096", dimColor: true }, `${messages.length} messages`)
+      e(Text, { color: "#64748b" }, "Conversation"),
+      e(Text, { color: "#475569", dimColor: true }, `${messages.length} messages`)
     ),
     e(
       Box,
       { flexDirection: "column", overflow: "hidden", width: "100%" },
       ...visibleMessages.map((msg, i) =>
-        e(MessageBubble, {
-          key: `${msg.timestamp.getTime()}-${i}`,
-          message: msg.content,
-          isUser: msg.role === "user",
-          timestamp: msg.timestamp
-        })
+        msg.role === "user"
+          ? e(UserMessage, {
+              key: `${msg.timestamp.getTime()}-${i}`,
+              message: msg.content,
+              timestamp: msg.timestamp
+            })
+          : e(AIMessage, {
+              key: `${msg.timestamp.getTime()}-${i}`,
+              message: msg.content,
+              timestamp: msg.timestamp,
+              modelInfo: msg.modelInfo
+            })
       ),
-      streamingText && e(
-        Box,
-        { flexDirection: "column", marginBottom: 1, width: "100%" },
-        e(
-          Box,
-          { flexDirection: "row", gap: 1 },
-          e(Text, { color: "#22c55e", bold: true }, "BackBone"),
-          e(Text, { color: "#22c55e" }, e(Spinner, { type: "dots" }))
-        ),
-        e(
-          Box,
-          { paddingX: 1, borderStyle: "round", borderColor: "#4a5568", width: "100%" },
-          e(Text, { color: "#e2e8f0", wrap: "wrap" }, streamingText)
-        )
-      ),
+      streamingText && e(StreamingMessage, { text: streamingText }),
+      actionStreamingText && e(ActionStreamingMessage, { text: actionStreamingText, title: actionStreamingTitle }),
       isLoading && !streamingText && e(LoadingIndicator, null)
     )
   );
@@ -127,11 +191,11 @@ const ConversationPanelBase = ({ messages, isLoading, streamingText }) => {
 
 // Custom comparison to prevent unnecessary re-renders
 const arePropsEqual = (prevProps, nextProps) => {
-  // Only re-render if these specific things change
   if (prevProps.isLoading !== nextProps.isLoading) return false;
   if (prevProps.streamingText !== nextProps.streamingText) return false;
+  if (prevProps.actionStreamingText !== nextProps.actionStreamingText) return false;
+  if (prevProps.actionStreamingTitle !== nextProps.actionStreamingTitle) return false;
   if (prevProps.messages.length !== nextProps.messages.length) return false;
-  // Check if the last message changed (most common case)
   const prevLast = prevProps.messages[prevProps.messages.length - 1];
   const nextLast = nextProps.messages[nextProps.messages.length - 1];
   if (prevLast?.content !== nextLast?.content) return false;

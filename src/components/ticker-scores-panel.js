@@ -1,7 +1,50 @@
-import React from "react";
+import React, { memo } from "react";
 import { Box, Text } from "ink";
 
 const e = React.createElement;
+
+/**
+ * Custom comparison for ticker scores to prevent unnecessary re-renders
+ */
+const areTickerScoresEqual = (prevProps, nextProps) => {
+  // Check simple props first
+  if (prevProps.title !== nextProps.title) return false;
+  if (prevProps.maxItems !== nextProps.maxItems) return false;
+  if (prevProps.viewMode !== nextProps.viewMode) return false;
+  if (prevProps.compact !== nextProps.compact) return false;
+
+  // Deep compare tickers - only check what matters for display
+  const prevTickers = prevProps.tickers || [];
+  const nextTickers = nextProps.tickers || [];
+
+  if (prevTickers.length !== nextTickers.length) return false;
+
+  // Compare top 10 tickers' key values (symbol, score, change)
+  for (let i = 0; i < Math.min(10, prevTickers.length); i++) {
+    const prev = prevTickers[i] || {};
+    const next = nextTickers[i] || {};
+    if (prev.symbol !== next.symbol) return false;
+    if (prev.score !== next.score) return false;
+    if (prev.change !== next.change && prev.changePercent !== next.changePercent) return false;
+  }
+
+  return true;
+};
+
+/**
+ * Format date/time for screenshots
+ */
+const formatDateTime = (date = new Date()) => {
+  const options = {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: true
+  };
+  return date.toLocaleString("en-US", options);
+};
 
 /**
  * Top 3 threshold - must be 8.0 or above to qualify
@@ -132,13 +175,16 @@ const isTop3Qualified = (score) => score >= TOP3_THRESHOLD;
  * Top 3 = ONLY tickers with score >= 8.0 (shown with green background)
  * Shows: 3 on minimal, 10 on core, 20 on advanced
  */
-export const TickerScoresPanel = ({
+const TickerScoresPanelBase = ({
   tickers = [],
   title = "Ticker Scores",
   maxItems = 10,
   viewMode = "core",
-  compact = false
+  compact = false,
+  timestamp = null
 }) => {
+  // Format timestamp for display
+  const displayTime = formatDateTime(timestamp ? new Date(timestamp) : new Date());
   // Determine max items based on view mode
   const itemCount = viewMode === "minimal" ? 3 :
                     viewMode === "advanced" ? 20 : 10;
@@ -187,7 +233,12 @@ export const TickerScoresPanel = ({
       e(
         Box,
         { flexDirection: "row", justifyContent: "space-between", marginBottom: 1 },
-        e(Text, { color: "#64748b" }, title),
+        e(
+          Box,
+          { flexDirection: "row", gap: 2 },
+          e(Text, { color: "#64748b" }, title),
+          e(Text, { color: "#475569", dimColor: true }, displayTime)
+        ),
         e(Text, { color: top3Count > 0 ? "#22c55e" : "#475569" },
           top3Count > 0 ? `${top3Count} buy` : "0 buy")
       ),
@@ -226,18 +277,27 @@ export const TickerScoresPanel = ({
       borderColor: "#1e293b",
       padding: 1
     },
-    // Header
+    // Header with date/time
     e(
       Box,
-      { flexDirection: "row", justifyContent: "space-between", marginBottom: 1 },
-      e(Text, { color: "#64748b" }, title),
+      { flexDirection: "column", marginBottom: 1 },
       e(
         Box,
-        { flexDirection: "row", gap: 2 },
-        top3Count > 0
-          ? e(Text, { color: "#22c55e", bold: true }, `${top3Count} BUY (≥8.0)`)
-          : e(Text, { color: "#64748b" }, "0 buy signals"),
-        e(Text, { color: "#475569" }, `showing ${sortedTickers.length}`)
+        { flexDirection: "row", justifyContent: "space-between" },
+        e(
+          Box,
+          { flexDirection: "row", gap: 2 },
+          e(Text, { color: "#64748b" }, title),
+          e(Text, { color: "#8b5cf6", bold: true }, displayTime)
+        ),
+        e(
+          Box,
+          { flexDirection: "row", gap: 2 },
+          top3Count > 0
+            ? e(Text, { color: "#22c55e", bold: true }, `${top3Count} BUY (≥8.0)`)
+            : e(Text, { color: "#64748b" }, "0 buy signals"),
+          e(Text, { color: "#475569" }, `showing ${sortedTickers.length}`)
+        )
       )
     ),
 
@@ -323,7 +383,7 @@ export const TickerScoresPanel = ({
 /**
  * Top 3 Display - Shows only tickers >= 8.0
  */
-export const Top3Display = ({ tickers = [] }) => {
+const Top3DisplayBase = ({ tickers = [] }) => {
   const qualified = [...tickers]
     .filter(t => t && t.symbol && typeof t.score === "number" && isTop3Qualified(t.score))
     .sort((a, b) => (b.score || 0) - (a.score || 0))
@@ -358,7 +418,7 @@ export const Top3Display = ({ tickers = [] }) => {
 /**
  * Ticker Summary Line
  */
-export const TickerSummaryLine = ({ tickers = [] }) => {
+const TickerSummaryLineBase = ({ tickers = [] }) => {
   const sorted = [...tickers]
     .filter(t => t && t.symbol && typeof t.score === "number")
     .sort((a, b) => (b.score || 0) - (a.score || 0))
@@ -390,5 +450,10 @@ export const TickerSummaryLine = ({ tickers = [] }) => {
     })
   );
 };
+
+// Memoized exports to prevent flickering
+export const TickerScoresPanel = memo(TickerScoresPanelBase, areTickerScoresEqual);
+export const Top3Display = memo(Top3DisplayBase);
+export const TickerSummaryLine = memo(TickerSummaryLineBase);
 
 export default TickerScoresPanel;

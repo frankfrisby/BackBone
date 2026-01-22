@@ -115,7 +115,10 @@ import {
 import { getTradingHistory, getNextTradingTime, formatTimeAgo } from "./services/trading-history.js";
 import { TradingHistoryPanel } from "./components/trading-history-panel.js";
 import { TestRunnerPanel } from "./components/test-runner-panel.js";
+import { SettingsPanel } from "./components/settings-panel.js";
 import { LinkedInDataViewer } from "./components/linkedin-data-viewer.js";
+import { loadUserSettings, saveUserSettings, updateSettings as updateUserSettings, getModelConfig, isProviderConfigured } from "./services/user-settings.js";
+import { loadFineTuningConfig, saveFineTuningConfig, runFineTuningPipeline, queryFineTunedModel } from "./services/fine-tuning.js";
 import { monitorAndTrade, loadConfig as loadTradingConfig, setTradingEnabled } from "./services/auto-trader.js";
 import { isMarketOpen } from "./services/trading-status.js";
 
@@ -193,16 +196,19 @@ const App = ({ updateConsoleTitle }) => {
   const [privateMode, setPrivateMode] = useState(false);
   const [viewMode, setViewMode] = useState(VIEW_MODES.CORE); // Core is default
   const [showTestRunner, setShowTestRunner] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [userSettings, setUserSettings] = useState(() => loadUserSettings());
+  const [fineTuningStatus, setFineTuningStatus] = useState(() => loadFineTuningConfig());
   const { stdout } = useStdout();
 
   // Engine state manager
   const engineState = useMemo(() => getEngineStateManager(), []);
   const [engineStatus, setEngineStatus] = useState(() => engineState.getDisplayData());
 
-  // Handle keyboard shortcuts: Ctrl+T (tier), Ctrl+R (test runner), Ctrl+P (private mode), Ctrl+U (view mode)
+  // Handle keyboard shortcuts: Ctrl+T (tier), Ctrl+R (test runner), Ctrl+P (private mode), Ctrl+U (view mode), Ctrl+S (settings)
   useInput((input, key) => {
-    // Don't process shortcuts if test runner is open (it handles its own input)
-    if (showTestRunner) return;
+    // Don't process shortcuts if test runner or settings is open (they handle their own input)
+    if (showTestRunner || showSettings) return;
 
     if (key.ctrl && input === "t") {
       const result = cycleTier();
@@ -215,6 +221,11 @@ const App = ({ updateConsoleTitle }) => {
       // Ctrl+R: Open test runner
       setShowTestRunner(true);
       setLastAction("Test Runner opened");
+    }
+    if (key.ctrl && input === "s") {
+      // Ctrl+S: Open settings panel
+      setShowSettings(true);
+      setLastAction("Settings opened");
     }
     if (key.ctrl && input === "p") {
       // Ctrl+P: Toggle private mode
@@ -3944,6 +3955,37 @@ Folder: ${result.action.id}`,
           loadConfig: loadTradingConfig,
           tickers,
           portfolio
+        }),
+        // Settings Panel overlay (Ctrl+S)
+        showSettings && e(SettingsPanel, {
+          onClose: () => setShowSettings(false),
+          settings: userSettings,
+          onSettingChange: (key, value) => {
+            const newSettings = { ...userSettings, [key]: value };
+            setUserSettings(newSettings);
+            saveUserSettings(newSettings);
+            // Sync private mode and view mode with app state
+            if (key === "privateMode") setPrivateMode(value);
+            if (key === "viewMode") setViewMode(value);
+          },
+          fineTuningStatus: fineTuningStatus,
+          onStartFineTuning: async () => {
+            try {
+              const result = await runFineTuningPipeline();
+              setFineTuningStatus(loadFineTuningConfig());
+              return result;
+            } catch (error) {
+              return { success: false, error: error.message };
+            }
+          },
+          onTestFineTuning: async () => {
+            try {
+              const result = await queryFineTunedModel("Hello, tell me about myself.");
+              return { success: true, result };
+            } catch (error) {
+              return { success: false, error: error.message };
+            }
+          }
         }),
         setupOverlay.active
           ? e(SetupOverlay, {

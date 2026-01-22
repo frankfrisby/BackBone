@@ -1,8 +1,13 @@
-import React from "react";
+import React, { useMemo } from "react";
 import { Box, Text } from "ink";
 import Gradient from "ink-gradient";
 
 const e = React.createElement;
+
+// Cache date string to prevent re-renders every second
+let cachedDateTime = "";
+let lastDateUpdate = 0;
+const DATE_UPDATE_INTERVAL = 60000; // Update every minute
 
 /**
  * ASCII Art BACKBONE logo
@@ -42,16 +47,21 @@ const getStatusIcon = (status) => {
 };
 
 /**
- * Get current date/time string
+ * Get current date/time string (cached to prevent unnecessary re-renders)
  */
 const getDateTime = () => {
-  return new Date().toLocaleString("en-US", {
-    weekday: "short",
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit"
-  });
+  const now = Date.now();
+  if (now - lastDateUpdate > DATE_UPDATE_INTERVAL || !cachedDateTime) {
+    cachedDateTime = new Date().toLocaleString("en-US", {
+      weekday: "short",
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit"
+    });
+    lastDateUpdate = now;
+  }
+  return cachedDateTime;
 };
 
 /**
@@ -194,4 +204,28 @@ export const HeaderMinimal = ({ claudeStatus }) => {
   );
 };
 
-export const Header = React.memo(HeaderBase);
+/**
+ * Custom comparison to prevent unnecessary re-renders
+ */
+const areHeaderPropsEqual = (prevProps, nextProps) => {
+  // Only re-render if these specific values change
+  if (prevProps.claudeStatus !== nextProps.claudeStatus) return false;
+  if (prevProps.version !== nextProps.version) return false;
+  if (prevProps.compact !== nextProps.compact) return false;
+
+  // Deep compare integrations object
+  const prevIntegrations = prevProps.integrations || {};
+  const nextIntegrations = nextProps.integrations || {};
+  const prevKeys = Object.keys(prevIntegrations);
+  const nextKeys = Object.keys(nextIntegrations);
+
+  if (prevKeys.length !== nextKeys.length) return false;
+
+  for (const key of prevKeys) {
+    if (prevIntegrations[key] !== nextIntegrations[key]) return false;
+  }
+
+  return true;
+};
+
+export const Header = React.memo(HeaderBase, areHeaderPropsEqual);

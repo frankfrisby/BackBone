@@ -1,12 +1,36 @@
-import React from "react";
+import React, { memo } from "react";
 import { Box, Text } from "ink";
 
 const e = React.createElement;
 
+/**
+ * Format date/time for screenshots (cached to prevent re-renders)
+ */
+let cachedPanelDateTime = "";
+let lastPanelDateUpdate = 0;
+const formatDateTime = (date = new Date()) => {
+  const now = Date.now();
+  // Only update every 60 seconds to prevent flickering
+  if (now - lastPanelDateUpdate > 60000 || !cachedPanelDateTime) {
+    const options = {
+      weekday: "short",
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: true
+    };
+    cachedPanelDateTime = date.toLocaleString("en-US", options);
+    lastPanelDateUpdate = now;
+  }
+  return cachedPanelDateTime;
+};
+
 // Fixed column widths for alignment
-const COL_WEEK = 16;  // "Dec 28-Jan 3" = 14 chars max, plus padding
-const COL_PNL = 8;    // "+10.5%" = 7 chars max
-const COL_SPY = 8;    // "+10.5%" = 7 chars max
+const COL_WEEK = 14;  // "Dec 28-Jan 3" = 14 chars max
+const COL_PNL_AMT = 9; // "$1,234" or "($1,234)"
+const COL_PNL_PCT = 7; // "+10.5%"
+const COL_SPY = 7;    // "+10.5%"
 const COL_ICON = 2;   // checkmark/x
 
 /**
@@ -37,7 +61,7 @@ const formatPct = (value) => {
  * Trading History Panel
  * Shows 8 weeks of P&L, SPY comparison, and growth projection
  */
-export const TradingHistoryPanel = ({ tradingHistory, isConnected }) => {
+const TradingHistoryPanelBase = ({ tradingHistory, isConnected }) => {
   // Don't show if not connected
   if (!isConnected || !tradingHistory) {
     return null;
@@ -61,11 +85,17 @@ export const TradingHistoryPanel = ({ tradingHistory, isConnected }) => {
       { key: `week-${index}`, flexDirection: "row" },
       // Week label - fixed width, left aligned
       e(Text, { color: "#94a3b8" }, (week.label || "--").padEnd(COL_WEEK)),
+      // P&L dollar amount - fixed width, right aligned
+      e(
+        Text,
+        { color: (week.pnl || 0) >= 0 ? "#22c55e" : "#ef4444" },
+        formatMoney(week.pnl || 0).padStart(COL_PNL_AMT)
+      ),
       // P&L percent - fixed width, right aligned
       e(
         Text,
         { color: (week.pnlPercent || 0) >= 0 ? "#22c55e" : "#ef4444" },
-        formatPct(week.pnlPercent || 0).padStart(COL_PNL)
+        formatPct(week.pnlPercent || 0).padStart(COL_PNL_PCT)
       ),
       // SPY return - fixed width, right aligned
       e(
@@ -91,11 +121,12 @@ export const TradingHistoryPanel = ({ tradingHistory, isConnected }) => {
       paddingX: 1,
       marginTop: 1
     },
-    // Header
+    // Header with date/time for screenshots
     e(
       Box,
-      { marginBottom: 1 },
-      e(Text, { color: "#64748b" }, "Trading History (8 Weeks)")
+      { flexDirection: "row", justifyContent: "space-between", marginBottom: 1 },
+      e(Text, { color: "#64748b" }, "Trading History (8 Weeks)"),
+      e(Text, { color: "#8b5cf6", bold: true }, formatDateTime())
     ),
 
     // Total P&L summary
@@ -137,14 +168,15 @@ export const TradingHistoryPanel = ({ tradingHistory, isConnected }) => {
     ),
 
     // Separator
-    e(Box, { marginY: 1 }, e(Text, { color: "#334155" }, "\u2500".repeat(COL_WEEK + COL_PNL + COL_SPY + COL_ICON))),
+    e(Box, { marginY: 1 }, e(Text, { color: "#334155" }, "\u2500".repeat(COL_WEEK + COL_PNL_AMT + COL_PNL_PCT + COL_SPY + COL_ICON))),
 
     // Weekly table header
     e(
       Box,
       { flexDirection: "row", marginBottom: 1 },
       e(Text, { color: "#475569" }, "Week".padEnd(COL_WEEK)),
-      e(Text, { color: "#475569" }, "P&L".padStart(COL_PNL)),
+      e(Text, { color: "#475569" }, "P&L".padStart(COL_PNL_AMT)),
+      e(Text, { color: "#475569" }, "%".padStart(COL_PNL_PCT)),
       e(Text, { color: "#475569" }, "SPY".padStart(COL_SPY)),
       e(Text, { color: "#475569" }, "".padStart(COL_ICON))
     ),
@@ -160,3 +192,31 @@ export const TradingHistoryPanel = ({ tradingHistory, isConnected }) => {
     )
   );
 };
+
+/**
+ * Custom comparison to prevent unnecessary re-renders
+ */
+const areTradingHistoryPropsEqual = (prevProps, nextProps) => {
+  if (prevProps.isConnected !== nextProps.isConnected) return false;
+
+  const prevHistory = prevProps.tradingHistory;
+  const nextHistory = nextProps.tradingHistory;
+
+  if (!prevHistory && !nextHistory) return true;
+  if (!prevHistory || !nextHistory) return false;
+
+  // Compare key values
+  if (prevHistory.totalPnL !== nextHistory.totalPnL) return false;
+  if (prevHistory.totalPnLPercent !== nextHistory.totalPnLPercent) return false;
+  if (prevHistory.growthRate !== nextHistory.growthRate) return false;
+
+  // Compare weeks length
+  const prevWeeks = prevHistory.weeks || [];
+  const nextWeeks = nextHistory.weeks || [];
+  if (prevWeeks.length !== nextWeeks.length) return false;
+
+  return true;
+};
+
+// Memoized export to prevent flickering
+export const TradingHistoryPanel = memo(TradingHistoryPanelBase, areTradingHistoryPropsEqual);

@@ -115,6 +115,8 @@ import {
 import { getTradingHistory, getNextTradingTime, formatTimeAgo } from "./services/trading-history.js";
 import { TradingHistoryPanel } from "./components/trading-history-panel.js";
 import { LinkedInDataViewer } from "./components/linkedin-data-viewer.js";
+import { monitorAndTrade, loadConfig as loadTradingConfig, setTradingEnabled } from "./services/auto-trader.js";
+import { isMarketOpen } from "./services/trading-status.js";
 
 // New autonomous system imports
 import { getAutonomousEngine, AI_ACTION_STATUS, AI_ACTION_TYPES, EXECUTION_TOOLS } from "./services/autonomous-engine.js";
@@ -518,25 +520,31 @@ const App = ({ updateConsoleTitle }) => {
       });
 
       autonomousEngine.on("proposals-updated", () => {
-        setAutonomousState(autonomousEngine.getDisplayData());
+        setAutonomousState((prev) => {
+          const next = autonomousEngine.getDisplayData();
+          if (JSON.stringify(prev) === JSON.stringify(next)) return prev;
+          return next;
+        });
       });
 
-      // Listen for engine state events
-      engineState.on("status-changed", ({ status, detail }) => {
-        setEngineStatus(engineState.getDisplayData());
-      });
-      engineState.on("plan-updated", () => {
-        setEngineStatus(engineState.getDisplayData());
-      });
-      engineState.on("work-updated", () => {
-        setEngineStatus(engineState.getDisplayData());
-      });
-      engineState.on("project-started", () => {
-        setEngineStatus(engineState.getDisplayData());
-      });
-      engineState.on("project-completed", () => {
-        setEngineStatus(engineState.getDisplayData());
-      });
+      // Listen for engine state events (with change detection to reduce flickering)
+      const updateEngineStatus = () => {
+        setEngineStatus((prev) => {
+          const next = engineState.getDisplayData();
+          // Only update if something actually changed
+          if (prev && prev.status?.status === next.status?.status &&
+              prev.status?.detail === next.status?.detail &&
+              JSON.stringify(prev.projects) === JSON.stringify(next.projects)) {
+            return prev;
+          }
+          return next;
+        });
+      };
+      engineState.on("status-changed", updateEngineStatus);
+      engineState.on("plan-updated", updateEngineStatus);
+      engineState.on("work-updated", updateEngineStatus);
+      engineState.on("project-started", updateEngineStatus);
+      engineState.on("project-completed", updateEngineStatus);
 
       // Sync autonomous engine actions with engine state
       autonomousEngine.on("action-started", (action) => {
@@ -555,15 +563,20 @@ const App = ({ updateConsoleTitle }) => {
         engineState.setStatus("idle");
       });
 
-      // Listen for goal tracker events
+      // Listen for goal tracker events (with change detection)
+      const updateGoals = () => {
+        setGoals((prev) => {
+          const next = goalTracker.getDisplayData();
+          if (JSON.stringify(prev) === JSON.stringify(next)) return prev;
+          return next;
+        });
+      };
       goalTracker.on("milestone-achieved", ({ goal, milestone }) => {
         workLog.logMilestone(LOG_SOURCE.GOAL, `Milestone: ${milestone.label}`, goal.title);
-        setGoals(goalTracker.getDisplayData());
+        updateGoals();
       });
 
-      goalTracker.on("progress-updated", () => {
-        setGoals(goalTracker.getDisplayData());
-      });
+      goalTracker.on("progress-updated", updateGoals);
 
       // Listen for work log events
       workLog.on("entry", () => {
@@ -617,18 +630,25 @@ const App = ({ updateConsoleTitle }) => {
     }
   }, [ouraHealth?.sleep?.score]);
 
-  // Update connection statuses for ConnectionBar
+  // Update connection statuses for ConnectionBar (with change detection to reduce flickering)
   useEffect(() => {
-    setConnectionStatuses({
-      alpaca: { connected: alpacaStatus === "Live", details: alpacaMode },
-      claude: { connected: claudeStatus === "Connected", details: "" },
-      claudeCode: { connected: claudeCodeStatus.available, details: claudeCodeStatus.available ? "Ready" : "Not installed" },
-      linkedin: { connected: linkedInProfile?.connected, details: "" },
-      oura: { connected: ouraHealth?.connected, details: "" },
-      yahoo: { connected: true, details: lastQuoteUpdate },
-      personalCapital: { connected: personalCapitalData?.connected || false, details: personalCapitalData?.connected ? "Connected" : "" }
+    setConnectionStatuses((prev) => {
+      const next = {
+        alpaca: { connected: alpacaStatus === "Live", details: alpacaMode },
+        claude: { connected: claudeStatus === "Connected", details: "" },
+        claudeCode: { connected: claudeCodeStatus.available, details: claudeCodeStatus.available ? "Ready" : "Not installed" },
+        linkedin: { connected: linkedInProfile?.connected, details: "" },
+        oura: { connected: ouraHealth?.connected, details: "" },
+        yahoo: { connected: true, details: lastQuoteUpdate },
+        personalCapital: { connected: personalCapitalData?.connected || false, details: personalCapitalData?.connected ? "Connected" : "" }
+      };
+      // Only update if something actually changed
+      if (JSON.stringify(prev) === JSON.stringify(next)) {
+        return prev;
+      }
+      return next;
     });
-  }, [alpacaStatus, claudeStatus, claudeCodeStatus, linkedInProfile?.connected, ouraHealth?.connected, lastQuoteUpdate, personalCapitalData?.connected]);
+  }, [alpacaStatus, claudeStatus, claudeCodeStatus.available, linkedInProfile?.connected, ouraHealth?.connected, lastQuoteUpdate, personalCapitalData?.connected]);
 
   // AI Action Generation function
   const generateAIActions = useCallback(async (context, needed) => {
@@ -681,14 +701,22 @@ Return ONLY a JSON array, no other text.`;
       if (isTypingRef.current) return;
       const status = loadTradingStatus();
       const next = buildTradingStatusDisplay(status);
-      setTradingStatus((prev) => (prev === next ? prev : next));
+      setTradingStatus((prev) => {
+        // Deep compare to prevent unnecessary re-renders
+        if (prev && prev.statusText === next.statusText &&
+            prev.marketOpen === next.marketOpen &&
+            JSON.stringify(prev.lastAttempt) === JSON.stringify(next.lastAttempt)) {
+          return prev;
+        }
+        return next;
+      });
     };
 
     // Initial load
     refreshTradingStatus();
 
-    // Refresh every 30 seconds to update "Next at" time (reduced to prevent glitching)
-    const interval = setInterval(refreshTradingStatus, 30_000);
+    // Refresh every 60 seconds to update "Next at" time (increased to reduce flickering)
+    const interval = setInterval(refreshTradingStatus, 60_000);
     return () => clearInterval(interval);
   }, []);
 
@@ -720,7 +748,7 @@ Return ONLY a JSON array, no other text.`;
     const interval = setInterval(() => {
       processQueue();
       refreshActions();
-    }, 10_000);
+    }, 30_000); // Increased from 10s to 30s to reduce flickering
 
     return () => clearInterval(interval);
   }, []);
@@ -1083,13 +1111,13 @@ Return ONLY a JSON array, no other text.`;
     };
   }, []);
 
-  // Life feed updates - doubled interval items
+  // Life feed updates - reduced frequency to prevent flickering
   useEffect(() => {
     const interval = setInterval(() => {
       if (pauseUpdatesRef.current || isTypingRef.current) {
         return;
       }
-      setLifeFeed((prev) => [buildLifeEvent(), ...prev].slice(0, 12)); // Doubled from 6
+      setLifeFeed((prev) => [buildLifeEvent(), ...prev].slice(0, 12));
       setLifeUpdatedAt(
         new Date().toLocaleTimeString("en-US", {
           hour: "2-digit",
@@ -1097,7 +1125,7 @@ Return ONLY a JSON array, no other text.`;
           second: "2-digit"
         })
       );
-    }, 3_500);
+    }, 10_000); // Increased from 3.5s to 10s to reduce flickering
 
     return () => clearInterval(interval);
   }, []);
@@ -1131,11 +1159,21 @@ Return ONLY a JSON array, no other text.`;
           return;
         }
 
-        // Successfully got data - update everything
+        // Successfully got data - update everything (with change detection)
         const newPortfolio = buildPortfolioFromAlpaca(account, positions);
-        setPortfolio(newPortfolio);
-        setAlpacaStatus("Live");
-        setAlpacaMode(config.mode === "live" ? "Live" : "Paper");
+        setPortfolio((prev) => {
+          // Only update if equity or positions changed
+          if (prev && prev.equity === newPortfolio.equity &&
+              JSON.stringify(prev.positions) === JSON.stringify(newPortfolio.positions)) {
+            return prev;
+          }
+          return newPortfolio;
+        });
+        setAlpacaStatus((prev) => prev === "Live" ? prev : "Live");
+        setAlpacaMode((prev) => {
+          const newMode = config.mode === "live" ? "Live" : "Paper";
+          return prev === newMode ? prev : newMode;
+        });
         setPortfolioLastUpdated(new Date());
         isLiveRef.current = true;
       } catch (error) {
@@ -1179,7 +1217,10 @@ Return ONLY a JSON array, no other text.`;
       try {
         const history = await getTradingHistory();
         if (!cancelled && history) {
-          setTradingHistory(history);
+          setTradingHistory((prev) => {
+            if (JSON.stringify(prev) === JSON.stringify(history)) return prev;
+            return history;
+          });
         }
       } catch (error) {
         // Silently fail - trading history is supplementary
@@ -1188,7 +1229,7 @@ Return ONLY a JSON array, no other text.`;
 
     const updateNextTradeTime = () => {
       const nextTrade = getNextTradingTime();
-      setNextTradeTimeDisplay(nextTrade.formatted);
+      setNextTradeTimeDisplay((prev) => prev === nextTrade.formatted ? prev : nextTrade.formatted);
     };
 
     // Initial fetch
@@ -1206,6 +1247,64 @@ Return ONLY a JSON array, no other text.`;
       clearInterval(tradeTimeInterval);
     };
   }, [alpacaStatus]);
+
+  // Autonomous trading loop - runs every 10 minutes during market hours
+  useEffect(() => {
+    let cancelled = false;
+
+    const runAutoTrading = async () => {
+      // Skip if not connected to Alpaca or no tickers
+      if (!alpacaStatus || alpacaStatus === "Offline" || alpacaStatus === "Missing keys") {
+        return;
+      }
+
+      // Skip if market is closed
+      if (!isMarketOpen()) {
+        return;
+      }
+
+      // Skip if no ticker data
+      if (!tickers || tickers.length === 0) {
+        return;
+      }
+
+      // Skip if no positions data
+      if (!portfolio || !portfolio.positions) {
+        return;
+      }
+
+      try {
+        // Load trading config
+        const config = loadTradingConfig();
+
+        // Skip if trading is disabled
+        if (!config.enabled) {
+          return;
+        }
+
+        // Run the auto-trading monitor
+        const result = await monitorAndTrade(tickers, portfolio.positions);
+
+        if (result.executed && result.executed.length > 0) {
+          // Trades were executed - refresh portfolio
+          setLastAction(`Auto-trade: ${result.executed.map(t => `${t.side} ${t.symbol}`).join(", ")}`);
+        }
+      } catch (error) {
+        console.error("Auto-trading error:", error.message);
+      }
+    };
+
+    // Run immediately on mount (if conditions are met)
+    runAutoTrading();
+
+    // Run every 10 minutes
+    const interval = setInterval(runAutoTrading, 10 * 60 * 1000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [alpacaStatus, tickers, portfolio]);
 
   // Start Yahoo Finance server and fetch tickers (always - Alpaca free tier doesn't have market data)
   useEffect(() => {
@@ -1243,19 +1342,24 @@ Return ONLY a JSON array, no other text.`;
 
         if (result.success && result.tickers.length > 0) {
           // Only update state if data actually changed (prevents glitchy re-renders)
+          let didChange = false;
           setTickers((prevTickers) => {
             if (tickersChanged(prevTickers, result.tickers)) {
+              didChange = true;
               return result.tickers;
             }
             return prevTickers;
           });
-          setLastQuoteUpdate(
-            new Date().toLocaleTimeString("en-US", {
-              hour: "2-digit",
-              minute: "2-digit",
-              second: "2-digit"
-            })
-          );
+          // Only update timestamp if tickers actually changed
+          if (didChange) {
+            setLastQuoteUpdate(
+              new Date().toLocaleTimeString("en-US", {
+                hour: "2-digit",
+                minute: "2-digit",
+                second: "2-digit"
+              })
+            );
+          }
         }
       } catch (error) {
         // Silently handle errors - server might still be starting
@@ -4096,7 +4200,19 @@ Folder: ${result.action.id}`,
           tradingStatus,
           lastUpdatedAgo: portfolioLastUpdated ? formatTimeAgo(portfolioLastUpdated) : null,
           nextTradeTime: nextTradeTimeDisplay,
-          privateMode
+          privateMode,
+          // Pass ticker scores for position action indicators
+          tickerScores: tickers.reduce((acc, t) => {
+            if (t.symbol && typeof t.score === "number") {
+              acc[t.symbol] = t.score;
+            }
+            return acc;
+          }, {})
+        }),
+        // Trading History Panel (8 weeks)
+        viewMode !== VIEW_MODES.MINIMAL && e(TradingHistoryPanel, {
+          tradingHistory,
+          isConnected: alpacaStatus === "Live"
         }),
         // Wealth Panel or Connections Panel
         personalCapitalData?.connected

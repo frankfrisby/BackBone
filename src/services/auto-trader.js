@@ -1,6 +1,7 @@
 import fetch from "node-fetch";
 import fs from "fs";
 import path from "path";
+import { getAlpacaConfig } from "./alpaca.js";
 
 /**
  * Auto-Trading Service for BACKBONE
@@ -12,14 +13,14 @@ const DATA_DIR = path.join(process.cwd(), "data");
 const TRADES_LOG = path.join(DATA_DIR, "trades-log.json");
 const CONFIG_FILE = path.join(DATA_DIR, "trading-config.json");
 
-// Trading thresholds
+// Trading thresholds (0-10 scale)
 const DEFAULT_CONFIG = {
-  enabled: false, // Must be explicitly enabled
+  enabled: true, // Auto-trading enabled by default
   mode: "paper", // paper or live
-  buyThreshold: 70, // Score >= this triggers buy evaluation
-  sellThreshold: 40, // Score <= this triggers sell evaluation
-  requireBullishMACD: true, // Require bullish MACD for buy
-  requireBearishMACD: true, // Require bearish MACD for sell
+  buyThreshold: 8.0, // Score >= this triggers buy evaluation (0-10 scale)
+  sellThreshold: 4.0, // Score <= this triggers sell evaluation (0-10 scale)
+  requireBullishMACD: false, // Don't require bullish MACD (rely on score)
+  requireBearishMACD: false, // Don't require bearish MACD (rely on score)
   requireHighVolume: false, // Require above-average volume
   maxPositionSize: 1000, // Max $ per position
   maxTotalPositions: 5, // Max number of positions
@@ -29,6 +30,7 @@ const DEFAULT_CONFIG = {
   notifyOnSignal: false, // Send notification on strong signals
   watchlist: [], // Specific tickers to watch (empty = all)
   blacklist: [], // Tickers to never trade
+  onlyTop3: true, // Only buy tickers that are in the top 3 by score
 };
 
 // In-memory state
@@ -235,11 +237,7 @@ export const executeBuy = async (symbol, price, reason) => {
   }
 
   try {
-    const baseUrl = config.mode === "live"
-      ? "https://api.alpaca.markets"
-      : "https://paper-api.alpaca.markets";
-
-    const response = await fetch(`${baseUrl}/v2/orders`, {
+    const response = await fetch(`${alpacaConfig.baseUrl}/v2/orders`, {
       method: "POST",
       headers: {
         "APCA-API-KEY-ID": alpacaConfig.key,
@@ -272,7 +270,7 @@ export const executeBuy = async (symbol, price, reason) => {
       reason,
       status: order.status,
       timestamp: new Date().toISOString(),
-      mode: config.mode
+      mode: alpacaConfig.mode
     };
     logTrade(trade);
 
@@ -310,11 +308,7 @@ export const executeSell = async (symbol, price, quantity, reason) => {
   }
 
   try {
-    const baseUrl = config.mode === "live"
-      ? "https://api.alpaca.markets"
-      : "https://paper-api.alpaca.markets";
-
-    const response = await fetch(`${baseUrl}/v2/orders`, {
+    const response = await fetch(`${alpacaConfig.baseUrl}/v2/orders`, {
       method: "POST",
       headers: {
         "APCA-API-KEY-ID": alpacaConfig.key,
@@ -347,7 +341,7 @@ export const executeSell = async (symbol, price, quantity, reason) => {
       reason,
       status: order.status,
       timestamp: new Date().toISOString(),
-      mode: config.mode
+      mode: alpacaConfig.mode
     };
     logTrade(trade);
 
@@ -365,15 +359,6 @@ export const executeSell = async (symbol, price, quantity, reason) => {
     return { success: false, error: error.message };
   }
 };
-
-/**
- * Get Alpaca configuration
- */
-const getAlpacaConfig = () => ({
-  key: process.env.ALPACA_KEY,
-  secret: process.env.ALPACA_SECRET,
-  ready: Boolean(process.env.ALPACA_KEY && process.env.ALPACA_SECRET)
-});
 
 /**
  * Send trade notification to phone
@@ -473,6 +458,7 @@ export const sendTradeNotification = async (trade) => {
 
 /**
  * Monitor tickers and execute trades
+ * Only buys from top 3 tickers with score >= buyThreshold
  */
 export const monitorAndTrade = async (tickers, positions = []) => {
   if (!config.enabled) {
@@ -490,25 +476,37 @@ export const monitorAndTrade = async (tickers, positions = []) => {
   // Get current position symbols
   const positionSymbols = positions.map(p => p.symbol);
 
-  for (const ticker of tickers) {
+  // Sort tickers by score (highest first) and get top 3 qualified for buying
+  const sortedTickers = [...tickers]
+    .filter(t => t && typeof t.score === "number")
+    .sort((a, b) => (b.score || 0) - (a.score || 0));
+
+  // Top 3 qualified tickers (score >= buyThreshold)
+  const top3BuyTickers = sortedTickers
+    .filter(t => t.score >= config.buyThreshold)
+    .slice(0, 3)
+    .map(t => t.symbol);
+
+  for (const ticker of sortedTickers) {
     // Skip if in blacklist
     if (config.blacklist.includes(ticker.symbol)) continue;
 
     // Skip if not in watchlist (when watchlist is set)
     if (config.watchlist.length > 0 && !config.watchlist.includes(ticker.symbol)) continue;
 
-    // Evaluate buy signal (only if not already holding)
-    if (!positionSymbols.includes(ticker.symbol)) {
+    // Evaluate buy signal (only if not already holding AND in top 3)
+    const isTop3 = top3BuyTickers.includes(ticker.symbol);
+    if (!positionSymbols.includes(ticker.symbol) && isTop3) {
       const buyEval = evaluateBuySignal(ticker);
       if (buyEval.action === "BUY") {
         results.buySignals.push(buyEval);
 
         // Check position limits
-        if (positions.length < config.maxTotalPositions) {
+        if (positions.length + results.executed.filter(t => t.side === "buy").length < config.maxTotalPositions) {
           const buyResult = await executeBuy(
             ticker.symbol,
             ticker.price,
-            buyEval.signals.join(", ")
+            `Top ${top3BuyTickers.indexOf(ticker.symbol) + 1}: ${buyEval.signals.join(", ")}`
           );
 
           if (buyResult.success) {
@@ -530,7 +528,7 @@ export const monitorAndTrade = async (tickers, positions = []) => {
         const sellResult = await executeSell(
           ticker.symbol,
           ticker.price,
-          parseFloat(position.qty),
+          parseFloat(position.qty || position.shares),
           sellEval.signals.join(", ")
         );
 

@@ -34,11 +34,11 @@ const PulsingDot = ({ connected, color, dimColor, pulsePhase }) => {
 export const ConnectionBar = ({ connections = {}, title = "BACKBONE", version = "" }) => {
   const [pulsePhase, setPulsePhase] = useState(true);
 
-  // Pulse animation - toggle every 3 seconds (slower to reduce re-renders)
+  // Pulse animation - toggle every 5 seconds (slower to reduce re-renders)
   useEffect(() => {
     const interval = setInterval(() => {
       setPulsePhase(prev => !prev);
-    }, 3000);
+    }, 5000);
     return () => clearInterval(interval);
   }, []);
 

@@ -103,32 +103,28 @@ const ACTION_LABELS = {
  * @param {string} status - observation, working, done, error
  */
 const formatAction = (action, target, status = "working") => {
-  let icon, color;
+  let color;
   switch (status) {
     case "error":
     case "failed":
-      icon = "✕";
       color = TASK_STATE.ERROR;
       break;
     case "done":
     case "completed":
     case "success":
-      icon = "✓";
       color = TASK_STATE.DONE;
       break;
     case "observation":
     case "output":
     case "result":
-      icon = "●";
       color = TASK_STATE.OBSERVATION;
       break;
     default: // working, starting, etc.
-      icon = "●";
       color = TASK_STATE.WORKING;
   }
   const label = ACTION_LABELS[action?.toLowerCase()] || action || "Action";
   const shortTarget = target ? `(${target.length > 30 ? "..." + target.slice(-27) : target})` : "";
-  return { icon, color, text: `${label}${shortTarget}` };
+  return { icon: "●", color, text: `${label}${shortTarget}` };
 };
 
 // Status labels for display

@@ -90,16 +90,14 @@ const WorkLogPanelBase = ({ entries = [], title = "Activity / Thoughts", maxItem
           Box,
           { flexDirection: "column" },
           ...displayEntries.map((entry, i) => {
-            // Status determines color: white=running, green=done, red=error
+            // Status determines color: white=observation, gray=working, green=done, red=error
             const statusColor = getStatusColor(entry.status);
-            const icon = entry.status === "error" || entry.status === "failed" ? "✕" :
-                        entry.status === "done" || entry.status === "completed" ? "✓" : "●";
             const formattedTitle = formatEntryTitle(entry);
 
             return e(
               Box,
               { key: entry.id || `entry-${i}`, flexDirection: "row", gap: 1 },
-              e(Text, { color: statusColor }, icon),
+              e(Text, { color: statusColor }, "●"),
               e(Text, { color: "#475569" }, entry.time || "--:--"),
               e(Text, { color: statusColor, wrap: "truncate" }, formattedTitle)
             );
@@ -118,12 +116,10 @@ const WorkLogCompactBase = ({ entries = [], maxItems = 5 }) => {
     { flexDirection: "column" },
     ...entries.slice(0, maxItems).map((entry, i) => {
       const statusColor = getStatusColor(entry.status);
-      const icon = entry.status === "error" || entry.status === "failed" ? "✕" :
-                  entry.status === "done" || entry.status === "completed" ? "✓" : "●";
       return e(
         Box,
         { key: entry.id || `compact-${i}`, flexDirection: "row", gap: 1 },
-        e(Text, { color: statusColor }, icon),
+        e(Text, { color: statusColor }, "●"),
         e(Text, { color: statusColor }, (entry.title || "").slice(0, 20))
       );
     })

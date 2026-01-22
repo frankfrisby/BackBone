@@ -114,6 +114,7 @@ import {
 } from "./services/models-setup.js";
 import { getTradingHistory, getNextTradingTime, formatTimeAgo } from "./services/trading-history.js";
 import { TradingHistoryPanel } from "./components/trading-history-panel.js";
+import { TestRunnerPanel } from "./components/test-runner-panel.js";
 import { LinkedInDataViewer } from "./components/linkedin-data-viewer.js";
 import { monitorAndTrade, loadConfig as loadTradingConfig, setTradingEnabled } from "./services/auto-trader.js";
 import { isMarketOpen } from "./services/trading-status.js";
@@ -191,14 +192,18 @@ const App = ({ updateConsoleTitle }) => {
   const [currentTier, setCurrentTier] = useState(() => getCurrentTier());
   const [privateMode, setPrivateMode] = useState(false);
   const [viewMode, setViewMode] = useState(VIEW_MODES.CORE); // Core is default
+  const [showTestRunner, setShowTestRunner] = useState(false);
   const { stdout } = useStdout();
 
   // Engine state manager
   const engineState = useMemo(() => getEngineStateManager(), []);
   const [engineStatus, setEngineStatus] = useState(() => engineState.getDisplayData());
 
-  // Handle keyboard shortcuts: Ctrl+T (tier), Ctrl+R (private mode), Ctrl+U (view mode)
+  // Handle keyboard shortcuts: Ctrl+T (tier), Ctrl+R (test runner), Ctrl+P (private mode), Ctrl+U (view mode)
   useInput((input, key) => {
+    // Don't process shortcuts if test runner is open (it handles its own input)
+    if (showTestRunner) return;
+
     if (key.ctrl && input === "t") {
       const result = cycleTier();
       if (result.success) {
@@ -207,6 +212,12 @@ const App = ({ updateConsoleTitle }) => {
       }
     }
     if (key.ctrl && input === "r") {
+      // Ctrl+R: Open test runner
+      setShowTestRunner(true);
+      setLastAction("Test Runner opened");
+    }
+    if (key.ctrl && input === "p") {
+      // Ctrl+P: Toggle private mode
       setPrivateMode(prev => !prev);
       setLastAction(privateMode ? "Private mode OFF" : "Private mode ON");
     }
@@ -3923,6 +3934,16 @@ Folder: ${result.action.id}`,
           data: linkedInViewerData,
           visible: showLinkedInViewer,
           onClose: () => setShowLinkedInViewer(false)
+        }),
+        // Test Runner Panel overlay (Ctrl+R)
+        showTestRunner && e(TestRunnerPanel, {
+          onClose: () => setShowTestRunner(false),
+          getAlpacaConfig,
+          fetchYahooTickers,
+          loadTradingStatus,
+          loadConfig: loadTradingConfig,
+          tickers,
+          portfolio
         }),
         setupOverlay.active
           ? e(SetupOverlay, {

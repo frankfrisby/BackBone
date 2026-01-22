@@ -1,7 +1,11 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, memo } from "react";
 import { Box, Text } from "ink";
 
 const e = React.createElement;
+
+// Cache for time display to prevent re-renders
+let cachedTime = "";
+let lastTimeUpdate = 0;
 
 // Service colors and icons
 const SERVICE_CONFIG = {
@@ -15,33 +19,20 @@ const SERVICE_CONFIG = {
 };
 
 /**
- * Pulsing Dot Component - Animates between bright and dim colors
+ * Status Dot Component - Static indicator (no animation to prevent flickering)
  */
-const PulsingDot = ({ connected, color, dimColor, pulsePhase }) => {
+const StatusDot = ({ connected, color }) => {
   if (!connected) {
     return e(Text, { color: "#334155" }, "○ ");
   }
-
-  // Pulse between bright and dim based on phase
-  const currentColor = pulsePhase ? color : dimColor;
-  return e(Text, { color: currentColor, bold: pulsePhase }, "● ");
+  return e(Text, { color, bold: true }, "● ");
 };
 
 /**
  * Connection Bar Component - Shows colored status dots with service names
- * Connected dots pulse to show active connection
+ * Static indicators to prevent flickering
  */
-export const ConnectionBar = ({ connections = {}, title = "BACKBONE", version = "" }) => {
-  const [pulsePhase, setPulsePhase] = useState(true);
-
-  // Pulse animation - toggle every 5 seconds (slower to reduce re-renders)
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setPulsePhase(prev => !prev);
-    }, 5000);
-    return () => clearInterval(interval);
-  }, []);
-
+const ConnectionBarBase = ({ connections = {}, title = "BACKBONE", version = "" }) => {
   const services = Object.keys(SERVICE_CONFIG);
   const connectedCount = services.filter(key => connections[key]?.connected).length;
 
@@ -68,7 +59,7 @@ export const ConnectionBar = ({ connections = {}, title = "BACKBONE", version = 
       e(Text, { color: connectedCount > 0 ? "#22c55e" : "#64748b" }, `${connectedCount}/${services.length}`),
       e(Text, { color: "#475569" }, "connected")
     ),
-    // Connection indicators with pulsing dots
+    // Connection indicators with static dots
     e(
       Box,
       { flexDirection: "row", gap: 1 },
@@ -81,11 +72,9 @@ export const ConnectionBar = ({ connections = {}, title = "BACKBONE", version = 
         return e(
           Box,
           { key, flexDirection: "row", gap: 0 },
-          e(PulsingDot, {
+          e(StatusDot, {
             connected,
-            color: config.color,
-            dimColor: config.dimColor,
-            pulsePhase
+            color: config.color
           }),
           e(Text, { color: textColor }, config.label),
           idx < services.length - 1 && e(Text, { color: "#1e293b" }, " │")
@@ -96,18 +85,32 @@ export const ConnectionBar = ({ connections = {}, title = "BACKBONE", version = 
 };
 
 /**
- * Compact Connection Status - Just icons with labels on hover
+ * Custom comparison to prevent unnecessary re-renders
  */
-export const ConnectionStatusCompact = ({ connections = {} }) => {
-  const [pulsePhase, setPulsePhase] = useState(true);
+const areConnectionBarPropsEqual = (prevProps, nextProps) => {
+  if (prevProps.title !== nextProps.title) return false;
+  if (prevProps.version !== nextProps.version) return false;
 
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setPulsePhase(prev => !prev);
-    }, 3000); // Reduced from 1s to 3s to prevent glitching
-    return () => clearInterval(interval);
-  }, []);
+  // Only compare connection status, not details (which may include timestamps)
+  const prevConns = prevProps.connections || {};
+  const nextConns = nextProps.connections || {};
+  const services = Object.keys(SERVICE_CONFIG);
 
+  for (const key of services) {
+    const prevConnected = prevConns[key]?.connected || false;
+    const nextConnected = nextConns[key]?.connected || false;
+    if (prevConnected !== nextConnected) return false;
+  }
+
+  return true;
+};
+
+export const ConnectionBar = memo(ConnectionBarBase, areConnectionBarPropsEqual);
+
+/**
+ * Compact Connection Status - Just icons (no animation)
+ */
+const ConnectionStatusCompactBase = ({ connections = {} }) => {
   const services = ["alpaca", "claude", "linkedin", "oura", "yahoo", "personalCapital"];
 
   return e(
@@ -117,13 +120,13 @@ export const ConnectionStatusCompact = ({ connections = {} }) => {
       const config = SERVICE_CONFIG[service];
       const conn = connections[service];
       const connected = conn?.connected || false;
-      const color = connected
-        ? (pulsePhase ? config?.color : config?.dimColor) || "#22c55e"
-        : "#334155";
+      const color = connected ? config?.color || "#22c55e" : "#334155";
       return e(Text, { key: service, color }, connected ? "\u25CF" : "\u25CB");
     })
   );
 };
+
+export const ConnectionStatusCompact = memo(ConnectionStatusCompactBase);
 
 /**
  * Detailed Connection Panel - For diagnostics view

@@ -653,6 +653,7 @@ const App = ({ updateConsoleTitle }) => {
   }, [ouraHealth?.sleep?.score]);
 
   // Update connection statuses for ConnectionBar (with change detection to reduce flickering)
+  // NOTE: Only track connection status changes, not details like timestamps
   useEffect(() => {
     setConnectionStatuses((prev) => {
       const next = {
@@ -661,16 +662,18 @@ const App = ({ updateConsoleTitle }) => {
         claudeCode: { connected: claudeCodeStatus.available, details: claudeCodeStatus.available ? "Ready" : "Not installed" },
         linkedin: { connected: linkedInProfile?.connected, details: "" },
         oura: { connected: ouraHealth?.connected, details: "" },
-        yahoo: { connected: true, details: lastQuoteUpdate },
-        personalCapital: { connected: personalCapitalData?.connected || false, details: personalCapitalData?.connected ? "Connected" : "" }
+        yahoo: { connected: true, details: "" }, // Removed lastQuoteUpdate to prevent flickering
+        personalCapital: { connected: personalCapitalData?.connected || false, details: "" }
       };
-      // Only update if something actually changed
-      if (JSON.stringify(prev) === JSON.stringify(next)) {
+      // Only update if connection status actually changed (ignore details)
+      const prevConnected = Object.keys(prev).map(k => prev[k]?.connected).join(",");
+      const nextConnected = Object.keys(next).map(k => next[k]?.connected).join(",");
+      if (prevConnected === nextConnected) {
         return prev;
       }
       return next;
     });
-  }, [alpacaStatus, claudeStatus, claudeCodeStatus.available, linkedInProfile?.connected, ouraHealth?.connected, lastQuoteUpdate, personalCapitalData?.connected]);
+  }, [alpacaStatus, alpacaMode, claudeStatus, claudeCodeStatus.available, linkedInProfile?.connected, ouraHealth?.connected, personalCapitalData?.connected]);
 
   // AI Action Generation function
   const generateAIActions = useCallback(async (context, needed) => {

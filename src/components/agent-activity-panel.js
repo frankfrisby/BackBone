@@ -1,6 +1,7 @@
-import React, { useState, useEffect, memo, useMemo, useRef, useCallback } from "react";
+import React, { useState, useEffect, memo, useMemo, useRef } from "react";
 import { Box, Text } from "ink";
 import { getActivityTracker } from "../services/activity-tracker.js";
+import { getRenderController } from "../services/render-controller.js";
 
 const e = React.createElement;
 
@@ -8,7 +9,7 @@ const e = React.createElement;
 const DOT_COLORS = {
   error: "#ef4444",      // Red
   completed: "#22c55e",  // Green
-  working: "#3b82f6",    // Blue (active, no blink to reduce flicker)
+  working: "#3b82f6",    // Blue
   observation: "#f8fafc", // White
   idle: "#475569"        // Dim gray
 };
@@ -25,64 +26,22 @@ const formatTimeUntil = (nextTime) => {
   return `${seconds}s`;
 };
 
-// Activity log entry with status dot - NO animation to prevent flicker
+// Activity log entry - completely static, no animations
 const ActivityEntry = memo(({ id, text, detail, status }) => {
   const dotColor = DOT_COLORS[status] || DOT_COLORS.observation;
   const textColor = status === "working" ? "#94a3b8" :
                     status === "completed" ? "#4ade80" :
                     status === "error" ? "#f87171" : "#e2e8f0";
 
-  const displayText = detail || text;
-
   return e(
     Box,
     { flexDirection: "row", gap: 1, paddingLeft: 1 },
     e(Text, { color: dotColor }, "●"),
-    e(Text, { color: textColor }, displayText)
+    e(Text, { color: textColor }, detail || text)
   );
 });
 
-// ALIVE pulse indicator - isolated animation
-const AlivePulse = memo(({ running }) => {
-  const [pulseOn, setPulseOn] = useState(true);
-
-  useEffect(() => {
-    if (!running) return;
-    const interval = setInterval(() => setPulseOn(prev => !prev), 1000);
-    return () => clearInterval(interval);
-  }, [running]);
-
-  if (!running) return null;
-
-  return e(
-    Box,
-    { flexDirection: "row", gap: 1 },
-    e(Text, { color: pulseOn ? "#22c55e" : "#064e3b" }, "●"),
-    e(Text, { color: pulseOn ? "#22c55e" : "#166534", bold: true }, "ALIVE")
-  );
-});
-
-// Active state indicator with simple dots animation
-const ActiveIndicator = memo(({ text }) => {
-  const [dots, setDots] = useState("...");
-
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setDots(prev => prev.length >= 3 ? "." : prev + ".");
-    }, 400);
-    return () => clearInterval(interval);
-  }, []);
-
-  return e(
-    Box,
-    { flexDirection: "row", gap: 1 },
-    e(Text, { color: "#3b82f6" }, "↓"),
-    e(Text, { color: "#94a3b8" }, text),
-    e(Text, { color: "#3b82f6" }, dots)
-  );
-});
-
-// Static activity list - only updates when items actually change
+// Static activity list
 const ActivityList = memo(({ items }) => {
   if (!items || items.length === 0) return null;
 
@@ -100,7 +59,6 @@ const ActivityList = memo(({ items }) => {
     )
   );
 }, (prev, next) => {
-  // Only re-render if items actually changed
   if (prev.items?.length !== next.items?.length) return false;
   for (let i = 0; i < (prev.items?.length || 0); i++) {
     if (prev.items[i].id !== next.items[i].id ||
@@ -112,8 +70,8 @@ const ActivityList = memo(({ items }) => {
 });
 
 /**
- * Engine Status Panel - Self-contained component that subscribes to activity tracker
- * This isolates updates from the main app to prevent full app re-renders
+ * Engine Status Panel - Uses centralized render controller to prevent flickering
+ * All animations sync to a single global tick to avoid multiple render cycles
  */
 const EngineStatusPanelBase = ({
   toolEvents = [],
@@ -121,51 +79,59 @@ const EngineStatusPanelBase = ({
   nextCycleTime = null,
   maxEntries = 6
 }) => {
-  // Subscribe directly to activity tracker - isolates updates from main app
   const tracker = useMemo(() => getActivityTracker(), []);
+  const renderController = useMemo(() => getRenderController(), []);
 
-  // Use refs for data that updates frequently, state for rendering
-  const dataRef = useRef(tracker.getDisplayData());
-  const [renderKey, setRenderKey] = useState(0);
-  const lastUpdateRef = useRef(Date.now());
+  // Single state for all data - only updates on render controller tick
+  const [viewState, setViewState] = useState(() => ({
+    data: tracker.getDisplayData(),
+    animations: renderController.getAnimationStates()
+  }));
 
-  // Throttled update - only re-render at most every 500ms
+  // Subscribe to centralized render tick - single source of updates
   useEffect(() => {
-    const handleUpdate = (data) => {
-      dataRef.current = data;
+    // Start the render controller if not running
+    renderController.start();
 
-      const now = Date.now();
-      if (now - lastUpdateRef.current > 500) {
-        lastUpdateRef.current = now;
-        setRenderKey(prev => prev + 1);
+    // Track if data actually changed
+    let lastDataJson = JSON.stringify(tracker.getDisplayData());
+
+    const handleTick = (tickData) => {
+      const currentData = tracker.getDisplayData();
+      const currentJson = JSON.stringify(currentData);
+
+      // Only update state if data actually changed OR animation state changed
+      const dataChanged = currentJson !== lastDataJson;
+
+      if (dataChanged) {
+        lastDataJson = currentJson;
+        setViewState({
+          data: currentData,
+          animations: tickData.animations
+        });
+      } else {
+        // Only update animations (cheap update)
+        setViewState(prev => ({
+          ...prev,
+          animations: tickData.animations
+        }));
       }
     };
 
-    tracker.on("updated", handleUpdate);
-    return () => tracker.off("updated", handleUpdate);
-  }, [tracker]);
+    renderController.on("tick", handleTick);
+    return () => {
+      renderController.off("tick", handleTick);
+    };
+  }, [tracker, renderController]);
 
-  // Also check for updates on a slower interval as backup
-  useEffect(() => {
-    const interval = setInterval(() => {
-      const newData = tracker.getDisplayData();
-      if (JSON.stringify(newData) !== JSON.stringify(dataRef.current)) {
-        dataRef.current = newData;
-        setRenderKey(prev => prev + 1);
-      }
-    }, 1000);
-    return () => clearInterval(interval);
-  }, [tracker]);
-
-  const data = dataRef.current;
+  const { data, animations } = viewState;
   const isIdle = data.currentState === "idle" || data.currentState === "ready" || !data.isRunning;
   const isActive = !isIdle && data.isRunning;
 
-  // Build display items from tool events + activities
+  // Build display items
   const displayItems = useMemo(() => {
     const items = [];
 
-    // Add tool events first
     if (toolEvents && toolEvents.length > 0) {
       toolEvents.slice(0, 4).forEach((evt, i) => {
         items.push({
@@ -178,7 +144,6 @@ const EngineStatusPanelBase = ({
       });
     }
 
-    // Add activities with deduplication
     const existingTexts = new Set(items.map(d => d.text));
     (data.activities || []).slice(0, maxEntries - items.length).forEach((act, i) => {
       if (!existingTexts.has(act.text)) {
@@ -197,6 +162,11 @@ const EngineStatusPanelBase = ({
 
   const hasStreaming = streamingText && streamingText.length > 0;
 
+  // Animation values from centralized controller
+  const pulseOn = animations.pulseOn;
+  const dotPhase = animations.dotPhase;
+  const dots = ".".repeat((dotPhase % 3) + 1);
+
   return e(
     Box,
     { flexDirection: "column", paddingX: 1, marginBottom: 1 },
@@ -209,7 +179,8 @@ const EngineStatusPanelBase = ({
         Box,
         { flexDirection: "row", gap: 1, alignItems: "center" },
         e(Text, { color: "#64748b" }, "Engine Status"),
-        e(AlivePulse, { running: data.isRunning })
+        data.isRunning && e(Text, { color: pulseOn ? "#22c55e" : "#064e3b" }, "●"),
+        data.isRunning && e(Text, { color: pulseOn ? "#22c55e" : "#166534", bold: true }, "ALIVE")
       ),
       e(Text, { color: "#475569", dimColor: true }, `cycle ${data.cycleCount}`)
     ),
@@ -230,7 +201,13 @@ const EngineStatusPanelBase = ({
       Box,
       { flexDirection: "row", gap: 1, marginTop: 1, paddingLeft: 1 },
       isActive
-        ? e(ActiveIndicator, { text: data.stateDetail || data.currentState })
+        ? e(
+            Box,
+            { flexDirection: "row", gap: 1 },
+            e(Text, { color: "#3b82f6" }, "↓"),
+            e(Text, { color: "#94a3b8" }, data.stateDetail || data.currentState),
+            e(Text, { color: "#3b82f6" }, dots)
+          )
         : e(
             Box,
             { flexDirection: "row", gap: 1 },
@@ -244,7 +221,7 @@ const EngineStatusPanelBase = ({
 
 export const AgentActivityPanel = memo(EngineStatusPanelBase);
 
-// Compact status dot for other panels
+// Compact status dot
 export const AgentStatusDot = memo(({ status = "idle", running = false }) => {
   const color = status === "error" ? DOT_COLORS.error :
                 status === "idle" || !running ? DOT_COLORS.idle :

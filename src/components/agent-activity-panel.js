@@ -103,8 +103,13 @@ const ObservationLine = memo(({ observation }) => {
 
 /**
  * State display with subtle pulse indicator
+ * Manages its own tick subscription to isolate animation re-renders
+ * (prevents full panel re-renders on each tick - like opentui's dirty region tracking)
  */
-const ShimmerState = memo(({ state, stateInfo, tickCount = 0 }) => {
+const ShimmerState = memo(({ state, stateInfo }) => {
+  // Subscribe to tick ONLY in this component - isolates animation re-renders
+  const tickCount = useCoordinatedTick(null, true);
+
   // Simple rotating dot indicator (same width always)
   const pulseIndex = tickCount % PULSE_DOTS.length;
   const pulseChar = PULSE_DOTS[pulseIndex];
@@ -148,12 +153,13 @@ const AgentActivityPanelBase = () => {
     { initialData: narrator.getDisplayData() }
   ) || narrator.getDisplayData();
 
-  // Use coordinated tick for shimmer (no separate interval)
-  const tickCount = useCoordinatedTick(null, true);
+  // NOTE: tickCount removed from parent - ShimmerState manages its own tick subscription
+  // This prevents full panel re-renders on each tick (dirty region isolation)
 
   const { state, stateInfo, goal, actions, subActions, observations, diffs } = data;
 
   // Build fixed-height content array (always PANEL_HEIGHT lines)
+  // NOTE: tickCount is NOT included in deps - shimmer gets it directly to avoid full re-renders
   const lines = useMemo(() => {
     const result = [];
 
@@ -182,8 +188,8 @@ const AgentActivityPanelBase = () => {
       }
     }
 
-    // Line 7: State with shimmer
-    result.push({ type: "state", state, stateInfo, tickCount });
+    // Line 7: State with shimmer (tickCount passed directly to component, not stored in line)
+    result.push({ type: "state", state, stateInfo });
 
     // Line 8: Goal
     result.push({ type: "goal", goal });
@@ -192,7 +198,7 @@ const AgentActivityPanelBase = () => {
     result.push({ type: "empty" });
 
     return result;
-  }, [actions, subActions, observations, state, stateInfo, goal, tickCount]);
+  }, [actions, subActions, observations, state, stateInfo, goal]);
 
   return e(
     Box,
@@ -220,7 +226,7 @@ const AgentActivityPanelBase = () => {
           return e(
             Box,
             { key: i, paddingLeft: 1 },
-            e(ShimmerState, { state: line.state, stateInfo: line.stateInfo, tickCount: line.tickCount })
+            e(ShimmerState, { state: line.state, stateInfo: line.stateInfo })
           );
         case "goal":
           return line.goal

@@ -175,6 +175,15 @@ import { TickerScoresPanel, TickerSummaryLine } from "./components/ticker-scores
 import { getActivityTracker, ACTIVITY_STATUS } from "./services/activity-tracker.js";
 import { AgentActivityPanel, AgentStatusDot } from "./components/agent-activity-panel.js";
 
+// Isolated column components for reduced flickering
+import { LeftColumn } from "./components/left-column.js";
+import { RightColumn } from "./components/right-column.js";
+import { AppFooterBar } from "./components/app-footer-bar.js";
+
+// Store sync for bridging useState to app store
+import { useStoreSync, STATE_SLICES } from "./hooks/useStoreSync.js";
+import { getAppStore } from "./services/app-store.js";
+
 const e = React.createElement;
 
 const deepEqual = (a, b) => {
@@ -674,6 +683,67 @@ const App = ({ updateConsoleTitle }) => {
   const [currentModelInfo, setCurrentModelInfo] = useState(() => {
     const initial = getCurrentModel();
     return { ...initial.model, taskType: initial.taskType };
+  });
+
+  // ===== SYNC STATE TO APP STORE =====
+  // This bridges useState to the store so child components can subscribe independently
+  // and only re-render when their specific data changes (reduces flickering)
+  useStoreSync({
+    [STATE_SLICES.UI]: {
+      viewMode,
+      privateMode,
+      currentTier,
+      isInitializing,
+      mainViewReady,
+      lastAction,
+      uiClock,
+    },
+    [STATE_SLICES.USER]: {
+      firebaseUser,
+      userSettings,
+      showOnboarding,
+    },
+    [STATE_SLICES.CONNECTIONS]: {
+      alpaca: { status: alpacaStatus, mode: alpacaMode },
+      claude: { status: claudeStatus },
+      claudeCode: claudeCodeStatus,
+    },
+    [STATE_SLICES.PORTFOLIO]: {
+      portfolio,
+      tradingStatus,
+      tradingHistory,
+      lastUpdated: portfolioLastUpdated,
+      nextTradeTime: nextTradeTimeDisplay,
+    },
+    [STATE_SLICES.TICKERS]: {
+      tickers,
+      weights,
+      priceHistory,
+      lastQuoteUpdate,
+    },
+    [STATE_SLICES.CHAT]: {
+      messages,
+      isProcessing,
+      streamingText,
+      actionStreamingText,
+      actionStreamingTitle,
+      currentModelInfo,
+    },
+    [STATE_SLICES.HEALTH]: {
+      ouraHealth,
+      ouraHistory,
+    },
+    [STATE_SLICES.PROJECTS]: {
+      projects,
+    },
+    [STATE_SLICES.OVERLAYS]: {
+      showTestRunner,
+      showSettings,
+      showLinkedInViewer,
+      showApprovalOverlay,
+      setupOverlay,
+      linkedInViewerData,
+    },
   });
 
   // Check AI model connection on mount
@@ -4828,29 +4898,12 @@ Folder: ${result.action.id}`,
     e(
       Box,
       { flexDirection: "row", height: contentHeight, overflow: "hidden" },
-      // ===== LEFT COLUMN: Progress, Goals, Tickers (based on view mode) =====
-      // Hide left column in medium width mode to give more space to chat
+      // ===== LEFT COLUMN: Progress, Goals, Tickers (isolated component) =====
+      // Uses app store subscriptions - only re-renders when its own data changes
       viewMode !== VIEW_MODES.MINIMAL && !isMedium && e(
         Box,
         { flexDirection: "column", width: "25%", paddingRight: 1, overflow: "hidden" },
-        e(LifeScoresPanel, { data: lifeScoresData, title: "Progress", compact: true }),
-        e(OuraHealthPanel, { data: ouraHealth, history: ouraHistory }),
-        e(GoalProgressPanel, { goals: goals.slice(0, 2), title: "Goals" }),
-        // Ticker scores panel (shows based on view mode)
-        e(TickerScoresPanel, {
-          tickers: topTickers,
-          title: "Ticker Scores",
-          viewMode: viewMode,
-          maxItems: viewMode === VIEW_MODES.MINIMAL ? 3 : viewMode === VIEW_MODES.ADVANCED ? 20 : 10,
-          compact: viewMode === VIEW_MODES.MINIMAL,
-          timestamp: uiClock
-        }),
-        // Projects panel in advanced mode
-        viewMode === VIEW_MODES.ADVANCED && e(ProjectsPanel, {
-          projects: projects.slice(0, 3),
-          title: "Active Projects",
-          maxItems: 3
-        })
+        e(LeftColumn, { viewMode })
       ),
       // ===== CENTER COLUMN: Engine Status, Chat =====
       e(
@@ -5172,90 +5225,16 @@ Folder: ${result.action.id}`,
               modelInfo: currentModelInfo
             })
       ),
-      // ===== RIGHT COLUMN: Portfolio, Wealth (hidden in medium width) =====
+      // ===== RIGHT COLUMN: Portfolio, Wealth (isolated component) =====
+      // Uses app store subscriptions - only re-renders when its own data changes
       !isMedium && e(
         Box,
         { flexDirection: "column", width: "25%", paddingLeft: 1, overflow: "hidden" },
-        // Portfolio Panel
-        e(PortfolioPanel, {
-          portfolio: {
-            ...portfolio,
-            status: alpacaStatus,
-            mode: alpacaMode
-          },
-          formatPercent,
-          tradingStatus,
-          lastUpdatedAgo: portfolioLastUpdated ? formatTimeAgo(portfolioLastUpdated) : null,
-          nextTradeTime: nextTradeTimeDisplay,
-          privateMode,
-          // Pass ticker scores for position action indicators
-          tickerScores: tickers.reduce((acc, t) => {
-            if (t.symbol && typeof t.score === "number") {
-              acc[t.symbol] = t.score;
-            }
-            return acc;
-          }, {})
-        }),
-        // Trading History Panel (8 weeks)
-        viewMode !== VIEW_MODES.MINIMAL && e(TradingHistoryPanel, {
-          tradingHistory,
-          isConnected: alpacaStatus === "Live",
-          timestamp: uiClock
-        }),
-        // Wealth Panel or Connections Panel
-        personalCapitalData?.connected
-          ? e(WealthPanel, { data: personalCapitalData, compact: true, privateMode })
-          : e(ConnectionsStatusPanel, { connections: connectionStatuses })
+        e(RightColumn, { viewMode })
       )
     ),
-    // Footer bar with tier indicator and shortcuts
-    e(
-      Box,
-      {
-        flexDirection: "row",
-        justifyContent: "space-between",
-        paddingX: 2,
-        paddingY: 0,
-        borderStyle: "single",
-        borderColor: "#1e293b",
-        borderTop: true,
-        borderBottom: false,
-        borderLeft: false,
-        borderRight: false
-      },
-      e(
-        Box,
-        { flexDirection: "row", gap: 2 },
-        e(Text, { color: "#64748b" }, "Tier:"),
-        e(Text, { color: "#f59e0b", bold: true }, MODEL_TIERS[currentTier]?.label || "Medium"),
-        e(Text, { color: "#334155" }, "│"),
-        e(Text, { color: "#64748b" }, "View:"),
-        e(Text, { color: "#3b82f6", bold: true }, VIEW_MODE_LABELS[viewMode]),
-        privateMode && e(Text, { color: "#f59e0b", bold: true }, " [PRIVATE]")
-      ),
-      e(
-        Box,
-        { flexDirection: "row", gap: 3 },
-        e(Text, { color: "#475569" }, "Ctrl+T"),
-        e(Text, { color: "#64748b" }, "tier"),
-        e(Text, { color: "#334155" }, ""),
-        e(Text, { color: "#3b82f6" }, "Ctrl+U"),
-        e(Text, { color: "#64748b" }, "view"),
-        e(Text, { color: "#334155" }, ""),
-        e(Text, { color: "#38bdf8" }, "Ctrl+S"),
-        e(Text, { color: "#64748b" }, "setup"),
-        e(Text, { color: "#334155" }, ""),
-        e(Text, { color: privateMode ? "#f59e0b" : "#475569" }, "Ctrl+R"),
-        e(Text, { color: privateMode ? "#f59e0b" : "#64748b" }, "private"),
-        e(Text, { color: "#334155" }, ""),
-        firebaseUser
-          ? e(Text, { color: "#22c55e" }, "O logout")
-          : e(Text, { color: "#f97316" }, "L login"),
-        e(Text, { color: "#334155" }, ""),
-        e(Text, { color: "#475569" }, "/help"),
-        e(Text, { color: "#64748b" }, "commands")
-      )
-    ),
+    // Footer bar (isolated component - uses app store subscriptions)
+    e(AppFooterBar, null),
     // Approval Overlay (modal)
     showApprovalOverlay && e(ApprovalOverlay, {
       actions: autonomousState.proposedActions || [],

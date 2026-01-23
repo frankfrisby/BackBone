@@ -452,6 +452,8 @@ const App = ({ updateConsoleTitle }) => {
   });
   const [pauseUpdates, setPauseUpdates] = useState(false);
   const pauseUpdatesRef = useRef(false); // Use ref to avoid re-renders in intervals
+  const [mainViewReady, setMainViewReady] = useState(false);
+  const readinessTimerRef = useRef(null);
   const handleLogout = useCallback(() => {
     signOutFirebase();
     const currentSettings = loadUserSettings();
@@ -1143,6 +1145,34 @@ const App = ({ updateConsoleTitle }) => {
       return next;
     });
   }, [alpacaStatus, alpacaMode, claudeStatus, claudeCodeStatus.available, linkedInProfile?.connected, ouraHealth?.connected, personalCapitalData?.connected]);
+
+  useEffect(() => {
+    if (readinessTimerRef.current) {
+      clearTimeout(readinessTimerRef.current);
+      readinessTimerRef.current = null;
+    }
+    if (isInitializing || showOnboarding) {
+      setMainViewReady(false);
+      return () => {};
+    }
+    const connectedCount = Object.keys(connectionStatuses).length;
+    const hasConnections = connectedCount >= 3;
+    const hasTickers = tickers.length > 0;
+    if (hasConnections && hasTickers) {
+      readinessTimerRef.current = setTimeout(() => {
+        setMainViewReady(true);
+        readinessTimerRef.current = null;
+      }, 400);
+    } else {
+      setMainViewReady(false);
+    }
+    return () => {
+      if (readinessTimerRef.current) {
+        clearTimeout(readinessTimerRef.current);
+        readinessTimerRef.current = null;
+      }
+    };
+  }, [isInitializing, showOnboarding, connectionStatuses, tickers.length]);
 
   // AI Action Generation function
   const generateAIActions = useCallback(async (context, needed) => {
@@ -4530,6 +4560,21 @@ Folder: ${result.action.id}`,
           setLastAction("Setup complete!");
         }
       })
+    );
+  }
+
+  if (!showOnboarding && !mainViewReady) {
+    return e(
+      Box,
+      {
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        height: "100%",
+        paddingX: 2
+      },
+      e(Text, { color: "#f97316", bold: true }, "Loading..."),
+      e(Text, { color: "#94a3b8" }, "Preparing your workspace")
     );
   }
 

@@ -54,3 +54,4 @@ yarn-error.log*
 *.crt
 credentials.json
 tokens.json
+zig/

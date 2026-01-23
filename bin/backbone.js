@@ -28,17 +28,23 @@ const ANSI = {
 };
 
 /**
- * Synchronized stdout wrapper - batches writes to prevent flickering
- * This wraps process.stdout and adds sync escape sequences around writes
+ * Double-buffered synchronized stdout wrapper
+ * - Batches all writes into frames
+ * - Only flushes at controlled intervals (like vsync)
+ * - Uses terminal sync mode to prevent tearing
+ * - Compares buffers to skip unchanged frames
  */
 class SyncedStdout extends Writable {
   constructor(target) {
     super();
     this.target = target;
-    this.buffer = "";
+    this.currentBuffer = "";
+    this.lastRendered = "";
     this.flushTimeout = null;
-    this.flushInterval = 16; // ~60fps max
+    this.flushInterval = 50; // 20fps max - stable, no flicker
     this.lastFlush = 0;
+    this.frameCount = 0;
+    this.skippedFrames = 0;
 
     // Copy properties from target
     this.columns = target.columns;
@@ -50,6 +56,7 @@ class SyncedStdout extends Writable {
       target.on("resize", () => {
         this.columns = target.columns;
         this.rows = target.rows;
+        this.lastRendered = ""; // Force full redraw on resize
         this.emit("resize");
       });
     }
@@ -57,16 +64,17 @@ class SyncedStdout extends Writable {
 
   _write(chunk, encoding, callback) {
     const str = chunk.toString();
-    this.buffer += str;
+    this.currentBuffer += str;
 
-    // Throttle flushes to reduce flickering
-    const now = Date.now();
-    if (now - this.lastFlush >= this.flushInterval) {
-      this.flush();
-    } else if (!this.flushTimeout) {
+    // Schedule a flush if not already scheduled
+    if (!this.flushTimeout) {
+      const now = Date.now();
+      const elapsed = now - this.lastFlush;
+      const delay = Math.max(0, this.flushInterval - elapsed);
+
       this.flushTimeout = setTimeout(() => {
         this.flush();
-      }, this.flushInterval - (now - this.lastFlush));
+      }, delay);
     }
 
     callback();
@@ -78,11 +86,35 @@ class SyncedStdout extends Writable {
       this.flushTimeout = null;
     }
 
-    if (this.buffer.length > 0) {
-      // Write with sync sequences to prevent tearing
-      this.target.write(ANSI.SYNC_START + this.buffer + ANSI.SYNC_END);
-      this.buffer = "";
+    if (this.currentBuffer.length > 0) {
+      // Only render if content changed (double buffering)
+      if (this.currentBuffer !== this.lastRendered) {
+        // Use sync sequences to prevent tearing
+        this.target.write(
+          ANSI.SYNC_START +
+          ANSI.CURSOR_HOME +
+          this.currentBuffer +
+          ANSI.SYNC_END
+        );
+        this.lastRendered = this.currentBuffer;
+        this.frameCount++;
+      } else {
+        this.skippedFrames++;
+      }
+      this.currentBuffer = "";
       this.lastFlush = Date.now();
+    }
+  }
+
+  // Force immediate flush (for cleanup)
+  forceFlush() {
+    if (this.flushTimeout) {
+      clearTimeout(this.flushTimeout);
+      this.flushTimeout = null;
+    }
+    if (this.currentBuffer.length > 0) {
+      this.target.write(ANSI.SYNC_START + this.currentBuffer + ANSI.SYNC_END);
+      this.currentBuffer = "";
     }
   }
 
@@ -125,6 +157,14 @@ class SyncedStdout extends Writable {
   getWindowSize() {
     return [this.columns, this.rows];
   }
+
+  getStats() {
+    return {
+      frames: this.frameCount,
+      skipped: this.skippedFrames,
+      fps: this.flushInterval ? Math.round(1000 / this.flushInterval) : 0
+    };
+  }
 }
 
 // Create synced stdout
@@ -138,7 +178,7 @@ process.stdout.write(ANSI.CURSOR_HOME);
 
 // Cleanup on exit
 const cleanup = () => {
-  syncedStdout.flush(); // Flush any pending output
+  syncedStdout.forceFlush(); // Flush any pending output immediately
   process.stdout.write(ANSI.CURSOR_SHOW);
   process.stdout.write(ANSI.ALTERNATE_SCREEN_OFF);
   process.stdout.write(ANSI.RESET);

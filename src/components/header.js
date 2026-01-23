@@ -1,8 +1,10 @@
 import React, { useMemo } from "react";
 import { Box, Text } from "ink";
-import Gradient from "ink-gradient";
 
 const e = React.createElement;
+
+// Static gradient colors - no animation, just color stops
+const GRADIENT_COLORS = ["#667eea", "#764ba2", "#f093fb"];
 
 // Cache date string to prevent re-renders every second
 let cachedDateTime = "";
@@ -88,7 +90,7 @@ const HeaderBase = ({ claudeStatus, version = "2.0.0", compact = false, integrat
       e(
         Box,
         { flexDirection: "row", gap: 1, alignItems: "center" },
-        e(Gradient, { name: "atlas" }, e(Text, { bold: true }, BACKBONE_COMPACT)),
+        e(Text, { color: "#667eea", bold: true }, BACKBONE_COMPACT),
         e(Text, { color: "#334155" }, "│"),
         e(Text, { color: "#475569" }, `v${version}`)
       ),
@@ -123,16 +125,12 @@ const HeaderBase = ({ claudeStatus, version = "2.0.0", compact = false, integrat
       borderStyle: "double",
       borderColor: "#f59e0b"
     },
-    // Big ASCII logo
+    // Big ASCII logo - static colors instead of animated gradient
     e(
       Box,
       { flexDirection: "column", alignItems: "center" },
       ...BACKBONE_LOGO.map((line, i) =>
-        e(
-          Gradient,
-          { key: i, name: "atlas" },
-          e(Text, { bold: true }, line)
-        )
+        e(Text, { key: i, color: GRADIENT_COLORS[i % GRADIENT_COLORS.length], bold: true }, line)
       )
     ),
     // Subtitle and version
@@ -199,7 +197,7 @@ export const HeaderMinimal = ({ claudeStatus }) => {
   return e(
     Box,
     { flexDirection: "row", gap: 2, paddingX: 1 },
-    e(Gradient, { name: "atlas" }, e(Text, { bold: true }, BACKBONE_COMPACT)),
+    e(Text, { color: "#667eea", bold: true }, BACKBONE_COMPACT),
     e(Text, { color: statusColor }, getStatusIcon(claudeStatus))
   );
 };

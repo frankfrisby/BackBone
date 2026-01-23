@@ -168,7 +168,8 @@ const OuraHealthPanel = ({ data, history = [] }) => {
     return Math.round(total / trend.length);
   }, [trend]);
   const aiInsight = useMemo(() => buildInsight(summary, stress), [summary, stress]);
-  const todayScore = Math.round(summary?.readinessScore ?? summary?.activityScore ?? summary?.sleepScore ?? qualityScore || 0);
+  const baseScore = summary?.readinessScore ?? summary?.activityScore ?? summary?.sleepScore ?? qualityScore;
+  const todayScore = Math.round(baseScore ?? 0);
   const todayQuality = useMemo(() => categorizeScore(todayScore), [todayScore]);
   const readinessBreakdown = useMemo(() => buildReadinessCounts(history), [history]);
 

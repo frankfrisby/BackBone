@@ -1,12 +1,11 @@
-import React, { memo, useMemo } from "react";
+import React, { memo, useMemo, useState, useEffect, useRef } from "react";
 import { Box, Text } from "ink";
 import { getActivityTracker } from "../services/activity-tracker.js";
 
 const e = React.createElement;
 
 // ═══════════════════════════════════════════════════════════════════════════
-// COMPLETELY STATIC PANEL - NO ANIMATIONS, NO INTERVALS
-// This tests if animations are causing the flickering
+// THROTTLED ACTIVITY PANEL - Updates at controlled rate to prevent flickering
 // ═══════════════════════════════════════════════════════════════════════════
 
 const THEME = {
@@ -67,16 +66,51 @@ const ActivityList = memo(({ items }) => {
   );
 });
 
-// Main panel - reads data once per render, no internal state
+// Main panel - subscribes to tracker with throttled updates
 const EngineStatusPanelBase = ({
   toolEvents = [],
   streamingText = "",
   nextCycleTime = null,
   maxEntries = 5
 }) => {
-  // Get data directly from tracker - no useState, no useEffect
   const tracker = getActivityTracker();
-  const data = tracker.getDisplayData();
+
+  // State for activity data - initialized from tracker
+  const [data, setData] = useState(() => tracker.getDisplayData());
+
+  // Throttled subscription to tracker updates
+  useEffect(() => {
+    let lastUpdate = 0;
+    let pendingUpdate = null;
+    const THROTTLE_MS = 500; // Max update rate: once per 500ms
+
+    const handleUpdate = (newData) => {
+      const now = Date.now();
+      const elapsed = now - lastUpdate;
+
+      if (elapsed >= THROTTLE_MS) {
+        // Enough time has passed, update immediately
+        lastUpdate = now;
+        setData(newData);
+      } else if (!pendingUpdate) {
+        // Schedule update for later
+        pendingUpdate = setTimeout(() => {
+          pendingUpdate = null;
+          lastUpdate = Date.now();
+          setData(tracker.getDisplayData());
+        }, THROTTLE_MS - elapsed);
+      }
+    };
+
+    tracker.on("updated", handleUpdate);
+
+    return () => {
+      tracker.off("updated", handleUpdate);
+      if (pendingUpdate) {
+        clearTimeout(pendingUpdate);
+      }
+    };
+  }, [tracker]);
 
   const isRunning = data.isRunning;
   const isIdle = data.currentState === "idle" || data.currentState === "ready" || !isRunning;

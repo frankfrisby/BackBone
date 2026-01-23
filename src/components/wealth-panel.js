@@ -276,7 +276,7 @@ const ConnectionsStatusPanelBase = ({ connections = {} }) => {
     {
       flexDirection: "column",
       borderStyle: "single",
-      borderColor: "#334155",
+      borderColor: "#0f172a",
       paddingX: 1,
       paddingY: 0,
       height: 9,

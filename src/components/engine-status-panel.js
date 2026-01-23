@@ -169,7 +169,8 @@ const EngineStatusPanelBase = ({
   currentWork = null,
   projects = [],
   compact = false,
-  actionStreamingText = ""
+  actionStreamingText = "",
+  borderless = false
 }) => {
   const statusId = status?.id || "idle";
   const statusDetail = status?.detail || null;
@@ -178,12 +179,18 @@ const EngineStatusPanelBase = ({
   const statusLabel = STATUS_LABELS[statusId] || "Ready";
   const isActive = statusId !== "idle" && statusId !== "waiting";
   const containerProps = compact
-    ? { flexDirection: "row", gap: 1, paddingX: 1 }
+    ? {
+        flexDirection: "row",
+        gap: 1,
+        paddingX: borderless ? 0 : 1,
+        marginBottom: borderless ? 0 : 1
+      }
     : {
         flexDirection: "column",
-        paddingX: 1,
-        paddingY: 1,
-        marginBottom: 1
+        paddingX: borderless ? 0 : 1,
+        paddingY: borderless ? 0 : 1,
+        marginBottom: borderless ? 0 : 1,
+        ...(borderless ? {} : { borderStyle: "round", borderColor: "#0f172a" })
       };
 
   // Parse action and target from status detail (format: "action:target" or just detail)
@@ -323,6 +330,7 @@ const EngineStatusLineBase = ({ status = {}, showSpinner = true }) => {
  * Custom comparison for EngineStatusPanel
  */
 const areEngineStatusPropsEqual = (prevProps, nextProps) => {
+  if (prevProps.borderless !== nextProps.borderless) return false;
   // Only re-render if actual status changes
   if (prevProps.status?.id !== nextProps.status?.id) return false;
   if (prevProps.status?.detail !== nextProps.status?.detail) return false;

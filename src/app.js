@@ -170,6 +170,14 @@ import { TickerScoresPanel, TickerSummaryLine } from "./components/ticker-scores
 
 const e = React.createElement;
 
+const deepEqual = (a, b) => {
+  try {
+    return JSON.stringify(a) === JSON.stringify(b);
+  } catch (error) {
+    return a === b;
+  }
+};
+
 // View modes: minimal, core (default), advanced
 export const VIEW_MODES = {
   MINIMAL: "minimal",
@@ -255,7 +263,7 @@ const App = ({ updateConsoleTitle }) => {
   const resizeTimersRef = useRef([]);
   const scheduleResize = useCallback(() => {
     resizeTimersRef.current.forEach((id) => clearTimeout(id));
-    const delays = [0, 400, 900, 1500];
+    const delays = [0, 500, 1100, 1900];
     resizeTimersRef.current = delays.map((delay) => {
       const timeout = setTimeout(() => resizeForMainApp(), delay);
       return timeout;
@@ -558,6 +566,16 @@ const App = ({ updateConsoleTitle }) => {
   const [lifeScoresData, setLifeScoresData] = useState(() => lifeScores.getDisplayData());
   const [autonomousState, setAutonomousState] = useState(() => autonomousEngine.getDisplayData());
   const [completedActions, setCompletedActions] = useState(() => autonomousEngine.getRecentCompleted(10));
+
+  const updateLifeScoresData = useCallback(() => {
+    const next = lifeScores.getDisplayData();
+    setLifeScoresData((prev) => (deepEqual(prev, next) ? prev : next));
+  }, [lifeScores]);
+
+  const refreshAutonomousState = useCallback(() => {
+    const next = autonomousEngine.getDisplayData();
+    setAutonomousState((prev) => (deepEqual(prev, next) ? prev : next));
+  }, [autonomousEngine]);
   const [claudeCodeStatus, setClaudeCodeStatus] = useState({ initialized: false, available: false });
   const [showApprovalOverlay, setShowApprovalOverlay] = useState(false);
   const [selectedActionIndex, setSelectedActionIndex] = useState(0);
@@ -898,7 +916,7 @@ const App = ({ updateConsoleTitle }) => {
         currentActionIdRef.current = action.id;
         resetActionStream(action.title);
         resetToolEvents();
-        setAutonomousState(autonomousEngine.getDisplayData());
+        refreshAutonomousState();
       });
 
       autonomousEngine.on("action-completed", (action) => {
@@ -921,7 +939,7 @@ const App = ({ updateConsoleTitle }) => {
             });
           }
         }
-        setAutonomousState(autonomousEngine.getDisplayData());
+        refreshAutonomousState();
         setCompletedActions(autonomousEngine.getRecentCompleted(10));
       });
 
@@ -934,7 +952,7 @@ const App = ({ updateConsoleTitle }) => {
             ? { ...entry, status: "error", endedAt: Date.now() }
             : entry
         )));
-        setAutonomousState(autonomousEngine.getDisplayData());
+        refreshAutonomousState();
       });
 
       autonomousEngine.on("proposals-updated", () => {
@@ -1086,9 +1104,9 @@ const App = ({ updateConsoleTitle }) => {
         oura: ouraHealth,
         linkedin: linkedInProfile
       });
-      setLifeScoresData(lifeScores.getDisplayData());
+      updateLifeScoresData();
     }
-  }, [portfolio?.equity]);
+  }, [portfolio?.equity, updateLifeScoresData]);
 
   useEffect(() => {
     if (ouraHealth?.sleep?.score) {
@@ -1099,9 +1117,9 @@ const App = ({ updateConsoleTitle }) => {
         oura: ouraHealth,
         linkedin: linkedInProfile
       });
-      setLifeScoresData(lifeScores.getDisplayData());
+      updateLifeScoresData();
     }
-  }, [ouraHealth?.sleep?.score]);
+  }, [ouraHealth?.sleep?.score, updateLifeScoresData]);
 
   // Update connection statuses for ConnectionBar (with change detection to reduce flickering)
   // NOTE: Only track connection status changes, not details like timestamps
@@ -4443,31 +4461,31 @@ Folder: ${result.action.id}`,
   // Action approval handlers
   const handleApproveAction = useCallback((actionId) => {
     autonomousEngine.approveAction(actionId);
-    setAutonomousState(autonomousEngine.getDisplayData());
+    refreshAutonomousState();
     workLog.logAction(LOG_SOURCE.USER, "Action Approved", "", LOG_STATUS.SUCCESS);
   }, [autonomousEngine, workLog]);
 
   const handleRejectAction = useCallback((actionId) => {
     autonomousEngine.rejectAction(actionId);
-    setAutonomousState(autonomousEngine.getDisplayData());
+    refreshAutonomousState();
     workLog.logAction(LOG_SOURCE.USER, "Action Rejected", "", LOG_STATUS.INFO);
   }, [autonomousEngine, workLog]);
 
   const handleApproveAll = useCallback(() => {
     autonomousEngine.approveAll();
-    setAutonomousState(autonomousEngine.getDisplayData());
+    refreshAutonomousState();
     workLog.logAction(LOG_SOURCE.USER, "All Actions Approved", "", LOG_STATUS.SUCCESS);
   }, [autonomousEngine, workLog]);
 
   const handleStartAutonomous = useCallback(() => {
     autonomousEngine.start(generateAIActions);
-    setAutonomousState(autonomousEngine.getDisplayData());
+    refreshAutonomousState();
     workLog.logSystem("Autonomous Mode Started", "AI will generate and execute actions");
   }, [autonomousEngine, generateAIActions, workLog]);
 
   const handleStopAutonomous = useCallback(() => {
     autonomousEngine.stop();
-    setAutonomousState(autonomousEngine.getDisplayData());
+    refreshAutonomousState();
     workLog.logSystem("Autonomous Mode Stopped", "");
   }, [autonomousEngine, workLog]);
 
@@ -4634,7 +4652,8 @@ Folder: ${result.action.id}`,
           currentWork: engineStatus.status.currentWork,
           projects: engineStatus.projects,
           compact: viewMode === VIEW_MODES.MINIMAL,
-          actionStreamingText: actionStreamingText
+          actionStreamingText: actionStreamingText,
+          borderless: true
         }),
         // Conversation Panel
         e(ConversationPanel, { messages, isLoading: isProcessing, streamingText, actionStreamingText, actionStreamingTitle }),
@@ -5033,7 +5052,7 @@ Folder: ${result.action.id}`,
       onApproveAll: handleApproveAll,
       onRejectAll: () => {
         autonomousState.proposedActions?.forEach(a => autonomousEngine.rejectAction(a.id));
-        setAutonomousState(autonomousEngine.getDisplayData());
+        refreshAutonomousState();
         setShowApprovalOverlay(false);
       },
       onSelect: setSelectedActionIndex,

@@ -168,12 +168,13 @@ const formatScore = (score) => {
 };
 
 /**
- * Format percent change
+ * Format percent change (fixed 6 char width: +XX.X% or -XX.X%)
  */
 const formatChange = (change) => {
-  if (change === undefined || change === null) return "  --";
+  if (change === undefined || change === null) return "   -- ";
   const sign = change >= 0 ? "+" : "";
-  return `${sign}${change.toFixed(1)}%`;
+  const formatted = `${sign}${change.toFixed(1)}%`;
+  return formatted.padStart(6);
 };
 
 /**
@@ -365,23 +366,23 @@ const TickerScoresPanelBase = ({
       )
     ),
 
-    // Column headers - fixed widths
+    // Column headers - fixed widths (total: 3+5+10+7+7+5+7 = 44)
     e(
       Box,
       { flexDirection: "row" },
-      e(Text, { color: "#475569", width: 4 }, "  # "),
-      e(Text, { color: "#475569", width: 6 }, "SYM"),
-      e(Text, { color: "#475569", width: 10 }, "  SCORE"),
-      e(Text, { color: "#475569", width: 7 }, "SIGNAL"),
-      e(Text, { color: "#475569", width: 7 }, "  MACD"),
-      e(Text, { color: "#475569", width: 5 }, " VOL"),
-      e(Text, { color: "#475569", width: 7 }, "   CHG")
+      e(Text, { color: "#475569" }, " # "),       // 3 chars
+      e(Text, { color: "#475569" }, "SYM  "),     // 5 chars
+      e(Text, { color: "#475569" }, "   SCORE  "),// 10 chars
+      e(Text, { color: "#475569" }, "SIGNAL "),   // 7 chars
+      e(Text, { color: "#475569" }, "  MACD "),   // 7 chars
+      e(Text, { color: "#475569" }, " VOL "),     // 5 chars
+      e(Text, { color: "#475569" }, "   CHG")     // 7 chars (includes space before)
     ),
 
     // Separator
-    e(Text, { color: "#334155" }, "─".repeat(46)),
+    e(Text, { color: "#334155" }, "─".repeat(44)),
 
-    // Ticker rows with fixed column widths
+    // Ticker rows with fixed column widths (must match header: 3+5+10+7+7+5+7 = 44)
     ...sortedTickers.map((ticker, i) => {
       const isTop3 = top3Symbols.has(ticker.symbol);
       const scoreColor = getSignalColor(ticker.score);
@@ -391,6 +392,14 @@ const TickerScoresPanelBase = ({
       const macdColor = getMACDColor(macdVal);
       const volColor = getVolumeColor(ticker.volumeSigma);
 
+      // Pre-format all values with exact widths
+      const numCol = (i + 1).toString().padStart(2) + " ";           // 3 chars
+      const symCol = ticker.symbol.padEnd(5);                         // 5 chars
+      const sigCol = getSignalLabel(ticker.score, isTop3).padEnd(6) + " ";  // 7 chars
+      const macdCol = formatMACD(macdVal).padStart(6) + " ";          // 7 chars
+      const volCol = formatVolume(ticker.volumeSigma).padStart(4) + " "; // 5 chars
+      const chgCol = formatChange(changeVal).padStart(6);             // 7 chars (already padded)
+
       return e(
         Box,
         {
@@ -398,32 +407,21 @@ const TickerScoresPanelBase = ({
           flexDirection: "row",
           backgroundColor: isTop3 ? "#166534" : undefined
         },
-        // # column (1-n with space)
-        e(Text, { color: isTop3 ? "#f59e0b" : "#64748b", width: 4 },
-          `${(i + 1).toString().padStart(2)} `),
-        // Symbol
-        e(Text, { color: isTop3 ? "#f8fafc" : "#e2e8f0", bold: isTop3, width: 6 },
-          ticker.symbol.padEnd(5)),
-        // Score with bar
-        e(
-          Box,
-          { width: 10, flexDirection: "row" },
-          e(ScoreBar, { score: ticker.score, width: 5 }),
-          e(Text, { color: scoreColor, bold: isTop3 },
-            ` ${formatScore(ticker.score)}`)
-        ),
-        // Signal (space before for separation from score)
-        e(Text, { color: scoreColor, bold: isTop3, width: 8 },
-          ` ${getSignalLabel(ticker.score, isTop3).padEnd(6)}`),
-        // MACD
-        e(Text, { color: macdColor, width: 7 },
-          formatMACD(macdVal).padStart(6)),
-        // Volume
-        e(Text, { color: volColor, width: 5 },
-          formatVolume(ticker.volumeSigma).padStart(4)),
-        // Change
-        e(Text, { color: changeColor, width: 7 },
-          formatChange(changeVal).padStart(6))
+        // # column (3 chars)
+        e(Text, { color: isTop3 ? "#f59e0b" : "#64748b" }, numCol),
+        // Symbol (5 chars)
+        e(Text, { color: isTop3 ? "#f8fafc" : "#e2e8f0", bold: isTop3 }, symCol),
+        // Score with bar (10 chars: 5 bar + 1 space + 4 score)
+        e(ScoreBar, { score: ticker.score, width: 5 }),
+        e(Text, { color: scoreColor, bold: isTop3 }, ` ${formatScore(ticker.score)}  `),
+        // Signal (7 chars)
+        e(Text, { color: scoreColor, bold: isTop3 }, sigCol),
+        // MACD (7 chars)
+        e(Text, { color: macdColor }, macdCol),
+        // Volume (5 chars)
+        e(Text, { color: volColor }, volCol),
+        // Change (7 chars)
+        e(Text, { color: changeColor }, chgCol)
       );
     }),
 

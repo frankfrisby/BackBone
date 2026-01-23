@@ -173,6 +173,7 @@ const ScoreIndicator = ({ score }) => {
 
 /**
  * Single position row with clean formatting
+ * Column widths: SYM(6) QTY(4) VALUE(7) TODAY(8) P/L(8) ACTION(11)
  */
 const PositionRow = ({ position, score, privateMode, isFirst }) => {
   const icon = getTickerIcon(position.symbol);
@@ -190,6 +191,13 @@ const PositionRow = ({ position, score, privateMode, isFirst }) => {
   const marketValue = position.marketValue ||
     (position.shares * parseFloat(String(position.lastPrice || 0).replace(/[$,]/g, "")));
 
+  // Format values with consistent widths
+  const symDisplay = (icon + position.symbol).padEnd(6);
+  const qtyDisplay = (privateMode ? "••" : String(position.shares || 0)).padStart(4);
+  const valDisplay = formatCompact(marketValue, privateMode).padStart(7);
+  const todayDisplay = formatPct(todayPercent, privateMode).padStart(8);
+  const totalDisplay = formatPct(totalPercent, privateMode).padStart(8);
+
   return e(
     Box,
     {
@@ -197,46 +205,18 @@ const PositionRow = ({ position, score, privateMode, isFirst }) => {
       paddingY: 0,
       backgroundColor: isFirst ? "#1a2e1a" : undefined
     },
-    // Icon + Symbol
-    e(
-      Box,
-      { width: 7, flexDirection: "row" },
-      e(Text, null, icon),
-      e(Text, { color: COLORS.primary, bold: true }, ` ${position.symbol}`)
-    ),
-    // Shares
-    e(
-      Box,
-      { width: 5, justifyContent: "flex-end" },
-      e(Text, { color: COLORS.muted },
-        privateMode ? "\u2022\u2022" : String(position.shares || 0).padStart(4))
-    ),
-    // Market Value
-    e(
-      Box,
-      { width: 8, justifyContent: "flex-end" },
-      e(Text, { color: COLORS.secondary }, formatCompact(marketValue, privateMode).padStart(7))
-    ),
-    // Today's PnL %
-    e(
-      Box,
-      { width: 9, justifyContent: "flex-end" },
-      e(Text, { color: todayColor, bold: Math.abs(todayPercent) >= 5 },
-        formatPct(todayPercent, privateMode).padStart(7))
-    ),
-    // Total P/L %
-    e(
-      Box,
-      { width: 8, justifyContent: "flex-end" },
-      e(Text, { color: totalColor, bold: Math.abs(totalPercent) >= 5 },
-        formatPct(totalPercent, privateMode).padStart(7))
-    ),
-    // Score/Action
-    e(
-      Box,
-      { width: 12, marginLeft: 1 },
-      e(ScoreIndicator, { score })
-    )
+    // Symbol (6 chars)
+    e(Text, { color: COLORS.primary, bold: true }, symDisplay),
+    // Shares (4 chars)
+    e(Text, { color: COLORS.muted }, qtyDisplay),
+    // Market Value (7 chars)
+    e(Text, { color: COLORS.secondary }, valDisplay),
+    // Today's PnL % (8 chars)
+    e(Text, { color: todayColor, bold: Math.abs(todayPercent) >= 5 }, todayDisplay),
+    // Total P/L % (8 chars)
+    e(Text, { color: totalColor, bold: Math.abs(totalPercent) >= 5 }, totalDisplay),
+    // Score/Action (11 chars)
+    e(Box, { marginLeft: 1 }, e(ScoreIndicator, { score }))
   );
 };
 
@@ -307,17 +287,18 @@ const DayPL = ({ portfolio, privateMode }) => {
 
 /**
  * Positions header row
+ * Column widths must match PositionRow: SYM(6) QTY(4) VALUE(7) TODAY(8) P/L(8) ACTION(11)
  */
 const PositionsHeader = () => {
   return e(
     Box,
     { flexDirection: "row", marginBottom: 0 },
-    e(Text, { color: COLORS.dim, width: 7 }, "SYMBOL"),
-    e(Text, { color: COLORS.dim, width: 5 }, " QTY"),
-    e(Text, { color: COLORS.dim, width: 8 }, "  VALUE"),
-    e(Text, { color: COLORS.dim, width: 9 }, "    TODAY"),
-    e(Text, { color: COLORS.dim, width: 8 }, "    P/L"),
-    e(Text, { color: COLORS.dim, width: 12, marginLeft: 1 }, "ACTION")
+    e(Text, { color: COLORS.dim }, "SYM   "),      // 6 chars
+    e(Text, { color: COLORS.dim }, " QTY"),        // 4 chars
+    e(Text, { color: COLORS.dim }, "  VALUE"),     // 7 chars
+    e(Text, { color: COLORS.dim }, "   TODAY"),    // 8 chars
+    e(Text, { color: COLORS.dim }, "     P/L"),    // 8 chars
+    e(Text, { color: COLORS.dim, marginLeft: 1 }, "ACTION")  // 11 chars
   );
 };
 
@@ -458,8 +439,8 @@ const PortfolioPanelBase = ({
         ),
         // Header row
         e(PositionsHeader),
-          // Separator
-          e(Text, { color: COLORS.border }, "\u2500".repeat(40)),
+          // Separator (matches total column width: 6+4+7+8+8+1+10 = 44)
+          e(Text, { color: COLORS.border }, "\u2500".repeat(44)),
           // Position rows (limit to 6)
           ...sortedPositions.slice(0, 6).map((position, index) =>
             e(PositionRow, {
@@ -487,7 +468,7 @@ const PortfolioPanelBase = ({
     (lastUpdatedAgo || nextTradeTime) && e(
       Box,
       { flexDirection: "column", marginTop: 1 },
-      e(Text, { color: COLORS.border }, "\u2500".repeat(40)),
+      e(Text, { color: COLORS.border }, "\u2500".repeat(44)),
       e(
         Box,
         { flexDirection: "row", justifyContent: "space-between" },

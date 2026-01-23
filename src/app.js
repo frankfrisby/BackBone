@@ -4856,12 +4856,8 @@ Folder: ${result.action.id}`,
       e(
         Box,
         { flexDirection: "column", width: viewMode === VIEW_MODES.MINIMAL || isMedium ? "75%" : "50%", paddingX: 1, overflow: "hidden" },
-        // Engine Status - self-contained panel that subscribes directly to activity tracker
-        e(AgentActivityPanel, {
-          toolEvents: toolEvents,
-          streamingText: actionStreamingText,
-          maxEntries: viewMode === VIEW_MODES.MINIMAL ? 4 : 6
-        }),
+        // Engine Status - self-contained panel (no props to prevent re-renders)
+        e(AgentActivityPanel, null),
         // Conversation Panel
         e(ConversationPanel, { messages, isLoading: isProcessing, streamingText, actionStreamingText, actionStreamingTitle }),
         // LinkedIn Data Viewer overlay

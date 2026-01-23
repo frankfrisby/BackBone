@@ -1,14 +1,17 @@
-import React, { memo, useState, useEffect, useRef } from "react";
+import React, { memo, useMemo } from "react";
 import { Box, Text } from "ink";
 import { getActivityNarrator, AGENT_STATES, ACTION_TYPES } from "../services/activity-narrator.js";
-import { useCoordinatedUpdates } from "../hooks/useCoordinatedUpdates.js";
+import { useCoordinatedUpdates, useCoordinatedTick } from "../hooks/useCoordinatedUpdates.js";
 
 const e = React.createElement;
 
 // ═══════════════════════════════════════════════════════════════════════════
-// REALISTIC AGENT ACTIVITY PANEL - Claude Code inspired design
-// Shows actions, sub-actions, diffs, state with shimmer, and current goal
+// STABLE AGENT ACTIVITY PANEL - Fixed height, no layout shifts
+// Uses coordinated updates only - no independent intervals
 // ═══════════════════════════════════════════════════════════════════════════
+
+// Fixed panel height to prevent layout shifts
+const PANEL_HEIGHT = 10;
 
 const THEME = {
   bg: "#0f172a",
@@ -24,8 +27,8 @@ const THEME = {
   cyan: "#06b6d4",
 };
 
-// Shimmer effect characters for state display
-const SHIMMER_CHARS = ["░", "▒", "▓", "█", "▓", "▒", "░", " "];
+// Simple pulse indicator (just dots, no width changes)
+const PULSE_DOTS = ["◐", "◓", "◑", "◒"];
 
 /**
  * Action display - e.g., "→ Update('linkedin.md')"
@@ -99,21 +102,20 @@ const ObservationLine = memo(({ observation }) => {
 });
 
 /**
- * Shimmer state display - animated state indicator
+ * State display with subtle pulse indicator
  */
 const ShimmerState = memo(({ state, stateInfo, tickCount = 0 }) => {
-  // Create shimmer effect based on tick
-  const shimmerIndex = tickCount % SHIMMER_CHARS.length;
-  const shimmerChar = SHIMMER_CHARS[shimmerIndex];
+  // Simple rotating dot indicator (same width always)
+  const pulseIndex = tickCount % PULSE_DOTS.length;
+  const pulseChar = PULSE_DOTS[pulseIndex];
   const stateText = stateInfo?.text || state || "Idle";
   const stateColor = stateInfo?.color || THEME.muted;
 
   return e(
     Box,
     { flexDirection: "row", gap: 1 },
-    e(Text, { color: stateColor }, shimmerChar),
-    e(Text, { color: stateColor, bold: true }, `${stateText}...`),
-    e(Text, { color: stateColor }, shimmerChar)
+    e(Text, { color: stateColor }, pulseChar),
+    e(Text, { color: stateColor, bold: true }, `${stateText}...`)
   );
 });
 
@@ -132,101 +134,102 @@ const GoalLine = memo(({ goal }) => {
 });
 
 /**
- * Main Activity Panel
+ * Main Activity Panel - Fixed height, no props, self-contained
+ * Subscribes directly to narrator to prevent parent re-renders
  */
-const AgentActivityPanelBase = ({ maxActions = 3 }) => {
+const AgentActivityPanelBase = () => {
+  const maxActions = 3;
   const narrator = getActivityNarrator();
-  const [tickCount, setTickCount] = useState(0);
 
-  // Use coordinated updates for smooth rendering
+  // Use coordinated updates - synced with global tick
   const data = useCoordinatedUpdates(
     "agent-narrator",
     () => narrator.getDisplayData(),
     { initialData: narrator.getDisplayData() }
   ) || narrator.getDisplayData();
 
-  // Shimmer animation tick (slower than render tick)
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setTickCount(t => t + 1);
-    }, 200); // 5fps shimmer
-    return () => clearInterval(interval);
-  }, []);
+  // Use coordinated tick for shimmer (no separate interval)
+  const tickCount = useCoordinatedTick(null, true);
 
   const { state, stateInfo, goal, actions, subActions, observations, diffs } = data;
-  const hasContent = actions?.length > 0 || observations?.length > 0 || goal;
+
+  // Build fixed-height content array (always PANEL_HEIGHT lines)
+  const lines = useMemo(() => {
+    const result = [];
+
+    // Line 0: Header
+    result.push({ type: "header" });
+
+    // Line 1: Separator
+    result.push({ type: "separator" });
+
+    // Lines 2-4: Actions (always 3 slots)
+    const actionSlots = actions?.slice(0, 3) || [];
+    for (let i = 0; i < 3; i++) {
+      result.push({ type: "action", action: actionSlots[i] || null, isMain: true });
+    }
+
+    // Lines 5-6: Sub-actions or observations (2 slots)
+    const subSlots = subActions?.slice(0, 2) || [];
+    const obsSlots = observations?.slice(0, 2) || [];
+    for (let i = 0; i < 2; i++) {
+      if (subSlots[i]) {
+        result.push({ type: "action", action: subSlots[i], isMain: false });
+      } else if (obsSlots[i]) {
+        result.push({ type: "observation", observation: obsSlots[i] });
+      } else {
+        result.push({ type: "empty" });
+      }
+    }
+
+    // Line 7: State with shimmer
+    result.push({ type: "state", state, stateInfo, tickCount });
+
+    // Line 8: Goal
+    result.push({ type: "goal", goal });
+
+    // Line 9: Padding
+    result.push({ type: "empty" });
+
+    return result;
+  }, [actions, subActions, observations, state, stateInfo, goal, tickCount]);
 
   return e(
     Box,
-    { flexDirection: "column", paddingX: 1, paddingY: 0 },
+    { flexDirection: "column", paddingX: 1, height: PANEL_HEIGHT },
 
-    // Header
-    e(
-      Box,
-      { flexDirection: "row", justifyContent: "space-between" },
-      e(Text, { color: THEME.muted, bold: true }, "ENGINE"),
-      e(Text, { color: THEME.dim, dimColor: true }, "◆")
-    ),
-
-    // Separator
-    e(Text, { color: THEME.dim }, "─".repeat(44)),
-
-    // Main actions (e.g., Update, Search, WebSearch)
-    actions?.length > 0 && e(
-      Box,
-      { flexDirection: "column", marginTop: 0 },
-      ...actions.slice(0, maxActions).map((action, i) =>
-        e(ActionLine, { key: action.id || i, action, isMain: true })
-      )
-    ),
-
-    // Diffs (file changes with red/green)
-    diffs?.length > 0 && e(
-      Box,
-      { flexDirection: "column", marginTop: 0 },
-      ...diffs.slice(0, 2).map((diff, i) =>
-        e(DiffLine, { key: diff.id || i, diff })
-      )
-    ),
-
-    // Sub-actions (e.g., Bash, MkDir, Copy)
-    subActions?.length > 0 && e(
-      Box,
-      { flexDirection: "column", marginTop: 0 },
-      ...subActions.slice(0, 2).map((action, i) =>
-        e(ActionLine, { key: action.id || i, action, isMain: false })
-      )
-    ),
-
-    // Observations
-    observations?.length > 0 && e(
-      Box,
-      { flexDirection: "column", marginTop: 1 },
-      ...observations.slice(0, 2).map((obs, i) =>
-        e(ObservationLine, { key: obs.id || i, observation: obs })
-      )
-    ),
-
-    // State with shimmer effect
-    e(
-      Box,
-      { marginTop: 1, paddingLeft: 1 },
-      e(ShimmerState, { state, stateInfo, tickCount })
-    ),
-
-    // Current goal
-    goal && e(
-      Box,
-      { marginTop: 0 },
-      e(GoalLine, { goal })
-    ),
-
-    // Empty state
-    !hasContent && e(
-      Box,
-      { paddingLeft: 1 },
-      e(Text, { color: THEME.muted }, "Waiting for activity...")
-    )
+    // Render fixed lines
+    ...lines.map((line, i) => {
+      switch (line.type) {
+        case "header":
+          return e(
+            Box,
+            { key: i, flexDirection: "row", justifyContent: "space-between" },
+            e(Text, { color: THEME.muted, bold: true }, "ENGINE"),
+            e(Text, { color: THEME.dim }, "◆")
+          );
+        case "separator":
+          return e(Text, { key: i, color: THEME.dim }, "─".repeat(44));
+        case "action":
+          return line.action
+            ? e(ActionLine, { key: i, action: line.action, isMain: line.isMain })
+            : e(Text, { key: i, color: THEME.dim }, " ");
+        case "observation":
+          return e(ObservationLine, { key: i, observation: line.observation });
+        case "state":
+          return e(
+            Box,
+            { key: i, paddingLeft: 1 },
+            e(ShimmerState, { state: line.state, stateInfo: line.stateInfo, tickCount: line.tickCount })
+          );
+        case "goal":
+          return line.goal
+            ? e(GoalLine, { key: i, goal: line.goal })
+            : e(Text, { key: i, color: THEME.dim }, " ");
+        default:
+          return e(Text, { key: i }, " ");
+      }
+    })
   );
 };
 

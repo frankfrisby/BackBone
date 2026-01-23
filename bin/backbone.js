@@ -4,6 +4,7 @@ import { createElement } from "react";
 import { render } from "ink";
 import App from "../src/app.js";
 import { loadLinkedInProfile } from "../src/services/linkedin-scraper.js";
+import { Writable } from "stream";
 
 // Force color support for Windows terminals
 if (process.platform === "win32") {
@@ -20,9 +21,114 @@ const ANSI = {
   CURSOR_HIDE: "\x1b[?25l",
   CURSOR_SHOW: "\x1b[?25h",
   CLEAR_LINE: "\x1b[2K",
-  RESET: "\x1b[0m"
+  RESET: "\x1b[0m",
+  // Synchronized output - prevents flickering
+  SYNC_START: "\x1b[?2026h",
+  SYNC_END: "\x1b[?2026l",
 };
 
+/**
+ * Synchronized stdout wrapper - batches writes to prevent flickering
+ * This wraps process.stdout and adds sync escape sequences around writes
+ */
+class SyncedStdout extends Writable {
+  constructor(target) {
+    super();
+    this.target = target;
+    this.buffer = "";
+    this.flushTimeout = null;
+    this.flushInterval = 16; // ~60fps max
+    this.lastFlush = 0;
+
+    // Copy properties from target
+    this.columns = target.columns;
+    this.rows = target.rows;
+    this.isTTY = target.isTTY;
+
+    // Forward resize events
+    if (target.on) {
+      target.on("resize", () => {
+        this.columns = target.columns;
+        this.rows = target.rows;
+        this.emit("resize");
+      });
+    }
+  }
+
+  _write(chunk, encoding, callback) {
+    const str = chunk.toString();
+    this.buffer += str;
+
+    // Throttle flushes to reduce flickering
+    const now = Date.now();
+    if (now - this.lastFlush >= this.flushInterval) {
+      this.flush();
+    } else if (!this.flushTimeout) {
+      this.flushTimeout = setTimeout(() => {
+        this.flush();
+      }, this.flushInterval - (now - this.lastFlush));
+    }
+
+    callback();
+  }
+
+  flush() {
+    if (this.flushTimeout) {
+      clearTimeout(this.flushTimeout);
+      this.flushTimeout = null;
+    }
+
+    if (this.buffer.length > 0) {
+      // Write with sync sequences to prevent tearing
+      this.target.write(ANSI.SYNC_START + this.buffer + ANSI.SYNC_END);
+      this.buffer = "";
+      this.lastFlush = Date.now();
+    }
+  }
+
+  // Forward other methods
+  write(chunk, encoding, callback) {
+    return super.write(chunk, encoding, callback);
+  }
+
+  cursorTo(x, y) {
+    if (this.target.cursorTo) {
+      return this.target.cursorTo(x, y);
+    }
+  }
+
+  moveCursor(dx, dy) {
+    if (this.target.moveCursor) {
+      return this.target.moveCursor(dx, dy);
+    }
+  }
+
+  clearLine(dir) {
+    if (this.target.clearLine) {
+      return this.target.clearLine(dir);
+    }
+  }
+
+  clearScreenDown() {
+    if (this.target.clearScreenDown) {
+      return this.target.clearScreenDown();
+    }
+  }
+
+  getColorDepth() {
+    if (this.target.getColorDepth) {
+      return this.target.getColorDepth();
+    }
+    return 24; // Assume true color
+  }
+
+  getWindowSize() {
+    return [this.columns, this.rows];
+  }
+}
+
+// Create synced stdout
+const syncedStdout = new SyncedStdout(process.stdout);
 
 // Enter alternate screen buffer
 process.stdout.write(ANSI.ALTERNATE_SCREEN_ON);
@@ -32,6 +138,7 @@ process.stdout.write(ANSI.CURSOR_HOME);
 
 // Cleanup on exit
 const cleanup = () => {
+  syncedStdout.flush(); // Flush any pending output
   process.stdout.write(ANSI.CURSOR_SHOW);
   process.stdout.write(ANSI.ALTERNATE_SCREEN_OFF);
   process.stdout.write(ANSI.RESET);
@@ -74,12 +181,12 @@ export const updateConsoleTitle = (name) => {
 
 const stdin = process.stdin.isTTY ? process.stdin : undefined;
 
-// Render with Ink-managed output
+// Render with synced stdout to prevent flickering
 const { unmount, clear } = render(createElement(App, { updateConsoleTitle }), {
   stdin,
-  stdout: process.stdout,
+  stdout: syncedStdout, // Use synced stdout wrapper
   exitOnCtrlC: false,
-  patchConsole: true,
+  patchConsole: false, // Don't patch console to avoid interference
 });
 
 // Handle Ctrl+C

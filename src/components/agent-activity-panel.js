@@ -1,24 +1,48 @@
 import React, { useState, useEffect, memo, useMemo, useRef } from "react";
 import { Box, Text } from "ink";
 import { getActivityTracker } from "../services/activity-tracker.js";
-import { getRenderController } from "../services/render-controller.js";
 
 const e = React.createElement;
 
-// Status dot colors
-const DOT_COLORS = {
+// ═══════════════════════════════════════════════════════════════════════════
+// THEME - Claude Code / OpenCode inspired design
+// ═══════════════════════════════════════════════════════════════════════════
+
+const THEME = {
+  // Status colors
+  success: "#10b981",    // Emerald
   error: "#ef4444",      // Red
-  completed: "#22c55e",  // Green
-  working: "#3b82f6",    // Blue
-  observation: "#f8fafc", // White
-  idle: "#475569"        // Dim gray
+  working: "#6366f1",    // Indigo
+  warning: "#f59e0b",    // Amber
+  info: "#3b82f6",       // Blue
+
+  // Text colors
+  primary: "#f1f5f9",    // Slate 100
+  secondary: "#94a3b8",  // Slate 400
+  muted: "#64748b",      // Slate 500
+  dim: "#475569",        // Slate 600
+
+  // Accents
+  accent: "#8b5cf6",     // Violet
+  highlight: "#22d3ee",  // Cyan
 };
 
-// Format time until next cycle
+// Status indicators
+const STATUS = {
+  working: { dot: "◉", color: THEME.working },
+  completed: { dot: "✓", color: THEME.success },
+  error: { dot: "✗", color: THEME.error },
+  pending: { dot: "○", color: THEME.muted },
+  observation: { dot: "◈", color: THEME.info },
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// UTILITIES
+// ═══════════════════════════════════════════════════════════════════════════
+
 const formatTimeUntil = (nextTime) => {
   if (!nextTime) return "soon";
-  const now = Date.now();
-  const diff = nextTime - now;
+  const diff = nextTime - Date.now();
   if (diff <= 0) return "now";
   const seconds = Math.floor(diff / 1000);
   const minutes = Math.floor(seconds / 60);
@@ -26,194 +50,195 @@ const formatTimeUntil = (nextTime) => {
   return `${seconds}s`;
 };
 
-// Activity log entry - completely static, no animations
-const ActivityEntry = memo(({ id, text, detail, status }) => {
-  const dotColor = DOT_COLORS[status] || DOT_COLORS.observation;
-  const textColor = status === "working" ? "#94a3b8" :
-                    status === "completed" ? "#4ade80" :
-                    status === "error" ? "#f87171" : "#e2e8f0";
+// ═══════════════════════════════════════════════════════════════════════════
+// COMPONENTS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Single activity entry - clean, minimal
+const ActivityEntry = memo(({ text, detail, status, isLatest }) => {
+  const s = STATUS[status] || STATUS.observation;
+  const displayText = detail || text || "Processing...";
 
   return e(
     Box,
-    { flexDirection: "row", gap: 1, paddingLeft: 1 },
-    e(Text, { color: dotColor }, "●"),
-    e(Text, { color: textColor }, detail || text)
+    { flexDirection: "row", paddingLeft: 1 },
+    e(Text, { color: s.color }, s.dot),
+    e(Text, { color: isLatest ? THEME.primary : THEME.secondary }, ` ${displayText}`)
   );
 });
 
-// Static activity list
+// Activity list with separator
 const ActivityList = memo(({ items }) => {
   if (!items || items.length === 0) return null;
 
   return e(
     Box,
-    { flexDirection: "column", gap: 0 },
-    ...items.map(entry =>
+    { flexDirection: "column" },
+    ...items.map((entry, i) =>
       e(ActivityEntry, {
-        key: entry.id,
-        id: entry.id,
+        key: entry.id || i,
         text: entry.text,
         detail: entry.detail,
-        status: entry.status
+        status: entry.status,
+        isLatest: i === 0
       })
     )
   );
 }, (prev, next) => {
   if (prev.items?.length !== next.items?.length) return false;
   for (let i = 0; i < (prev.items?.length || 0); i++) {
-    if (prev.items[i].id !== next.items[i].id ||
-        prev.items[i].status !== next.items[i].status) {
+    if (prev.items[i]?.id !== next.items[i]?.id ||
+        prev.items[i]?.status !== next.items[i]?.status) {
       return false;
     }
   }
   return true;
 });
 
-/**
- * Engine Status Panel - Uses centralized render controller to prevent flickering
- * All animations sync to a single global tick to avoid multiple render cycles
- */
+// Spinner animation frames
+const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MAIN PANEL
+// ═══════════════════════════════════════════════════════════════════════════
+
 const EngineStatusPanelBase = ({
   toolEvents = [],
   streamingText = "",
   nextCycleTime = null,
-  maxEntries = 6
+  maxEntries = 5
 }) => {
   const tracker = useMemo(() => getActivityTracker(), []);
-  const renderController = useMemo(() => getRenderController(), []);
+  const [data, setData] = useState(() => tracker.getDisplayData());
+  const [frame, setFrame] = useState(0);
+  const lastJsonRef = useRef("");
 
-  // Single state for all data - only updates on render controller tick
-  const [viewState, setViewState] = useState(() => ({
-    data: tracker.getDisplayData(),
-    animations: renderController.getAnimationStates()
-  }));
-
-  // Subscribe to centralized render tick - single source of updates
+  // Single animation loop - 100ms for smooth spinner
   useEffect(() => {
-    // Start the render controller if not running
-    renderController.start();
+    const interval = setInterval(() => {
+      setFrame(f => (f + 1) % SPINNER.length);
 
-    // Track if data actually changed
-    let lastDataJson = JSON.stringify(tracker.getDisplayData());
-
-    const handleTick = (tickData) => {
-      const currentData = tracker.getDisplayData();
-      const currentJson = JSON.stringify(currentData);
-
-      // Only update state if data actually changed OR animation state changed
-      const dataChanged = currentJson !== lastDataJson;
-
-      if (dataChanged) {
-        lastDataJson = currentJson;
-        setViewState({
-          data: currentData,
-          animations: tickData.animations
-        });
-      } else {
-        // Only update animations (cheap update)
-        setViewState(prev => ({
-          ...prev,
-          animations: tickData.animations
-        }));
+      // Check for data changes (throttled by the interval)
+      const newData = tracker.getDisplayData();
+      const newJson = JSON.stringify(newData);
+      if (newJson !== lastJsonRef.current) {
+        lastJsonRef.current = newJson;
+        setData(newData);
       }
-    };
+    }, 100);
 
-    renderController.on("tick", handleTick);
-    return () => {
-      renderController.off("tick", handleTick);
-    };
-  }, [tracker, renderController]);
+    return () => clearInterval(interval);
+  }, [tracker]);
 
-  const { data, animations } = viewState;
-  const isIdle = data.currentState === "idle" || data.currentState === "ready" || !data.isRunning;
-  const isActive = !isIdle && data.isRunning;
+  const isRunning = data.isRunning;
+  const isIdle = data.currentState === "idle" || data.currentState === "ready" || !isRunning;
+  const isActive = !isIdle && isRunning;
 
   // Build display items
   const displayItems = useMemo(() => {
     const items = [];
+    const seen = new Set();
 
-    if (toolEvents && toolEvents.length > 0) {
-      toolEvents.slice(0, 4).forEach((evt, i) => {
-        items.push({
-          id: evt.id || `tool_${evt.timestamp || i}`,
-          text: evt.text || evt.action,
-          detail: evt.detail || evt.target,
-          status: evt.status === "done" ? "completed" :
-                  evt.status === "error" ? "error" : "working"
-        });
+    // Tool events first
+    if (toolEvents?.length > 0) {
+      toolEvents.slice(0, 3).forEach((evt, i) => {
+        const text = evt.text || evt.action;
+        if (!seen.has(text)) {
+          seen.add(text);
+          items.push({
+            id: evt.id || `t${i}`,
+            text,
+            detail: evt.detail || evt.target,
+            status: evt.status === "done" ? "completed" : evt.status === "error" ? "error" : "working"
+          });
+        }
       });
     }
 
-    const existingTexts = new Set(items.map(d => d.text));
+    // Activities
     (data.activities || []).slice(0, maxEntries - items.length).forEach((act, i) => {
-      if (!existingTexts.has(act.text)) {
+      if (!seen.has(act.text)) {
+        seen.add(act.text);
         items.push({
-          id: act.id || `act_${i}`,
+          id: act.id || `a${i}`,
           text: act.text,
           detail: act.detail || act.target,
           status: act.status
         });
-        existingTexts.add(act.text);
       }
     });
 
     return items.slice(0, maxEntries);
   }, [toolEvents, data.activities, maxEntries]);
 
-  const hasStreaming = streamingText && streamingText.length > 0;
-
-  // Animation values from centralized controller
-  const pulseOn = animations.pulseOn;
-  const dotPhase = animations.dotPhase;
-  const dots = ".".repeat((dotPhase % 3) + 1);
+  const spinner = SPINNER[frame];
+  const hasStreaming = streamingText?.length > 0;
 
   return e(
     Box,
-    { flexDirection: "column", paddingX: 1, marginBottom: 1 },
+    { flexDirection: "column", paddingX: 1, paddingY: 0 },
 
-    // Header row
+    // ─── Header ───────────────────────────────────────────────────────
     e(
       Box,
-      { flexDirection: "row", justifyContent: "space-between", marginBottom: 1 },
+      { flexDirection: "row", justifyContent: "space-between" },
       e(
         Box,
-        { flexDirection: "row", gap: 1, alignItems: "center" },
-        e(Text, { color: "#64748b" }, "Engine Status"),
-        data.isRunning && e(Text, { color: pulseOn ? "#22c55e" : "#064e3b" }, "●"),
-        data.isRunning && e(Text, { color: pulseOn ? "#22c55e" : "#166534", bold: true }, "ALIVE")
+        { flexDirection: "row", gap: 1 },
+        e(Text, { color: THEME.muted, bold: true }, "ENGINE"),
+        isRunning
+          ? e(
+              Box,
+              { flexDirection: "row", gap: 1 },
+              e(Text, { color: THEME.success }, "●"),
+              e(Text, { color: THEME.success, bold: true }, "LIVE")
+            )
+          : e(Text, { color: THEME.dim }, "○ STOPPED")
       ),
-      e(Text, { color: "#475569", dimColor: true }, `cycle ${data.cycleCount}`)
+      e(Text, { color: THEME.dim }, `#${data.cycleCount}`)
     ),
 
-    // Activity list
-    e(ActivityList, { items: displayItems }),
+    // ─── Separator ────────────────────────────────────────────────────
+    e(Text, { color: THEME.dim }, "─".repeat(40)),
 
-    // Streaming output
+    // ─── Activity List ────────────────────────────────────────────────
+    displayItems.length > 0
+      ? e(ActivityList, { items: displayItems })
+      : e(
+          Box,
+          { paddingLeft: 1 },
+          e(Text, { color: THEME.muted }, "No recent activity")
+        ),
+
+    // ─── Streaming Output ─────────────────────────────────────────────
     hasStreaming && e(
       Box,
-      { flexDirection: "row", gap: 1, paddingLeft: 1, marginTop: 1 },
-      e(Text, { color: "#3b82f6" }, "..."),
-      e(Text, { color: "#94a3b8", wrap: "truncate-end" }, streamingText.slice(-80))
+      { flexDirection: "row", paddingLeft: 1, marginTop: 1 },
+      e(Text, { color: THEME.info }, "│ "),
+      e(Text, { color: THEME.secondary, wrap: "truncate-end" }, streamingText.slice(-60))
     ),
 
-    // Current state
+    // ─── Status Line ──────────────────────────────────────────────────
     e(
       Box,
-      { flexDirection: "row", gap: 1, marginTop: 1, paddingLeft: 1 },
+      { flexDirection: "row", marginTop: 1, paddingLeft: 1 },
       isActive
         ? e(
             Box,
             { flexDirection: "row", gap: 1 },
-            e(Text, { color: "#3b82f6" }, "↓"),
-            e(Text, { color: "#94a3b8" }, data.stateDetail || data.currentState),
-            e(Text, { color: "#3b82f6" }, dots)
+            e(Text, { color: THEME.working }, spinner),
+            e(Text, { color: THEME.primary }, data.stateDetail || data.currentState)
           )
         : e(
             Box,
             { flexDirection: "row", gap: 1 },
-            e(Text, { color: "#475569" }, "○"),
-            e(Text, { color: "#64748b" }, "Idle"),
-            nextCycleTime && e(Text, { color: "#475569", dimColor: true }, `· next cycle in ${formatTimeUntil(nextCycleTime)}`)
+            e(Text, { color: THEME.muted }, "◇"),
+            e(Text, { color: THEME.muted }, "Idle"),
+            nextCycleTime && e(
+              Text,
+              { color: THEME.dim },
+              ` · next in ${formatTimeUntil(nextCycleTime)}`
+            )
           )
     )
   );
@@ -221,13 +246,11 @@ const EngineStatusPanelBase = ({
 
 export const AgentActivityPanel = memo(EngineStatusPanelBase);
 
-// Compact status dot
+// Compact status indicator
 export const AgentStatusDot = memo(({ status = "idle", running = false }) => {
-  const color = status === "error" ? DOT_COLORS.error :
-                status === "idle" || !running ? DOT_COLORS.idle :
-                DOT_COLORS.working;
-
-  return e(Text, { color }, "●");
+  if (!running) return e(Text, { color: THEME.dim }, "○");
+  const s = STATUS[status] || STATUS.pending;
+  return e(Text, { color: s.color }, s.dot);
 });
 
 export default AgentActivityPanel;

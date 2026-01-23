@@ -1,11 +1,12 @@
-import React, { memo, useMemo, useState, useEffect, useRef } from "react";
+import React, { memo, useMemo } from "react";
 import { Box, Text } from "ink";
 import { getActivityTracker } from "../services/activity-tracker.js";
+import { useCoordinatedUpdates } from "../hooks/useCoordinatedUpdates.js";
 
 const e = React.createElement;
 
 // ═══════════════════════════════════════════════════════════════════════════
-// THROTTLED ACTIVITY PANEL - Updates at controlled rate to prevent flickering
+// COORDINATED ACTIVITY PANEL - Updates via global coordinator to prevent flickering
 // ═══════════════════════════════════════════════════════════════════════════
 
 const THEME = {
@@ -66,7 +67,7 @@ const ActivityList = memo(({ items }) => {
   );
 });
 
-// Main panel - subscribes to tracker with throttled updates
+// Main panel - uses global update coordinator to prevent flickering
 const EngineStatusPanelBase = ({
   toolEvents = [],
   streamingText = "",
@@ -75,42 +76,12 @@ const EngineStatusPanelBase = ({
 }) => {
   const tracker = getActivityTracker();
 
-  // State for activity data - initialized from tracker
-  const [data, setData] = useState(() => tracker.getDisplayData());
-
-  // Throttled subscription to tracker updates
-  useEffect(() => {
-    let lastUpdate = 0;
-    let pendingUpdate = null;
-    const THROTTLE_MS = 500; // Max update rate: once per 500ms
-
-    const handleUpdate = (newData) => {
-      const now = Date.now();
-      const elapsed = now - lastUpdate;
-
-      if (elapsed >= THROTTLE_MS) {
-        // Enough time has passed, update immediately
-        lastUpdate = now;
-        setData(newData);
-      } else if (!pendingUpdate) {
-        // Schedule update for later
-        pendingUpdate = setTimeout(() => {
-          pendingUpdate = null;
-          lastUpdate = Date.now();
-          setData(tracker.getDisplayData());
-        }, THROTTLE_MS - elapsed);
-      }
-    };
-
-    tracker.on("updated", handleUpdate);
-
-    return () => {
-      tracker.off("updated", handleUpdate);
-      if (pendingUpdate) {
-        clearTimeout(pendingUpdate);
-      }
-    };
-  }, [tracker]);
+  // Use coordinated updates - all components update together at 2fps
+  const data = useCoordinatedUpdates(
+    "agent-activity",
+    () => tracker.getDisplayData(),
+    { initialData: tracker.getDisplayData() }
+  ) || tracker.getDisplayData();
 
   const isRunning = data.isRunning;
   const isIdle = data.currentState === "idle" || data.currentState === "ready" || !isRunning;

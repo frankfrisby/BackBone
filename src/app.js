@@ -58,7 +58,9 @@ import {
   getLinkedInConfig,
   buildLinkedInProfile,
   buildLinkedInProfileFromUrl,
-  fetchLinkedInMessages
+  fetchLinkedInMessages,
+  getLinkedInMeta,
+  updateLinkedInMeta
 } from "./services/linkedin.js";
 import { getOuraConfig, buildOuraHealthSummary } from "./services/oura.js";
 import { getSocialConfig, buildSocialConnectionsSummary, getConnectionPrompts } from "./services/social.js";
@@ -454,6 +456,7 @@ const App = ({ updateConsoleTitle }) => {
   const pauseUpdatesRef = useRef(false); // Use ref to avoid re-renders in intervals
   const [mainViewReady, setMainViewReady] = useState(false);
   const readinessTimerRef = useRef(null);
+  const linkedInCheckTimerRef = useRef(null);
   const handleLogout = useCallback(() => {
     signOutFirebase();
     const currentSettings = loadUserSettings();
@@ -1313,6 +1316,64 @@ Return ONLY a JSON array, no other text.`;
     };
     initLinkedIn();
   }, []);
+
+  const runLinkedInCheck = useCallback(async () => {
+    const config = getLinkedInConfig();
+    if (!config.ready) return;
+    if (!linkedInProfile?.connected) return;
+    const meta = getLinkedInMeta();
+    const yesterday = meta?.lastCheckedAt ? new Date(meta.lastCheckedAt) : null;
+    const today = new Date();
+    if (yesterday && yesterday.toDateString() === today.toDateString()) {
+      return;
+    }
+    try {
+      const linkedIn = await buildLinkedInProfile(config);
+      setLinkedInProfile(linkedIn);
+      updateFromLinkedIn(linkedIn);
+      const messages = await fetchLinkedInMessages(config);
+      setLinkedInMessages(messages || []);
+      updateLinkedInMeta({
+        lastCheckedAt: new Date().toISOString(),
+        lastFetchedAt: new Date().toISOString()
+      });
+    } catch (error) {
+      console.error("LinkedIn weekly check failed:", error.message);
+    }
+  }, [linkedInProfile?.connected]);
+
+  useEffect(() => {
+    if (!linkedInProfile?.connected) return;
+    const config = getLinkedInConfig();
+    if (!config.ready) return;
+    let cancelled = false;
+
+    const scheduleNextCheck = () => {
+      const now = new Date();
+      const nextCheck = new Date(now);
+      nextCheck.setHours(8, 0, 0, 0);
+      if (now >= nextCheck) {
+        nextCheck.setDate(nextCheck.getDate() + 1);
+      }
+      const delay = nextCheck.getTime() - now.getTime();
+      linkedInCheckTimerRef.current = setTimeout(async () => {
+        if (cancelled) return;
+        await runLinkedInCheck();
+        scheduleNextCheck();
+      }, delay);
+    };
+
+    runLinkedInCheck();
+    scheduleNextCheck();
+
+    return () => {
+      cancelled = true;
+      if (linkedInCheckTimerRef.current) {
+        clearTimeout(linkedInCheckTimerRef.current);
+        linkedInCheckTimerRef.current = null;
+      }
+    };
+  }, [linkedInProfile?.connected, runLinkedInCheck]);
 
 
   // Initialize Oura health data - check both env var and file-based token

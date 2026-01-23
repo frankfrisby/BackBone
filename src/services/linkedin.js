@@ -127,6 +127,22 @@ export const saveLinkedInSync = (payload) => writeLinkedInData({ sync: payload }
 
 export const loadLinkedInSync = () => readLinkedInData()?.sync || null;
 
+export const getLinkedInMeta = () => readLinkedInData()?.meta || {};
+
+export const updateLinkedInMeta = (updates = {}) => {
+  ensureDataDir();
+  const current = readLinkedInData() || {};
+  const next = {
+    ...current,
+    meta: {
+      ...(current.meta || {}),
+      ...updates
+    }
+  };
+  fs.writeFileSync(LINKEDIN_DATA_PATH, JSON.stringify(next, null, 2), "utf-8");
+  return next.meta;
+};
+
 /**
  * LinkedIn API Service
  * Requires LinkedIn OAuth access token

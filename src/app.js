@@ -4675,7 +4675,10 @@ Folder: ${result.action.id}`,
           loadTradingStatus,
           loadConfig: loadTradingConfig,
           tickers,
-          portfolio
+          portfolio,
+          connections: connectionStatuses,
+          engineStatus,
+          toolEvents
         }),
         // Settings Panel overlay (Ctrl+S)
         showSettings && e(SettingsPanel, {

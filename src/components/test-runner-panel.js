@@ -20,14 +20,15 @@ const TEST_CATEGORIES = {
   },
   components: {
     label: "Components",
-    icon: "◧",
+    icon: "",
     tests: [
       { id: "connection-bar", name: "Connection Bar", description: "Header connection status display" },
       { id: "portfolio-panel", name: "Portfolio Panel", description: "Portfolio data rendering" },
       { id: "ticker-scores", name: "Ticker Scores", description: "Ticker score display and sorting" },
       { id: "trading-history", name: "Trading History", description: "8-week history display" },
-      { id: "chat-panel", name: "Chat Panel", description: "Input handling and autocomplete" },
-      { id: "engine-status", name: "Engine Status", description: "Engine status panel rendering" }
+      { id: "chat-panel", name: "Chat Panel", description: "Chat Panel rendering" },
+      { id: "engine-status", name: "Engine Status", description: "Engine status panel rendering" },
+      { id: "tool-actions", name: "Tool Actions", description: "Action streaming and tooling" }
     ]
   },
   data: {
@@ -146,7 +147,12 @@ const runTest = async (testId, context = {}) => {
 
       // Component tests
       case "connection-bar": {
-        return { passed: true, message: "7 service indicators configured" };
+        const connectionCount = Object.keys(context.connections || {}).length;
+        const connected = Object.values(context.connections || {}).filter(c => c?.connected).length;
+        return {
+          passed: connectionCount === 0 ? false : true,
+          message: `${connected}/${connectionCount} services connected`
+        };
       }
 
       case "portfolio-panel": {
@@ -175,7 +181,18 @@ const runTest = async (testId, context = {}) => {
       }
 
       case "engine-status": {
-        return { passed: true, message: "Status panel rendering" };
+        const status = context.engineStatus?.status?.id || context.engineStatus?.status || "idle";
+        const detail = context.engineStatus?.status?.detail || "";
+        return { passed: true, message: `Status: ${status}${detail ? ` · ${detail}` : ""}` };
+      }
+
+      case "tool-actions": {
+        const total = (context.toolEvents || []).length;
+        const working = (context.toolEvents || []).some(event => event.status === "working");
+        return {
+          passed: true,
+          message: `${total} tool events${working ? " (live work detected)" : ""}`
+        };
       }
 
       // Data flow tests
@@ -244,7 +261,10 @@ export const TestRunnerPanel = ({
   loadTradingStatus,
   loadConfig,
   tickers,
-  portfolio
+  portfolio,
+  connections = {},
+  engineStatus = {},
+  toolEvents = []
 }) => {
   const [testResults, setTestResults] = useState({});
   const [isRunning, setIsRunning] = useState(false);
@@ -254,7 +274,17 @@ export const TestRunnerPanel = ({
   const [endTime, setEndTime] = useState(null);
 
   const categories = Object.keys(TEST_CATEGORIES);
-  const context = { getAlpacaConfig, fetchYahooTickers, loadTradingStatus, loadConfig, tickers, portfolio };
+    const context = {
+      getAlpacaConfig,
+      fetchYahooTickers,
+      loadTradingStatus,
+      loadConfig,
+      tickers,
+      portfolio,
+      connections,
+      engineStatus,
+      toolEvents
+    };
 
   // Keyboard navigation
   useInput((input, key) => {

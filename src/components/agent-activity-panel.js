@@ -1,33 +1,32 @@
 import React, { useState, useEffect, memo, useMemo, useRef } from "react";
-import { Box, Text } from "ink";
+import { Box, Text, useStdout } from "ink";
 import { getActivityTracker } from "../services/activity-tracker.js";
 
 const e = React.createElement;
 
 // ═══════════════════════════════════════════════════════════════════════════
-// THEME - Claude Code / OpenCode inspired design
+// SYNCHRONIZED OUTPUT - Prevents terminal tearing/flickering
+// Same technique used by Zig-based renderers (OpenTUI)
+// ═══════════════════════════════════════════════════════════════════════════
+
+const SYNC_START = "\x1b[?2026h";  // Begin synchronized update
+const SYNC_END = "\x1b[?2026l";    // End synchronized update
+
+// ═══════════════════════════════════════════════════════════════════════════
+// THEME - Modern, clean design
 // ═══════════════════════════════════════════════════════════════════════════
 
 const THEME = {
-  // Status colors
-  success: "#10b981",    // Emerald
-  error: "#ef4444",      // Red
-  working: "#6366f1",    // Indigo
-  warning: "#f59e0b",    // Amber
-  info: "#3b82f6",       // Blue
-
-  // Text colors
-  primary: "#f1f5f9",    // Slate 100
-  secondary: "#94a3b8",  // Slate 400
-  muted: "#64748b",      // Slate 500
-  dim: "#475569",        // Slate 600
-
-  // Accents
-  accent: "#8b5cf6",     // Violet
-  highlight: "#22d3ee",  // Cyan
+  success: "#10b981",
+  error: "#ef4444",
+  working: "#6366f1",
+  info: "#3b82f6",
+  primary: "#f1f5f9",
+  secondary: "#94a3b8",
+  muted: "#64748b",
+  dim: "#475569",
 };
 
-// Status indicators
 const STATUS = {
   working: { dot: "◉", color: THEME.working },
   completed: { dot: "✓", color: THEME.success },
@@ -51,10 +50,9 @@ const formatTimeUntil = (nextTime) => {
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
-// COMPONENTS
+// COMPONENTS - Static, no animations to prevent re-renders
 // ═══════════════════════════════════════════════════════════════════════════
 
-// Single activity entry - clean, minimal
 const ActivityEntry = memo(({ text, detail, status, isLatest }) => {
   const s = STATUS[status] || STATUS.observation;
   const displayText = detail || text || "Processing...";
@@ -67,7 +65,6 @@ const ActivityEntry = memo(({ text, detail, status, isLatest }) => {
   );
 });
 
-// Activity list with separator
 const ActivityList = memo(({ items }) => {
   if (!items || items.length === 0) return null;
 
@@ -95,11 +92,11 @@ const ActivityList = memo(({ items }) => {
   return true;
 });
 
-// Spinner animation frames
+// Spinner frames
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 // ═══════════════════════════════════════════════════════════════════════════
-// MAIN PANEL
+// MAIN PANEL - Uses synchronized output for flicker-free rendering
 // ═══════════════════════════════════════════════════════════════════════════
 
 const EngineStatusPanelBase = ({
@@ -109,26 +106,62 @@ const EngineStatusPanelBase = ({
   maxEntries = 5
 }) => {
   const tracker = useMemo(() => getActivityTracker(), []);
+  const { write } = useStdout();
+
+  // State
   const [data, setData] = useState(() => tracker.getDisplayData());
   const [frame, setFrame] = useState(0);
-  const lastJsonRef = useRef("");
 
-  // Single animation loop - 100ms for smooth spinner
+  // Refs for performance
+  const lastJsonRef = useRef("");
+  const syncWrittenRef = useRef(false);
+
+  // Single optimized update loop
   useEffect(() => {
-    const interval = setInterval(() => {
+    let mounted = true;
+
+    const tick = () => {
+      if (!mounted) return;
+
+      // Update spinner frame
       setFrame(f => (f + 1) % SPINNER.length);
 
-      // Check for data changes (throttled by the interval)
+      // Check for data changes
       const newData = tracker.getDisplayData();
       const newJson = JSON.stringify(newData);
+
       if (newJson !== lastJsonRef.current) {
         lastJsonRef.current = newJson;
+
+        // Write sync start before React update
+        if (write && !syncWrittenRef.current) {
+          write(SYNC_START);
+          syncWrittenRef.current = true;
+        }
+
         setData(newData);
       }
-    }, 100);
+    };
 
-    return () => clearInterval(interval);
-  }, [tracker]);
+    // 100ms interval for smooth spinner
+    const interval = setInterval(tick, 100);
+
+    return () => {
+      mounted = false;
+      clearInterval(interval);
+    };
+  }, [tracker, write]);
+
+  // Write sync end after render
+  useEffect(() => {
+    if (write && syncWrittenRef.current) {
+      // Use setImmediate to write after React has flushed
+      setImmediate(() => {
+        write(SYNC_END);
+        syncWrittenRef.current = false;
+      });
+    }
+  });
 
   const isRunning = data.isRunning;
   const isIdle = data.currentState === "idle" || data.currentState === "ready" || !isRunning;
@@ -139,7 +172,6 @@ const EngineStatusPanelBase = ({
     const items = [];
     const seen = new Set();
 
-    // Tool events first
     if (toolEvents?.length > 0) {
       toolEvents.slice(0, 3).forEach((evt, i) => {
         const text = evt.text || evt.action;
@@ -155,7 +187,6 @@ const EngineStatusPanelBase = ({
       });
     }
 
-    // Activities
     (data.activities || []).slice(0, maxEntries - items.length).forEach((act, i) => {
       if (!seen.has(act.text)) {
         seen.add(act.text);
@@ -176,9 +207,9 @@ const EngineStatusPanelBase = ({
 
   return e(
     Box,
-    { flexDirection: "column", paddingX: 1, paddingY: 0 },
+    { flexDirection: "column", paddingX: 1 },
 
-    // ─── Header ───────────────────────────────────────────────────────
+    // Header
     e(
       Box,
       { flexDirection: "row", justifyContent: "space-between" },
@@ -193,24 +224,20 @@ const EngineStatusPanelBase = ({
               e(Text, { color: THEME.success }, "●"),
               e(Text, { color: THEME.success, bold: true }, "LIVE")
             )
-          : e(Text, { color: THEME.dim }, "○ STOPPED")
+          : e(Text, { color: THEME.dim }, "○ OFF")
       ),
       e(Text, { color: THEME.dim }, `#${data.cycleCount}`)
     ),
 
-    // ─── Separator ────────────────────────────────────────────────────
+    // Separator
     e(Text, { color: THEME.dim }, "─".repeat(40)),
 
-    // ─── Activity List ────────────────────────────────────────────────
+    // Activity list
     displayItems.length > 0
       ? e(ActivityList, { items: displayItems })
-      : e(
-          Box,
-          { paddingLeft: 1 },
-          e(Text, { color: THEME.muted }, "No recent activity")
-        ),
+      : e(Box, { paddingLeft: 1 }, e(Text, { color: THEME.muted }, "Waiting...")),
 
-    // ─── Streaming Output ─────────────────────────────────────────────
+    // Streaming
     hasStreaming && e(
       Box,
       { flexDirection: "row", paddingLeft: 1, marginTop: 1 },
@@ -218,7 +245,7 @@ const EngineStatusPanelBase = ({
       e(Text, { color: THEME.secondary, wrap: "truncate-end" }, streamingText.slice(-60))
     ),
 
-    // ─── Status Line ──────────────────────────────────────────────────
+    // Status line
     e(
       Box,
       { flexDirection: "row", marginTop: 1, paddingLeft: 1 },
@@ -234,11 +261,7 @@ const EngineStatusPanelBase = ({
             { flexDirection: "row", gap: 1 },
             e(Text, { color: THEME.muted }, "◇"),
             e(Text, { color: THEME.muted }, "Idle"),
-            nextCycleTime && e(
-              Text,
-              { color: THEME.dim },
-              ` · next in ${formatTimeUntil(nextCycleTime)}`
-            )
+            nextCycleTime && e(Text, { color: THEME.dim }, ` · next ${formatTimeUntil(nextCycleTime)}`)
           )
     )
   );
@@ -246,7 +269,6 @@ const EngineStatusPanelBase = ({
 
 export const AgentActivityPanel = memo(EngineStatusPanelBase);
 
-// Compact status indicator
 export const AgentStatusDot = memo(({ status = "idle", running = false }) => {
   if (!running) return e(Text, { color: THEME.dim }, "○");
   const s = STATUS[status] || STATUS.pending;

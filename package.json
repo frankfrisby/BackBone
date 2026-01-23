@@ -47,5 +47,8 @@
     "playwright": "^1.49.2",
     "ws": "^8.18.0",
     "zod": "^4.3.5"
+  },
+  "devDependencies": {
+    "zig": "^0.3.0"
   }
 }

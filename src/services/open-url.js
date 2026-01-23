@@ -1,13 +1,16 @@
 import { spawn } from "node:child_process";
 
 export const openUrl = (url) => {
+  const normalizedUrl = url.startsWith("http://") || url.startsWith("https://")
+    ? url
+    : `https://${url}`;
   if (process.platform === "win32") {
-    spawn("cmd", ["/c", "start", "", url], { stdio: "ignore", detached: true });
+    spawn("rundll32.exe", ["url.dll,FileProtocolHandler", normalizedUrl], { stdio: "ignore", detached: true });
     return;
   }
   if (process.platform === "darwin") {
-    spawn("open", [url], { stdio: "ignore", detached: true });
+    spawn("open", [normalizedUrl], { stdio: "ignore", detached: true });
     return;
   }
-  spawn("xdg-open", [url], { stdio: "ignore", detached: true });
+  spawn("xdg-open", [normalizedUrl], { stdio: "ignore", detached: true });
 };

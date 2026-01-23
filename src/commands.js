@@ -44,6 +44,7 @@ export const COMMANDS = [
   "/focus",
   "/learn",
   "/reset",
+  "/logout",
   "/clear",
   "/help"
 ];
@@ -93,6 +94,7 @@ export const COMMAND_DESCRIPTIONS = {
   "/focus": "Focus timer - /focus start [task], /focus deep, /focus end, /focus pause/resume",
   "/learn": "Learning tracker - /learn, /learn add <title>, /learn progress <#> <percent>, /learn done",
   "/reset": "Reset all data - requires two confirmations to delete",
+  "/logout": "Log out and return to onboarding",
   "/clear": "Clear conversation history",
   "/help": "Show available commands"
 };

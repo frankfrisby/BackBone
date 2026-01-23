@@ -2,6 +2,7 @@ import fs from "fs";
 import path from "path";
 
 const PROJECTS_DIR = path.join(process.cwd(), "projects");
+const PROJECT_RESEARCH_FILE = "research.json";
 
 const ensureProjectsDir = () => {
   if (!fs.existsSync(PROJECTS_DIR)) {
@@ -130,6 +131,31 @@ const resolveProject = (projectId) => {
   if (!slug) return null;
 
   return findProjectBySlug(slug);
+};
+
+export const appendProjectResearch = (projectId, entry) => {
+  const resolved = resolveProject(projectId);
+  if (!resolved?.path) {
+    return { success: false, error: "Project not found" };
+  }
+  const researchPath = path.join(resolved.path, PROJECT_RESEARCH_FILE);
+  const payload = {
+    ...entry,
+    savedAt: new Date().toISOString()
+  };
+  try {
+    let data = [];
+    if (fs.existsSync(researchPath)) {
+      data = JSON.parse(fs.readFileSync(researchPath, "utf-8"));
+      if (!Array.isArray(data)) data = [];
+    }
+    data.unshift(payload);
+    data = data.slice(0, 100);
+    fs.writeFileSync(researchPath, JSON.stringify(data, null, 2));
+    return { success: true, path: researchPath };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
 };
 
 const buildGoalsTemplate = (name, displayDate) => `# Goals

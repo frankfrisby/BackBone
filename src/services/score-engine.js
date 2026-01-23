@@ -1,35 +1,53 @@
 /**
  * Comprehensive Score Engine for BACKBONE
- * Based on CofounderAGI production scoring system
+ * Based on BackBoneApp production scoring system (https://github.com/frankfrisby/BackBoneApp)
  *
  * Score Range: 0-10 (not 0-100)
  *
  * Components:
  * - Technical Score (RSI, volatility)
  * - Prediction Score (AI model output)
- * - MACD Score (multi-timeframe momentum)
- * - Volume Score (sigma-based anomaly detection)
- * - Price Position Score (60-day range)
- * - Psychological Adjustment (price momentum)
- * - Time Decay (staleness penalty)
- * - Earnings Proximity Boost
+ * - MACD Score (multi-timeframe momentum with slope analysis)
+ * - Volume Score (sigma-based anomaly detection with direction validation)
+ * - Price Position Score (60-day range - overbought/oversold)
+ * - Psychological Adjustment (price momentum with breaking points at 15%/25%)
+ * - Time Decay (staleness penalty - 0.6 per day, max 7 days)
+ * - Earnings Proximity Boost (exponential as earnings approach)
+ * - Price Movement Penalty (extreme moves -12%/-20%)
  */
 
 import fs from "fs";
 import path from "path";
 
+// Import BackBoneApp algorithms
+import {
+  calculateMacdSlopeAndDirection,
+  calculateEffectiveMacdScore as calcEffectiveMacdScore,
+  computeFinalMacdScore,
+  calculatePsychologicalAdjustment as calcPsychAdjustment,
+  calculatePriceMovementPenalty as calcMovementPenalty,
+  calculateEarningsScore as calcEarningsScore,
+  calculatePricePositionScore as calcPricePositionScore,
+  calculateVolumeScore as calcVolumeScore,
+  calculateEffectiveScore as calcEffectiveScoreFull,
+  TRADING_CONFIG
+} from "./trading-algorithms.js";
+
 const DATA_DIR = path.join(process.cwd(), "data");
 const SCORES_PATH = path.join(DATA_DIR, "ticker-scores.json");
 
-// Score thresholds (0-10 scale)
+// Score thresholds (0-10 scale) - aligned with BackBoneApp
 export const SCORE_THRESHOLDS = {
-  EXTREME_BUY: 9.0,    // Auto-execute buy
-  BUY: 7.0,            // High confidence buy
-  MODERATE_BUY: 6.0,   // Moderate buy
-  HOLD_HIGH: 5.0,      // Upper hold
-  HOLD_LOW: 4.0,       // Lower hold
-  SELL: 3.0,           // Sell signal
-  EXTREME_SELL: 1.5    // Auto-execute sell
+  EXTREME_BUY: 9.0,              // Auto-execute buy
+  BUY: 8.0,                       // High confidence buy (SPY positive: 7.1, SPY negative: 8.0)
+  BUY_SPY_POSITIVE: 7.1,          // Buy threshold when SPY is positive
+  BUY_SPY_NEGATIVE: 8.0,          // Buy threshold when SPY is negative
+  MODERATE_BUY: 6.5,              // Moderate buy
+  HOLD_HIGH: 5.0,                 // Upper hold
+  HOLD_LOW: 4.0,                  // Lower hold
+  SELL: 3.0,                      // Sell signal
+  TECHNICAL_OVERRIDE: 2.7,        // Sell protected positions if technicals drop here
+  EXTREME_SELL: 1.5               // Auto-execute sell
 };
 
 // Signal labels and colors
@@ -63,29 +81,45 @@ export const isTop3Candidate = (score) => {
 
 /**
  * Calculate Effective Score (0-10)
- * Main scoring formula from CofounderAGI
+ * Main scoring formula from BackBoneApp production system
+ *
+ * Formula:
+ * (tech + pred + psych)/2 + (dir × 0.2) + (pos × 0.2) - (days × 0.6)
+ * + macdAdj + volumeScore + (pricePos × 1.25) + (earnings × 2.0) + movementPenalty
  */
-export const calculateEffectiveScore = ({
-  technicalScore = 5.0,
-  predictionScore = 5.5,
-  macdAdjustment = 0,
-  volumeScore = 0,
-  pricePositionScore = 0,
-  psychologicalAdjustment = 0,
-  directionalBonus = 0,
-  positiveBonus = 0,
-  timeDecayPenalty = 0,
-  earningsScore = 0,
-  priceMovementPenalty = 0
-}) => {
-  // Base score from technical + prediction + psychological
-  const baseScore = (technicalScore + predictionScore + psychologicalAdjustment) / 2;
+export const calculateEffectiveScore = (inputs) => {
+  // If full inputs object provided, use the comprehensive calculation
+  if (inputs && typeof inputs === 'object' && 'technicalScore' in inputs) {
+    return calcEffectiveScoreFull(inputs);
+  }
 
-  // Apply all adjustments
+  // Legacy parameter format for backwards compatibility
+  const {
+    technicalScore = 5.0,
+    predictionScore = 5.5,
+    macdAdjustment = 0,
+    volumeScore = 0,
+    pricePositionScore = 0,
+    psychologicalAdjustment = 0,
+    directionalBonus = 0,
+    positiveBonus = 0,
+    timeDecayPenalty = 0,
+    earningsScore = 0,
+    priceMovementPenalty = 0
+  } = inputs || {};
+
+  // Apply defaults for 0 values (per BackBoneApp logic)
+  const adjTechnical = technicalScore === 0 ? 6.0 : technicalScore;
+  const adjPrediction = predictionScore === 0 ? 5.5 : predictionScore;
+
+  // Base score from technical + prediction + psychological
+  const baseScore = (adjTechnical + adjPrediction + psychologicalAdjustment) / 2;
+
+  // Apply all adjustments with BackBoneApp weights
   const rawScore = baseScore +
-    (directionalBonus * 0.2) +
-    (positiveBonus * 0.2) -
-    (timeDecayPenalty * 0.6) +
+    Math.max(-1.0, Math.min(1.0, directionalBonus * 0.2)) +
+    Math.max(-1.0, Math.min(1.0, positiveBonus * 0.2)) -
+    (Math.min(7, timeDecayPenalty) * 0.6) +
     macdAdjustment +
     volumeScore +
     (pricePositionScore * 1.25) +
@@ -98,23 +132,55 @@ export const calculateEffectiveScore = ({
 
 /**
  * Calculate MACD Score (-2.5 to +2.5)
- * Multi-timeframe weighted analysis
+ * Multi-timeframe weighted analysis using BackBoneApp algorithms
+ *
+ * Supports:
+ * - 6-day histogram array for slope analysis
+ * - Multi-timeframe weighted score (weekly/daily/4hr)
+ * - Position-in-range factor (rewards mid-range MACD positions)
  */
 export const calculateMACDScore = (macdData) => {
-  if (!macdData || macdData.histogram === null) return 0;
+  if (!macdData) return 0;
 
+  // If we have histogram array, use slope-based analysis
+  if (macdData.histogramArray && macdData.histogramArray.length >= 6) {
+    const slopeAnalysis = calculateMacdSlopeAndDirection(macdData.histogramArray);
+
+    if (slopeAnalysis.isValid) {
+      const directionMultiplier = slopeAnalysis.direction === 'positive' ? 1 :
+                                   slopeAnalysis.direction === 'negative' ? -1 : 0;
+      const scaledMagnitude = Math.min(1, slopeAnalysis.magnitude * 10);
+      const rawMacdAdj = directionMultiplier * scaledMagnitude;
+
+      // Apply position-in-range factor if we have MACD line range data
+      if (macdData.macdLine != null && macdData.macdLineMin != null && macdData.macdLineMax != null) {
+        return calcEffectiveMacdScore(rawMacdAdj, macdData.macdLine, macdData.macdLineMin, macdData.macdLineMax);
+      }
+
+      return Math.max(-2.5, Math.min(2.5, rawMacdAdj * 2.5));
+    }
+  }
+
+  // If we have weighted multi-timeframe score
+  if (macdData.weightedScore != null) {
+    return macdData.weightedScore * 2.5;
+  }
+
+  // Fallback to simple histogram-based scoring
   const { histogram, macd, signal, trend } = macdData;
+
+  if (histogram == null) return 0;
 
   // Base MACD score from histogram
   let score = 0;
 
   // Histogram-based scoring
   if (histogram > 0.5) {
-    score = Math.min(1, histogram / 2); // Cap at 1
+    score = Math.min(1, histogram / 2);
   } else if (histogram < -0.5) {
-    score = Math.max(-1, histogram / 2); // Cap at -1
+    score = Math.max(-1, histogram / 2);
   } else {
-    score = histogram / 0.5 * 0.5; // Scale smaller values
+    score = histogram / 0.5 * 0.5;
   }
 
   // Trend confirmation bonus
@@ -124,63 +190,62 @@ export const calculateMACDScore = (macdData) => {
     score -= 0.25;
   }
 
-  // Multiply by 2.5 for final range
   return Math.max(-2.5, Math.min(2.5, score * 2.5));
 };
 
 /**
  * Calculate Volume Sigma Score (-1.5 to +1.5)
+ * Uses BackBoneApp algorithm with direction validation:
+ *
+ * Formula:
+ * - Base: 2.5 × (enhancedSigma - 1) / 10 - 1
+ * - Enhanced sigma = sigma × (1 + intradayMultiplier)
+ *
+ * Direction Validation:
+ * - If stock declining in last 30 min (< -0.05%): force NEGATIVE volume score
+ * - This prevents misleading pump signals on declining stocks
+ *
+ * @param {number} sigma - Volume sigma (standard deviations from mean)
+ * @param {number} priceDirection - Recent price change for direction validation
+ * @param {number} intradayMultiplier - Intraday volume multiplier (optional)
  */
-export const calculateVolumeSigmaScore = (sigma, priceDirection = 0) => {
-  if (!sigma || sigma === 1) return 0;
-
-  // Base formula: 2.5 × (sigma - 1) / 10 - 1
-  let score = 2.5 * (sigma - 1) / 10;
-
-  // Validation: Only positive if not declining
-  if (score > 0 && priceDirection < 0) {
-    score = score * 0.3; // Dampen positive volume on declining price
-  }
-
-  return Math.max(-1.5, Math.min(1.5, score));
+export const calculateVolumeSigmaScore = (sigma, priceDirection = 0, intradayMultiplier = 0) => {
+  return calcVolumeScore(sigma || 1, intradayMultiplier, priceDirection);
 };
 
 /**
- * Calculate Price Position Score (-1.5 to +1.5)
- * Based on 60-day price range
+ * Calculate 60-day Price Position Score (-1.5 to +1.5)
+ * Uses BackBoneApp algorithm:
+ *
+ * - Near 60-day low (0-10%): +1.5 (oversold, bullish)
+ * - Near 60-day high (90-100%): -1.5 (overbought, bearish)
+ * - Linear interpolation between 10% and 90%
+ *
+ * Multiplied by 1.25 in final formula for moderate influence
  */
 export const calculatePricePositionScore = (currentPrice, min60d, max60d) => {
-  if (!currentPrice || !min60d || !max60d || max60d === min60d) return 0;
-
-  const position = (currentPrice - min60d) / (max60d - min60d);
-
-  // Oversold (bullish) vs overbought (bearish)
-  if (position <= 0.1) return 1.5;  // Deeply oversold - bullish
-  if (position >= 0.9) return -1.5; // Deeply overbought - bearish
-
-  // Linear interpolation between
-  return 1.5 - (position * 3);
+  return calcPricePositionScore(currentPrice, min60d, max60d);
 };
 
 /**
- * Calculate Psychological Adjustment (-3.5 to +3.5)
- * Based on price momentum
+ * Calculate Psychological Adjustment with Breaking Points
+ * Uses BackBoneApp psychological zones:
+ *
+ * Zone 1 (0-15%): Normal momentum
+ *   - Up decreases score, Down increases score
+ *   - Adjustment: (absPercent / 2) × 0.5
+ *
+ * Zone 2 (15-25%): First reversal (momentum energy)
+ *   - Beyond 15%, the effect reverses
+ *
+ * Zone 3 (>25%): Second reversal
+ *   - Beyond 25%, reverses again
+ *
+ * @param {number} percentChange - Price change percentage
+ * @returns {number} Adjustment value
  */
 export const calculatePsychologicalAdjustment = (percentChange) => {
-  if (!percentChange) return 0;
-
-  const absPercent = Math.abs(percentChange);
-  const direction = percentChange >= 0 ? 1 : -1;
-
-  let adjustment = 0;
-  if (absPercent < 1) adjustment = 0;
-  else if (absPercent < 3) adjustment = (absPercent - 1) / 2 * 1.5;
-  else if (absPercent < 5) adjustment = 1.5;
-  else if (absPercent < 10) adjustment = 2.0;
-  else if (absPercent < 15) adjustment = 3.0;
-  else adjustment = 3.5;
-
-  return adjustment * direction;
+  return calcPsychAdjustment(percentChange || 0);
 };
 
 /**
@@ -192,100 +257,192 @@ export const calculateTimeDecayPenalty = (daysOld) => {
 };
 
 /**
- * Calculate Earnings Score (0 to 1)
+ * Calculate Earnings Proximity Score (0 to 1, can be negative post-earnings)
+ * Uses BackBoneApp algorithm:
+ *
+ * Formula (for earnings within 30 days):
+ * - earningsScore = ((30 - t) / 30)^2
+ *
+ * Post-earnings penalty:
+ * - 0-3 days after: NEGATIVE score (fades out linearly)
+ *
+ * Time-of-day adjustment:
+ * - Before 4 PM ET: subtract 0.5 days (earnings today scores higher in morning)
+ *
+ * Multiplied by 2.0 in final formula for strong influence (up to +2 points)
  */
-export const calculateEarningsScore = (daysUntilEarnings) => {
-  if (daysUntilEarnings === null || daysUntilEarnings === undefined) return 0;
-  if (daysUntilEarnings > 30) return 0;
-  if (daysUntilEarnings < 0 && daysUntilEarnings >= -3) {
-    // Post-earnings penalty (fades out)
-    return (daysUntilEarnings / 3) * 0.5;
+export const calculateEarningsScore = (earningsDate) => {
+  // If passed as days until, convert to date
+  if (typeof earningsDate === 'number') {
+    const date = new Date();
+    date.setDate(date.getDate() + earningsDate);
+    return calcEarningsScore(date);
   }
-  if (daysUntilEarnings < 0) return 0;
-
-  // Exponential approach as earnings near
-  return Math.pow((30 - daysUntilEarnings) / 30, 2);
+  return calcEarningsScore(earningsDate);
 };
 
 /**
- * Calculate Price Movement Penalty (-3 to 0)
+ * Calculate Price Movement Penalty (always ≤ 0)
+ * Uses BackBoneApp algorithm:
+ *
+ * DOWN movements (negative %):
+ * - -1 point at -12%
+ * - -2 points at -20%
+ * - Continues at -1 per 10%
+ *
+ * UP movements (positive %):
+ * - -0.5 points at +12%
+ * - -1 point at +20%
+ * - Continues at half the down rate
+ *
+ * Examples:
+ * - -5%: 0 (no penalty)
+ * - -12%: -1.0
+ * - -20%: -2.0
+ * - +12%: -0.5
+ * - +20%: -1.0
  */
 export const calculatePriceMovementPenalty = (percentChange) => {
-  if (!percentChange) return 0;
-
-  const absPercent = Math.abs(percentChange);
-
-  if (absPercent < 12) return 0;
-
-  if (percentChange < 0) {
-    // Down movements (starting at 12% decline)
-    return Math.max(-3, -1 - (absPercent - 12) / 10);
-  } else {
-    // Up movements (half the rate)
-    return Math.max(-1.5, -0.5 - (absPercent - 12) / 20);
-  }
+  return calcMovementPenalty(percentChange || 0);
 };
 
 /**
  * Calculate comprehensive ticker score with all components
+ * Uses full BackBoneApp algorithm suite
+ *
+ * Inputs can include:
+ * - Basic: price, changePercent, volumeSigma, macd, rsi, predictionScore
+ * - Advanced: macdHistogramArray, macdLine, macdLineMin/Max, earningsDate
+ * - Multi-timeframe: macdWeightedScore, macdAlignmentScore
+ *
+ * @param {Object} ticker - Ticker data with all available fields
+ * @returns {Object} Score result with breakdown
  */
 export const calculateTickerScore = (ticker) => {
   const {
+    // Price data
     price,
+    currentPrice,
     change,
     changePercent,
+
+    // Volume
     volume,
     avgVolume,
     volumeSigma,
+    sigmaScore,
+    intradayVolumeMultiplier,
+    recentPriceChange30min,
+
+    // MACD - Basic
     macd,
+
+    // MACD - Advanced (from BackBoneApp)
+    macdHistogramArray,
+    macdLine,
+    macdLineMin30d,
+    macdLineMax30d,
+    macdLineMin120d,
+    macdLineMax120d,
+    improvedMacdScore,
+    macdWeightedScore,
+    macdAlignmentScore,
+
+    // Technical
     rsi,
+
+    // Price range
     min60d,
     max60d,
+    price60dMin,
+    price60dMax,
+
+    // Prediction
     predictionScore,
-    daysUntilEarnings,
-    predictionAge
+    technicalScore: rawTechnicalScore,
+    predictionDate,
+    predictionAge,
+
+    // Historical averages
+    avgDirectional,
+    avgPositive,
+
+    // Earnings
+    earningsDate,
+    daysUntilEarnings
   } = ticker;
 
-  // Calculate individual components
-  const technicalScore = rsi ? (100 - Math.abs(50 - rsi)) / 10 : 5.0;
-  const macdAdjustment = calculateMACDScore(macd);
-  const volumeScore = calculateVolumeSigmaScore(volumeSigma, changePercent);
-  const pricePositionScore = calculatePricePositionScore(price, min60d, max60d);
-  const psychologicalAdjustment = calculatePsychologicalAdjustment(changePercent);
-  const timeDecayPenalty = calculateTimeDecayPenalty(predictionAge);
-  const earningsScore = calculateEarningsScore(daysUntilEarnings);
-  const priceMovementPenalty = calculatePriceMovementPenalty(changePercent);
+  // Calculate technical score from RSI if not provided
+  const technicalScore = rawTechnicalScore || (rsi ? (100 - Math.abs(50 - rsi)) / 10 : 5.0);
 
-  // Calculate effective score
-  const score = calculateEffectiveScore({
+  // Build comprehensive inputs for BackBoneApp algorithm
+  const inputs = {
     technicalScore,
     predictionScore: predictionScore || 5.5,
-    macdAdjustment,
-    volumeScore,
-    pricePositionScore,
-    psychologicalAdjustment,
-    timeDecayPenalty,
-    earningsScore,
-    priceMovementPenalty
-  });
+    percentChange: changePercent || change || 0,
+    avgDirectional: avgDirectional || 0,
+    avgPositive: avgPositive || 0,
+    predictionDate: predictionDate,
+    sigmaScore: sigmaScore || volumeSigma || 1,
+    intradayVolumeMultiplier: intradayVolumeMultiplier || 0,
+    recentPriceChange30min: recentPriceChange30min,
+
+    // MACD inputs (priority: multi-timeframe > improved > array > basic)
+    macdWeightedScore: macdWeightedScore,
+    macdAlignmentScore: macdAlignmentScore,
+    improvedMacdScore: improvedMacdScore,
+    macdHistogramArray: macdHistogramArray,
+    macdLine: macdLine || macd?.macd,
+    macdLineMin30d: macdLineMin30d,
+    macdLineMax30d: macdLineMax30d,
+    macdLineMin120d: macdLineMin120d,
+    macdLineMax120d: macdLineMax120d,
+    macd: macd?.histogram,
+    macd5dAgo: macd?.histogram5dAgo,
+    effectiveMacdScore: macd?.effectiveScore,
+
+    // Price position
+    currentPrice: currentPrice || price,
+    price60dMin: price60dMin || min60d,
+    price60dMax: price60dMax || max60d,
+
+    // Earnings
+    earningsDate: earningsDate || (daysUntilEarnings != null ? addDays(new Date(), daysUntilEarnings) : null)
+  };
+
+  // Calculate using full BackBoneApp algorithm
+  const result = calcEffectiveScoreFull(inputs);
 
   // Get signal
-  const signal = getSignalFromScore(score);
+  const signal = getSignalFromScore(result.effectiveScore);
 
   return {
-    score,
+    score: result.effectiveScore,
     signal,
     components: {
-      technical: Math.round(technicalScore * 100) / 100,
-      macd: Math.round(macdAdjustment * 100) / 100,
-      volume: Math.round(volumeScore * 100) / 100,
-      pricePosition: Math.round(pricePositionScore * 100) / 100,
-      psychological: Math.round(psychologicalAdjustment * 100) / 100,
-      earnings: Math.round(earningsScore * 100) / 100,
-      penalty: Math.round(priceMovementPenalty * 100) / 100
-    }
+      technical: Math.round(result.adjustedTechnicalScore * 100) / 100,
+      prediction: Math.round(result.adjustedPredictionScore * 100) / 100,
+      macd: Math.round(result.macdAdjustment * 100) / 100,
+      volume: Math.round(result.volumeScore * 100) / 100,
+      pricePosition: Math.round(result.pricePositionScore * 100) / 100,
+      psychological: Math.round(result.psychologicalAdjustment * 100) / 100,
+      earnings: Math.round(result.earningsScore * 1000) / 1000,
+      penalty: Math.round(result.priceMovementPenalty * 100) / 100,
+      directional: Math.round(result.directionalBonus * 100) / 100,
+      positive: Math.round(result.positiveBonus * 100) / 100,
+      timeDecay: Math.round(result.timeDecayPenalty * 100) / 100
+    },
+    formula: result.formula,
+    daysOld: result.daysOld
   };
 };
+
+// Helper function for date calculation
+function addDays(date, days) {
+  const result = new Date(date);
+  result.setDate(result.getDate() + days);
+  return result;
+}
 
 /**
  * Load saved ticker scores

@@ -53,7 +53,7 @@ export const ProjectsPanel = ({ projects = [], title = "Projects", maxItems = 5 
       {
         flexDirection: "column",
         borderStyle: "round",
-        borderColor: "#1e293b",
+        borderColor: "#0f172a",
         padding: 1
       },
       e(
@@ -94,7 +94,7 @@ export const ProjectsPanel = ({ projects = [], title = "Projects", maxItems = 5 
     {
       flexDirection: "column",
       borderStyle: "round",
-      borderColor: "#1e293b",
+      borderColor: "#0f172a",
       padding: 1
     },
     // Header with count

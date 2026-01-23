@@ -25,7 +25,7 @@ export const StatusPanel = ({ notifications, integrations }) => {
     {
       flexDirection: "column",
       borderStyle: "round",
-      borderColor: "#1e293b",
+      borderColor: "#0f172a",
       padding: 1,
       marginY: 1
     },

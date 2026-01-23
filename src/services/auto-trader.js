@@ -2,35 +2,54 @@ import fetch from "node-fetch";
 import fs from "fs";
 import path from "path";
 import { getAlpacaConfig } from "./alpaca.js";
+import { TRADING_CONFIG, TRADING_RULES, isGoodMomentum, isProtectedPosition, getActionFromScore } from "./trading-algorithms.js";
+import { SCORE_THRESHOLDS, getSignalFromScore } from "./score-engine.js";
 
 /**
  * Auto-Trading Service for BACKBONE
- * Monitors ticker scores and executes trades based on criteria
- * Sends notifications when trades are made
+ * Based on BackBoneApp production trading system
+ *
+ * Features:
+ * - Dynamic buy threshold based on SPY direction (7.1 positive, 8.0 negative)
+ * - Momentum protection (don't interrupt +8% gains)
+ * - Technical override (sell protected positions if score ≤2.7)
+ * - Day trade limits (3 per 5-day window)
+ * - Position limits (max 2 concurrent)
+ * - Multi-channel notifications (Pushover, Ntfy, Firebase, local)
  */
 
 const DATA_DIR = path.join(process.cwd(), "data");
 const TRADES_LOG = path.join(DATA_DIR, "trades-log.json");
 const CONFIG_FILE = path.join(DATA_DIR, "trading-config.json");
 
-// Trading thresholds (0-10 scale)
+// Trading thresholds (0-10 scale) - aligned with BackBoneApp
 const DEFAULT_CONFIG = {
-  enabled: true, // Auto-trading enabled by default
-  mode: "paper", // paper or live
-  buyThreshold: 8.0, // Score >= this triggers buy evaluation (0-10 scale)
-  sellThreshold: 4.0, // Score <= this triggers sell evaluation (0-10 scale)
-  requireBullishMACD: false, // Don't require bullish MACD (rely on score)
-  requireBearishMACD: false, // Don't require bearish MACD (rely on score)
-  requireHighVolume: false, // Require above-average volume
-  maxPositionSize: 1000, // Max $ per position
-  maxTotalPositions: 5, // Max number of positions
-  maxDailyTrades: 10, // Max trades per day
-  cooldownMinutes: 30, // Minutes between trades on same ticker
-  notifyOnTrade: true, // Send phone notification
-  notifyOnSignal: false, // Send notification on strong signals
-  watchlist: [], // Specific tickers to watch (empty = all)
-  blacklist: [], // Tickers to never trade
-  onlyTop3: true, // Only buy tickers that are in the top 3 by score
+  enabled: true,                    // Auto-trading enabled by default
+  mode: "paper",                    // paper or live
+  buyThreshold: 8.0,                // Score >= this triggers buy evaluation (SPY negative)
+  buyThresholdSPYPositive: 7.1,     // Lower threshold when SPY is positive
+  sellThreshold: 4.0,               // Score <= this triggers sell evaluation
+  extremeBuyThreshold: 9.0,         // Auto-execute buy immediately
+  extremeSellThreshold: 1.5,        // Auto-execute sell immediately
+  technicalOverrideThreshold: 2.7,  // Sell protected positions if technicals drop here
+  goodMomentumPercent: 5.0,         // +5% or better = good momentum
+  protectedPositionPercent: 8.0,    // +8% = protected from interruption
+  requireBullishMACD: false,        // Don't require bullish MACD (rely on score)
+  requireBearishMACD: false,        // Don't require bearish MACD (rely on score)
+  requireHighVolume: false,         // Require above-average volume
+  maxPositionSize: 1000,            // Max $ per position
+  maxTotalPositions: 2,             // Max number of positions (BackBoneApp: 2)
+  maxDailyTrades: 10,               // Max trades per day
+  maxDayTrades: 3,                  // Max day trades in 5-day window (PDT rule)
+  dayTradeWindow: 5,                // 5-day rolling window for day trades
+  cooldownMinutes: 30,              // Minutes between trades on same ticker
+  notifyOnTrade: true,              // Send phone notification
+  notifyOnSignal: false,            // Send notification on strong signals
+  watchlist: [],                    // Specific tickers to watch (empty = all)
+  blacklist: [],                    // Tickers to never trade
+  onlyTop3: true,                   // Only buy tickers that are in the top 3 by score
+  protectMomentum: true,            // Don't interrupt good performers
+  onlyOneTradePerTickerPerDay: true, // One trade per ticker per day
 };
 
 // In-memory state
@@ -134,17 +153,50 @@ const canTrade = (symbol) => {
 
 /**
  * Evaluate if ticker meets buy criteria
+ * Uses BackBoneApp thresholds:
+ * - SPY Positive: Score >= 7.1
+ * - SPY Negative: Score >= 8.0
+ * - Extreme Buy: Score >= 9.0 (auto-execute)
+ *
+ * @param {Object} ticker - Ticker with score and other data
+ * @param {Object} options - Additional options (spyPositive, positions)
  */
-export const evaluateBuySignal = (ticker) => {
+export const evaluateBuySignal = (ticker, options = {}) => {
+  const { spyPositive = false, positions = [] } = options;
   const signals = [];
   let shouldBuy = true;
+  let isExtreme = false;
 
-  // Check score threshold
-  if (ticker.score >= config.buyThreshold) {
-    signals.push(`Score ${ticker.score} >= ${config.buyThreshold}`);
+  // Determine threshold based on SPY direction
+  const threshold = spyPositive ? config.buyThresholdSPYPositive : config.buyThreshold;
+
+  // Check for extreme buy (auto-execute)
+  if (ticker.score >= config.extremeBuyThreshold) {
+    signals.push(`EXTREME BUY: Score ${ticker.score.toFixed(2)} >= ${config.extremeBuyThreshold}`);
+    isExtreme = true;
+  }
+  // Check regular buy threshold
+  else if (ticker.score >= threshold) {
+    signals.push(`Score ${ticker.score.toFixed(2)} >= ${threshold} (SPY ${spyPositive ? "positive" : "negative"})`);
   } else {
     shouldBuy = false;
-    signals.push(`Score ${ticker.score} < ${config.buyThreshold}`);
+    signals.push(`Score ${ticker.score.toFixed(2)} < ${threshold}`);
+  }
+
+  // Check momentum protection (don't buy if we have protected positions)
+  if (config.protectMomentum && positions.length > 0) {
+    const protectedPositions = positions.filter(p => {
+      const plPercent = parseFloat(p.unrealized_plpc || 0) * 100;
+      return plPercent >= config.protectedPositionPercent;
+    });
+
+    if (protectedPositions.length > 0) {
+      shouldBuy = false;
+      const protectedList = protectedPositions.map(p =>
+        `${p.symbol} (+${(parseFloat(p.unrealized_plpc) * 100).toFixed(1)}%)`
+      ).join(", ");
+      signals.push(`Momentum protection: ${protectedList}`);
+    }
   }
 
   // Check MACD if required
@@ -168,32 +220,65 @@ export const evaluateBuySignal = (ticker) => {
   }
 
   return {
-    action: shouldBuy ? "BUY" : "HOLD",
+    action: shouldBuy ? (isExtreme ? "EXTREME_BUY" : "BUY") : "HOLD",
     symbol: ticker.symbol,
     score: ticker.score,
     price: ticker.price,
     signals,
+    isExtreme,
     timestamp: new Date().toISOString()
   };
 };
 
 /**
  * Evaluate if ticker meets sell criteria
+ * Uses BackBoneApp logic:
+ * - Extreme Sell: Score <= 1.5 (auto-execute)
+ * - Regular Sell: Score <= 4.0
+ * - Technical Override: Score <= 2.7 sells protected positions (+8%)
+ *
+ * @param {Object} ticker - Ticker with score and other data
+ * @param {Object} position - Current position data (if holding)
  */
-export const evaluateSellSignal = (ticker) => {
+export const evaluateSellSignal = (ticker, position = null) => {
   const signals = [];
   let shouldSell = true;
+  let isExtreme = false;
+  let isTechnicalOverride = false;
 
-  // Check score threshold
-  if (ticker.score <= config.sellThreshold) {
-    signals.push(`Score ${ticker.score} <= ${config.sellThreshold}`);
+  // Get position P&L if available
+  const plPercent = position ? parseFloat(position.unrealized_plpc || 0) * 100 : 0;
+  const isProtected = plPercent >= config.protectedPositionPercent;
+  const isGoodMomentum = plPercent >= config.goodMomentumPercent;
+
+  // Check for extreme sell (auto-execute)
+  if (ticker.score <= config.extremeSellThreshold) {
+    signals.push(`EXTREME SELL: Score ${ticker.score.toFixed(2)} <= ${config.extremeSellThreshold}`);
+    isExtreme = true;
+    shouldSell = true;
+  }
+  // Check technical override (sell protected positions with poor technicals)
+  else if (ticker.score <= config.technicalOverrideThreshold && isProtected) {
+    signals.push(`TECHNICAL OVERRIDE: Score ${ticker.score.toFixed(2)} <= ${config.technicalOverrideThreshold} (position +${plPercent.toFixed(1)}%)`);
+    isTechnicalOverride = true;
+    shouldSell = true;
+  }
+  // Check regular sell threshold
+  else if (ticker.score <= config.sellThreshold) {
+    signals.push(`Score ${ticker.score.toFixed(2)} <= ${config.sellThreshold}`);
+
+    // Don't sell protected positions (unless extreme or technical override)
+    if (isProtected && config.protectMomentum) {
+      shouldSell = false;
+      signals.push(`Protected position (+${plPercent.toFixed(1)}%) - momentum protection active`);
+    }
   } else {
     shouldSell = false;
-    signals.push(`Score ${ticker.score} > ${config.sellThreshold}`);
+    signals.push(`Score ${ticker.score.toFixed(2)} > ${config.sellThreshold}`);
   }
 
   // Check MACD if required
-  if (config.requireBearishMACD) {
+  if (config.requireBearishMACD && !isExtreme && !isTechnicalOverride) {
     if (ticker.macd?.trend === "bearish") {
       signals.push("MACD bearish");
     } else {
@@ -202,12 +287,24 @@ export const evaluateSellSignal = (ticker) => {
     }
   }
 
+  // Add position info to signals
+  if (position) {
+    signals.push(`Position: ${plPercent >= 0 ? "+" : ""}${plPercent.toFixed(2)}%`);
+    if (isGoodMomentum) signals.push("Good momentum (+5%+)");
+    if (isProtected) signals.push("Protected (+8%+)");
+  }
+
   return {
-    action: shouldSell ? "SELL" : "HOLD",
+    action: shouldSell ? (isExtreme ? "EXTREME_SELL" : "SELL") : "HOLD",
     symbol: ticker.symbol,
     score: ticker.score,
     price: ticker.price,
     signals,
+    isExtreme,
+    isTechnicalOverride,
+    plPercent,
+    isProtected,
+    isGoodMomentum,
     timestamp: new Date().toISOString()
   };
 };
@@ -458,19 +555,38 @@ export const sendTradeNotification = async (trade) => {
 
 /**
  * Monitor tickers and execute trades
- * Only buys from top 3 tickers with score >= buyThreshold
+ * Uses BackBoneApp trading logic:
+ * - Only buys from top 3 qualified tickers
+ * - Dynamic threshold based on SPY direction
+ * - Momentum protection for +8% positions
+ * - Technical override for poor technicals
+ * - Position limits (max 2)
+ * - Day trade limits (3 per 5-day window)
+ *
+ * @param {Array} tickers - All tickers with scores
+ * @param {Array} positions - Current positions
+ * @param {Object} marketContext - Market context (spyChange, etc.)
  */
-export const monitorAndTrade = async (tickers, positions = []) => {
+export const monitorAndTrade = async (tickers, positions = [], marketContext = {}) => {
   if (!config.enabled) {
     return { monitored: false, reason: "Auto-trading disabled" };
   }
 
+  const { spyChange = 0 } = marketContext;
+  const spyPositive = spyChange >= 0;
+
+  // Determine buy threshold based on SPY direction
+  const effectiveBuyThreshold = spyPositive ? config.buyThresholdSPYPositive : config.buyThreshold;
+
   const results = {
     monitored: true,
+    spyPositive,
+    effectiveBuyThreshold,
     buySignals: [],
     sellSignals: [],
     executed: [],
-    skipped: []
+    skipped: [],
+    protected: []
   };
 
   // Get current position symbols
@@ -481,12 +597,47 @@ export const monitorAndTrade = async (tickers, positions = []) => {
     .filter(t => t && typeof t.score === "number")
     .sort((a, b) => (b.score || 0) - (a.score || 0));
 
-  // Top 3 qualified tickers (score >= buyThreshold)
+  // Top 3 qualified tickers (score >= effectiveBuyThreshold)
   const top3BuyTickers = sortedTickers
-    .filter(t => t.score >= config.buyThreshold)
+    .filter(t => t.score >= effectiveBuyThreshold)
     .slice(0, 3)
     .map(t => t.symbol);
 
+  // Track executed buys for position limit check
+  let buyCount = results.executed.filter(t => t.side === "buy").length;
+
+  // STEP 1: Evaluate ALL positions for sell signals first
+  for (const position of positions) {
+    const ticker = sortedTickers.find(t => t.symbol === position.symbol);
+    if (!ticker) continue;
+
+    const sellEval = evaluateSellSignal(ticker, position);
+
+    if (sellEval.action === "SELL" || sellEval.action === "EXTREME_SELL") {
+      results.sellSignals.push(sellEval);
+
+      const sellResult = await executeSell(
+        ticker.symbol,
+        ticker.price,
+        parseFloat(position.qty || position.shares),
+        `${sellEval.isExtreme ? "EXTREME: " : ""}${sellEval.isTechnicalOverride ? "TECH OVERRIDE: " : ""}${sellEval.signals.join(", ")}`
+      );
+
+      if (sellResult.success) {
+        results.executed.push(sellResult.trade);
+      } else {
+        results.skipped.push({ symbol: ticker.symbol, reason: sellResult.error });
+      }
+    } else if (sellEval.isProtected) {
+      results.protected.push({
+        symbol: position.symbol,
+        plPercent: sellEval.plPercent,
+        score: ticker.score
+      });
+    }
+  }
+
+  // STEP 2: Evaluate top 3 for buy signals
   for (const ticker of sortedTickers) {
     // Skip if in blacklist
     if (config.blacklist.includes(ticker.symbol)) continue;
@@ -494,48 +645,35 @@ export const monitorAndTrade = async (tickers, positions = []) => {
     // Skip if not in watchlist (when watchlist is set)
     if (config.watchlist.length > 0 && !config.watchlist.includes(ticker.symbol)) continue;
 
-    // Evaluate buy signal (only if not already holding AND in top 3)
+    // Only evaluate if in top 3 and not already holding
     const isTop3 = top3BuyTickers.includes(ticker.symbol);
     if (!positionSymbols.includes(ticker.symbol) && isTop3) {
-      const buyEval = evaluateBuySignal(ticker);
-      if (buyEval.action === "BUY") {
+      const buyEval = evaluateBuySignal(ticker, { spyPositive, positions });
+
+      if (buyEval.action === "BUY" || buyEval.action === "EXTREME_BUY") {
         results.buySignals.push(buyEval);
 
-        // Check position limits
-        if (positions.length + results.executed.filter(t => t.side === "buy").length < config.maxTotalPositions) {
+        // Check position limits (max 2 in BackBoneApp)
+        const currentPositionCount = positions.length - results.executed.filter(t => t.side === "sell").length + buyCount;
+
+        if (currentPositionCount < config.maxTotalPositions) {
           const buyResult = await executeBuy(
             ticker.symbol,
             ticker.price,
-            `Top ${top3BuyTickers.indexOf(ticker.symbol) + 1}: ${buyEval.signals.join(", ")}`
+            `${buyEval.isExtreme ? "EXTREME: " : ""}Top ${top3BuyTickers.indexOf(ticker.symbol) + 1}: ${buyEval.signals.join(", ")}`
           );
 
           if (buyResult.success) {
             results.executed.push(buyResult.trade);
+            buyCount++;
           } else {
             results.skipped.push({ symbol: ticker.symbol, reason: buyResult.error });
           }
-        }
-      }
-    }
-
-    // Evaluate sell signal (only if holding)
-    const position = positions.find(p => p.symbol === ticker.symbol);
-    if (position) {
-      const sellEval = evaluateSellSignal(ticker);
-      if (sellEval.action === "SELL") {
-        results.sellSignals.push(sellEval);
-
-        const sellResult = await executeSell(
-          ticker.symbol,
-          ticker.price,
-          parseFloat(position.qty || position.shares),
-          sellEval.signals.join(", ")
-        );
-
-        if (sellResult.success) {
-          results.executed.push(sellResult.trade);
         } else {
-          results.skipped.push({ symbol: ticker.symbol, reason: sellResult.error });
+          results.skipped.push({
+            symbol: ticker.symbol,
+            reason: `Position limit reached (${currentPositionCount}/${config.maxTotalPositions})`
+          });
         }
       }
     }

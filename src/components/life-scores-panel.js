@@ -57,7 +57,7 @@ export const LifeScoresPanel = ({ data, title = "Progress", compact = false, com
       {
         flexDirection: "column",
         borderStyle: "round",
-        borderColor: "#1e293b",
+        borderColor: "#0f172a",
         padding: 1,
         height: 6
       },
@@ -84,7 +84,7 @@ export const LifeScoresPanel = ({ data, title = "Progress", compact = false, com
     {
       flexDirection: "column",
       borderStyle: "round",
-      borderColor: "#1e293b",
+      borderColor: "#0f172a",
       padding: 1,
       height: compact ? 8 : 12,
       overflow: "hidden"
@@ -214,7 +214,7 @@ export const ParallelWorldPanel = ({ data, weeksUsing = 0 }) => {
     {
       flexDirection: "column",
       borderStyle: "round",
-      borderColor: "#1e293b",
+      borderColor: "#0f172a",
       padding: 1
     },
     // Header

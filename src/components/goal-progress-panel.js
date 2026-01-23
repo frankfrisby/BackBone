@@ -54,7 +54,7 @@ export const GoalProgressPanel = ({ goals = [], title = "Goals" }) => {
       {
         flexDirection: "column",
         borderStyle: "round",
-        borderColor: "#1e293b",
+        borderColor: "#0f172a",
         padding: 1,
         height: 6
       },
@@ -68,7 +68,7 @@ export const GoalProgressPanel = ({ goals = [], title = "Goals" }) => {
     {
       flexDirection: "column",
       borderStyle: "round",
-      borderColor: "#1e293b",
+      borderColor: "#0f172a",
       padding: 1,
       height: 8,
       overflow: "hidden"

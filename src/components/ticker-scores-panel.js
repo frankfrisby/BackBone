@@ -1,5 +1,6 @@
 import React, { memo } from "react";
 import { Box, Text } from "ink";
+import { SCORE_THRESHOLDS, getSignalFromScore } from "../services/score-engine.js";
 
 const e = React.createElement;
 
@@ -12,6 +13,7 @@ const areTickerScoresEqual = (prevProps, nextProps) => {
   if (prevProps.maxItems !== nextProps.maxItems) return false;
   if (prevProps.viewMode !== nextProps.viewMode) return false;
   if (prevProps.compact !== nextProps.compact) return false;
+  if (prevProps.timestamp !== nextProps.timestamp) return false;
 
   // Deep compare tickers - only check what matters for display
   const prevTickers = prevProps.tickers || [];
@@ -32,50 +34,96 @@ const areTickerScoresEqual = (prevProps, nextProps) => {
 };
 
 /**
- * Format date/time for screenshots
+ * Format date/time for screenshots (cached to prevent flickering)
  */
+let cachedDateTime = "";
+let lastDateUpdate = 0;
 const formatDateTime = (date = new Date()) => {
-  const options = {
-    weekday: "short",
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: true
-  };
-  return date.toLocaleString("en-US", options);
+  const now = Date.now();
+  // Only update every 30 seconds to prevent flickering
+  if (now - lastDateUpdate > 30000 || !cachedDateTime) {
+    const options = {
+      weekday: "short",
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: true
+    };
+    cachedDateTime = date.toLocaleString("en-US", options);
+    lastDateUpdate = now;
+  }
+  return cachedDateTime;
 };
 
 /**
- * Top 3 threshold - must be 8.0 or above to qualify
+ * BackBoneApp Thresholds
+ * - Top 3 threshold varies by SPY direction:
+ *   - SPY Positive: 7.1 (more lenient)
+ *   - SPY Negative: 8.0 (more strict)
+ * - Default: 8.0 (when SPY status unknown)
  */
-const TOP3_THRESHOLD = 8.0;
+const TOP3_THRESHOLD_SPY_POSITIVE = SCORE_THRESHOLDS?.BUY_SPY_POSITIVE || 7.1;
+const TOP3_THRESHOLD_SPY_NEGATIVE = SCORE_THRESHOLDS?.BUY_SPY_NEGATIVE || 8.0;
+const TOP3_THRESHOLD = TOP3_THRESHOLD_SPY_NEGATIVE; // Default to stricter threshold
 
 /**
- * Get signal color based on 0-10 score
- * BUY signals only for >= 8.0
+ * Get dynamic threshold based on SPY direction
+ */
+const getDynamicThreshold = (spyPositive = null) => {
+  if (spyPositive === true) return TOP3_THRESHOLD_SPY_POSITIVE;
+  if (spyPositive === false) return TOP3_THRESHOLD_SPY_NEGATIVE;
+  return TOP3_THRESHOLD; // Default when unknown
+};
+
+/**
+ * Get signal color based on 0-10 score (BackBoneApp aligned)
+ *
+ * Score Color Mapping:
+ * - 9.0+:  Bright green (#22c55e) - EXTREME BUY
+ * - 8.0+:  Green (#4ade80) - BUY (SPY negative threshold)
+ * - 7.1+:  Light green (#86efac) - BUY (SPY positive threshold)
+ * - 4.0+:  Yellow (#eab308) - HOLD
+ * - 3.0+:  Orange (#f97316) - SELL
+ * - 2.7+:  Red-orange - TECHNICAL OVERRIDE threshold
+ * - <1.5:  Red (#ef4444) - EXTREME SELL
  */
 const getSignalColor = (score) => {
   if (score >= 9.0) return "#22c55e"; // Bright green - extreme buy
-  if (score >= 8.0) return "#4ade80"; // Green - buy
+  if (score >= 8.0) return "#4ade80"; // Green - buy (SPY negative)
+  if (score >= 7.1) return "#86efac"; // Light green - buy (SPY positive)
   if (score >= 4.0) return "#eab308"; // Yellow - hold
   if (score >= 3.0) return "#f97316"; // Orange - sell
-  return "#ef4444"; // Red - strong sell
+  if (score >= 2.7) return "#fb923c"; // Light orange - near technical override
+  if (score >= 1.5) return "#f87171"; // Light red - approaching extreme sell
+  return "#ef4444"; // Red - extreme sell
 };
 
 /**
- * Get signal label - BUY only for top 3 tickers with scores >= 8.0
+ * Get signal label - Uses BackBoneApp thresholds
+ *
  * @param {number} score - The ticker score
  * @param {boolean} isTop3 - Whether this ticker is in the top 3 qualified tickers
+ * @param {boolean|null} spyPositive - SPY direction for dynamic threshold
  */
-const getSignalLabel = (score, isTop3 = false) => {
-  // Only show BUY signals for top 3 qualified tickers
-  if (isTop3 && score >= 9.0) return "BUY++";
-  if (isTop3 && score >= 8.0) return "BUY";
-  // Everything else is HOLD or SELL based on score
+const getSignalLabel = (score, isTop3 = false, spyPositive = null) => {
+  const threshold = getDynamicThreshold(spyPositive);
+
+  // Extreme signals
+  if (score >= 9.0) return isTop3 ? "BUY++" : "HIGH";
+  if (score <= 1.5) return "SELL--";
+
+  // Buy signals (only for top 3 qualified)
+  if (isTop3 && score >= threshold) return "BUY";
+
+  // Hold zone
   if (score >= 4.0) return "HOLD";
+
+  // Sell zone
   if (score >= 3.0) return "SELL";
-  return "SELL--";
+  if (score >= 2.7) return "WEAK"; // Near technical override threshold
+
+  return "SELL-";
 };
 
 /**
@@ -165,14 +213,23 @@ const ScoreBar = ({ score, width = 6 }) => {
 };
 
 /**
- * Check if ticker qualifies for top 3 (must be 8.0 or above)
+ * Check if ticker qualifies for top 3 (uses dynamic threshold)
+ * @param {number} score - Ticker score
+ * @param {boolean|null} spyPositive - SPY direction for dynamic threshold
  */
-const isTop3Qualified = (score) => score >= TOP3_THRESHOLD;
+const isTop3Qualified = (score, spyPositive = null) => {
+  const threshold = getDynamicThreshold(spyPositive);
+  return score >= threshold;
+};
 
 /**
  * Ticker Scores Panel - Detailed view with aligned columns
  *
- * Top 3 = ONLY tickers with score >= 8.0 (shown with green background)
+ * Top 3 = ONLY tickers meeting dynamic threshold (shown with green background)
+ * - SPY Positive: >= 7.1
+ * - SPY Negative: >= 8.0
+ * - Default: >= 8.0
+ *
  * Shows: 3 on minimal, 10 on core, 20 on advanced
  */
 const TickerScoresPanelBase = ({
@@ -181,7 +238,9 @@ const TickerScoresPanelBase = ({
   maxItems = 10,
   viewMode = "core",
   compact = false,
-  timestamp = null
+  timestamp = null,
+  spyPositive = null,  // SPY direction for dynamic threshold
+  spyChange = null     // SPY % change for display
 }) => {
   // Format timestamp for display
   const displayTime = formatDateTime(timestamp ? new Date(timestamp) : new Date());
@@ -190,16 +249,19 @@ const TickerScoresPanelBase = ({
                     viewMode === "advanced" ? 20 : 10;
   const actualMax = maxItems || itemCount;
 
+  // Get dynamic threshold based on SPY
+  const threshold = getDynamicThreshold(spyPositive);
+
   // Sort by score descending
   const sortedTickers = [...tickers]
     .filter(t => t && t.symbol && typeof t.score === "number")
     .sort((a, b) => (b.score || 0) - (a.score || 0))
     .slice(0, actualMax);
 
-  // Top 3 = only tickers with score >= 8.0
+  // Top 3 = only tickers meeting dynamic threshold
   const top3Symbols = new Set(
     sortedTickers
-      .filter(t => isTop3Qualified(t.score))
+      .filter(t => t.score >= threshold)
       .slice(0, 3)
       .map(t => t.symbol)
   );
@@ -212,7 +274,7 @@ const TickerScoresPanelBase = ({
       {
         flexDirection: "column",
         borderStyle: "round",
-        borderColor: "#1e293b",
+        borderColor: "#0f172a",
         padding: 1
       },
       e(Text, { color: "#64748b" }, title),
@@ -227,7 +289,7 @@ const TickerScoresPanelBase = ({
       {
         flexDirection: "column",
         borderStyle: "round",
-        borderColor: "#1e293b",
+        borderColor: "#0f172a",
         padding: 1
       },
       e(
@@ -235,9 +297,9 @@ const TickerScoresPanelBase = ({
         { flexDirection: "row", justifyContent: "space-between", marginBottom: 1 },
         e(
           Box,
-          { flexDirection: "row", gap: 2 },
+          { flexDirection: "column" },
           e(Text, { color: "#64748b" }, title),
-          e(Text, { color: "#475569", dimColor: true }, displayTime)
+          e(Text, { color: "#475569", dimColor: true }, `Updated: ${displayTime}`)
         ),
         e(Text, { color: top3Count > 0 ? "#22c55e" : "#475569" },
           top3Count > 0 ? `${top3Count} buy` : "0 buy")
@@ -274,7 +336,7 @@ const TickerScoresPanelBase = ({
     {
       flexDirection: "column",
       borderStyle: "round",
-      borderColor: "#1e293b",
+      borderColor: "#0f172a",
       padding: 1
     },
     // Header with date/time
@@ -286,16 +348,18 @@ const TickerScoresPanelBase = ({
         { flexDirection: "row", justifyContent: "space-between" },
         e(
           Box,
-          { flexDirection: "row", gap: 2 },
+          { flexDirection: "column" },
           e(Text, { color: "#64748b" }, title),
-          e(Text, { color: "#8b5cf6", bold: true }, displayTime)
+          e(Text, { color: "#475569", dimColor: true }, `Updated: ${displayTime}`)
         ),
         e(
           Box,
           { flexDirection: "row", gap: 2 },
           top3Count > 0
-            ? e(Text, { color: "#22c55e", bold: true }, `${top3Count} BUY (≥8.0)`)
-            : e(Text, { color: "#64748b" }, "0 buy signals"),
+            ? e(Text, { color: "#22c55e", bold: true }, `${top3Count} BUY (≥${threshold})`)
+            : e(Text, { color: "#64748b" }, `0 buy (need ≥${threshold})`),
+          spyChange !== null && e(Text, { color: spyPositive ? "#22c55e" : "#ef4444" },
+            `SPY ${spyChange >= 0 ? "+" : ""}${spyChange?.toFixed(2) || 0}%`),
           e(Text, { color: "#475569" }, `showing ${sortedTickers.length}`)
         )
       )
@@ -363,40 +427,46 @@ const TickerScoresPanelBase = ({
       );
     }),
 
-    // Footer legend
+    // Footer legend with dynamic threshold
     e(
       Box,
       { marginTop: 1, flexDirection: "row", gap: 1 },
       e(Text, { color: "#166534", backgroundColor: "#166534" }, "  "),
-      e(Text, { color: "#475569" }, "= Top 3 (≥8.0)"),
+      e(Text, { color: "#475569" }, `= Top 3 (≥${threshold})`),
       e(Text, { color: "#334155" }, "│"),
-      e(Text, { color: "#22c55e" }, "≥8"),
+      e(Text, { color: "#22c55e" }, `≥${threshold}`),
       e(Text, { color: "#475569" }, "buy"),
-      e(Text, { color: "#eab308" }, "4-8"),
+      e(Text, { color: "#eab308" }, `4-${threshold}`),
       e(Text, { color: "#475569" }, "hold"),
       e(Text, { color: "#ef4444" }, "<4"),
-      e(Text, { color: "#475569" }, "sell")
+      e(Text, { color: "#475569" }, "sell"),
+      e(Text, { color: "#334155" }, "│"),
+      e(Text, { color: "#64748b", dimColor: true },
+        spyPositive === null ? "SPY ?" : spyPositive ? "SPY+" : "SPY-")
     )
   );
 };
 
 /**
- * Top 3 Display - Shows only tickers >= 8.0
+ * Top 3 Display - Shows only tickers meeting dynamic threshold
+ * @param {Array} tickers - All tickers
+ * @param {boolean|null} spyPositive - SPY direction for dynamic threshold
  */
-const Top3DisplayBase = ({ tickers = [] }) => {
+const Top3DisplayBase = ({ tickers = [], spyPositive = null }) => {
+  const threshold = getDynamicThreshold(spyPositive);
   const qualified = [...tickers]
-    .filter(t => t && t.symbol && typeof t.score === "number" && isTop3Qualified(t.score))
+    .filter(t => t && t.symbol && typeof t.score === "number" && t.score >= threshold)
     .sort((a, b) => (b.score || 0) - (a.score || 0))
     .slice(0, 3);
 
   if (qualified.length === 0) {
-    return e(Text, { color: "#64748b" }, "No buy signals (need ≥8.0)");
+    return e(Text, { color: "#64748b" }, `No buy signals (need ≥${threshold})`);
   }
 
   return e(
     Box,
     { flexDirection: "row", gap: 2 },
-    e(Text, { color: "#22c55e", bold: true }, "TOP 3:"),
+    e(Text, { color: "#22c55e", bold: true }, `TOP 3 (≥${threshold}):`),
     ...qualified.map((ticker, i) =>
       e(
         Box,
@@ -417,8 +487,11 @@ const Top3DisplayBase = ({ tickers = [] }) => {
 
 /**
  * Ticker Summary Line
+ * @param {Array} tickers - All tickers
+ * @param {boolean|null} spyPositive - SPY direction for dynamic threshold
  */
-const TickerSummaryLineBase = ({ tickers = [] }) => {
+const TickerSummaryLineBase = ({ tickers = [], spyPositive = null }) => {
+  const threshold = getDynamicThreshold(spyPositive);
   const sorted = [...tickers]
     .filter(t => t && t.symbol && typeof t.score === "number")
     .sort((a, b) => (b.score || 0) - (a.score || 0))
@@ -433,7 +506,7 @@ const TickerSummaryLineBase = ({ tickers = [] }) => {
     { flexDirection: "row", gap: 2 },
     ...sorted.map((ticker, i) => {
       const color = getSignalColor(ticker.score);
-      const isQualified = isTop3Qualified(ticker.score);
+      const isQualified = ticker.score >= threshold;
       return e(
         Box,
         {

@@ -2,6 +2,59 @@
 
 Welcome to BACKBONE - your AI-powered life operating system. This guide will walk you through connecting all your integrations step by step.
 
+---
+
+## Architecture: System-Level vs User-Level Keys
+
+BACKBONE uses a two-tier configuration architecture:
+
+### System-Level Keys (Firebase Firestore)
+These are **shared application credentials** stored securely in Firebase Firestore. Users don't need to provide these - they're loaded automatically on app startup.
+
+| Service | Firebase Document | Fields |
+|---------|------------------|--------|
+| Plaid (Banking) | `config/config_plaid` | `clientId`, `secret`, `env` |
+| Google OAuth | `config/config_google` | `clientId`, `clientSecret` |
+
+**Why Firebase?** System-level keys are the same for all users of the app. Storing them in Firebase:
+- Keeps sensitive API keys off user machines
+- Allows updating keys without app updates
+- Centralizes credential management
+
+**Firebase Firestore Rules Required:**
+```
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /config/{document} {
+      allow read: if true;
+    }
+  }
+}
+```
+
+### User-Level Keys (Local .env file)
+These are **personal credentials** unique to each user. They stay local on the user's machine.
+
+| Service | Environment Variable | Purpose |
+|---------|---------------------|---------|
+| Alpaca | `ALPACA_KEY`, `ALPACA_SECRET` | User's personal trading account |
+| OpenAI | `OPENAI_API_KEY` | User's personal API key |
+| Anthropic | `ANTHROPIC_API_KEY` | User's personal API key |
+| Oura | `OURA_ACCESS_TOKEN` | User's health data access |
+
+**Why Local?** User-level keys represent personal accounts and data access:
+- Alpaca connects to the user's own brokerage account
+- OpenAI/Anthropic usage is billed to the user's account
+- Health tokens access the user's private health data
+
+### Code Reference
+- Firebase config fetching: `src/services/firebase-config.js`
+- Config initialization on startup: `src/app.js` → `initializeRemoteConfig()`
+- Local .env loading: standard dotenv at app start
+
+---
+
 ## Quick Start
 
 1. Copy `.env.example` to `.env`
@@ -169,18 +222,23 @@ OUTLOOK_REFRESH_TOKEN=your-refresh-token
 ### Plaid (Recommended - Aggregates All Accounts)
 Plaid connects to most banks and brokerages.
 
-**How to set up:**
-1. Go to https://dashboard.plaid.com
-2. Sign up for a free developer account
-3. Get your client ID and secret
-4. Use Plaid Link to connect your accounts and get access token
+**Note:** Plaid API credentials are loaded automatically from Firebase (system-level).
+Users only need to authorize their bank connections through the onboarding wizard.
 
-**Add to .env:**
+**For Administrators:**
+Plaid credentials are stored in Firebase Firestore at `config/config_plaid`:
+```json
+{
+  "clientId": "your-plaid-client-id",
+  "secret": "your-plaid-secret",
+  "env": "sandbox"  // or "development" or "production"
+}
 ```
-PLAID_CLIENT_ID=your-client-id
-PLAID_SECRET=your-secret
-PLAID_ACCESS_TOKEN=your-access-token
-```
+
+**Environments:**
+- `sandbox` - Free testing with fake bank data
+- `development` - Free with real banks (100 items)
+- `production` - Pay-per-use with real banks
 
 ### Robinhood (Direct Connection)
 Note: Uses unofficial API - use at your own risk.
@@ -257,6 +315,10 @@ USER_FOCUS_AREAS=startups,finance,health,education
 ## Complete .env Example
 
 ```env
+# === BACKBONE .env Configuration ===
+# Only USER-LEVEL keys belong here (personal accounts)
+# System-level keys (Plaid, Google OAuth) are loaded from Firebase
+
 # === AI Models (Required - pick at least one) ===
 ANTHROPIC_API_KEY=sk-ant-xxx
 OPENAI_API_KEY=sk-xxx
@@ -267,11 +329,11 @@ USER_EMAIL=frank@university.edu
 USER_ROLE=Founder
 USER_FOCUS=Building the future
 
-# === Stock Data ===
+# === Stock Data (User's trading account) ===
 ALPACA_KEY=xxx
 ALPACA_SECRET=xxx
 
-# === Health ===
+# === Health (User's personal data) ===
 OURA_ACCESS_TOKEN=xxx
 
 # === Social ===
@@ -280,9 +342,6 @@ GITHUB_ACCESS_TOKEN=ghp_xxx
 
 # === Email ===
 GMAIL_REFRESH_TOKEN=xxx
-
-# === Wealth ===
-PLAID_ACCESS_TOKEN=xxx
 
 # === Cloud Sync ===
 CLOUD_SYNC_PROVIDER=firebase

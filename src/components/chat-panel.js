@@ -34,7 +34,7 @@ const buildMatches = (input, commands) => {
  * - displayValue: React state for rendering (synced from ref)
  * - Uses Ink's useInput (proper integration, no conflicts)
  */
-const ChatPanelBase = ({ commands, onSubmit, onTypingChange }) => {
+const ChatPanelBase = ({ commands, onSubmit, onTypingChange, modelInfo }) => {
   // The actual input buffer - synchronous, source of truth
   const inputRef = useRef("");
 
@@ -62,9 +62,14 @@ const ChatPanelBase = ({ commands, onSubmit, onTypingChange }) => {
 
   const showPalette = displayValue.startsWith("/") && matches.length > 0;
 
-  // Sync ref to display state
+  const updateScheduledRef = useRef(false);
   const syncDisplay = useCallback(() => {
-    setDisplayValue(inputRef.current);
+    if (updateScheduledRef.current) return;
+    updateScheduledRef.current = true;
+    setTimeout(() => {
+      updateScheduledRef.current = false;
+      setDisplayValue(inputRef.current);
+    }, 30);
   }, []);
 
   // Signal typing started
@@ -178,7 +183,7 @@ const ChatPanelBase = ({ commands, onSubmit, onTypingChange }) => {
 
   // Derived values for display
   const isCommand = displayValue.startsWith("/");
-  const borderColor = isCommand ? "#f59e0b" : "#334155";
+  const borderColor = isCommand ? "#f59e0b" : "#0f172a";
   const promptColor = isCommand ? "#f59e0b" : "#22c55e";
   const isEmpty = displayValue.length === 0;
   const cursorColor = isCommand ? "#f59e0b" : "#3b82f6";
@@ -238,7 +243,29 @@ const ChatPanelBase = ({ commands, onSubmit, onTypingChange }) => {
       title: "Commands",
       isFocused: true,
       countLabel: "matches"
-    })
+    }),
+    // Model indicator - shows below input
+    !showPalette && modelInfo && e(
+      Box,
+      { flexDirection: "row", justifyContent: "space-between", marginTop: 1, paddingX: 0 },
+      e(
+        Box,
+        { flexDirection: "row", gap: 1 },
+        e(Text, { color: "#475569" }, "Model:"),
+        e(Text, { color: modelInfo.color || "#10a37f", bold: true }, `${modelInfo.icon || "◇"} ${modelInfo.shortName || modelInfo.name || "GPT-5.2"}`),
+        modelInfo.taskType && e(Text, { color: "#334155" }, "│"),
+        modelInfo.taskType && e(Text, { color: "#64748b" }, modelInfo.taskType)
+      ),
+      e(
+        Box,
+        { flexDirection: "row", gap: 1 },
+        e(Text, { color: "#334155" }, "instant"),
+        e(Text, { color: "#475569" }, "fast"),
+        e(Text, { color: "#334155" }, "│"),
+        e(Text, { color: "#8b5cf6" }, "thinking"),
+        e(Text, { color: "#475569" }, "complex")
+      )
+    )
   );
 };
 

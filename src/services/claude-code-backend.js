@@ -193,7 +193,8 @@ export class ClaudeCodeBackend extends EventEmitter {
         args,
         {
           cwd: task.workDir || process.cwd(),
-          timeout: task.timeout || 120000
+          timeout: task.timeout || 120000,
+          taskId
         }
       );
 
@@ -231,6 +232,7 @@ export class ClaudeCodeBackend extends EventEmitter {
    */
   async runWithTimeout(command, args, options = {}) {
     const timeout = options.timeout || 120000;
+    const taskId = options.taskId || null;
 
     return new Promise((resolve) => {
       const proc = spawn(command, args, {
@@ -258,13 +260,13 @@ export class ClaudeCodeBackend extends EventEmitter {
       proc.stdout.on("data", (data) => {
         const chunk = data.toString();
         output += chunk;
-        this.emit("task-output", { output: chunk, type: "stdout" });
+        this.emit("task-output", { taskId, output: chunk, type: "stdout" });
       });
 
       proc.stderr.on("data", (data) => {
         const chunk = data.toString();
         error += chunk;
-        this.emit("task-output", { output: chunk, type: "stderr" });
+        this.emit("task-output", { taskId, output: chunk, type: "stderr" });
       });
 
       proc.on("close", (code) => {

@@ -11,6 +11,23 @@ const SETTINGS_PATH = path.join(DATA_DIR, "user-settings.json");
 
 // Default settings
 const DEFAULT_SETTINGS = {
+  // Onboarding
+  onboardingComplete: false,
+  onboardingStep: null,
+  firebaseUser: null,
+  coreModelProvider: null, // 'anthropic' | 'openai' | 'google'
+  hasProAccount: false,
+  connections: {
+    google: false,
+    phone: false,
+    alpaca: false,
+    oura: false,
+    email: false,
+    personalCapital: false,
+    plaid: false
+  },
+  phoneNumber: null,
+
   // Display
   privateMode: false,
   viewMode: "CORE", // CORE, ADVANCED, MINIMAL

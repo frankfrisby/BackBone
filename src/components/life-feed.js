@@ -18,7 +18,7 @@ export const LifeFeed = ({ items, lastUpdated, maxItems = 10, isThinking = true 
       {
         flexDirection: "column",
         borderStyle: "round",
-        borderColor: "#1e293b",
+        borderColor: "#0f172a",
         padding: 1
       },
       e(
@@ -35,7 +35,7 @@ export const LifeFeed = ({ items, lastUpdated, maxItems = 10, isThinking = true 
     {
       flexDirection: "column",
       borderStyle: "round",
-      borderColor: "#1e293b",
+      borderColor: "#0f172a",
       padding: 1
     },
     // Header
@@ -86,7 +86,7 @@ export const LifeChanges = ({ changes, maxItems = 10 }) => {
     {
       flexDirection: "column",
       borderStyle: "round",
-      borderColor: "#1e293b",
+      borderColor: "#0f172a",
       padding: 1,
       marginTop: 1
     },

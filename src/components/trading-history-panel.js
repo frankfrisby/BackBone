@@ -10,8 +10,8 @@ let cachedPanelDateTime = "";
 let lastPanelDateUpdate = 0;
 const formatDateTime = (date = new Date()) => {
   const now = Date.now();
-  // Only update every 60 seconds to prevent flickering
-  if (now - lastPanelDateUpdate > 60000 || !cachedPanelDateTime) {
+  // Only update every 30 seconds to prevent flickering
+  if (now - lastPanelDateUpdate > 30000 || !cachedPanelDateTime) {
     const options = {
       weekday: "short",
       month: "short",
@@ -61,7 +61,7 @@ const formatPct = (value) => {
  * Trading History Panel
  * Shows 8 weeks of P&L, SPY comparison, and growth projection
  */
-const TradingHistoryPanelBase = ({ tradingHistory, isConnected }) => {
+const TradingHistoryPanelBase = ({ tradingHistory, isConnected, timestamp = null }) => {
   // Don't show if not connected
   if (!isConnected || !tradingHistory) {
     return null;
@@ -117,7 +117,7 @@ const TradingHistoryPanelBase = ({ tradingHistory, isConnected }) => {
     {
       flexDirection: "column",
       borderStyle: "round",
-      borderColor: "#1e293b",
+      borderColor: "#0f172a",
       paddingX: 1,
       marginTop: 1
     },
@@ -125,8 +125,12 @@ const TradingHistoryPanelBase = ({ tradingHistory, isConnected }) => {
     e(
       Box,
       { flexDirection: "row", justifyContent: "space-between", marginBottom: 1 },
-      e(Text, { color: "#64748b" }, "Trading History (8 Weeks)"),
-      e(Text, { color: "#8b5cf6", bold: true }, formatDateTime())
+      e(
+        Box,
+        { flexDirection: "column" },
+        e(Text, { color: "#64748b" }, "Trading History (8 Weeks)"),
+        e(Text, { color: "#475569" }, `Updated: ${formatDateTime(timestamp ? new Date(timestamp) : new Date())}`)
+      )
     ),
 
     // Total P&L summary
@@ -214,6 +218,8 @@ const areTradingHistoryPropsEqual = (prevProps, nextProps) => {
   const prevWeeks = prevHistory.weeks || [];
   const nextWeeks = nextHistory.weeks || [];
   if (prevWeeks.length !== nextWeeks.length) return false;
+
+  if (prevProps.timestamp !== nextProps.timestamp) return false;
 
   return true;
 };

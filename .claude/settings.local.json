@@ -1,38 +1,16 @@
 {
   "permissions": {
     "allow": [
-      "Bash(tree:*)",
-      "Bash(npm install)",
-      "Bash(node --check:*)",
-      "Bash(node -e:*)",
-      "Bash(dir /b \"C:\\\\Users\\\\frank\\\\Documents\\\\cofounderagi_prod\\\\CofounderAGI\")",
-      "Bash(node scripts/scrape-linkedin.js:*)",
-      "Bash(timeout /t 30 /nobreak)",
-      "Bash(node:*)",
-      "Bash(ping:*)",
-      "Bash(curl:*)",
-      "Bash(dir \"C:\\\\Users\\\\frank\\\\Documents\" /b)",
-      "Bash(findstr:*)",
-      "Bash(dir \"C:\\\\Users\\\\frank\\\\Documents\\\\CofounderAGI_prod\" /b)",
-      "WebSearch",
-      "WebFetch(domain:kotrotsos.medium.com)",
-      "Bash(taskkill:*)",
-      "Bash(timeout 8 npm start)",
-      "Bash(del \"C:\\\\Users\\\\frank\\\\Documents\\\\agi_engine\\\\backbone\\\\data\\\\trading-history.json\")",
-      "Bash(dir \"C:\\\\Users\\\\frank\\\\Documents\\\\agi_engine\\\\backbone\\\\data\" /b)",
-      "Bash(powershell -Command:*)",
-      "Bash(npm start)",
+      "WebFetch(domain:www.npmjs.com)",
+      "Bash(dir \"C:\\\\Users\\\\frank\\\\Documents\\\\agi_engine\\\\backbone\\\\*.md\" /B)",
+      "Bash(dir \"C:\\\\Users\\\\frank\\\\Documents\\\\agi_engine\\\\backbone\" /B /A:-D)",
+      "Bash(claude install)",
+      "Bash(grep:*)",
       "Bash(ls:*)",
-      "Bash(npm test)",
-      "Bash(wc:*)",
-      "Bash(git rev-parse:*)",
-      "Bash(git clone:*)",
-      "WebFetch(domain:finance.yahoo.com)",
-      "WebFetch(domain:github.com)",
-      "Bash(npm ls:*)",
-      "Bash(dir \"C:\\\\Users\\\\frank\\\\Documents\\\\agi_engine\"\")",
-      "Bash(dir /s /b \"C:\\\\Users\\\\frank\\\\Documents\")",
-      "Bash(git add:*)"
+      "Bash(node:*)",
+      "WebSearch",
+      "WebFetch(domain:platform.openai.com)",
+      "WebFetch(domain:openai.com)"
     ]
   }
 }

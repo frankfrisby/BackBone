@@ -69,7 +69,7 @@ export const ActionsPanel = ({ actions, userName }) => {
     {
       flexDirection: "column",
       borderStyle: "round",
-      borderColor: "#1e293b",
+      borderColor: "#0f172a",
       padding: 1,
       marginBottom: 1
     },

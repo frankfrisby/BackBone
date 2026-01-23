@@ -4,15 +4,17 @@ import { EventEmitter } from "events";
 
 /**
  * Personal Capital (Empower) Integration for BACKBONE
- * Uses unofficial API via personal-capital-sdk
+ * Uses the personal-capital-sdk package
  *
- * Note: Personal Capital doesn't have an official public API.
- * This uses reverse-engineered endpoints that may change.
+ * SDK: https://github.com/auchenberg/node-personal-capital
+ * Install: npm install personal-capital-sdk
  *
- * Setup:
- * 1. Add PERSONAL_CAPITAL_EMAIL and PERSONAL_CAPITAL_PASSWORD to .env
- * 2. Run /finances setup to authenticate
- * 3. Complete 2FA via SMS when prompted
+ * Authentication Flow:
+ * 1. Call login(email, password)
+ * 2. If 2FA required, SDK throws error with message "2FA_required"
+ * 3. Call challangeTwoFactor("sms") to send SMS code
+ * 4. Call enterTwoFactorCode("sms", code) with the code
+ * 5. Call login() again to complete authentication
  */
 
 const DATA_DIR = path.join(process.cwd(), "data");
@@ -44,6 +46,7 @@ export class PersonalCapitalService extends EventEmitter {
     this.data = getDefaultData();
     this.client = null;
     this.authenticated = false;
+    this.pendingTwoFactor = false;
     this.load();
   }
 
@@ -91,7 +94,7 @@ export class PersonalCapitalService extends EventEmitter {
   getConfig() {
     return {
       hasCredentials: this.hasCredentials(),
-      authenticated: this.authenticated || this.data.authenticated,
+      authenticated: this.authenticated,
       lastUpdated: this.data.lastUpdated,
       accountCount: this.data.accounts?.length || 0,
       email: process.env.PERSONAL_CAPITAL_EMAIL
@@ -105,12 +108,17 @@ export class PersonalCapitalService extends EventEmitter {
    */
   async initClient() {
     if (!this.hasCredentials()) {
-      throw new Error("Personal Capital credentials not configured");
+      throw new Error("Personal Capital credentials not configured. Set PERSONAL_CAPITAL_EMAIL and PERSONAL_CAPITAL_PASSWORD.");
     }
 
     try {
       // Dynamic import since package may not be installed
-      const { PersonalCapital } = await import("personal-capital-sdk");
+      const module = await import("personal-capital-sdk");
+      const PersonalCapital = module.PersonalCapital || module.default;
+
+      if (!PersonalCapital) {
+        throw new Error("Could not load PersonalCapital from SDK");
+      }
 
       this.client = new PersonalCapital({
         cookiePath: PC_COOKIES_PATH
@@ -138,34 +146,39 @@ export class PersonalCapitalService extends EventEmitter {
     const password = process.env.PERSONAL_CAPITAL_PASSWORD;
 
     try {
-      // Try to restore session from cookies
-      const sessionValid = await this.client.isSessionValid();
-      if (sessionValid) {
-        this.authenticated = true;
-        this.data.authenticated = true;
-        this.save();
-        return { success: true, message: "Session restored from cookies" };
-      }
+      // Attempt login
+      await this.client.login(email, password);
 
-      // Start authentication
-      const authResult = await this.client.login(email, password);
-
-      if (authResult.needsTwoFactor) {
-        // 2FA required - will need user to provide code
-        return {
-          success: false,
-          needsTwoFactor: true,
-          message: "Two-factor authentication required. Check your SMS."
-        };
-      }
-
+      // If we get here, login succeeded without 2FA
       this.authenticated = true;
       this.data.authenticated = true;
+      this.pendingTwoFactor = false;
       this.save();
 
       return { success: true, message: "Authenticated successfully" };
     } catch (error) {
-      return { success: false, message: error.message };
+      // Check if 2FA is required
+      if (error.message === "2FA_required" || error.message?.includes("2FA") || error.message?.includes("two-factor")) {
+        this.pendingTwoFactor = true;
+
+        // Trigger SMS 2FA challenge
+        try {
+          await this.client.challangeTwoFactor("sms");
+          return {
+            success: false,
+            needsTwoFactor: true,
+            message: "Two-factor authentication required. SMS code sent to your phone."
+          };
+        } catch (challengeError) {
+          return {
+            success: false,
+            needsTwoFactor: true,
+            message: "Two-factor authentication required. Check your phone for SMS code."
+          };
+        }
+      }
+
+      return { success: false, message: error.message || "Authentication failed" };
     }
   }
 
@@ -178,13 +191,26 @@ export class PersonalCapitalService extends EventEmitter {
     }
 
     try {
-      await this.client.twoFactor(code);
+      // Submit the 2FA code
+      await this.client.enterTwoFactorCode("sms", code);
+
+      // Login again to complete authentication
+      const email = process.env.PERSONAL_CAPITAL_EMAIL;
+      const password = process.env.PERSONAL_CAPITAL_PASSWORD;
+      await this.client.login(email, password);
+
       this.authenticated = true;
       this.data.authenticated = true;
+      this.pendingTwoFactor = false;
       this.save();
+
       return { success: true, message: "Two-factor authentication complete" };
     } catch (error) {
-      return { success: false, message: error.message };
+      // If still needs 2FA, the code was wrong
+      if (error.message === "2FA_required" || error.message?.includes("2FA")) {
+        return { success: false, message: "Invalid code. Please try again." };
+      }
+      return { success: false, message: error.message || "2FA verification failed" };
     }
   }
 
@@ -192,22 +218,19 @@ export class PersonalCapitalService extends EventEmitter {
    * Fetch all account data
    */
   async fetchAccounts() {
-    if (!this.authenticated && !this.data.authenticated) {
-      const authResult = await this.authenticate();
-      if (!authResult.success) {
-        return authResult;
-      }
+    if (!this.authenticated) {
+      return { success: false, message: "Not authenticated" };
     }
 
     try {
       const accounts = await this.client.getAccounts();
 
-      this.data.accounts = accounts.map(acc => ({
+      this.data.accounts = (accounts || []).map(acc => ({
         id: acc.accountId,
-        name: acc.name || acc.accountName,
-        type: acc.accountType,
-        balance: acc.balance,
-        institution: acc.firmName,
+        name: acc.name || acc.accountName || acc.firmName,
+        type: acc.accountType || acc.productType,
+        balance: acc.balance || acc.currentBalance,
+        institution: acc.firmName || acc.name,
         lastUpdated: acc.lastRefreshed || new Date().toISOString()
       }));
 
@@ -225,22 +248,21 @@ export class PersonalCapitalService extends EventEmitter {
    * Fetch investment holdings
    */
   async fetchHoldings() {
-    if (!this.authenticated && !this.data.authenticated) {
-      const authResult = await this.authenticate();
-      if (!authResult.success) return authResult;
+    if (!this.authenticated) {
+      return { success: false, message: "Not authenticated" };
     }
 
     try {
       const holdings = await this.client.getHoldings();
 
-      this.data.holdings = holdings.map(h => ({
-        ticker: h.ticker,
-        name: h.description,
-        quantity: h.quantity,
-        value: h.value,
+      this.data.holdings = (holdings || []).map(h => ({
+        ticker: h.ticker || h.symbol,
+        name: h.description || h.securityName || h.holdingName,
+        quantity: h.quantity || h.shares,
+        value: h.value || h.marketValue,
         costBasis: h.costBasis,
-        gain: h.gain,
-        gainPercent: h.gainPercent,
+        gain: h.gain || h.unrealizedGain,
+        gainPercent: h.gainPercent || h.unrealizedGainPercent,
         accountId: h.accountId
       }));
 
@@ -255,34 +277,35 @@ export class PersonalCapitalService extends EventEmitter {
   }
 
   /**
-   * Fetch net worth data
+   * Fetch net worth data (using accounts sum if getNetWorth not available)
    */
   async fetchNetWorth() {
-    if (!this.authenticated && !this.data.authenticated) {
-      const authResult = await this.authenticate();
-      if (!authResult.success) return authResult;
+    if (!this.authenticated) {
+      return { success: false, message: "Not authenticated" };
     }
 
     try {
-      const netWorthData = await this.client.getNetWorth();
+      // Calculate net worth from accounts
+      let totalAssets = 0;
+      let totalLiabilities = 0;
 
-      // Current net worth
+      for (const acc of this.data.accounts || []) {
+        const balance = acc.balance || 0;
+        const type = (acc.type || "").toLowerCase();
+
+        if (type.includes("loan") || type.includes("credit") || type.includes("mortgage") || type.includes("debt")) {
+          totalLiabilities += Math.abs(balance);
+        } else {
+          totalAssets += balance;
+        }
+      }
+
       this.data.netWorth = {
-        total: netWorthData.netWorth,
-        assets: netWorthData.assets,
-        liabilities: netWorthData.liabilities,
+        total: totalAssets - totalLiabilities,
+        assets: totalAssets,
+        liabilities: totalLiabilities,
         date: new Date().toISOString()
       };
-
-      // Historical data if available
-      if (netWorthData.history) {
-        this.data.netWorthHistory = netWorthData.history.map(h => ({
-          date: h.date,
-          netWorth: h.netWorth,
-          assets: h.assets,
-          liabilities: h.liabilities
-        }));
-      }
 
       this.data.lastUpdated = new Date().toISOString();
       this.save();
@@ -305,28 +328,31 @@ export class PersonalCapitalService extends EventEmitter {
       errors: []
     };
 
+    // Fetch accounts first
     try {
       results.accounts = await this.fetchAccounts();
       if (!results.accounts.success) {
-        results.errors.push(results.accounts.message);
+        results.errors.push(`Accounts: ${results.accounts.message}`);
       }
     } catch (e) {
       results.errors.push(`Accounts: ${e.message}`);
     }
 
+    // Then holdings
     try {
       results.holdings = await this.fetchHoldings();
       if (!results.holdings.success) {
-        results.errors.push(results.holdings.message);
+        results.errors.push(`Holdings: ${results.holdings.message}`);
       }
     } catch (e) {
       results.errors.push(`Holdings: ${e.message}`);
     }
 
+    // Calculate net worth from accounts
     try {
       results.netWorth = await this.fetchNetWorth();
       if (!results.netWorth.success) {
-        results.errors.push(results.netWorth.message);
+        results.errors.push(`Net Worth: ${results.netWorth.message}`);
       }
     } catch (e) {
       results.errors.push(`Net Worth: ${e.message}`);
@@ -354,11 +380,12 @@ export class PersonalCapitalService extends EventEmitter {
     // Calculate totals by account type
     const byType = {};
     for (const acc of this.data.accounts || []) {
-      if (!byType[acc.type]) {
-        byType[acc.type] = { count: 0, balance: 0 };
+      const type = acc.type || "Other";
+      if (!byType[type]) {
+        byType[type] = { count: 0, balance: 0 };
       }
-      byType[acc.type].count++;
-      byType[acc.type].balance += acc.balance || 0;
+      byType[type].count++;
+      byType[type].balance += acc.balance || 0;
     }
 
     // Top holdings
@@ -367,7 +394,7 @@ export class PersonalCapitalService extends EventEmitter {
       .slice(0, 5);
 
     return {
-      connected: this.data.authenticated && this.data.accounts.length > 0,
+      connected: this.authenticated && this.data.accounts.length > 0,
       netWorth: this.data.netWorth,
       accountCount: this.data.accounts?.length || 0,
       accountsByType: byType,
@@ -406,6 +433,7 @@ export class PersonalCapitalService extends EventEmitter {
   reset() {
     this.data = getDefaultData();
     this.authenticated = false;
+    this.pendingTwoFactor = false;
     this.save();
 
     // Remove cookies file

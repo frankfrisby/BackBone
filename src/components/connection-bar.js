@@ -32,7 +32,7 @@ const StatusDot = ({ connected, color }) => {
  * Connection Bar Component - Shows colored status dots with service names
  * Static indicators to prevent flickering
  */
-const ConnectionBarBase = ({ connections = {}, title = "BACKBONE", version = "" }) => {
+const ConnectionBarBase = ({ connections = {}, title = "BACKBONE", version = "", userDisplay = "" }) => {
   const services = Object.keys(SERVICE_CONFIG);
   const connectedCount = services.filter(key => connections[key]?.connected).length;
 
@@ -45,7 +45,7 @@ const ConnectionBarBase = ({ connections = {}, title = "BACKBONE", version = "" 
       paddingY: 0,
       marginBottom: 1,
       borderStyle: "round",
-      borderColor: "#1e293b"
+      borderColor: "#0f172a"
     },
     // Title with logo
     e(
@@ -57,7 +57,9 @@ const ConnectionBarBase = ({ connections = {}, title = "BACKBONE", version = "" 
       version && e(Text, { color: "#475569" }, `v${version}`),
       e(Text, { color: "#334155" }, "│"),
       e(Text, { color: connectedCount > 0 ? "#22c55e" : "#64748b" }, `${connectedCount}/${services.length}`),
-      e(Text, { color: "#475569" }, "connected")
+      e(Text, { color: "#475569" }, "connected"),
+      userDisplay && e(Text, { color: "#1e293b" }, " │"),
+      userDisplay && e(Text, { color: "#94a3b8" }, userDisplay)
     ),
     // Connection indicators with static dots
     e(
@@ -90,6 +92,7 @@ const ConnectionBarBase = ({ connections = {}, title = "BACKBONE", version = "" 
 const areConnectionBarPropsEqual = (prevProps, nextProps) => {
   if (prevProps.title !== nextProps.title) return false;
   if (prevProps.version !== nextProps.version) return false;
+  if (prevProps.userDisplay !== nextProps.userDisplay) return false;
 
   // Only compare connection status, not details (which may include timestamps)
   const prevConns = prevProps.connections || {};
@@ -137,7 +140,7 @@ export const ConnectionPanel = ({ connections = [], title = "Connections" }) => 
     {
       flexDirection: "column",
       borderStyle: "single",
-      borderColor: "#1e293b",
+      borderColor: "#0f172a",
       paddingX: 1
     },
     e(

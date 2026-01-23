@@ -94,7 +94,7 @@ export const WealthPanel = ({ data, compact = false, privateMode = false }) => {
     {
       flexDirection: "column",
       borderStyle: "single",
-      borderColor: "#0f172a",
+      borderColor: "#05060a",
       paddingX: 1,
       paddingY: 0,
       height: compact ? 10 : 14,

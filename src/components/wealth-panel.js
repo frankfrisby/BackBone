@@ -1,4 +1,4 @@
-import React from "react";
+import React, { memo } from "react";
 import { Box, Text } from "ink";
 
 const e = React.createElement;
@@ -94,7 +94,7 @@ export const WealthPanel = ({ data, compact = false, privateMode = false }) => {
     {
       flexDirection: "column",
       borderStyle: "single",
-      borderColor: "#334155",
+      borderColor: "#0f172a",
       paddingX: 1,
       paddingY: 0,
       height: compact ? 10 : 14,
@@ -260,7 +260,7 @@ export const WealthSummaryLine = ({ data, privateMode = false }) => {
 /**
  * Connections Status Panel - Shows all connections with commands
  */
-export const ConnectionsStatusPanel = ({ connections = {} }) => {
+const ConnectionsStatusPanelBase = ({ connections = {} }) => {
   const connectionItems = [
     { key: "claude", label: "AI Model", command: "/models", icon: "◈" },
     { key: "alpaca", label: "Trading", command: "/alpaca", icon: "△" },
@@ -309,5 +309,20 @@ export const ConnectionsStatusPanel = ({ connections = {} }) => {
     })
   );
 };
+
+/**
+ * Custom comparison to prevent unnecessary re-renders
+ */
+const areConnectionsEqual = (prev, next) => {
+  const keys = ["claude", "alpaca", "personalCapital", "oura", "linkedin"];
+  for (const key of keys) {
+    if (prev.connections?.[key]?.connected !== next.connections?.[key]?.connected) {
+      return false;
+    }
+  }
+  return true;
+};
+
+export const ConnectionsStatusPanel = memo(ConnectionsStatusPanelBase, areConnectionsEqual);
 
 export default WealthPanel;

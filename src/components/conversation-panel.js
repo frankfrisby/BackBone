@@ -112,8 +112,6 @@ const LoadingIndicator = () => {
   );
 };
 
-const BORDER_COLOR = "#0f172a";
-
 const ConversationPanelBase = ({ messages, isLoading, streamingText, actionStreamingText, actionStreamingTitle }) => {
   const hasMessages = messages.length > 0 || isLoading || streamingText || actionStreamingText;
 
@@ -126,9 +124,7 @@ const ConversationPanelBase = ({ messages, isLoading, streamingText, actionStrea
         paddingY: 1,
         overflow: "hidden",
         width: "100%",
-        height: 8,
-        borderStyle: "single",
-        borderColor: BORDER_COLOR
+        height: 8
       },
       e(
         Box,
@@ -155,9 +151,7 @@ const ConversationPanelBase = ({ messages, isLoading, streamingText, actionStrea
       paddingX: 1,
       paddingY: 1,
       overflow: "hidden",
-      width: "100%",
-      borderStyle: "single",
-      borderColor: BORDER_COLOR
+      width: "100%"
     },
     e(
       Box,

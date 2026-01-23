@@ -177,13 +177,10 @@ const EngineStatusPanelBase = ({
   const statusIcon = STATUS_ICONS[statusId] || "●";
   const statusLabel = STATUS_LABELS[statusId] || "Ready";
   const isActive = statusId !== "idle" && statusId !== "waiting";
-  const borderColor = isActive ? "#1e293b" : "#0f172a";
   const containerProps = compact
     ? { flexDirection: "row", gap: 1, paddingX: 1 }
     : {
         flexDirection: "column",
-        borderStyle: "single",
-        borderColor,
         paddingX: 1,
         paddingY: 1,
         marginBottom: 1
@@ -351,4 +348,3 @@ export const EngineStatusPanel = memo(EngineStatusPanelBase, areEngineStatusProp
 export const EngineStatusLine = memo(EngineStatusLineBase);
 
 export default EngineStatusPanel;
-

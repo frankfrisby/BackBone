@@ -1,13 +1,12 @@
 /**
  * App Footer Bar Component - Tier, View Mode, Shortcuts
  *
- * Self-contained component that subscribes to its own state slices.
+ * Receives data as props from parent.
  * Displays tier indicator, view mode, and keyboard shortcuts.
  */
 
 import React, { memo } from "react";
 import { Box, Text } from "ink";
-import { useAppStore, STATE_SLICES } from "../hooks/useAppStore.js";
 
 const e = React.createElement;
 
@@ -27,15 +26,19 @@ const VIEW_MODE_LABELS = {
 
 /**
  * App Footer Bar - Shows tier, view mode, and keyboard shortcuts
+ *
+ * Props:
+ * - currentTier: "low" | "medium" | "high"
+ * - viewMode: "core" | "advanced" | "minimal"
+ * - privateMode: boolean
+ * - firebaseUser: User object or null
  */
-const AppFooterBarBase = () => {
-  // Subscribe to UI state
-  const uiState = useAppStore(STATE_SLICES.UI);
-  const userState = useAppStore(STATE_SLICES.USER);
-
-  const { currentTier, viewMode, privateMode } = uiState;
-  const { firebaseUser } = userState;
-
+const AppFooterBarBase = ({
+  currentTier = "medium",
+  viewMode = "core",
+  privateMode = false,
+  firebaseUser = null,
+}) => {
   const tierConfig = MODEL_TIERS[currentTier] || MODEL_TIERS.medium;
 
   return e(

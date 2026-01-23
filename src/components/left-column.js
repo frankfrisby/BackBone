@@ -1,13 +1,12 @@
 /**
  * Left Column Component - Progress, Goals, Tickers, Projects
  *
- * Self-contained component that subscribes to its own state slices.
- * Updates to other parts of the app don't cause this to re-render.
+ * Receives data as props from parent to avoid store sync timing issues.
+ * Uses coordinated updates for frequently changing data.
  */
 
 import React, { memo, useMemo } from "react";
 import { Box } from "ink";
-import { useAppStore, useAppStoreMultiple, STATE_SLICES } from "../hooks/useAppStore.js";
 import { useCoordinatedUpdates } from "../hooks/useCoordinatedUpdates.js";
 
 // Import child components
@@ -31,14 +30,24 @@ const VIEW_MODES = {
 };
 
 /**
- * Left Column - subscribes to life scores, goals, health, tickers, projects
+ * Left Column - Progress, Goals, Tickers, Projects
+ *
+ * Props:
+ * - viewMode: "core" | "advanced" | "minimal"
+ * - ouraHealth: Oura health data
+ * - ouraHistory: Oura history data
+ * - tickers: Array of ticker data with scores
+ * - projects: Array of project data
+ * - uiClock: Timestamp for ticker panel updates
  */
-const LeftColumnBase = ({ viewMode = VIEW_MODES.CORE }) => {
-  // Subscribe to store slices we need
-  const healthState = useAppStore(STATE_SLICES.HEALTH);
-  const tickersState = useAppStore(STATE_SLICES.TICKERS);
-  const projectsState = useAppStore(STATE_SLICES.PROJECTS);
-
+const LeftColumnBase = ({
+  viewMode = VIEW_MODES.CORE,
+  ouraHealth,
+  ouraHistory,
+  tickers = [],
+  projects = [],
+  uiClock,
+}) => {
   // Use coordinated updates for frequently changing data (like activity narrator pattern)
   const lifeScores = getLifeScores();
   const goalTracker = getGoalTracker();
@@ -55,11 +64,6 @@ const LeftColumnBase = ({ viewMode = VIEW_MODES.CORE }) => {
     { initialData: goalTracker.getDisplayData() }
   ) || goalTracker.getDisplayData();
 
-  // Extract needed data
-  const { ouraHealth, ouraHistory } = healthState;
-  const { tickers } = tickersState;
-  const { projects } = projectsState;
-
   // Compute top tickers (memoized)
   const topTickers = useMemo(() => {
     if (!tickers || tickers.length === 0) return [];
@@ -68,9 +72,6 @@ const LeftColumnBase = ({ viewMode = VIEW_MODES.CORE }) => {
       .sort((a, b) => b.score - a.score)
       .slice(0, viewMode === VIEW_MODES.MINIMAL ? 3 : viewMode === VIEW_MODES.ADVANCED ? 20 : 10);
   }, [tickers, viewMode]);
-
-  // Get current timestamp for ticker panel
-  const uiClock = useMemo(() => Date.now(), []);
 
   return e(
     Box,

@@ -180,9 +180,7 @@ import { LeftColumn } from "./components/left-column.js";
 import { RightColumn } from "./components/right-column.js";
 import { AppFooterBar } from "./components/app-footer-bar.js";
 
-// Store sync for bridging useState to app store
-import { useStoreSync, STATE_SLICES } from "./hooks/useStoreSync.js";
-import { getAppStore } from "./services/app-store.js";
+// Note: Store sync removed - passing props directly to column components now
 
 const e = React.createElement;
 
@@ -683,67 +681,6 @@ const App = ({ updateConsoleTitle }) => {
   const [currentModelInfo, setCurrentModelInfo] = useState(() => {
     const initial = getCurrentModel();
     return { ...initial.model, taskType: initial.taskType };
-  });
-
-  // ===== SYNC STATE TO APP STORE =====
-  // This bridges useState to the store so child components can subscribe independently
-  // and only re-render when their specific data changes (reduces flickering)
-  useStoreSync({
-    [STATE_SLICES.UI]: {
-      viewMode,
-      privateMode,
-      currentTier,
-      isInitializing,
-      mainViewReady,
-      lastAction,
-      uiClock,
-    },
-    [STATE_SLICES.USER]: {
-      firebaseUser,
-      userSettings,
-      showOnboarding,
-    },
-    [STATE_SLICES.CONNECTIONS]: {
-      alpaca: { status: alpacaStatus, mode: alpacaMode },
-      claude: { status: claudeStatus },
-      claudeCode: claudeCodeStatus,
-    },
-    [STATE_SLICES.PORTFOLIO]: {
-      portfolio,
-      tradingStatus,
-      tradingHistory,
-      lastUpdated: portfolioLastUpdated,
-      nextTradeTime: nextTradeTimeDisplay,
-    },
-    [STATE_SLICES.TICKERS]: {
-      tickers,
-      weights,
-      priceHistory,
-      lastQuoteUpdate,
-    },
-    [STATE_SLICES.CHAT]: {
-      messages,
-      isProcessing,
-      streamingText,
-      actionStreamingText,
-      actionStreamingTitle,
-      currentModelInfo,
-    },
-    [STATE_SLICES.HEALTH]: {
-      ouraHealth,
-      ouraHistory,
-    },
-    [STATE_SLICES.PROJECTS]: {
-      projects,
-    },
-    [STATE_SLICES.OVERLAYS]: {
-      showTestRunner,
-      showSettings,
-      showLinkedInViewer,
-      showApprovalOverlay,
-      setupOverlay,
-      linkedInViewerData,
-    },
   });
 
   // Check AI model connection on mount
@@ -4899,11 +4836,17 @@ Folder: ${result.action.id}`,
       Box,
       { flexDirection: "row", height: contentHeight, overflow: "hidden" },
       // ===== LEFT COLUMN: Progress, Goals, Tickers (isolated component) =====
-      // Uses app store subscriptions - only re-renders when its own data changes
       viewMode !== VIEW_MODES.MINIMAL && !isMedium && e(
         Box,
         { flexDirection: "column", width: "25%", paddingRight: 1, overflow: "hidden" },
-        e(LeftColumn, { viewMode })
+        e(LeftColumn, {
+          viewMode,
+          ouraHealth,
+          ouraHistory,
+          tickers,
+          projects,
+          uiClock,
+        })
       ),
       // ===== CENTER COLUMN: Engine Status, Chat =====
       e(
@@ -5226,15 +5169,28 @@ Folder: ${result.action.id}`,
             })
       ),
       // ===== RIGHT COLUMN: Portfolio, Wealth (isolated component) =====
-      // Uses app store subscriptions - only re-renders when its own data changes
       !isMedium && e(
         Box,
         { flexDirection: "column", width: "25%", paddingLeft: 1, overflow: "hidden" },
-        e(RightColumn, { viewMode })
+        e(RightColumn, {
+          viewMode,
+          portfolio,
+          tradingStatus,
+          tradingHistory,
+          portfolioLastUpdated,
+          nextTradeTimeDisplay,
+          privateMode,
+          alpacaStatus,
+          alpacaMode,
+          tickers,
+          personalCapitalData,
+          connectionStatuses,
+          uiClock,
+        })
       )
     ),
-    // Footer bar (isolated component - uses app store subscriptions)
-    e(AppFooterBar, null),
+    // Footer bar
+    e(AppFooterBar, { currentTier, viewMode, privateMode, firebaseUser }),
     // Approval Overlay (modal)
     showApprovalOverlay && e(ApprovalOverlay, {
       actions: autonomousState.proposedActions || [],

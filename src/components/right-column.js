@@ -1,13 +1,11 @@
 /**
  * Right Column Component - Portfolio, Trading History, Wealth
  *
- * Self-contained component that subscribes to its own state slices.
- * Updates to other parts of the app don't cause this to re-render.
+ * Receives data as props from parent to avoid store sync timing issues.
  */
 
 import React, { memo, useMemo } from "react";
 import { Box } from "ink";
-import { useAppStore, useAppStoreMultiple, STATE_SLICES } from "../hooks/useAppStore.js";
 
 // Import child components
 import { PortfolioPanel } from "./portfolio-panel.js";
@@ -41,20 +39,37 @@ const formatTimeAgo = (date) => {
 
 /**
  * Right Column - Portfolio, Trading History, Wealth/Connections
+ *
+ * Props:
+ * - viewMode: "core" | "advanced" | "minimal"
+ * - portfolio: Portfolio data object
+ * - tradingStatus: Trading status display data
+ * - tradingHistory: Trading history data
+ * - portfolioLastUpdated: Timestamp of last portfolio update
+ * - nextTradeTimeDisplay: Next trade time string
+ * - privateMode: Whether to hide sensitive data
+ * - alpacaStatus: Alpaca connection status
+ * - alpacaMode: Alpaca mode (paper/live)
+ * - tickers: Array of ticker data for score lookup
+ * - personalCapitalData: Personal Capital wealth data
+ * - connectionStatuses: All connection statuses
+ * - uiClock: Timestamp for UI updates
  */
-const RightColumnBase = ({ viewMode = VIEW_MODES.CORE }) => {
-  // Subscribe to store slices we need
-  const portfolioState = useAppStore(STATE_SLICES.PORTFOLIO);
-  const connectionsState = useAppStore(STATE_SLICES.CONNECTIONS);
-  const tickersState = useAppStore(STATE_SLICES.TICKERS);
-  const uiState = useAppStore(STATE_SLICES.UI);
-
-  // Extract needed data
-  const { portfolio, tradingStatus, tradingHistory, lastUpdated, nextTradeTime } = portfolioState;
-  const { alpaca, personalCapital } = connectionsState;
-  const { tickers } = tickersState;
-  const { privateMode, uiClock } = uiState;
-
+const RightColumnBase = ({
+  viewMode = VIEW_MODES.CORE,
+  portfolio,
+  tradingStatus,
+  tradingHistory,
+  portfolioLastUpdated,
+  nextTradeTimeDisplay,
+  privateMode = false,
+  alpacaStatus = "Not connected",
+  alpacaMode = "paper",
+  tickers = [],
+  personalCapitalData,
+  connectionStatuses = {},
+  uiClock,
+}) => {
   // Compute ticker scores for position action indicators
   const tickerScores = useMemo(() => {
     if (!tickers || tickers.length === 0) return {};
@@ -67,7 +82,7 @@ const RightColumnBase = ({ viewMode = VIEW_MODES.CORE }) => {
   }, [tickers]);
 
   // Format last updated time
-  const lastUpdatedAgo = useMemo(() => formatTimeAgo(lastUpdated), [lastUpdated]);
+  const lastUpdatedAgo = useMemo(() => formatTimeAgo(portfolioLastUpdated), [portfolioLastUpdated]);
 
   return e(
     Box,
@@ -78,14 +93,14 @@ const RightColumnBase = ({ viewMode = VIEW_MODES.CORE }) => {
       portfolio: portfolio
         ? {
             ...portfolio,
-            status: alpaca?.status || "Not connected",
-            mode: alpaca?.mode || "paper",
+            status: alpacaStatus,
+            mode: alpacaMode,
           }
         : null,
       formatPercent,
       tradingStatus,
       lastUpdatedAgo,
-      nextTradeTime,
+      nextTradeTime: nextTradeTimeDisplay,
       privateMode,
       tickerScores,
     }),
@@ -94,19 +109,19 @@ const RightColumnBase = ({ viewMode = VIEW_MODES.CORE }) => {
     viewMode !== VIEW_MODES.MINIMAL &&
       e(TradingHistoryPanel, {
         tradingHistory,
-        isConnected: alpaca?.status === "Live",
+        isConnected: alpacaStatus === "Live",
         timestamp: uiClock,
       }),
 
     // Wealth Panel (if Personal Capital connected) or Connections Status Panel
-    personalCapital?.connected
+    personalCapitalData?.connected
       ? e(WealthPanel, {
-          data: personalCapital,
+          data: personalCapitalData,
           compact: true,
           privateMode,
         })
       : e(ConnectionsStatusPanel, {
-          connections: connectionsState,
+          connections: connectionStatuses,
         })
   );
 };

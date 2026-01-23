@@ -142,7 +142,7 @@ import { WealthPanel, WealthCompact, ConnectionsStatusPanel } from "./components
 import OuraHealthPanel from "./components/oura-health-panel.js";
 import { OnboardingPanel } from "./components/onboarding-panel.js";
 import { SplashScreen } from "./components/splash-screen.js";
-import { ToolActionsPanel } from "./components/tool-actions-panel.js";
+// ToolActionsPanel removed - merged into AgentActivityPanel
 import { resizeForOnboarding, resizeForMainApp } from "./services/terminal-resize.js";
 import { processAndSaveContext, buildContextForAI } from "./services/conversation-context.js";
 import { MENTORS, MENTOR_CATEGORIES, getMentorsByCategory, getDailyWisdom, formatMentorDisplay, getAllMentorsDisplay, getMentorAdvice } from "./services/mentors.js";
@@ -167,8 +167,13 @@ import { runUserEvaluationCycle } from "./services/analysis-scheduler.js";
 
 // Engine state and new panels
 import { getEngineStateManager, ENGINE_STATUS } from "./services/engine-state.js";
-import { EngineStatusPanel, EngineStatusLine } from "./components/engine-status-panel.js";
+// EngineStatusPanel removed - merged into AgentActivityPanel
+import { EngineStatusLine } from "./components/engine-status-panel.js";
 import { TickerScoresPanel, TickerSummaryLine } from "./components/ticker-scores-panel.js";
+
+// Activity tracker for agent status display
+import { getActivityTracker, ACTIVITY_STATUS } from "./services/activity-tracker.js";
+import { AgentActivityPanel, AgentStatusDot } from "./components/agent-activity-panel.js";
 
 const e = React.createElement;
 
@@ -564,6 +569,10 @@ const App = ({ updateConsoleTitle }) => {
   const lifeScores = useMemo(() => getLifeScores(), []);
   const mobileService = useMemo(() => getMobileService(), []);
   const personalCapitalRef = useRef(null);
+
+  // Activity tracker for visual status display
+  const activityTracker = useMemo(() => getActivityTracker(), []);
+  const [activityData, setActivityData] = useState(() => activityTracker.getDisplayData());
 
   const [workLogEntries, setWorkLogEntries] = useState(() => workLog.getDisplayData(15));
   const [goals, setGoals] = useState(() => goalTracker.getDisplayData());
@@ -1038,6 +1047,47 @@ const App = ({ updateConsoleTitle }) => {
       // Update work log entries periodically
       setWorkLogEntries(workLog.getDisplayData(15));
 
+      // ===== ACTIVITY TRACKER WIRING =====
+      // Wire activity tracker to autonomous engine events
+      autonomousEngine.on("cycle-start", (cycle) => {
+        activityTracker.incrementCycle();
+        activityTracker.log("analyzing", "System state", ACTIVITY_STATUS.WORKING);
+        activityTracker.setState("analyzing", "Evaluating current context...");
+      });
+
+      autonomousEngine.on("proposals-updated", (proposals) => {
+        if (proposals.length > 0) {
+          activityTracker.log("planning", `${proposals.length} actions`, ACTIVITY_STATUS.OBSERVATION);
+        }
+      });
+
+      autonomousEngine.on("action-started", (action) => {
+        const actId = activityTracker.log("executing", action.title, ACTIVITY_STATUS.WORKING);
+        action._activityId = actId;
+        activityTracker.setState("executing", action.title);
+      });
+
+      autonomousEngine.on("action-completed", (action) => {
+        if (action._activityId) {
+          activityTracker.complete(action._activityId);
+        }
+        activityTracker.log("completed", action.title, ACTIVITY_STATUS.COMPLETED);
+        activityTracker.setState("idle", null);
+      });
+
+      autonomousEngine.on("action-failed", (action) => {
+        if (action._activityId) {
+          activityTracker.error(action._activityId, action.error);
+        }
+        activityTracker.log("failed", action.title, ACTIVITY_STATUS.ERROR);
+        activityTracker.setState("error", action.error?.slice(0, 50));
+      });
+
+      // Listen for activity tracker updates
+      activityTracker.on("updated", (data) => {
+        setActivityData(data);
+      });
+
       // Start mobile dashboard
       try {
         await mobileService.startWebDashboard();
@@ -1051,6 +1101,7 @@ const App = ({ updateConsoleTitle }) => {
 
     return () => {
       autonomousEngine.stop();
+      activityTracker.setRunning(false);
       mobileService.stopWebDashboard();
       claudeCodeBackend.off("task-output", handleTaskOutput);
     };
@@ -1220,6 +1271,32 @@ Return ONLY a JSON array, no other text.`;
       return [];
     }
   }, [claudeCodeStatus.available]);
+
+  // ===== AUTO-START AUTONOMOUS ENGINE =====
+  // This runs once generateAIActions is available
+  const autoStartedRef = useRef(false);
+  useEffect(() => {
+    if (autoStartedRef.current) return;
+    if (!autonomousEngine || !generateAIActions) return;
+
+    // Delay to let other initialization complete
+    const startTimer = setTimeout(() => {
+      if (autoStartedRef.current) return;
+      autoStartedRef.current = true;
+
+      // Start the engine
+      activityTracker.log("starting", "Autonomous engine", ACTIVITY_STATUS.WORKING);
+      activityTracker.setState("starting", "Initializing autonomous agent...");
+
+      autonomousEngine.start(generateAIActions);
+      activityTracker.setRunning(true);
+      activityTracker.log("ready", "Engine running", ACTIVITY_STATUS.COMPLETED);
+      activityTracker.setState("monitoring", "Watching for opportunities...");
+      workLog.logSystem("Autonomous Engine", "Auto-started and monitoring");
+    }, 3000);
+
+    return () => clearTimeout(startTimer);
+  }, [autonomousEngine, generateAIActions, activityTracker, workLog]);
 
   // Refresh trading status display every 10 seconds
   useEffect(() => {
@@ -4750,20 +4827,16 @@ Folder: ${result.action.id}`,
       e(
         Box,
         { flexDirection: "column", width: viewMode === VIEW_MODES.MINIMAL || isMedium ? "75%" : "50%", paddingX: 1, overflow: "hidden" },
-        e(ToolActionsPanel, {
-          items: toolEvents,
+        // Engine Status - unified panel showing live agent status with visual effects
+        e(AgentActivityPanel, {
+          activities: activityData.activities,
+          currentState: activityData.currentState,
+          stateDetail: activityData.stateDetail,
+          engineRunning: activityData.isRunning,
+          cycleCount: activityData.cycleCount,
+          toolEvents: toolEvents,
           streamingText: actionStreamingText,
-          streamingTitle: actionStreamingTitle || "Running action"
-        }),
-        // Engine Status Panel - shows what AI is doing (replaces Actions)
-        e(EngineStatusPanel, {
-          status: engineStatus.status,
-          currentPlan: engineStatus.status.currentPlan,
-          currentWork: engineStatus.status.currentWork,
-          projects: engineStatus.projects,
-          compact: viewMode === VIEW_MODES.MINIMAL,
-          actionStreamingText: actionStreamingText,
-          borderless: true
+          maxEntries: viewMode === VIEW_MODES.MINIMAL ? 4 : 6
         }),
         // Conversation Panel
         e(ConversationPanel, { messages, isLoading: isProcessing, streamingText, actionStreamingText, actionStreamingTitle }),

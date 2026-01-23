@@ -1,32 +1,70 @@
-import React from "react";
+import React, { memo } from "react";
 import { Box, Text } from "ink";
 import { getTickerIcon } from "../data/tickers.js";
 
 const e = React.createElement;
 
-const statusColor = (status) => {
-  if (status === "Live") return "#22c55e";
-  if (status === "Connecting...") return "#3b82f6";
-  if (status === "Missing keys") return "#f97316";
-  if (status === "Offline") return "#ef4444";
-  return "#64748b";
+// ============================================================================
+// COLORS & STYLING
+// ============================================================================
+
+const COLORS = {
+  // Status colors
+  live: "#22c55e",
+  connecting: "#3b82f6",
+  warning: "#f97316",
+  offline: "#ef4444",
+
+  // P&L colors
+  profit: "#22c55e",
+  loss: "#ef4444",
+  neutral: "#94a3b8",
+
+  // Score colors (aligned with BackBoneApp thresholds)
+  scoreBuy: "#22c55e",      // >= 8.0
+  scoreHold: "#eab308",     // 4.0 - 8.0
+  scoreSell: "#ef4444",     // < 4.0
+  scoreExtreme: "#16a34a",  // >= 9.0
+
+  // UI colors
+  primary: "#e2e8f0",
+  secondary: "#94a3b8",
+  muted: "#64748b",
+  dim: "#475569",
+  border: "#0f172a",
+  background: "#1e293b",
+
+  // Accent
+  accent: "#3b82f6",
+  gold: "#f59e0b"
 };
 
-const statusIcon = (status) => {
-  if (status === "Live") return "\u25CF";
-  return "\u25CB";
+// ============================================================================
+// UTILITY FUNCTIONS
+// ============================================================================
+
+const getStatusColor = (status) => {
+  if (status === "Live") return COLORS.live;
+  if (status === "Connecting...") return COLORS.connecting;
+  if (status === "Missing keys") return COLORS.warning;
+  if (status === "Offline") return COLORS.offline;
+  return COLORS.muted;
+};
+
+const getStatusDot = (status) => {
+  return status === "Live" ? "\u25CF" : "\u25CB";
 };
 
 /**
- * Format currency with proper notation
- * @param {number|string} value - The value to format
- * @param {boolean} privateMode - If true, mask the value with dots
+ * Format currency with $ and commas
  */
 const formatCurrency = (value, privateMode = false) => {
-  if (value === null || value === undefined) return "--";
-  if (privateMode) return "$••••••";
+  if (value === null || value === undefined || value === "--") return "--";
+  if (privateMode) return "$\u2022\u2022\u2022\u2022\u2022\u2022";
+
   const num = typeof value === "string" ? parseFloat(value.replace(/[$,]/g, "")) : value;
   if (isNaN(num)) return "--";
+
   return new Intl.NumberFormat("en-US", {
     style: "currency",
     currency: "USD",
@@ -36,64 +74,266 @@ const formatCurrency = (value, privateMode = false) => {
 };
 
 /**
- * Format market value
- * @param {number|string} value - The value to format
- * @param {boolean} privateMode - If true, mask the value
+ * Format value in compact notation (K/M)
  */
-const formatMarketValue = (value, privateMode = false) => {
+const formatCompact = (value, privateMode = false) => {
   if (value === null || value === undefined) return "--";
-  if (privateMode) return "$••••";
+  if (privateMode) return "$\u2022\u2022\u2022";
+
   const num = typeof value === "string" ? parseFloat(value.replace(/[$,]/g, "")) : value;
   if (isNaN(num)) return "--";
 
-  if (num >= 1000000) {
+  if (Math.abs(num) >= 1000000) {
     return `$${(num / 1000000).toFixed(1)}M`;
   }
-  if (num >= 1000) {
+  if (Math.abs(num) >= 1000) {
     return `$${(num / 1000).toFixed(1)}K`;
   }
   return `$${num.toFixed(0)}`;
 };
 
 /**
- * Position action bar - 4 bars showing score level
- * Bar 1: Red (< 4), Bar 2: Yellow (4-6), Bar 3: Dark Green (6-8), Bar 4: Light Green (>= 8)
+ * Format percentage with sign
  */
-const PositionActionBar = ({ score }) => {
-  // Determine how many bars are "lit" based on score
-  // Score < 4: 1 bar, Score 4-6: 2 bars, Score 6-8: 3 bars, Score >= 8: 4 bars
-  let level = 0;
-  if (score !== null && score !== undefined) {
-    if (score >= 8.0) level = 4;
-    else if (score >= 6.0) level = 3;
-    else if (score >= 4.0) level = 2;
-    else level = 1;
-  }
+const formatPct = (value, privateMode = false) => {
+  if (value === null || value === undefined) return "--";
+  if (privateMode) return "\u2022\u2022%";
 
-  // Colors for each bar position
-  const colors = {
-    red: "#ef4444",
-    yellow: "#eab308",
-    darkGreen: "#16a34a",
-    lightGreen: "#22c55e"
-  };
-  const dimColor = "#334155";
+  const num = typeof value === "number" ? value : parseFloat(value);
+  if (isNaN(num)) return "--";
+
+  const sign = num >= 0 ? "+" : "";
+  return `${sign}${num.toFixed(2)}%`;
+};
+
+/**
+ * Get P/L color based on value
+ */
+const getPLColor = (value, privateMode = false) => {
+  if (privateMode) return COLORS.muted;
+  if (value === null || value === undefined) return COLORS.muted;
+  const num = typeof value === "number" ? value : parseFloat(value);
+  if (isNaN(num)) return COLORS.muted;
+  if (num > 0) return COLORS.profit;
+  if (num < 0) return COLORS.loss;
+  return COLORS.neutral;
+};
+
+/**
+ * Get score color based on BackBoneApp thresholds
+ */
+const getScoreColor = (score) => {
+  if (score === null || score === undefined) return COLORS.dim;
+  if (score >= 9.0) return COLORS.scoreExtreme;
+  if (score >= 8.0) return COLORS.scoreBuy;
+  if (score >= 4.0) return COLORS.scoreHold;
+  return COLORS.scoreSell;
+};
+
+/**
+ * Get action label based on score
+ */
+const getActionLabel = (score) => {
+  if (score === null || score === undefined) return "---";
+  if (score >= 9.0) return "BUY+";
+  if (score >= 8.0) return "BUY";
+  if (score >= 6.0) return "KEEP";
+  if (score >= 4.0) return "HOLD";
+  if (score >= 2.7) return "WEAK";
+  return "SELL";
+};
+
+// ============================================================================
+// SUB-COMPONENTS
+// ============================================================================
+
+/**
+ * Score indicator bar with visual representation
+ */
+const ScoreIndicator = ({ score }) => {
+  const color = getScoreColor(score);
+  const label = getActionLabel(score);
+
+  // Visual bar (0-10 mapped to 5 segments)
+  const filled = score !== null ? Math.min(5, Math.max(0, Math.round(score / 2))) : 0;
+  const empty = 5 - filled;
 
   return e(
     Box,
-    { flexDirection: "row" },
-    // Bar 1 - Red (sell)
-    e(Text, { color: level >= 1 ? colors.red : dimColor }, "█"),
-    // Bar 2 - Yellow (hold)
-    e(Text, { color: level >= 2 ? colors.yellow : dimColor }, "█"),
-    // Bar 3 - Dark Green (keep)
-    e(Text, { color: level >= 3 ? colors.darkGreen : dimColor }, "█"),
-    // Bar 4 - Light Green (buy)
-    e(Text, { color: level >= 4 ? colors.lightGreen : dimColor }, "█")
+    { flexDirection: "row", gap: 1 },
+    e(
+      Box,
+      { flexDirection: "row" },
+      filled > 0 && e(Text, { color }, "\u2588".repeat(filled)),
+      empty > 0 && e(Text, { color: COLORS.border }, "\u2591".repeat(empty))
+    ),
+    e(Text, { color, bold: score >= 8.0 }, label.padStart(4))
   );
 };
 
-export const PortfolioPanel = ({ portfolio: inputPortfolio = {}, formatPercent, tradingStatus, lastUpdatedAgo, nextTradeTime, privateMode = false, tickerScores = {} }) => {
+/**
+ * Single position row with clean formatting
+ */
+const PositionRow = ({ position, score, privateMode, isFirst }) => {
+  const icon = getTickerIcon(position.symbol);
+
+  // Today's change - use dayChangePercent first, otherwise calculate from price change
+  const todayPercent = position.dayChangePercent ?? position.todayChangePercent ?? 0;
+
+  // Total position PnL - use unrealizedPlPercent or calculate from cost basis
+  const totalPercent = position.unrealizedPlPercent ?? position.totalChangePercent ?? position.pnlPercent ?? 0;
+
+  const todayColor = getPLColor(todayPercent, privateMode);
+  const totalColor = getPLColor(totalPercent, privateMode);
+
+  // Calculate market value
+  const marketValue = position.marketValue ||
+    (position.shares * parseFloat(String(position.lastPrice || 0).replace(/[$,]/g, "")));
+
+  return e(
+    Box,
+    {
+      flexDirection: "row",
+      paddingY: 0,
+      backgroundColor: isFirst ? "#1a2e1a" : undefined
+    },
+    // Icon + Symbol
+    e(
+      Box,
+      { width: 7, flexDirection: "row" },
+      e(Text, null, icon),
+      e(Text, { color: COLORS.primary, bold: true }, ` ${position.symbol}`)
+    ),
+    // Shares
+    e(
+      Box,
+      { width: 5, justifyContent: "flex-end" },
+      e(Text, { color: COLORS.muted },
+        privateMode ? "\u2022\u2022" : String(position.shares || 0).padStart(4))
+    ),
+    // Market Value
+    e(
+      Box,
+      { width: 8, justifyContent: "flex-end" },
+      e(Text, { color: COLORS.secondary }, formatCompact(marketValue, privateMode).padStart(7))
+    ),
+    // Today's PnL %
+    e(
+      Box,
+      { width: 9, justifyContent: "flex-end" },
+      e(Text, { color: todayColor, bold: Math.abs(todayPercent) >= 5 },
+        formatPct(todayPercent, privateMode).padStart(7))
+    ),
+    // Total P/L %
+    e(
+      Box,
+      { width: 8, justifyContent: "flex-end" },
+      e(Text, { color: totalColor, bold: Math.abs(totalPercent) >= 5 },
+        formatPct(totalPercent, privateMode).padStart(7))
+    ),
+    // Score/Action
+    e(
+      Box,
+      { width: 12, marginLeft: 1 },
+      e(ScoreIndicator, { score })
+    )
+  );
+};
+
+/**
+ * Account summary section
+ */
+const AccountSummary = ({ portfolio, privateMode }) => {
+  return e(
+    Box,
+    { flexDirection: "column" },
+    // Equity (main highlight)
+    e(
+      Box,
+      { flexDirection: "row", justifyContent: "space-between" },
+      e(Text, { color: COLORS.secondary }, "Equity"),
+      e(Text, { color: COLORS.primary, bold: true },
+        privateMode ? "$\u2022\u2022\u2022,\u2022\u2022\u2022" : portfolio.equity)
+    ),
+    // Cash & Buying Power on same row
+    e(
+      Box,
+      { flexDirection: "row", justifyContent: "space-between", marginTop: 0 },
+      e(
+        Box,
+        { flexDirection: "row", gap: 1 },
+        e(Text, { color: COLORS.muted }, "Cash"),
+        e(Text, { color: COLORS.secondary },
+          privateMode ? "$\u2022\u2022\u2022" : formatCompact(portfolio.cash))
+      ),
+      e(
+        Box,
+        { flexDirection: "row", gap: 1 },
+        e(Text, { color: COLORS.muted }, "BP"),
+        e(Text, { color: COLORS.secondary },
+          privateMode ? "$\u2022\u2022\u2022" : formatCompact(portfolio.buyingPower))
+      )
+    )
+  );
+};
+
+/**
+ * Day P/L display
+ */
+const DayPL = ({ portfolio, privateMode }) => {
+  const color = getPLColor(portfolio.dayChange, privateMode);
+  const isPositive = portfolio.dayChange >= 0;
+
+  return e(
+    Box,
+    {
+      flexDirection: "row",
+      justifyContent: "space-between",
+      backgroundColor: isPositive && !privateMode ? "#0a2a0a" : privateMode ? undefined : "#2a0a0a",
+      paddingX: 1,
+      marginY: 1
+    },
+    e(Text, { color: COLORS.muted }, "Today"),
+    e(
+      Box,
+      { flexDirection: "row", gap: 1 },
+      e(Text, { color, bold: true },
+        privateMode ? "$\u2022\u2022\u2022" : portfolio.dayChangeDollar),
+      e(Text, { color },
+        privateMode ? "(\u2022\u2022%)" : `(${formatPct(portfolio.dayChange, privateMode)})`)
+    )
+  );
+};
+
+/**
+ * Positions header row
+ */
+const PositionsHeader = () => {
+  return e(
+    Box,
+    { flexDirection: "row", marginBottom: 0 },
+    e(Text, { color: COLORS.dim, width: 7 }, "SYMBOL"),
+    e(Text, { color: COLORS.dim, width: 5 }, " QTY"),
+    e(Text, { color: COLORS.dim, width: 8 }, "  VALUE"),
+    e(Text, { color: COLORS.dim, width: 9 }, "    TODAY"),
+    e(Text, { color: COLORS.dim, width: 8 }, "    P/L"),
+    e(Text, { color: COLORS.dim, width: 12, marginLeft: 1 }, "ACTION")
+  );
+};
+
+// ============================================================================
+// MAIN COMPONENT
+// ============================================================================
+
+const PortfolioPanelBase = ({
+  portfolio: inputPortfolio = {},
+  formatPercent = formatPct,
+  tradingStatus,
+  lastUpdatedAgo,
+  nextTradeTime,
+  privateMode = false,
+  tickerScores = {}
+}) => {
   // Ensure portfolio has default values
   const portfolio = {
     positions: [],
@@ -110,258 +350,185 @@ export const PortfolioPanel = ({ portfolio: inputPortfolio = {}, formatPercent, 
   };
 
   const hasPositions = portfolio.positions && portfolio.positions.length > 0;
-  // ALWAYS show data if we have equity or positions - status doesn't matter
   const hasData = portfolio.equity !== "--" || hasPositions;
 
-  // Trading status section builder
-  const buildTradingStatusSection = () => {
-    if (!tradingStatus) return null;
+  // Sort positions by market value (highest first)
+  const sortedPositions = hasPositions
+    ? [...portfolio.positions].sort((a, b) => {
+        const aVal = a.marketValue || (a.shares * parseFloat(String(a.lastPrice || 0).replace(/[$,]/g, "")));
+        const bVal = b.marketValue || (b.shares * parseFloat(String(b.lastPrice || 0).replace(/[$,]/g, "")));
+        return bVal - aVal;
+      })
+    : [];
 
-    return e(
-      Box,
-      { flexDirection: "column", marginTop: 1 },
-      // Separator
-      e(Box, { marginBottom: 1 }, e(Text, { color: "#334155" }, "\u2500".repeat(30))),
-      // Trading system status
-      e(
-        Box,
-        { flexDirection: "row", gap: 1 },
-        e(Text, { color: tradingStatus.statusColor }, tradingStatus.statusIcon),
-        e(Text, { color: tradingStatus.statusColor }, tradingStatus.statusText)
-      ),
-      // Last attempt (if any)
-      tradingStatus.lastAttempt
-        ? e(
-            Box,
-            { flexDirection: "column", marginTop: 1 },
-            e(
-              Box,
-              { flexDirection: "row", gap: 1 },
-              e(Text, { color: tradingStatus.lastAttempt.color }, tradingStatus.lastAttempt.icon),
-              e(
-                Text,
-                { color: "#94a3b8" },
-                `${tradingStatus.lastAttempt.action?.toUpperCase() || "TRADE"} ${tradingStatus.lastAttempt.symbol || ""}`
-              ),
-              e(Text, { color: "#475569", dimColor: true }, tradingStatus.lastAttempt.timestamp)
-            ),
-            e(
-              Text,
-              { color: "#64748b", dimColor: true, marginLeft: 2 },
-              tradingStatus.lastAttempt.message
-            )
-          )
-        : null
-    );
-  };
-
-  // Build API key display
-  const buildKeyDisplay = () => {
-    if (!portfolio.apiKeyPreview) return null;
-    return e(
-      Box,
-      { flexDirection: "column", marginTop: 1 },
-      e(
-        Box,
-        { flexDirection: "row", justifyContent: "space-between" },
-        e(Text, { color: "#64748b" }, "API Key"),
-        e(Text, { color: "#94a3b8" }, portfolio.apiKeyPreview)
-      ),
-      portfolio.apiSecretPreview && e(
-        Box,
-        { flexDirection: "row", justifyContent: "space-between" },
-        e(Text, { color: "#64748b" }, "Secret"),
-        e(Text, { color: "#94a3b8" }, portfolio.apiSecretPreview)
-      )
-    );
-  };
-
-  // Don't show detailed data if not connected and have no data
+  // ============ NOT CONNECTED STATE ============
   if (!hasData) {
     return e(
       Box,
       {
         flexDirection: "column",
         borderStyle: "round",
-        borderColor: "#1e293b",
-        padding: 1,
-        height: 8,
-        overflow: "hidden"
+        borderColor: COLORS.border,
+        padding: 1
       },
+      // Header
       e(
         Box,
         { flexDirection: "row", justifyContent: "space-between", marginBottom: 1 },
-        e(Text, { color: "#64748b" }, "Portfolio"),
+        e(Text, { color: COLORS.muted }, "Portfolio"),
         e(
           Box,
           { flexDirection: "row", gap: 1 },
-          e(Text, { color: statusColor(portfolio.status) }, statusIcon(portfolio.status)),
-          e(Text, { color: "#475569", dimColor: true }, portfolio.status || "Not connected")
+          e(Text, { color: getStatusColor(portfolio.status) }, getStatusDot(portfolio.status)),
+          e(Text, { color: COLORS.dim }, portfolio.status || "Not connected")
         )
       ),
-      // Show mode if available
+      // Mode
       portfolio.mode && e(
         Box,
         { flexDirection: "row", justifyContent: "space-between" },
-        e(Text, { color: "#64748b" }, "Mode"),
-        e(Text, { color: "#94a3b8" }, portfolio.mode)
+        e(Text, { color: COLORS.muted }, "Mode"),
+        e(Text, { color: COLORS.secondary }, portfolio.mode)
       ),
-      // Show API key info if available
-      buildKeyDisplay(),
-      // Status messages
-      portfolio.status === "Connecting..." && e(
-        Text,
-        { color: "#3b82f6", marginTop: 1 },
-        "Connecting to Alpaca..."
+      // API Key preview
+      portfolio.apiKeyPreview && e(
+        Box,
+        { flexDirection: "row", justifyContent: "space-between", marginTop: 1 },
+        e(Text, { color: COLORS.muted }, "API Key"),
+        e(Text, { color: COLORS.secondary }, portfolio.apiKeyPreview)
       ),
-      portfolio.status === "Offline" && e(
-        Text,
-        { color: "#f97316", marginTop: 1 },
-        "Connection offline. Retrying..."
-      ),
-      // Prompt to connect only if no keys
+      // Connect prompt
       !portfolio.apiKeyPreview && portfolio.status !== "Connecting..." && e(
-        Text,
-        { color: "#94a3b8", marginTop: 1 },
-        "Type → /alpaca to connect"
+        Box,
+        { marginTop: 1 },
+        e(Text, { color: COLORS.accent }, "\u2192 Type /alpaca to connect")
       ),
-      // Trading status even when disconnected
-      buildTradingStatusSection()
+      // Connecting indicator
+      portfolio.status === "Connecting..." && e(
+        Box,
+        { marginTop: 1, flexDirection: "row", gap: 1 },
+        e(Text, { color: COLORS.connecting }, "\u25CF"),
+        e(Text, { color: COLORS.connecting }, "Connecting to Alpaca...")
+      )
     );
   }
 
+  // ============ CONNECTED STATE ============
   return e(
     Box,
     {
       flexDirection: "column",
       borderStyle: "round",
-      borderColor: "#1e293b",
-      padding: 1,
-      minHeight: 14
+      borderColor: COLORS.border,
+      padding: 1
     },
-    // Header
+    // ===== HEADER =====
     e(
       Box,
       { flexDirection: "row", justifyContent: "space-between", marginBottom: 1 },
-      e(Text, { color: "#64748b" }, "Portfolio"),
       e(
         Box,
         { flexDirection: "row", gap: 1 },
-        e(Text, { color: statusColor(portfolio.status) }, statusIcon(portfolio.status)),
-        e(Text, { color: "#475569", dimColor: true }, portfolio.mode)
-      )
-    ),
-    // Account summary
-    e(
-      Box,
-      { flexDirection: "column" },
-      e(
-        Box,
-        { flexDirection: "row", justifyContent: "space-between" },
-        e(Text, { color: "#94a3b8" }, "Equity"),
-        e(Text, { color: "#e2e8f0", bold: true }, privateMode ? "$••••••" : portfolio.equity)
+        e(Text, { color: COLORS.muted }, "Portfolio"),
+        privateMode && e(Text, { color: COLORS.gold }, "[PRIVATE]")
       ),
       e(
         Box,
-        { flexDirection: "row", justifyContent: "space-between" },
-        e(Text, { color: "#64748b" }, "Cash"),
-        e(Text, { color: "#94a3b8" }, privateMode ? "$••••••" : portfolio.cash)
-      ),
-      e(
-        Box,
-        { flexDirection: "row", justifyContent: "space-between" },
-        e(Text, { color: "#64748b" }, "Buying Power"),
-        e(Text, { color: "#94a3b8" }, privateMode ? "$••••••" : portfolio.buyingPower)
-      ),
-      privateMode && e(
-        Box,
-        { marginTop: 1 },
-        e(Text, { color: "#f59e0b" }, "[PRIVATE MODE]")
+        { flexDirection: "row", gap: 1 },
+        e(Text, { color: getStatusColor(portfolio.status) }, getStatusDot(portfolio.status)),
+        e(Text, { color: COLORS.dim }, portfolio.mode)
       )
     ),
-    // Separator
-    e(Box, { marginY: 1 }, e(Text, { color: "#334155" }, "\u2500".repeat(24))),
-    // Day P/L Summary
-    e(
-      Box,
-      { flexDirection: "row", justifyContent: "space-between" },
-      e(Text, { color: "#64748b" }, "Day P/L"),
-      e(
-        Text,
-        { color: privateMode ? "#64748b" : (portfolio.dayChange >= 0 ? "#22c55e" : "#ef4444"), bold: true },
-        privateMode ? "$•••• (••••%)" : `${portfolio.dayChangeDollar} (${formatPercent(portfolio.dayChange)})`
-      )
-    ),
-    // Positions section (only if we have positions)
+
+    // ===== ACCOUNT SUMMARY =====
+    e(AccountSummary, { portfolio, privateMode }),
+
+    // ===== DAY P/L =====
+    e(DayPL, { portfolio, privateMode }),
+
+    // ===== POSITIONS SECTION =====
     hasPositions
-      ? e(
+    ? e(
+        Box,
+        { flexDirection: "column" },
+        e(
           Box,
-          { flexDirection: "column", marginTop: 1 },
-          e(Box, { marginBottom: 1 }, e(Text, { color: "#334155" }, "\u2500".repeat(30))),
-          // Positions header
-          e(
-            Box,
-            { flexDirection: "row", marginBottom: 1 },
-            e(Text, { color: "#475569" }, " "),
-            e(Text, { color: "#475569", width: 5 }, "SYM"),
-            e(Text, { color: "#475569", width: 4 }, "QTY"),
-            e(Text, { color: "#475569", width: 7 }, "VALUE"),
-            e(Text, { color: "#475569", width: 6 }, " P/L"),
-            e(Text, { color: "#475569", width: 5 }, " ACT")
+          { marginBottom: 0 },
+          e(Text, { color: COLORS.secondary, bold: true }, "Positions")
+        ),
+        // Header row
+        e(PositionsHeader),
+          // Separator
+          e(Text, { color: COLORS.border }, "\u2500".repeat(40)),
+          // Position rows (limit to 6)
+          ...sortedPositions.slice(0, 6).map((position, index) =>
+            e(PositionRow, {
+              key: position.symbol,
+              position,
+              score: tickerScores[position.symbol],
+              privateMode,
+              isFirst: index === 0
+            })
           ),
-          // Position rows with action indicator
-          ...portfolio.positions.slice(0, 5).map((position) => {
-            const score = tickerScores[position.symbol];
-            return e(
-              Box,
-              { key: position.symbol, flexDirection: "row" },
-              // Icon
-              e(Text, null, getTickerIcon(position.symbol)),
-              // Symbol
-              e(Text, { color: "#94a3b8", width: 5 }, position.symbol),
-              // Quantity
-              e(Text, { color: "#64748b", width: 4 }, privateMode ? "••" : String(position.shares).padStart(3)),
-              // Market Value
-              e(
-                Text,
-                { color: "#e2e8f0", width: 7 },
-                formatMarketValue(position.marketValue || position.shares * parseFloat(position.lastPrice?.replace(/[$,]/g, "") || 0), privateMode)
-              ),
-              // P/L %
-              e(
-                Text,
-                { color: privateMode ? "#64748b" : (position.change >= 0 ? "#22c55e" : "#ef4444"), width: 6 },
-                privateMode ? "••••" : formatPercent(position.change)
-              ),
-              // Action indicator (Keep/Hold/Sell)
-              e(PositionActionBar, { score })
-            );
-          }),
+          // Show more indicator if > 6 positions
+          sortedPositions.length > 6 && e(
+            Text,
+            { color: COLORS.dim, marginTop: 1 },
+            `  ... and ${sortedPositions.length - 6} more`
+          )
         )
       : e(
           Box,
-          { marginTop: 1 },
-          e(Text, { color: "#64748b", dimColor: true }, "No positions")
+          { paddingY: 1 },
+          e(Text, { color: COLORS.dim }, "No open positions")
         ),
-    // Last updated and next trade time
+
+    // ===== FOOTER =====
     (lastUpdatedAgo || nextTradeTime) && e(
       Box,
       { flexDirection: "column", marginTop: 1 },
-      e(Box, { marginBottom: 1 }, e(Text, { color: "#334155" }, "\u2500".repeat(30))),
-      lastUpdatedAgo && e(
+      e(Text, { color: COLORS.border }, "\u2500".repeat(40)),
+      e(
         Box,
         { flexDirection: "row", justifyContent: "space-between" },
-        e(Text, { color: "#64748b" }, "Updated"),
-        e(Text, { color: "#94a3b8" }, lastUpdatedAgo)
-      ),
-      nextTradeTime && e(
-        Box,
-        { flexDirection: "row", justifyContent: "space-between" },
-        e(Text, { color: "#64748b" }, "Next attempt"),
-        e(Text, { color: "#3b82f6" }, nextTradeTime)
+        lastUpdatedAgo && e(
+          Box,
+          { flexDirection: "row", gap: 1 },
+          e(Text, { color: COLORS.dim }, "Updated"),
+          e(Text, { color: COLORS.muted }, lastUpdatedAgo)
+        ),
+        nextTradeTime && e(
+          Box,
+          { flexDirection: "row", gap: 1 },
+          e(Text, { color: COLORS.dim }, "Next"),
+          e(Text, { color: COLORS.accent }, nextTradeTime)
+        )
       )
     ),
-    // Trading status section
-    buildTradingStatusSection()
+
+    // ===== TRADING STATUS =====
+    tradingStatus && e(
+      Box,
+      { flexDirection: "column", marginTop: 1 },
+      e(
+        Box,
+        { flexDirection: "row", gap: 1 },
+        e(Text, { color: tradingStatus.statusColor }, tradingStatus.statusIcon),
+        e(Text, { color: tradingStatus.statusColor }, tradingStatus.statusText)
+      ),
+      tradingStatus.lastAttempt && e(
+        Box,
+        { flexDirection: "row", gap: 1, marginTop: 0 },
+        e(Text, { color: tradingStatus.lastAttempt.color }, tradingStatus.lastAttempt.icon),
+        e(Text, { color: COLORS.secondary },
+          `${tradingStatus.lastAttempt.action?.toUpperCase() || "TRADE"} ${tradingStatus.lastAttempt.symbol || ""}`),
+        e(Text, { color: COLORS.dim }, tradingStatus.lastAttempt.timestamp)
+      )
+    )
   );
 };
+
+// Memoize to prevent flickering
+export const PortfolioPanel = memo(PortfolioPanelBase);
+
+export default PortfolioPanel;

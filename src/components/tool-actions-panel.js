@@ -31,7 +31,7 @@ const renderDiffLine = (line, index) => {
   return e(Text, { key: `${index}-${line}`, color }, `${lineNo} ${line}`);
 };
 
-const ToolActionsPanelBase = ({ items = [] }) => {
+const ToolActionsPanelBase = ({ items = [], streamingText = "", streamingTitle = "" }) => {
   return e(
     Box,
     {
@@ -41,6 +41,12 @@ const ToolActionsPanelBase = ({ items = [] }) => {
       padding: 1,
       marginBottom: 1
     },
+    streamingText && e(
+      Box,
+      { flexDirection: "column", marginBottom: 1 },
+      e(Text, { color: "#f59e0b", bold: true }, streamingTitle || "Live action"),
+      e(Text, { color: "#94a3b8" }, streamingText.slice(-260))
+    ),
     e(
       Box,
       { flexDirection: "row", justifyContent: "space-between" },

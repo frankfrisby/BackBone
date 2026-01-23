@@ -4644,7 +4644,11 @@ Folder: ${result.action.id}`,
       e(
         Box,
         { flexDirection: "column", width: viewMode === VIEW_MODES.MINIMAL || isMedium ? "75%" : "50%", paddingX: 1, overflow: "hidden" },
-        e(ToolActionsPanel, { items: toolEvents }),
+        e(ToolActionsPanel, {
+          items: toolEvents,
+          streamingText: actionStreamingText,
+          streamingTitle: actionStreamingTitle || "Running action"
+        }),
         // Engine Status Panel - shows what AI is doing (replaces Actions)
         e(EngineStatusPanel, {
           status: engineStatus.status,
@@ -5032,13 +5036,20 @@ Folder: ${result.action.id}`,
         { flexDirection: "row", gap: 3 },
         e(Text, { color: "#475569" }, "Ctrl+T"),
         e(Text, { color: "#64748b" }, "tier"),
-        e(Text, { color: "#334155" }, "│"),
+        e(Text, { color: "#334155" }, ""),
         e(Text, { color: "#3b82f6" }, "Ctrl+U"),
         e(Text, { color: "#64748b" }, "view"),
-        e(Text, { color: "#334155" }, "│"),
+        e(Text, { color: "#334155" }, ""),
+        e(Text, { color: "#38bdf8" }, "Ctrl+S"),
+        e(Text, { color: "#64748b" }, "setup"),
+        e(Text, { color: "#334155" }, ""),
         e(Text, { color: privateMode ? "#f59e0b" : "#475569" }, "Ctrl+R"),
         e(Text, { color: privateMode ? "#f59e0b" : "#64748b" }, "private"),
-        e(Text, { color: "#334155" }, "│"),
+        e(Text, { color: "#334155" }, ""),
+        firebaseUser
+          ? e(Text, { color: "#22c55e" }, "O logout")
+          : e(Text, { color: "#f97316" }, "L login"),
+        e(Text, { color: "#334155" }, ""),
         e(Text, { color: "#475569" }, "/help"),
         e(Text, { color: "#64748b" }, "commands")
       )

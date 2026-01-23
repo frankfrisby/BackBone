@@ -1,5 +1,6 @@
-import React, { useState, useEffect, memo, useMemo, useRef } from "react";
+import React, { useState, useEffect, memo, useMemo, useRef, useCallback } from "react";
 import { Box, Text } from "ink";
+import { getActivityTracker } from "../services/activity-tracker.js";
 
 const e = React.createElement;
 
@@ -25,15 +26,13 @@ const formatTimeUntil = (nextTime) => {
 };
 
 // Activity log entry with status dot - NO animation to prevent flicker
-const ActivityEntry = memo(({ entry }) => {
-  // Static colors - no blinking to prevent flickering
-  const dotColor = DOT_COLORS[entry.status] || DOT_COLORS.observation;
-  const textColor = entry.status === "working" ? "#94a3b8" :
-                    entry.status === "completed" ? "#4ade80" :
-                    entry.status === "error" ? "#f87171" : "#e2e8f0";
+const ActivityEntry = memo(({ id, text, detail, status }) => {
+  const dotColor = DOT_COLORS[status] || DOT_COLORS.observation;
+  const textColor = status === "working" ? "#94a3b8" :
+                    status === "completed" ? "#4ade80" :
+                    status === "error" ? "#f87171" : "#e2e8f0";
 
-  // Format: ● Reading config/settings.js:42
-  const displayText = entry.detail || entry.text;
+  const displayText = detail || text;
 
   return e(
     Box,
@@ -41,17 +40,30 @@ const ActivityEntry = memo(({ entry }) => {
     e(Text, { color: dotColor }, "●"),
     e(Text, { color: textColor }, displayText)
   );
-}, (prev, next) => {
-  // Custom comparison to prevent unnecessary re-renders
-  return prev.entry.id === next.entry.id &&
-         prev.entry.status === next.entry.status &&
-         prev.entry.detail === next.entry.detail &&
-         prev.entry.text === next.entry.text;
 });
 
-// Simple active indicator - minimal animation
+// ALIVE pulse indicator - isolated animation
+const AlivePulse = memo(({ running }) => {
+  const [pulseOn, setPulseOn] = useState(true);
+
+  useEffect(() => {
+    if (!running) return;
+    const interval = setInterval(() => setPulseOn(prev => !prev), 1000);
+    return () => clearInterval(interval);
+  }, [running]);
+
+  if (!running) return null;
+
+  return e(
+    Box,
+    { flexDirection: "row", gap: 1 },
+    e(Text, { color: pulseOn ? "#22c55e" : "#064e3b" }, "●"),
+    e(Text, { color: pulseOn ? "#22c55e" : "#166534", bold: true }, "ALIVE")
+  );
+});
+
+// Active state indicator with simple dots animation
 const ActiveIndicator = memo(({ text }) => {
-  // Single simple animation for active state only
   const [dots, setDots] = useState("...");
 
   useEffect(() => {
@@ -70,44 +82,90 @@ const ActiveIndicator = memo(({ text }) => {
   );
 });
 
+// Static activity list - only updates when items actually change
+const ActivityList = memo(({ items }) => {
+  if (!items || items.length === 0) return null;
+
+  return e(
+    Box,
+    { flexDirection: "column", gap: 0 },
+    ...items.map(entry =>
+      e(ActivityEntry, {
+        key: entry.id,
+        id: entry.id,
+        text: entry.text,
+        detail: entry.detail,
+        status: entry.status
+      })
+    )
+  );
+}, (prev, next) => {
+  // Only re-render if items actually changed
+  if (prev.items?.length !== next.items?.length) return false;
+  for (let i = 0; i < (prev.items?.length || 0); i++) {
+    if (prev.items[i].id !== next.items[i].id ||
+        prev.items[i].status !== next.items[i].status) {
+      return false;
+    }
+  }
+  return true;
+});
+
 /**
- * Engine Status Panel - Clean, borderless display of agent activity
- * Optimized to minimize re-renders and flickering
+ * Engine Status Panel - Self-contained component that subscribes to activity tracker
+ * This isolates updates from the main app to prevent full app re-renders
  */
 const EngineStatusPanelBase = ({
-  activities = [],
-  currentState = "idle",
-  stateDetail = null,
-  engineRunning = false,
-  cycleCount = 0,
-  nextCycleTime = null,
   toolEvents = [],
   streamingText = "",
+  nextCycleTime = null,
   maxEntries = 6
 }) => {
-  // Single pulse animation for ALIVE indicator only
-  const [pulseOn, setPulseOn] = useState(true);
-  const pulseRef = useRef(null);
+  // Subscribe directly to activity tracker - isolates updates from main app
+  const tracker = useMemo(() => getActivityTracker(), []);
 
+  // Use refs for data that updates frequently, state for rendering
+  const dataRef = useRef(tracker.getDisplayData());
+  const [renderKey, setRenderKey] = useState(0);
+  const lastUpdateRef = useRef(Date.now());
+
+  // Throttled update - only re-render at most every 500ms
   useEffect(() => {
-    if (!engineRunning) {
-      if (pulseRef.current) clearInterval(pulseRef.current);
-      return;
-    }
-    pulseRef.current = setInterval(() => setPulseOn(prev => !prev), 1000);
-    return () => {
-      if (pulseRef.current) clearInterval(pulseRef.current);
+    const handleUpdate = (data) => {
+      dataRef.current = data;
+
+      const now = Date.now();
+      if (now - lastUpdateRef.current > 500) {
+        lastUpdateRef.current = now;
+        setRenderKey(prev => prev + 1);
+      }
     };
-  }, [engineRunning]);
 
-  const isIdle = currentState === "idle" || currentState === "ready" || !engineRunning;
-  const isActive = !isIdle && engineRunning;
+    tracker.on("updated", handleUpdate);
+    return () => tracker.off("updated", handleUpdate);
+  }, [tracker]);
 
-  // Memoize display items to prevent unnecessary rebuilds
+  // Also check for updates on a slower interval as backup
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const newData = tracker.getDisplayData();
+      if (JSON.stringify(newData) !== JSON.stringify(dataRef.current)) {
+        dataRef.current = newData;
+        setRenderKey(prev => prev + 1);
+      }
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [tracker]);
+
+  const data = dataRef.current;
+  const isIdle = data.currentState === "idle" || data.currentState === "ready" || !data.isRunning;
+  const isActive = !isIdle && data.isRunning;
+
+  // Build display items from tool events + activities
   const displayItems = useMemo(() => {
     const items = [];
 
-    // Add tool events first (most recent activity)
+    // Add tool events first
     if (toolEvents && toolEvents.length > 0) {
       toolEvents.slice(0, 4).forEach((evt, i) => {
         items.push({
@@ -120,12 +178,12 @@ const EngineStatusPanelBase = ({
       });
     }
 
-    // Add activities (with deduplication)
+    // Add activities with deduplication
     const existingTexts = new Set(items.map(d => d.text));
-    activities.slice(0, maxEntries - items.length).forEach(act => {
+    (data.activities || []).slice(0, maxEntries - items.length).forEach((act, i) => {
       if (!existingTexts.has(act.text)) {
         items.push({
-          id: act.id || `act_${act.timestamp || activities.indexOf(act)}`,
+          id: act.id || `act_${i}`,
           text: act.text,
           detail: act.detail || act.target,
           status: act.status
@@ -135,17 +193,15 @@ const EngineStatusPanelBase = ({
     });
 
     return items.slice(0, maxEntries);
-  }, [toolEvents, activities, maxEntries]);
+  }, [toolEvents, data.activities, maxEntries]);
 
-  // Memoize streaming output check
-  const hasStreamingOutput = streamingText && streamingText.length > 0;
-  const truncatedStreaming = hasStreamingOutput ? streamingText.slice(-80) : "";
+  const hasStreaming = streamingText && streamingText.length > 0;
 
   return e(
     Box,
     { flexDirection: "column", paddingX: 1, marginBottom: 1 },
 
-    // Header: Engine Status + ALIVE indicator
+    // Header row
     e(
       Box,
       { flexDirection: "row", justifyContent: "space-between", marginBottom: 1 },
@@ -153,35 +209,28 @@ const EngineStatusPanelBase = ({
         Box,
         { flexDirection: "row", gap: 1, alignItems: "center" },
         e(Text, { color: "#64748b" }, "Engine Status"),
-        engineRunning && e(Text, { color: pulseOn ? "#22c55e" : "#064e3b" }, "●"),
-        engineRunning && e(Text, { color: pulseOn ? "#22c55e" : "#166534", bold: true }, "ALIVE")
+        e(AlivePulse, { running: data.isRunning })
       ),
-      e(Text, { color: "#475569", dimColor: true }, `cycle ${cycleCount}`)
+      e(Text, { color: "#475569", dimColor: true }, `cycle ${data.cycleCount}`)
     ),
 
-    // Activity entries - static rendering, no animations per entry
-    displayItems.length > 0 && e(
-      Box,
-      { flexDirection: "column", gap: 0 },
-      ...displayItems.map(entry =>
-        e(ActivityEntry, { key: entry.id, entry })
-      )
-    ),
+    // Activity list
+    e(ActivityList, { items: displayItems }),
 
-    // Streaming output (if any)
-    hasStreamingOutput && e(
+    // Streaming output
+    hasStreaming && e(
       Box,
       { flexDirection: "row", gap: 1, paddingLeft: 1, marginTop: 1 },
       e(Text, { color: "#3b82f6" }, "..."),
-      e(Text, { color: "#94a3b8", wrap: "truncate-end" }, truncatedStreaming)
+      e(Text, { color: "#94a3b8", wrap: "truncate-end" }, streamingText.slice(-80))
     ),
 
-    // Current state (bottom) - only animate when active
+    // Current state
     e(
       Box,
       { flexDirection: "row", gap: 1, marginTop: 1, paddingLeft: 1 },
       isActive
-        ? e(ActiveIndicator, { text: stateDetail || currentState })
+        ? e(ActiveIndicator, { text: data.stateDetail || data.currentState })
         : e(
             Box,
             { flexDirection: "row", gap: 1 },
@@ -193,28 +242,9 @@ const EngineStatusPanelBase = ({
   );
 };
 
-// Memoize with deep comparison on key props
-export const AgentActivityPanel = memo(EngineStatusPanelBase, (prev, next) => {
-  // Only re-render when meaningful data changes
-  if (prev.engineRunning !== next.engineRunning) return false;
-  if (prev.cycleCount !== next.cycleCount) return false;
-  if (prev.currentState !== next.currentState) return false;
-  if (prev.stateDetail !== next.stateDetail) return false;
-  if (prev.streamingText !== next.streamingText) return false;
+export const AgentActivityPanel = memo(EngineStatusPanelBase);
 
-  // Compare arrays by length and first item (quick check)
-  if (prev.toolEvents?.length !== next.toolEvents?.length) return false;
-  if (prev.activities?.length !== next.activities?.length) return false;
-
-  // If first items changed, re-render
-  const prevFirst = prev.toolEvents?.[0] || prev.activities?.[0];
-  const nextFirst = next.toolEvents?.[0] || next.activities?.[0];
-  if (prevFirst?.id !== nextFirst?.id || prevFirst?.status !== nextFirst?.status) return false;
-
-  return true;
-});
-
-// Compact status dot for other panels - no animation
+// Compact status dot for other panels
 export const AgentStatusDot = memo(({ status = "idle", running = false }) => {
   const color = status === "error" ? DOT_COLORS.error :
                 status === "idle" || !running ? DOT_COLORS.idle :

@@ -570,9 +570,8 @@ const App = ({ updateConsoleTitle }) => {
   const mobileService = useMemo(() => getMobileService(), []);
   const personalCapitalRef = useRef(null);
 
-  // Activity tracker for visual status display
+  // Activity tracker for visual status display (panel subscribes directly to avoid re-renders)
   const activityTracker = useMemo(() => getActivityTracker(), []);
-  const [activityData, setActivityData] = useState(() => activityTracker.getDisplayData());
 
   const [workLogEntries, setWorkLogEntries] = useState(() => workLog.getDisplayData(15));
   const [goals, setGoals] = useState(() => goalTracker.getDisplayData());
@@ -1083,10 +1082,8 @@ const App = ({ updateConsoleTitle }) => {
         activityTracker.setState("error", action.error?.slice(0, 50));
       });
 
-      // Listen for activity tracker updates
-      activityTracker.on("updated", (data) => {
-        setActivityData(data);
-      });
+      // Activity tracker updates are handled by AgentActivityPanel directly
+      // to prevent full app re-renders
 
       // Start mobile dashboard
       try {
@@ -4827,13 +4824,8 @@ Folder: ${result.action.id}`,
       e(
         Box,
         { flexDirection: "column", width: viewMode === VIEW_MODES.MINIMAL || isMedium ? "75%" : "50%", paddingX: 1, overflow: "hidden" },
-        // Engine Status - unified panel showing live agent status with visual effects
+        // Engine Status - self-contained panel that subscribes directly to activity tracker
         e(AgentActivityPanel, {
-          activities: activityData.activities,
-          currentState: activityData.currentState,
-          stateDetail: activityData.stateDetail,
-          engineRunning: activityData.isRunning,
-          cycleCount: activityData.cycleCount,
           toolEvents: toolEvents,
           streamingText: actionStreamingText,
           maxEntries: viewMode === VIEW_MODES.MINIMAL ? 4 : 6

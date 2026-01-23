@@ -1,191 +1,243 @@
-import React, { memo, useMemo } from "react";
+import React, { memo, useState, useEffect, useRef } from "react";
 import { Box, Text } from "ink";
-import { getActivityTracker } from "../services/activity-tracker.js";
+import { getActivityNarrator, AGENT_STATES, ACTION_TYPES } from "../services/activity-narrator.js";
 import { useCoordinatedUpdates } from "../hooks/useCoordinatedUpdates.js";
 
 const e = React.createElement;
 
 // ═══════════════════════════════════════════════════════════════════════════
-// COORDINATED ACTIVITY PANEL - Updates via global coordinator to prevent flickering
+// REALISTIC AGENT ACTIVITY PANEL - Claude Code inspired design
+// Shows actions, sub-actions, diffs, state with shimmer, and current goal
 // ═══════════════════════════════════════════════════════════════════════════
 
 const THEME = {
-  success: "#10b981",
-  error: "#ef4444",
-  working: "#6366f1",
-  info: "#3b82f6",
+  bg: "#0f172a",
   primary: "#f1f5f9",
   secondary: "#94a3b8",
   muted: "#64748b",
   dim: "#475569",
+  success: "#22c55e",
+  error: "#ef4444",
+  warning: "#f59e0b",
+  info: "#3b82f6",
+  purple: "#a855f7",
+  cyan: "#06b6d4",
 };
 
-const STATUS = {
-  working: { dot: "●", color: THEME.working },
-  completed: { dot: "✓", color: THEME.success },
-  error: { dot: "✗", color: THEME.error },
-  pending: { dot: "○", color: THEME.muted },
-  observation: { dot: "◈", color: THEME.info },
-};
+// Shimmer effect characters for state display
+const SHIMMER_CHARS = ["░", "▒", "▓", "█", "▓", "▒", "░", " "];
 
-const formatTimeUntil = (nextTime) => {
-  if (!nextTime) return "soon";
-  const diff = nextTime - Date.now();
-  if (diff <= 0) return "now";
-  const seconds = Math.floor(diff / 1000);
-  const minutes = Math.floor(seconds / 60);
-  if (minutes > 0) return `${minutes}m ${seconds % 60}s`;
-  return `${seconds}s`;
-};
+/**
+ * Action display - e.g., "→ Update('linkedin.md')"
+ */
+const ActionLine = memo(({ action, isMain = true }) => {
+  if (!action) return null;
 
-// Static entry - no state, no effects
-const ActivityEntry = memo(({ text, detail, status, isLatest }) => {
-  const s = STATUS[status] || STATUS.observation;
+  const icon = action.icon || "→";
+  const verb = action.verb || action.type;
+  const target = action.target || "";
+  const color = action.color || THEME.info;
+
+  return e(
+    Box,
+    { flexDirection: "row", paddingLeft: isMain ? 0 : 2 },
+    e(Text, { color: THEME.dim }, isMain ? "→ " : "↳ "),
+    e(Text, { color, bold: isMain }, verb),
+    e(Text, { color: THEME.muted }, "("),
+    e(Text, { color: THEME.primary }, `'${target}'`),
+    e(Text, { color: THEME.muted }, ")"),
+    action.detail && e(Text, { color: THEME.secondary }, ` ${action.detail}`)
+  );
+});
+
+/**
+ * Diff display - shows file changes with red/green highlighting
+ */
+const DiffLine = memo(({ diff }) => {
+  if (!diff) return null;
+
+  return e(
+    Box,
+    { flexDirection: "column", paddingLeft: 2, marginY: 0 },
+    // File and line number
+    e(
+      Box,
+      { flexDirection: "row" },
+      e(Text, { color: THEME.dim }, "  "),
+      e(Text, { color: THEME.muted }, `${diff.file}:`),
+      e(Text, { color: THEME.warning }, diff.lineNumber)
+    ),
+    // Old text (red background)
+    diff.oldText && e(
+      Box,
+      { flexDirection: "row" },
+      e(Text, { color: THEME.dim }, "  "),
+      e(Text, { color: "#fca5a5", backgroundColor: "#7f1d1d" }, `- ${diff.oldText.slice(0, 50)}`)
+    ),
+    // New text (green background)
+    diff.newText && e(
+      Box,
+      { flexDirection: "row" },
+      e(Text, { color: THEME.dim }, "  "),
+      e(Text, { color: "#86efac", backgroundColor: "#14532d" }, `+ ${diff.newText.slice(0, 50)}`)
+    )
+  );
+});
+
+/**
+ * Observation display - what the agent learned
+ */
+const ObservationLine = memo(({ observation }) => {
+  if (!observation) return null;
+
   return e(
     Box,
     { flexDirection: "row", paddingLeft: 1 },
-    e(Text, { color: s.color }, s.dot),
-    e(Text, { color: isLatest ? THEME.primary : THEME.secondary }, ` ${detail || text || "..."}`)
+    e(Text, { color: THEME.purple }, "◈ "),
+    e(Text, { color: THEME.secondary, italic: true }, observation.text?.slice(0, 60))
   );
 });
 
-// Static list
-const ActivityList = memo(({ items }) => {
-  if (!items || items.length === 0) return null;
+/**
+ * Shimmer state display - animated state indicator
+ */
+const ShimmerState = memo(({ state, stateInfo, tickCount = 0 }) => {
+  // Create shimmer effect based on tick
+  const shimmerIndex = tickCount % SHIMMER_CHARS.length;
+  const shimmerChar = SHIMMER_CHARS[shimmerIndex];
+  const stateText = stateInfo?.text || state || "Idle";
+  const stateColor = stateInfo?.color || THEME.muted;
+
   return e(
     Box,
-    { flexDirection: "column" },
-    ...items.map((entry, i) =>
-      e(ActivityEntry, {
-        key: entry.id || `item-${i}`,
-        text: entry.text,
-        detail: entry.detail,
-        status: entry.status,
-        isLatest: i === 0
-      })
-    )
+    { flexDirection: "row", gap: 1 },
+    e(Text, { color: stateColor }, shimmerChar),
+    e(Text, { color: stateColor, bold: true }, `${stateText}...`),
+    e(Text, { color: stateColor }, shimmerChar)
   );
 });
 
-// Main panel - uses global update coordinator to prevent flickering
-const EngineStatusPanelBase = ({
-  toolEvents = [],
-  streamingText = "",
-  nextCycleTime = null,
-  maxEntries = 5
-}) => {
-  const tracker = getActivityTracker();
+/**
+ * Goal display - what the agent is trying to accomplish
+ */
+const GoalLine = memo(({ goal }) => {
+  if (!goal) return null;
 
-  // Use coordinated updates - all components update together at 2fps
+  return e(
+    Box,
+    { flexDirection: "row", paddingLeft: 1 },
+    e(Text, { color: THEME.dim }, "↓ "),
+    e(Text, { color: THEME.primary }, goal.slice(0, 70))
+  );
+});
+
+/**
+ * Main Activity Panel
+ */
+const AgentActivityPanelBase = ({ maxActions = 3 }) => {
+  const narrator = getActivityNarrator();
+  const [tickCount, setTickCount] = useState(0);
+
+  // Use coordinated updates for smooth rendering
   const data = useCoordinatedUpdates(
-    "agent-activity",
-    () => tracker.getDisplayData(),
-    { initialData: tracker.getDisplayData() }
-  ) || tracker.getDisplayData();
+    "agent-narrator",
+    () => narrator.getDisplayData(),
+    { initialData: narrator.getDisplayData() }
+  ) || narrator.getDisplayData();
 
-  const isRunning = data.isRunning;
-  const isIdle = data.currentState === "idle" || data.currentState === "ready" || !isRunning;
+  // Shimmer animation tick (slower than render tick)
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setTickCount(t => t + 1);
+    }, 200); // 5fps shimmer
+    return () => clearInterval(interval);
+  }, []);
 
-  // Build display items
-  const displayItems = useMemo(() => {
-    const items = [];
-    const seen = new Set();
-
-    if (toolEvents?.length > 0) {
-      toolEvents.slice(0, 3).forEach((evt, i) => {
-        const text = evt.text || evt.action;
-        if (text && !seen.has(text)) {
-          seen.add(text);
-          items.push({
-            id: evt.id || `t${i}`,
-            text,
-            detail: evt.detail || evt.target,
-            status: evt.status === "done" ? "completed" : evt.status === "error" ? "error" : "working"
-          });
-        }
-      });
-    }
-
-    (data.activities || []).slice(0, maxEntries - items.length).forEach((act, i) => {
-      if (act.text && !seen.has(act.text)) {
-        seen.add(act.text);
-        items.push({
-          id: act.id || `a${i}`,
-          text: act.text,
-          detail: act.detail || act.target,
-          status: act.status
-        });
-      }
-    });
-
-    return items.slice(0, maxEntries);
-  }, [toolEvents, data.activities, maxEntries]);
-
-  const hasStreaming = streamingText?.length > 0;
+  const { state, stateInfo, goal, actions, subActions, observations, diffs } = data;
+  const hasContent = actions?.length > 0 || observations?.length > 0 || goal;
 
   return e(
     Box,
-    { flexDirection: "column", paddingX: 1 },
+    { flexDirection: "column", paddingX: 1, paddingY: 0 },
 
-    // Header - static
+    // Header
     e(
       Box,
       { flexDirection: "row", justifyContent: "space-between" },
-      e(
-        Box,
-        { flexDirection: "row", gap: 1 },
-        e(Text, { color: THEME.muted, bold: true }, "ENGINE"),
-        isRunning
-          ? e(Text, { color: THEME.success, bold: true }, "● LIVE")
-          : e(Text, { color: THEME.dim }, "○ OFF")
-      ),
-      e(Text, { color: THEME.dim }, `#${data.cycleCount}`)
+      e(Text, { color: THEME.muted, bold: true }, "ENGINE"),
+      e(Text, { color: THEME.dim, dimColor: true }, "◆")
     ),
 
     // Separator
-    e(Text, { color: THEME.dim }, "─".repeat(40)),
+    e(Text, { color: THEME.dim }, "─".repeat(44)),
 
-    // Activity list - static
-    displayItems.length > 0
-      ? e(ActivityList, { items: displayItems })
-      : e(Box, { paddingLeft: 1 }, e(Text, { color: THEME.muted }, "Waiting...")),
-
-    // Streaming - static
-    hasStreaming && e(
+    // Main actions (e.g., Update, Search, WebSearch)
+    actions?.length > 0 && e(
       Box,
-      { flexDirection: "row", paddingLeft: 1, marginTop: 1 },
-      e(Text, { color: THEME.info }, "│ "),
-      e(Text, { color: THEME.secondary }, streamingText.slice(-60))
+      { flexDirection: "column", marginTop: 0 },
+      ...actions.slice(0, maxActions).map((action, i) =>
+        e(ActionLine, { key: action.id || i, action, isMain: true })
+      )
     ),
 
-    // Status - static, no spinner animation
+    // Diffs (file changes with red/green)
+    diffs?.length > 0 && e(
+      Box,
+      { flexDirection: "column", marginTop: 0 },
+      ...diffs.slice(0, 2).map((diff, i) =>
+        e(DiffLine, { key: diff.id || i, diff })
+      )
+    ),
+
+    // Sub-actions (e.g., Bash, MkDir, Copy)
+    subActions?.length > 0 && e(
+      Box,
+      { flexDirection: "column", marginTop: 0 },
+      ...subActions.slice(0, 2).map((action, i) =>
+        e(ActionLine, { key: action.id || i, action, isMain: false })
+      )
+    ),
+
+    // Observations
+    observations?.length > 0 && e(
+      Box,
+      { flexDirection: "column", marginTop: 1 },
+      ...observations.slice(0, 2).map((obs, i) =>
+        e(ObservationLine, { key: obs.id || i, observation: obs })
+      )
+    ),
+
+    // State with shimmer effect
     e(
       Box,
-      { flexDirection: "row", marginTop: 1, paddingLeft: 1 },
-      !isIdle
-        ? e(
-            Box,
-            { flexDirection: "row", gap: 1 },
-            e(Text, { color: THEME.working }, "►"),
-            e(Text, { color: THEME.primary }, data.stateDetail || data.currentState)
-          )
-        : e(
-            Box,
-            { flexDirection: "row", gap: 1 },
-            e(Text, { color: THEME.muted }, "◇"),
-            e(Text, { color: THEME.muted }, "Idle"),
-            nextCycleTime && e(Text, { color: THEME.dim }, ` · next ${formatTimeUntil(nextCycleTime)}`)
-          )
+      { marginTop: 1, paddingLeft: 1 },
+      e(ShimmerState, { state, stateInfo, tickCount })
+    ),
+
+    // Current goal
+    goal && e(
+      Box,
+      { marginTop: 0 },
+      e(GoalLine, { goal })
+    ),
+
+    // Empty state
+    !hasContent && e(
+      Box,
+      { paddingLeft: 1 },
+      e(Text, { color: THEME.muted }, "Waiting for activity...")
     )
   );
 };
 
-export const AgentActivityPanel = memo(EngineStatusPanelBase);
+export const AgentActivityPanel = memo(AgentActivityPanelBase);
 
-export const AgentStatusDot = memo(({ status = "idle", running = false }) => {
-  if (!running) return e(Text, { color: THEME.dim }, "○");
-  const s = STATUS[status] || STATUS.pending;
-  return e(Text, { color: s.color }, s.dot);
+/**
+ * Compact status dot for headers
+ */
+export const AgentStatusDot = memo(({ state = "OBSERVING" }) => {
+  const stateInfo = AGENT_STATES[state] || AGENT_STATES.OBSERVING;
+  return e(Text, { color: stateInfo.color }, "●");
 });
 
 export default AgentActivityPanel;

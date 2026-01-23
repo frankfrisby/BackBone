@@ -1,10 +1,11 @@
 import { EventEmitter } from "events";
 import fs from "fs";
 import path from "path";
+import { getActivityNarrator, AGENT_STATES, ACTION_TYPES } from "./activity-narrator.js";
 
 /**
  * Activity Tracker - Tracks agent activities for display
- * Maintains a rolling log of recent activities with status
+ * Now integrates with ActivityNarrator for Claude Code-style updates
  */
 
 const DATA_DIR = path.join(process.cwd(), "data");
@@ -251,6 +252,83 @@ class ActivityTracker extends EventEmitter {
   titleCase(str) {
     if (!str) return "Action";
     return str.charAt(0).toUpperCase() + str.slice(1);
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // CLAUDE CODE STYLE METHODS - For realistic activity display
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Get the narrator for Claude Code-style updates
+   */
+  getNarrator() {
+    return getActivityNarrator();
+  }
+
+  /**
+   * Set the current goal the agent is working towards
+   */
+  setGoal(goal) {
+    const narrator = this.getNarrator();
+    narrator.setGoal(goal);
+  }
+
+  /**
+   * Log a main action (Read, Update, Search, WebSearch, etc.)
+   */
+  action(type, target, detail = null) {
+    const narrator = this.getNarrator();
+    narrator.action(type, target, detail);
+    // Also log to legacy system
+    this.log(type.toLowerCase(), target, ACTIVITY_STATUS.WORKING);
+  }
+
+  /**
+   * Log a sub-action (Bash, MkDir, Copy, etc.)
+   */
+  subAction(type, target, detail = null) {
+    const narrator = this.getNarrator();
+    narrator.subAction(type, target, detail);
+  }
+
+  /**
+   * Add an observation (what the agent learned)
+   */
+  addObservation(text, context = null) {
+    const narrator = this.getNarrator();
+    narrator.observe(text, context);
+    // Also log to legacy
+    this.log("observing", text, ACTIVITY_STATUS.OBSERVATION);
+  }
+
+  /**
+   * Add a diff (file change with line numbers)
+   */
+  addDiff(file, lineNumber, oldText, newText) {
+    const narrator = this.getNarrator();
+    narrator.addDiff(file, lineNumber, oldText, newText);
+  }
+
+  /**
+   * Set the agent state with Claude Code-style states
+   */
+  setAgentState(state) {
+    const narrator = this.getNarrator();
+    narrator.setState(state);
+    // Map to legacy state
+    const stateMap = {
+      RESEARCHING: "researching",
+      WORKING: "working",
+      BUILDING: "building",
+      THINKING: "thinking",
+      REFLECTING: "reflecting",
+      TESTING: "testing",
+      PLANNING: "planning",
+      ANALYZING: "analyzing",
+      CONNECTING: "connecting",
+      OBSERVING: "idle"
+    };
+    this.setState(stateMap[state] || "working", null);
   }
 }
 

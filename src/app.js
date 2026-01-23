@@ -1046,40 +1046,70 @@ const App = ({ updateConsoleTitle }) => {
       // Update work log entries periodically
       setWorkLogEntries(workLog.getDisplayData(15));
 
-      // ===== ACTIVITY TRACKER WIRING =====
-      // Wire activity tracker to autonomous engine events
+      // ===== ACTIVITY TRACKER WIRING (Claude Code Style) =====
+      // Wire activity tracker to autonomous engine events with meaningful messages
       autonomousEngine.on("cycle-start", (cycle) => {
         activityTracker.incrementCycle();
-        activityTracker.log("analyzing", "System state", ACTIVITY_STATUS.WORKING);
-        activityTracker.setState("analyzing", "Evaluating current context...");
+        activityTracker.setAgentState("ANALYZING");
+        activityTracker.action("ANALYZE", "opportunities", "scanning for actions");
       });
 
       autonomousEngine.on("proposals-updated", (proposals) => {
         if (proposals.length > 0) {
-          activityTracker.log("planning", `${proposals.length} actions`, ACTIVITY_STATUS.OBSERVATION);
+          activityTracker.setAgentState("PLANNING");
+          activityTracker.addObservation(`Found ${proposals.length} potential actions to take`);
         }
       });
 
       autonomousEngine.on("action-started", (action) => {
-        const actId = activityTracker.log("executing", action.title, ACTIVITY_STATUS.WORKING);
+        // Determine action type based on title/type
+        const actionTitle = action.title || "task";
+        let actionType = "BASH";
+        let stateType = "WORKING";
+
+        if (actionTitle.toLowerCase().includes("read") || actionTitle.toLowerCase().includes("fetch")) {
+          actionType = "READ";
+          stateType = "RESEARCHING";
+        } else if (actionTitle.toLowerCase().includes("search") || actionTitle.toLowerCase().includes("find")) {
+          actionType = "SEARCH";
+          stateType = "RESEARCHING";
+        } else if (actionTitle.toLowerCase().includes("update") || actionTitle.toLowerCase().includes("write")) {
+          actionType = "UPDATE";
+          stateType = "BUILDING";
+        } else if (actionTitle.toLowerCase().includes("web") || actionTitle.toLowerCase().includes("browse")) {
+          actionType = "WEB_SEARCH";
+          stateType = "RESEARCHING";
+        } else if (actionTitle.toLowerCase().includes("think") || actionTitle.toLowerCase().includes("analyze")) {
+          actionType = "THINK";
+          stateType = "THINKING";
+        } else if (actionTitle.toLowerCase().includes("test")) {
+          actionType = "BASH";
+          stateType = "TESTING";
+        }
+
+        activityTracker.setAgentState(stateType);
+        activityTracker.action(actionType, actionTitle);
+        activityTracker.setGoal(action.description || actionTitle);
+
+        const actId = activityTracker.log("executing", actionTitle, ACTIVITY_STATUS.WORKING);
         action._activityId = actId;
-        activityTracker.setState("executing", action.title);
       });
 
       autonomousEngine.on("action-completed", (action) => {
         if (action._activityId) {
           activityTracker.complete(action._activityId);
         }
-        activityTracker.log("completed", action.title, ACTIVITY_STATUS.COMPLETED);
-        activityTracker.setState("idle", null);
+        activityTracker.addObservation(`Completed: ${action.title}`);
+        activityTracker.setAgentState("OBSERVING");
+        activityTracker.setGoal(null);
       });
 
       autonomousEngine.on("action-failed", (action) => {
         if (action._activityId) {
           activityTracker.error(action._activityId, action.error);
         }
-        activityTracker.log("failed", action.title, ACTIVITY_STATUS.ERROR);
-        activityTracker.setState("error", action.error?.slice(0, 50));
+        activityTracker.addObservation(`Failed: ${action.title} - ${action.error?.slice(0, 30) || "unknown error"}`);
+        activityTracker.setAgentState("REFLECTING");
       });
 
       // Activity tracker updates are handled by AgentActivityPanel directly
@@ -1281,14 +1311,16 @@ Return ONLY a JSON array, no other text.`;
       if (autoStartedRef.current) return;
       autoStartedRef.current = true;
 
-      // Start the engine
-      activityTracker.log("starting", "Autonomous engine", ACTIVITY_STATUS.WORKING);
-      activityTracker.setState("starting", "Initializing autonomous agent...");
+      // Start the engine with Claude Code-style messages
+      activityTracker.setAgentState("CONNECTING");
+      activityTracker.setGoal("Initializing autonomous agent to help manage your life");
+      activityTracker.action("BASH", "backbone-engine", "starting services");
 
       autonomousEngine.start(generateAIActions);
       activityTracker.setRunning(true);
-      activityTracker.log("ready", "Engine running", ACTIVITY_STATUS.COMPLETED);
-      activityTracker.setState("monitoring", "Watching for opportunities...");
+      activityTracker.addObservation("Engine initialized and ready");
+      activityTracker.setAgentState("OBSERVING");
+      activityTracker.setGoal("Monitoring for opportunities to help");
       workLog.logSystem("Autonomous Engine", "Auto-started and monitoring");
     }, 3000);
 

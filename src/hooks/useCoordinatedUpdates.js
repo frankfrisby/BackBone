@@ -56,6 +56,10 @@ export const useCoordinatedUpdates = (key, fetchData, options = {}) => {
         const newDataJson = JSON.stringify(updates[key]);
         // Only update if data actually changed (deep comparison)
         if (newDataJson !== lastDataJson) {
+          // DEBUG: Log what's causing updates
+          if (process.env.DEBUG_FLICKER) {
+            console.log(`[FLICKER DEBUG] ${key} updating at tick ${tickCount}`);
+          }
           lastDataJson = newDataJson;
           setData(updates[key]);
         }
@@ -84,10 +88,16 @@ export const useCoordinatedUpdates = (key, fetchData, options = {}) => {
 /**
  * Hook to subscribe to tick events without registering a data source
  * Useful for components that just need periodic re-renders
+ *
+ * Options:
+ * - throttle: Only update every N ticks (default: 1)
+ * - onlyWhenVisible: Don't update when not visible (future)
  */
-export const useCoordinatedTick = (callback, enabled = true) => {
+export const useCoordinatedTick = (callback, enabled = true, options = {}) => {
+  const { throttle = 1 } = typeof options === "object" ? options : {};
   const [tickCount, setTickCount] = useState(0);
   const callbackRef = useRef(callback);
+  const lastUpdateRef = useRef(0);
 
   useEffect(() => {
     callbackRef.current = callback;
@@ -99,7 +109,18 @@ export const useCoordinatedTick = (callback, enabled = true) => {
     const coordinator = getUpdateCoordinator();
 
     const handleTick = (count, delta) => {
+      // Only update state every N ticks to reduce re-renders
+      if (throttle > 1 && (count - lastUpdateRef.current) < throttle) {
+        // Still call callback if provided, but don't trigger re-render
+        if (callbackRef.current) {
+          callbackRef.current(count, delta);
+        }
+        return;
+      }
+
+      lastUpdateRef.current = count;
       setTickCount(count);
+
       if (callbackRef.current) {
         callbackRef.current(count, delta);
       }
@@ -114,7 +135,7 @@ export const useCoordinatedTick = (callback, enabled = true) => {
     return () => {
       coordinator.off("tick", handleTick);
     };
-  }, [enabled]);
+  }, [enabled, throttle]);
 
   return tickCount;
 };

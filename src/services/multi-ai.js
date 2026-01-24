@@ -1,4 +1,5 @@
 import fetch from "node-fetch";
+import { getAPIQuotaMonitor } from "./api-quota-monitor.js";
 
 /**
  * Multi-Model AI Service for BACKBONE
@@ -153,8 +154,14 @@ export const getCurrentModel = () => ({
 
 /**
  * BACKBONE system prompt
+ * If context.systemPrompt is provided, use that instead (for AI Brain custom prompts)
  */
 const getSystemPrompt = (context, taskType) => {
+  // Allow custom system prompt from AI Brain or other advanced callers
+  if (context.systemPrompt) {
+    return context.systemPrompt;
+  }
+
   const basePrompt = `You are BACKBONE, an AI life operating system assistant. You help the user manage their life across domains: finance, health, career, education, and personal growth.
 
 Current context:
@@ -202,7 +209,22 @@ const sendToOpenAI = async (message, context = {}, modelConfig, taskType) => {
   // If primary model fails (e.g., not available), try fallback
   if (!response.ok && fallbackId) {
     const errorText = await response.text();
-    // Check if it's a model not found error
+
+    // First check for quota errors - these should NOT fallback to another model
+    const quotaMonitor = getAPIQuotaMonitor();
+    const quotaCheck = quotaMonitor.parseAPIError(errorText, "openai");
+
+    if (quotaCheck.isQuotaError) {
+      // Create a special error that can be identified by callers
+      const quotaError = new Error(`OpenAI API error: ${errorText}`);
+      quotaError.isQuotaExceeded = true;
+      quotaError.provider = "openai";
+      quotaError.billingUrl = quotaCheck.billingUrl;
+      quotaError.displayMessage = quotaCheck.displayMessage;
+      throw quotaError;
+    }
+
+    // Check if it's a model not found error - these CAN fallback
     if (errorText.includes("model") || errorText.includes("does not exist") || response.status === 404) {
       console.log(`Model ${modelId} not available, falling back to ${fallbackId}`);
       response = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -228,7 +250,28 @@ const sendToOpenAI = async (message, context = {}, modelConfig, taskType) => {
 
   if (!response.ok) {
     const error = await response.text();
+
+    // Check for quota exceeded errors
+    const quotaMonitor = getAPIQuotaMonitor();
+    const quotaCheck = quotaMonitor.parseAPIError(error, "openai");
+
+    if (quotaCheck.isQuotaError) {
+      // Create a special error that can be identified by callers
+      const quotaError = new Error(`OpenAI API error: ${error}`);
+      quotaError.isQuotaExceeded = true;
+      quotaError.provider = "openai";
+      quotaError.billingUrl = quotaCheck.billingUrl;
+      quotaError.displayMessage = quotaCheck.displayMessage;
+      throw quotaError;
+    }
+
     throw new Error(`OpenAI API error: ${error}`);
+  }
+
+  // Clear quota exceeded status on successful request
+  const quotaMonitor = getAPIQuotaMonitor();
+  if (quotaMonitor.isQuotaExceeded("openai")) {
+    quotaMonitor.clearQuotaExceeded("openai");
   }
 
   const data = await response.json();
@@ -546,25 +589,49 @@ export const executeClaudeCodeTask = async (task, workDir) => {
  */
 export const getAIStatus = () => {
   const config = getMultiAIConfig();
+  const quotaMonitor = getAPIQuotaMonitor();
+  const quotaStatus = quotaMonitor.getStatus();
+
+  // Determine effective status considering quota
+  const openaiQuotaExceeded = quotaStatus.openai.quotaExceeded;
+  const claudeQuotaExceeded = quotaStatus.anthropic.quotaExceeded;
+
+  const getOpenAIStatus = () => {
+    if (!config.gptInstant.ready) return "Missing OPENAI_API_KEY";
+    if (openaiQuotaExceeded) return "Tokens Exceeded";
+    return "Connected";
+  };
+
+  const getClaudeStatus = () => {
+    if (!config.claude.ready) return "Missing ANTHROPIC_API_KEY";
+    if (claudeQuotaExceeded) return "Tokens Exceeded";
+    return "Connected";
+  };
 
   return {
     gptInstant: {
-      ready: config.gptInstant.ready,
+      ready: config.gptInstant.ready && !openaiQuotaExceeded,
       model: MODELS.GPT52_INSTANT.id,
       modelInfo: MODELS.GPT52_INSTANT,
-      status: config.gptInstant.ready ? "Connected" : "Missing OPENAI_API_KEY"
+      status: getOpenAIStatus(),
+      quotaExceeded: openaiQuotaExceeded,
+      billingUrl: quotaStatus.openai.billingUrl
     },
     gptThinking: {
-      ready: config.gptThinking.ready,
+      ready: config.gptThinking.ready && !openaiQuotaExceeded,
       model: MODELS.GPT52_THINKING.id,
       modelInfo: MODELS.GPT52_THINKING,
-      status: config.gptThinking.ready ? "Connected" : "Missing OPENAI_API_KEY"
+      status: getOpenAIStatus(),
+      quotaExceeded: openaiQuotaExceeded,
+      billingUrl: quotaStatus.openai.billingUrl
     },
     claude: {
-      ready: config.claude.ready,
+      ready: config.claude.ready && !claudeQuotaExceeded,
       model: config.claude.model,
       modelInfo: MODELS.CLAUDE_SONNET,
-      status: config.claude.ready ? "Connected" : "Missing ANTHROPIC_API_KEY"
+      status: getClaudeStatus(),
+      quotaExceeded: claudeQuotaExceeded,
+      billingUrl: quotaStatus.anthropic.billingUrl
     },
     claudeCode: {
       ready: config.claudeCode.ready,
@@ -574,6 +641,10 @@ export const getAIStatus = () => {
     currentModel,
     lastTaskType,
     primaryModel: config.primaryModel,
-    anyAvailable: config.ready
+    anyAvailable: config.ready && (!openaiQuotaExceeded || !claudeQuotaExceeded),
+    quotaStatus: {
+      openai: quotaStatus.openai,
+      anthropic: quotaStatus.anthropic
+    }
   };
 };

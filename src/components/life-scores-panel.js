@@ -1,5 +1,6 @@
-import React from "react";
+import React, { useMemo } from "react";
 import { Box, Text } from "ink";
+import { getProgressResearch } from "../services/progress-research.js";
 
 const e = React.createElement;
 
@@ -39,19 +40,55 @@ const ScoreBar = ({ score = 0, width = 10, color = "#22c55e" }) => {
     Box,
     { flexDirection: "row" },
     filled > 0 && e(Text, { color }, "\u2588".repeat(filled)),
-    empty > 0 && e(Text, { color: "#4a5568" }, "\u2591".repeat(empty))
+    empty > 0 && e(Text, { color: "#6b7280" }, "\u2591".repeat(empty))
   );
 };
 
 /**
  * Progress Panel (formerly Life Scores)
  * Shows tracking metrics with comparison benchmarks
+ *
+ * New layout:
+ * ┌──────────────────────────────────────┐
+ * │ Frank              Warren Buffett    │
+ * │ 72                              98   │
+ * │ ████████░░░░       ██████████████░░  │
+ * └──────────────────────────────────────┘
  */
-export const LifeScoresPanel = ({ data, title = "Progress", compact = false, comparisons = null }) => {
-  const hasData = data?.categories?.some(c => c.score > 0) || data?.overall > 0;
+export const LifeScoresPanel = ({
+  data,
+  title = "Progress",
+  compact = false,
+  comparisons = null,
+  userName = null,
+  userGoals = []
+}) => {
+  // Get real progress data from research service
+  const progressData = useMemo(() => {
+    try {
+      const research = getProgressResearch();
+      return research.getProgressComparison();
+    } catch (e) {
+      return null;
+    }
+  }, []);
 
-  // If no data, show encouraging default message
-  if (!hasData) {
+  // User's actual progress from their goals and connected data
+  const overallProgress = progressData?.user?.score || 0;
+  const hasGoals = progressData?.user?.hasGoals || false;
+  const hasData = progressData?.user?.hasData || false;
+
+  // Empirical average person score (research-backed)
+  const avgPersonScore = progressData?.avgPerson?.score || 27;
+
+  // Aspirational figure based on user's primary goal
+  const topFigure = progressData?.aspiration || { name: "Warren Buffett", score: 99 };
+
+  // Get user's first name
+  const firstName = userName?.split(" ")[0] || null;
+
+  // If no goals set, show setup message
+  if (!hasGoals && !firstName) {
     return e(
       Box,
       {
@@ -61,23 +98,35 @@ export const LifeScoresPanel = ({ data, title = "Progress", compact = false, com
         padding: 1,
         height: 6
       },
-      e(Text, { color: "#64748b" }, title),
-      e(Text, { color: "#64748b" }, "Connect services to track")
+      e(Text, { color: "#64748b" }, "Progress"),
+      e(
+        Box,
+        { flexDirection: "row" },
+        e(Text, { color: "#475569" }, "Type "),
+        e(Text, { color: "#94a3b8", bold: true }, "/Goals"),
+        e(Text, { color: "#475569" }, " to set goals")
+      )
     );
   }
 
-  const categories = data?.categories || [];
-  const overall = data?.overall || 0;
-  const overallGrade = data?.overallGrade || "--";
-  const trend = data?.trend || "stable";
+  // Score color based on value
+  const getScoreColor = (score) => {
+    if (score >= 80) return "#22c55e";
+    if (score >= 60) return "#eab308";
+    if (score >= 40) return "#f97316";
+    return "#ef4444";
+  };
 
+  const trend = data?.trend || "stable";
   const trendIcon = TREND_ICONS[trend] || "-";
   const trendColor = TREND_COLORS[trend] || "#64748b";
 
-  // Overall score color
-  let scoreColor = "#22c55e";
-  if (overall < 50) scoreColor = "#ef4444";
-  else if (overall < 70) scoreColor = "#eab308";
+  // Display name - use actual name or "You" as last resort
+  const displayName = firstName || "You";
+
+  // Calculate a baseline score based on what we know
+  // Show score if we have any data (goals or connected services)
+  const effectiveProgress = overallProgress > 0 ? overallProgress : (hasData || hasGoals ? 0 : null);
 
   return e(
     Box,
@@ -86,59 +135,58 @@ export const LifeScoresPanel = ({ data, title = "Progress", compact = false, com
       borderStyle: "round",
       borderColor: "#0f172a",
       padding: 1,
-      height: compact ? 8 : 12,
+      height: compact ? 9 : 11,
       overflow: "hidden"
     },
-    // Header with overall score
+    // Section header
     e(
       Box,
-      { flexDirection: "row", justifyContent: "space-between", marginBottom: 1 },
-      e(Text, { color: "#64748b" }, title),
+      { marginBottom: 1 },
+      e(Text, { color: "#64748b" }, "Progress")
+    ),
+
+    // User row: Name · Score
+    e(
+      Box,
+      { flexDirection: "row", justifyContent: "space-between" },
+      // Left side: User name · score
       e(
         Box,
-        { flexDirection: "row", gap: 1 },
-        e(Text, { color: scoreColor, bold: true }, `${overall}`),
-        e(Text, { color: "#475569" }, overallGrade),
-        e(Text, { color: trendColor }, trendIcon)
+        { flexDirection: "row" },
+        e(Text, { color: "#e2e8f0", bold: true }, displayName),
+        e(Text, { color: "#64748b" }, " · "),
+        effectiveProgress !== null
+          ? e(Text, { color: getScoreColor(effectiveProgress), bold: true }, `${effectiveProgress}`)
+          : e(Text, { color: "#475569" }, "--"),
+        effectiveProgress !== null && e(Text, { color: trendColor }, ` ${trendIcon}`)
+      ),
+      // Right side: Target name · score
+      e(
+        Box,
+        { flexDirection: "row" },
+        e(Text, { color: "#22c55e" }, topFigure.name),
+        e(Text, { color: "#64748b" }, " · "),
+        e(Text, { color: "#22c55e", bold: true }, `${topFigure.score}`)
       )
     ),
-    // Main tracking metrics
+
+    // Progress bars row
     e(
       Box,
-      { flexDirection: "column" },
-      ...categories.slice(0, compact ? 3 : 4).map((cat, i) => {
-        const color = CATEGORY_COLORS[cat.category] || "#64748b";
-        const icon = cat.icon || CATEGORY_ICONS[cat.category] || "\u25CF";
-        const label = (cat.category || "score").charAt(0).toUpperCase() + (cat.category || "score").slice(1);
-
-        return e(
-          Box,
-          { key: cat.category || i, flexDirection: "row", justifyContent: "space-between" },
-          // Left: icon + label
-          e(
-            Box,
-            { flexDirection: "row", width: 10 },
-            e(Text, { color }, icon + " "),
-            e(Text, { color: "#94a3b8" }, label.slice(0, 7).padEnd(7))
-          ),
-          // Center: score bar
-          e(ScoreBar, { score: cat.score || 0, width: 10, color }),
-          // Right: score value
-          e(Text, { color: "#475569" }, `${String(cat.score || 0).padStart(3)}%`)
-        );
-      })
+      { flexDirection: "row", justifyContent: "space-between", gap: 2, marginTop: 1 },
+      e(ScoreBar, { score: effectiveProgress || 0, width: 12, color: effectiveProgress ? getScoreColor(effectiveProgress) : "#374151" }),
+      e(ScoreBar, { score: topFigure.score, width: 12, color: "#22c55e" })
     ),
-    // Comparison section (if provided)
-    comparisons && comparisons.length > 0 && e(
+
+    // Average Person row (lighter text)
+    e(
       Box,
-      { flexDirection: "column", marginTop: 1, borderTopColor: "#334155", borderTop: true, paddingTop: 1 },
-      e(Text, { color: "#64748b", dimColor: true }, "vs Benchmarks"),
-      ...comparisons.slice(0, 4).map((comp, i) => e(
-        Box,
-        { key: comp.label || i, flexDirection: "row", justifyContent: "space-between" },
-        e(Text, { color: "#64748b" }, comp.label.slice(0, 18)),
-        e(Text, { color: comp.ahead ? "#22c55e" : "#ef4444" }, comp.ahead ? `+${comp.diff}%` : `${comp.diff}%`)
-      ))
+      { flexDirection: "row", justifyContent: "center", marginTop: 1 },
+      e(Text, { color: "#374151" }, "Average Person"),
+      e(Text, { color: "#374151" }, " · "),
+      e(Text, { color: "#374151" }, `${avgPersonScore}`),
+      e(Text, { color: "#374151" }, "  "),
+      e(ScoreBar, { score: avgPersonScore, width: 6, color: "#1e293b" })
     )
   );
 };

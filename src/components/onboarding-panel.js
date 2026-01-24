@@ -1735,9 +1735,20 @@ export const OnboardingPanel = ({ onComplete, userDisplay = "" }) => {
     onComplete();
   }, [onComplete]);
 
-  // Handle Escape to exit
+  // Check if required steps are complete (login and model)
+  const requiredStepsComplete = stepStatuses.google === "complete" && stepStatuses.model === "complete";
+
+  // Handle keyboard shortcuts
   useInput((input, key) => {
-    if (key.escape) {
+    // Ctrl+M or 'x' to go to main (only if required steps done)
+    if ((key.ctrl && input === "m") || input.toLowerCase() === "x") {
+      if (requiredStepsComplete) {
+        handleComplete();
+      }
+      return;
+    }
+    // Escape or 'q' to quit the program
+    if (key.escape || input.toLowerCase() === "q") {
       exit();
     }
   });
@@ -1887,10 +1898,14 @@ export const OnboardingPanel = ({ onComplete, userDisplay = "" }) => {
       { flexDirection: "row", justifyContent: "space-between", marginTop: 1 },
       e(
         Box,
-        { flexDirection: "row", gap: 3 },
+        { flexDirection: "row", gap: 2 },
         e(Text, { color: "#64748b" }, "[Enter] Continue"),
         e(Text, { color: "#64748b" }, "[S] Skip"),
-        e(Text, { color: "#64748b" }, "[Esc] Exit"),
+        // Exit to main - only show if required steps done
+        requiredComplete >= requiredCount
+          ? e(Text, { color: "#22c55e" }, "[X/Ctrl+M] Main")
+          : e(Text, { color: "#475569", dimColor: true }, "[X] Main (complete login & model)"),
+        e(Text, { color: "#64748b" }, "[Q/Esc] Quit"),
         showLogoutHint && e(Text, { color: "#f59e0b" }, "[O] Logout")
       ),
       e(

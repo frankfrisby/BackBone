@@ -42,6 +42,17 @@ const ChatPanelBase = ({ commands, onSubmit, onTypingChange, modelInfo }) => {
   const [displayValue, setDisplayValue] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
 
+  // Blinking cursor state
+  const [cursorVisible, setCursorVisible] = useState(true);
+
+  // Blink the cursor
+  useEffect(() => {
+    const blinkInterval = setInterval(() => {
+      setCursorVisible(prev => !prev);
+    }, 530);
+    return () => clearInterval(blinkInterval);
+  }, []);
+
   // Callback refs to avoid stale closures
   const onSubmitRef = useRef(onSubmit);
   const onTypingChangeRef = useRef(onTypingChange);
@@ -220,7 +231,7 @@ const ChatPanelBase = ({ commands, onSubmit, onTypingChange, modelInfo }) => {
         e(Text, { color: "#334155" }, "clear")
       )
     ),
-    // Input line with better visual
+    // Input line with blinking cursor
     e(
       Box,
       { flexDirection: "row", paddingY: 0 },
@@ -228,7 +239,7 @@ const ChatPanelBase = ({ commands, onSubmit, onTypingChange, modelInfo }) => {
       isEmpty
         ? e(Text, { color: "#64748b" }, 'Ask anything... "Fix broken tests" or type / for commands')
         : e(Text, { color: "#f8fafc" }, displayValue),
-      e(Text, { color: cursorColor }, "█")
+      e(Text, { color: cursorVisible ? "#ffffff" : "transparent" }, "▌")
     ),
     // Character count for long inputs
     displayValue.length > 50 && e(

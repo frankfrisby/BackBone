@@ -96,6 +96,9 @@ import { openAlpacaKeys, openOuraKeys, openLLMKeys, readAlpacaKeysFile, watchKey
 import { buildLifeEvent, buildLifeFeed, buildLifeChanges } from "./data/life-engine.js";
 import { DiagnosticsPanel, STATUS_TYPES } from "./components/diagnostics-panel.js";
 import { createProject, createProjectAction, listProjects, createProjectsFromGoals, appendProjectResearch } from "./services/projects.js";
+import { getAIBrain } from "./services/ai-brain.js";
+import { getAPIQuotaMonitor, BILLING_URLS } from "./services/api-quota-monitor.js";
+import { QuotaExceededAlert, QuotaWarningBadge } from "./components/quota-exceeded-alert.js";
 import { calculateComprehensiveScore, getSignal, WEIGHT_PROFILES, THRESHOLDS } from "./services/scoring-criteria.js";
 import { getRiskyTickers, fetchAllRiskyK8Filings, getSignificantK8Tickers } from "./services/edgar-k8.js";
 import {
@@ -123,6 +126,7 @@ import { loadUserSettings, saveUserSettings, updateSettings as updateUserSetting
 import { loadFineTuningConfig, saveFineTuningConfig, runFineTuningPipeline, queryFineTunedModel } from "./services/fine-tuning.js";
 import { monitorAndTrade, loadConfig as loadTradingConfig, setTradingEnabled } from "./services/auto-trader.js";
 import { isMarketOpen } from "./services/trading-status.js";
+import { analyzeAllPositions, getPositionContext, explainWhyHeld } from "./services/position-analyzer.js";
 
 // New autonomous system imports
 import { getAutonomousEngine, AI_ACTION_STATUS, AI_ACTION_TYPES, EXECUTION_TOOLS } from "./services/autonomous-engine.js";
@@ -130,6 +134,7 @@ import { getClaudeCodeBackend } from "./services/claude-code-backend.js";
 import { getWorkLog, LOG_SOURCE, LOG_STATUS } from "./services/work-log.js";
 import { getGoalTracker, GOAL_CATEGORY } from "./services/goal-tracker.js";
 import { getLifeScores } from "./services/life-scores.js";
+import { getLifeEngine } from "./services/life-engine.js";
 import { getMobileService } from "./services/mobile.js";
 import { WorkLogPanel } from "./components/work-log-panel.js";
 import { GoalProgressPanel } from "./components/goal-progress-panel.js";
@@ -164,6 +169,14 @@ import { isEmailConfigured, syncEmailCalendar, getEmailSummary, getUpcomingEvent
 import { getPersonalCapitalService } from "./services/personal-capital.js";
 import { getPlaidService, isPlaidConfigured, syncPlaidData } from "./services/plaid-service.js";
 import { runUserEvaluationCycle } from "./services/analysis-scheduler.js";
+
+// Life Management Engine imports
+import { getLifeManagementEngine, LIFE_AREAS } from "./services/life-management-engine.js";
+import { getDisasterMonitor } from "./services/disaster-monitor.js";
+import { getPolymarketService } from "./services/polymarket-service.js";
+import { getConversationTracker } from "./services/conversation-tracker.js";
+import { getProactiveEngine } from "./services/proactive-engine.js";
+import { getFirebaseMessaging } from "./services/firebase-messaging.js";
 
 // Engine state and new panels
 import { getEngineStateManager, ENGINE_STATUS } from "./services/engine-state.js";
@@ -225,6 +238,8 @@ const YAHOO_FINANCE_REFRESH_MS = 180000; // 3 minutes
 
 const App = ({ updateConsoleTitle }) => {
   const [isInitializing, setIsInitializing] = useState(true);
+  const [lifeEngineCoverage, setLifeEngineCoverage] = useState(0);
+  const [lifeEngineReady, setLifeEngineReady] = useState(false);
   const [activeCommand, setActiveCommand] = useState("/account");
   const [lastAction, setLastAction] = useState("Ready");
   const [currentTier, setCurrentTier] = useState(() => getCurrentTier());
@@ -236,13 +251,10 @@ const App = ({ updateConsoleTitle }) => {
   const [userSettings, setUserSettings] = useState(initialSettingsRef.current);
   const [showOnboarding, setShowOnboarding] = useState(!initialSettingsRef.current.onboardingComplete);
   const [firebaseUser, setFirebaseUser] = useState(() => initialSettingsRef.current.firebaseUser || getCurrentFirebaseUser());
-  const firebaseUserDisplay = useMemo(() => {
+  // Basic firebase user name (job title added later when linkedInProfile is available)
+  const firebaseUserName = useMemo(() => {
     if (!firebaseUser) return "";
-    const nameOrEmail = firebaseUser.name || firebaseUser.email || "User";
-    const email = firebaseUser.email;
-    return email && !nameOrEmail.includes(email)
-      ? `${nameOrEmail} (${email})`
-      : nameOrEmail;
+    return firebaseUser.name || firebaseUser.email?.split("@")[0] || "User";
   }, [firebaseUser]);
 
   const syncUserSettings = useCallback(() => {
@@ -265,6 +277,19 @@ const App = ({ updateConsoleTitle }) => {
     const init = async () => {
       // Load API keys from Firebase (Plaid, Google, Alpaca, OpenAI)
       await initializeRemoteConfig();
+
+      // Run API health check to verify tokens are available
+      // This clears quota exceeded state if tokens were added
+      try {
+        const quotaMonitor = getAPIQuotaMonitor();
+        const healthResults = await quotaMonitor.checkAllProviders();
+        console.log("API Health Check:",
+          healthResults.openai?.success ? "OpenAI OK" : `OpenAI: ${healthResults.openai?.error}`,
+          healthResults.anthropic?.success ? "Anthropic OK" : `Anthropic: ${healthResults.anthropic?.error}`
+        );
+      } catch (e) {
+        console.error("Health check failed:", e.message);
+      }
 
       // Wait minimum 2 seconds for splash screen
       setTimeout(() => {
@@ -433,7 +458,7 @@ const App = ({ updateConsoleTitle }) => {
       setShowTestRunner(true);
       setLastAction("Test Runner opened");
     }
-    if (key.ctrl && input === "s") {
+    if (key.ctrl && !key.shift && input === "s") {
       // Ctrl+S: Open settings panel
       setShowSettings(true);
       setLastAction("Settings opened");
@@ -453,15 +478,28 @@ const App = ({ updateConsoleTitle }) => {
         return next;
       });
     }
-    if (key.ctrl && !key.shift && lower === "s") {
-      // Ctrl+S: Open onboarding/setup wizard
+    if (key.ctrl && key.shift && lower === "s") {
+      // Ctrl+Shift+S: Open onboarding/setup wizard
       setShowOnboarding(true);
       setLastAction("Setup wizard opened");
     }
-    if (key.ctrl && key.shift && lower === "s") {
-      // Ctrl+Shift+S: Open settings panel
-      setShowSettings(true);
-      setLastAction("Settings opened");
+    if (key.ctrl && input === "m") {
+      // Ctrl+M: Go to main view (close any overlays if allowed)
+      if (showOnboarding) {
+        // Only allow if required steps are complete (google login and model)
+        const hasLogin = !!firebaseUser;
+        const hasModel = isProviderConfigured("anthropic") || isProviderConfigured("openai") || isProviderConfigured("google");
+        if (hasLogin && hasModel) {
+          setShowOnboarding(false);
+          setLastAction("Returned to main");
+        }
+      } else if (showSettings) {
+        setShowSettings(false);
+        setLastAction("Returned to main");
+      } else if (showTestRunner) {
+        setShowTestRunner(false);
+        setLastAction("Returned to main");
+      }
     }
   });
   const [pauseUpdates, setPauseUpdates] = useState(false);
@@ -547,6 +585,17 @@ const App = ({ updateConsoleTitle }) => {
   const [personalCapitalData, setPersonalCapitalData] = useState(null);
   const [socialConnections, setSocialConnections] = useState(null);
 
+  // User display with job title from LinkedIn (shows that data is being tracked)
+  const firebaseUserDisplay = useMemo(() => {
+    const baseName = firebaseUserName || "User";
+    // Get job title from LinkedIn profile headline
+    const jobTitle = linkedInProfile?.headline || linkedInProfile?.currentPosition?.title;
+    if (jobTitle) {
+      return `${baseName} (${jobTitle})`;
+    }
+    return baseName;
+  }, [firebaseUserName, linkedInProfile]);
+
   const weightsRef = useRef(weights);
   const portfolioRef = useRef(portfolio);
   const profileRef = useRef(profile);
@@ -577,6 +626,20 @@ const App = ({ updateConsoleTitle }) => {
   const mobileService = useMemo(() => getMobileService(), []);
   const personalCapitalRef = useRef(null);
 
+  // ===== LIFE MANAGEMENT ENGINE =====
+  const lifeManagementEngine = useMemo(() => getLifeManagementEngine(), []);
+  const disasterMonitor = useMemo(() => getDisasterMonitor(), []);
+  const polymarketService = useMemo(() => getPolymarketService(), []);
+  const conversationTracker = useMemo(() => getConversationTracker(), []);
+  const proactiveEngine = useMemo(() => getProactiveEngine(), []);
+  const firebaseMessaging = useMemo(() => getFirebaseMessaging(), []);
+
+  // ===== AI BRAIN - Real AI-driven decision engine =====
+  const aiBrain = useMemo(() => getAIBrain(), []);
+
+  // ===== API QUOTA MONITOR =====
+  const quotaMonitor = useMemo(() => getAPIQuotaMonitor(), []);
+
   // Activity tracker for visual status display (panel subscribes directly to avoid re-renders)
   const activityTracker = useMemo(() => getActivityTracker(), []);
 
@@ -597,6 +660,15 @@ const App = ({ updateConsoleTitle }) => {
     setAutonomousState((prev) => (deepEqual(prev, next) ? prev : next));
   }, [autonomousEngine]);
   const [claudeCodeStatus, setClaudeCodeStatus] = useState({ initialized: false, available: false });
+  const [quotaExceeded, setQuotaExceeded] = useState(() => {
+    const status = quotaMonitor.getStatus();
+    return {
+      openai: status.openai.quotaExceeded,
+      anthropic: status.anthropic.quotaExceeded,
+      showAlert: status.openai.quotaExceeded || status.anthropic.quotaExceeded,
+      provider: status.openai.quotaExceeded ? "openai" : "anthropic"
+    };
+  });
   const [showApprovalOverlay, setShowApprovalOverlay] = useState(false);
   const [selectedActionIndex, setSelectedActionIndex] = useState(0);
   const [connectionStatuses, setConnectionStatuses] = useState({});
@@ -864,7 +936,11 @@ const App = ({ updateConsoleTitle }) => {
       if (backend.installed) {
         workLog.logConnection(LOG_SOURCE.CLAUDE_CODE, "Claude Code Connected", backend.version, LOG_STATUS.SUCCESS);
       } else {
-        workLog.logConnection(LOG_SOURCE.CLAUDE_CODE, "Claude Code Not Installed", "Using API fallback", LOG_STATUS.INFO);
+        workLog.logConnection(LOG_SOURCE.CLAUDE_CODE, "Claude Code Not Available",
+          "Install Claude Code CLI for complex work: npm install -g @anthropic-ai/claude-code", LOG_STATUS.WARNING);
+        // Let user know via activity narrator
+        const narrator = getActivityNarrator();
+        narrator.observe("Claude Code CLI not installed - install for advanced automation: npm install -g @anthropic-ai/claude-code");
       }
 
       // Register context providers for autonomous engine
@@ -882,6 +958,94 @@ const App = ({ updateConsoleTitle }) => {
       autonomousEngine.registerContextProvider("tickers", async () =>
         tickersRef.current.slice(0, 10).map(t => ({ symbol: t.symbol, score: t.score, change: t.change }))
       );
+
+      // Position analysis context - explains why positions are held/sold
+      autonomousEngine.registerContextProvider("positionAnalysis", async () => {
+        try {
+          const positions = portfolioRef.current?.positions || [];
+          const tickers = tickersRef.current || [];
+          const analyses = analyzeAllPositions(tickers, positions);
+          return {
+            count: positions.length,
+            positions: analyses.map(a => ({
+              symbol: a.symbol,
+              score: a.score,
+              plPercent: a.plPercent,
+              holdTime: a.holdTime?.formatted,
+              decision: a.decision,
+              isProtected: a.isProtected,
+              explanation: a.explanation
+            })),
+            summary: analyses.map(a =>
+              `${a.symbol}: Score ${a.score?.toFixed(1) || "?"}/10, P&L ${a.plPercent?.toFixed(1) || "?"}%, ` +
+              `Held ${a.holdTime?.formatted || "?"} - ${a.decision}`
+            ).join("\n")
+          };
+        } catch (error) {
+          return { error: error.message, positions: [] };
+        }
+      });
+
+      // ===== WIRE AI BRAIN CONTEXT PROVIDERS =====
+      // The AI Brain uses these for real AI-driven reasoning
+      aiBrain.registerContextProvider("portfolio", async () => {
+        const p = portfolioRef.current;
+        if (!p || p.equity === "--") return { connected: false };
+        return {
+          connected: true,
+          equity: p.equity,
+          cash: p.cash,
+          dayChange: p.dayChange,
+          dayChangeDollar: p.dayChangeDollar,
+          positions: p.positions?.slice(0, 8).map(pos => ({
+            symbol: pos.symbol,
+            shares: pos.shares,
+            marketValue: pos.marketValue,
+            todayChange: pos.todayChange,
+            totalPnL: pos.pnlPercent
+          }))
+        };
+      });
+
+      aiBrain.registerContextProvider("health", async () => {
+        const h = ouraHealthRef.current;
+        if (!h) return { connected: false };
+        return {
+          connected: true,
+          sleep: h.sleep,
+          readiness: h.readiness,
+          activity: h.activity
+        };
+      });
+
+      aiBrain.registerContextProvider("goals", async () => {
+        const g = goalTracker.getDisplayData();
+        return g.filter(goal => goal.status !== "completed").slice(0, 5).map(goal => ({
+          title: goal.title,
+          progress: Math.round((goal.progress || 0) * 100),
+          category: goal.category,
+          dueDate: goal.dueDate
+        }));
+      });
+
+      aiBrain.registerContextProvider("tickers", async () => {
+        const t = tickersRef.current || [];
+        return t.slice(0, 6).map(ticker => ({
+          symbol: ticker.symbol,
+          score: ticker.score?.toFixed(1),
+          change: ticker.change,
+          signal: ticker.signal
+        }));
+      });
+
+      aiBrain.registerContextProvider("projects", async () => {
+        const p = listProjects();
+        return p.slice(0, 3).map(proj => ({
+          name: proj.name,
+          status: proj.status,
+          lastUpdated: proj.lastUpdated
+        }));
+      });
 
       // Register executor for Claude Code tasks
       autonomousEngine.registerExecutor(EXECUTION_TOOLS.CLAUDE_CODE, async (action) => {
@@ -1057,14 +1221,27 @@ const App = ({ updateConsoleTitle }) => {
       // Wire activity tracker to autonomous engine events with meaningful messages
       autonomousEngine.on("cycle-start", (cycle) => {
         activityTracker.incrementCycle();
+
+        // Vary the displayed action based on what we're checking
+        const cycleActions = [
+          { type: "SEARCH", target: "market trends", detail: "scanning opportunities" },
+          { type: "FETCH", target: "portfolio data", detail: "checking positions" },
+          { type: "ANALYZE", target: "health metrics", detail: "reviewing wellness" },
+          { type: "READ", target: "goal progress", detail: "tracking milestones" },
+          { type: "SYNC", target: "connections", detail: "updating status" }
+        ];
+        const actionIndex = cycle % cycleActions.length;
+        const cycleAction = cycleActions[actionIndex];
+
         activityTracker.setAgentState("ANALYZING");
-        activityTracker.action("ANALYZE", "opportunities", "scanning for actions");
+        activityTracker.action(cycleAction.type, cycleAction.target, cycleAction.detail);
       });
 
       autonomousEngine.on("proposals-updated", (proposals) => {
         if (proposals.length > 0) {
           activityTracker.setAgentState("PLANNING");
-          activityTracker.addObservation(`Found ${proposals.length} potential actions to take`);
+          // Note: Real AI observations are now added in generateAIActions via AI Brain
+          // The observation shows the AI's actual reasoning, not a hardcoded count
         }
       });
 
@@ -1121,6 +1298,41 @@ const App = ({ updateConsoleTitle }) => {
 
       // Activity tracker updates are handled by AgentActivityPanel directly
       // to prevent full app re-renders
+
+      // ===== QUOTA MONITOR EVENTS =====
+      quotaMonitor.on("quota-exceeded", ({ provider, errorMessage }) => {
+        setQuotaExceeded(prev => ({
+          ...prev,
+          [provider]: true,
+          showAlert: true,
+          provider
+        }));
+        workLog.logError(LOG_SOURCE.SYSTEM, `${provider.toUpperCase()} Quota Exceeded`, "Add credits to continue using AI");
+        activityTracker.addObservation(`API quota exceeded - add credits at billing page`);
+      });
+
+      quotaMonitor.on("quota-cleared", ({ provider }) => {
+        setQuotaExceeded(prev => ({
+          ...prev,
+          [provider]: false,
+          showAlert: prev.openai || prev.anthropic
+        }));
+        workLog.logSystem(LOG_SOURCE.SYSTEM, `${provider.toUpperCase()} quota restored`);
+      });
+
+      quotaMonitor.on("low-balance-warning", async ({ provider, balance, threshold, urgency, message }) => {
+        workLog.logError(LOG_SOURCE.SYSTEM, `Low Balance: ${provider}`, `$${balance.toFixed(2)} remaining`);
+        activityTracker.addObservation(`${urgency}: ${provider} balance at $${balance.toFixed(2)}`);
+
+        // Send SMS if messaging is available
+        if (firebaseMessaging?.getStatus()?.phoneVerified) {
+          try {
+            await firebaseMessaging.sendAlert(message);
+          } catch (err) {
+            console.error("Failed to send balance warning SMS:", err.message);
+          }
+        }
+      });
 
       // Start mobile dashboard
       try {
@@ -1262,49 +1474,157 @@ const App = ({ updateConsoleTitle }) => {
     };
   }, [isInitializing, showOnboarding, connectionStatuses, tickers.length]);
 
-  // AI Action Generation function
+  // Life Engine Boot - Gather all data sources and start optimization when ready
+  useEffect(() => {
+    if (isInitializing || showOnboarding) return;
+
+    const bootLifeEngine = async () => {
+      try {
+        const lifeEngine = getLifeEngine();
+        const goalTracker = getGoalTracker();
+
+        // Boot with all available data sources
+        const result = await lifeEngine.boot({
+          linkedInProfile,
+          ouraHealth,
+          portfolio,
+          goals: goalTracker.getActive(),
+          calendar: null, // TODO: Add calendar integration
+          email: null, // TODO: Add email integration
+          aiStatus: {
+            ready: getMultiAIConfig().ready,
+            provider: getMultiAIConfig().gptThinking?.ready ? "openai" : "anthropic",
+            quotaExceeded: getAIStatus().gptThinking?.quotaExceeded
+          }
+        });
+
+        setLifeEngineCoverage(result.coverage);
+        setLifeEngineReady(result.ready);
+
+        // Log coverage status
+        if (result.coverage < 80) {
+          console.log(`Life Engine: ${result.coverage}% coverage. Need 80% to start optimization.`);
+          if (result.missing.length > 0) {
+            console.log(`Missing: ${result.missing.slice(0, 3).map(m => m.name).join(", ")}`);
+          }
+        } else {
+          console.log(`Life Engine: ${result.coverage}% coverage. Optimization active.`);
+        }
+      } catch (e) {
+        console.error("Life Engine boot failed:", e.message);
+      }
+    };
+
+    // Boot after a short delay to let other data load
+    const timer = setTimeout(bootLifeEngine, 3000);
+    return () => clearTimeout(timer);
+  }, [isInitializing, showOnboarding, linkedInProfile?.connected, ouraHealth?.connected, portfolio?.connected]);
+
+  // AI Action Generation function - Uses AI Brain for real reasoning
   const generateAIActions = useCallback(async (context, needed) => {
-    const config = getClaudeConfig();
-    if (!config.ready) return [];
+    const claudeConfig = getClaudeConfig();
+    const multiConfig = getMultiAIConfig();
 
-    const prompt = `Based on the user's current state:
-- Portfolio: ${context.portfolio?.equity ? `$${context.portfolio.equity.toLocaleString()} equity` : "Not connected"}
-- Health: ${context.health?.sleep?.score ? `Sleep score ${context.health.sleep.score}` : "Not connected"}
-- Goals: ${context.goals?.map(g => `${g.title}: ${Math.round(g.progress * 100)}%`).join(", ") || "None set"}
-- Top Tickers: ${context.tickers?.map(t => `${t.symbol} (score: ${t.score})`).join(", ") || "None"}
-- Time: ${new Date().toLocaleTimeString()}
+    // Check if any AI is available
+    if (!claudeConfig.ready && !multiConfig.ready) return [];
 
-Generate ${needed} actionable tasks as JSON array. Each task should have:
-- title: Brief action title
-- type: One of: research, execute, analyze, health, family, plan
-- description: What this action will accomplish
-- prompt: The detailed prompt to execute this action
-
-Focus on concrete, executable actions for:
-1. Finance: Stock research, portfolio analysis, trading opportunities
-2. Health: Sleep optimization, exercise, nutrition
-3. Family: Quality time, activities, communication
-
-Return ONLY a JSON array, no other text.`;
+    // Update activity to show we're working (not just thinking)
+    activityTracker.setAgentState("RESEARCHING");
 
     try {
-      const result = await sendMultiAI(prompt, context, "complex");
-      const parsed = JSON.parse(result.response);
-      return parsed.map(p => ({
-        title: p.title,
-        type: p.type || AI_ACTION_TYPES.RESEARCH,
-        description: p.description,
-        executionPlan: {
-          tool: claudeCodeStatus.available ? EXECUTION_TOOLS.CLAUDE_CODE : EXECUTION_TOOLS.CLAUDE_API,
-          prompt: p.prompt
-        },
-        requiresApproval: true,
-        priority: 5
-      }));
+      // Step 1: Use AI Brain to analyze and find ACTIONABLE work
+      // Focus on core competencies: trading, research, user issues, projects
+      const thinkResult = await aiBrain.think();
+
+      if (thinkResult.success && thinkResult.observation) {
+        // Only show if it's actionable insight, not just restating facts
+        const observation = thinkResult.observation.split("\n")[0];
+        // The narrator will filter out useless observations
+        activityTracker.addObservation(observation);
+        activityTracker.setAgentState("PLANNING");
+      }
+
+      // Step 2: Generate REAL actions that DO WORK
+      const actionResult = await aiBrain.generateActions(needed);
+
+      if (!actionResult.success || actionResult.actions.length === 0) {
+        // Don't show useless "no changes" observations
+        return [];
+      }
+
+      // Actions that auto-execute (research and analysis are safe)
+      const safeTypes = ["research", "analyze", "plan"];
+
+      // Convert to autonomous engine format with REAL prompts
+      const actions = actionResult.actions.map(a => {
+        const actionType = a.type || AI_ACTION_TYPES.RESEARCH;
+        const isSafe = safeTypes.includes(actionType);
+
+        // Build a real, actionable prompt
+        let prompt = "";
+        if (actionType === "research") {
+          prompt = `RESEARCH TASK: ${a.title}
+
+You are doing real research. Find specific, actionable information:
+- Search for relevant data, news, and analysis
+- Extract specific numbers, dates, and facts
+- Provide a summary with 3-5 key findings
+- Recommend specific next actions
+
+${a.rationale || ""}
+
+Output your findings in a structured format.`;
+        } else if (actionType === "analyze") {
+          prompt = `ANALYSIS TASK: ${a.title}
+
+Perform deep analysis:
+- Examine the data for patterns and signals
+- Calculate relevant metrics
+- Identify opportunities or risks
+- Provide specific recommendations
+
+${a.rationale || ""}
+
+Output specific, actionable insights.`;
+        } else {
+          prompt = `TASK: ${a.title}
+
+${a.rationale || a.description || ""}
+
+Execute this task and provide concrete results.`;
+        }
+
+        return {
+          title: a.title,
+          type: actionType,
+          description: a.rationale || a.description,
+          executionPlan: {
+            tool: claudeCodeStatus.available ? EXECUTION_TOOLS.CLAUDE_CODE : EXECUTION_TOOLS.CLAUDE_API,
+            prompt
+          },
+          requiresApproval: !isSafe,
+          priority: a.priority === "high" ? 8 : a.priority === "medium" ? 5 : 3
+        };
+      });
+
+      // Log the planned work (not just observation)
+      if (actions.length > 0) {
+        const firstAction = actions[0];
+        // Use WEB_SEARCH for research actions to show proper format
+        if (firstAction.type === "research") {
+          activityTracker.action("WEB_SEARCH", firstAction.title);
+        } else {
+          activityTracker.setGoal(firstAction.title);
+        }
+      }
+
+      return actions;
     } catch (error) {
+      // Don't log useless error observations
+      console.error("Action generation error:", error.message);
       return [];
     }
-  }, [claudeCodeStatus.available]);
+  }, [claudeCodeStatus.available, activityTracker, aiBrain]);
 
   // ===== AUTO-START AUTONOMOUS ENGINE =====
   // This runs once generateAIActions is available
@@ -1323,16 +1643,46 @@ Return ONLY a JSON array, no other text.`;
       activityTracker.setGoal("Initializing autonomous agent to help manage your life");
       activityTracker.action("BASH", "backbone-engine", "starting services");
 
+      // Configure auto-approval for safe action types (research, analyze don't make real changes)
+      autonomousEngine.updateConfig({
+        autoApproveTypes: ["research", "analyze", "plan"],
+        cycleIntervalMs: 60000, // Run cycle every 60 seconds
+        requireApproval: false  // Allow auto-execution for safe types
+      });
+
       autonomousEngine.start(generateAIActions);
       activityTracker.setRunning(true);
-      activityTracker.addObservation("Engine initialized and ready");
-      activityTracker.setAgentState("OBSERVING");
-      activityTracker.setGoal("Monitoring for opportunities to help");
-      workLog.logSystem("Autonomous Engine", "Auto-started and monitoring");
+      activityTracker.setAgentState("ANALYZING");
+      workLog.logSystem("Autonomous Engine", "AI Brain started - GPT-5.2/Claude reasoning");
+
+      // Initialize Life Management Engine services (but DON'T start its rule-based cycle)
+      // The AI Brain now handles intelligent decision-making
+      lifeManagementEngine.initialize().then(() => {
+        workLog.logSystem("Life Engine", "Services initialized (AI Brain is primary)");
+
+        // Polymarket data is useful context for the AI Brain
+        if (polymarketService.shouldFetch()) {
+          polymarketService.refresh();
+        }
+      });
+
+      // Initial AI Brain observation after a short delay
+      setTimeout(async () => {
+        try {
+          const result = await aiBrain.think();
+          if (result.success && result.observation) {
+            // Show the AI's first observation (real AI reasoning)
+            const firstLine = result.observation.split("\n")[0];
+            activityTracker.addObservation(firstLine);
+          }
+        } catch (err) {
+          // Silently handle - the regular cycle will pick up
+        }
+      }, 5000);
     }, 3000);
 
     return () => clearTimeout(startTimer);
-  }, [autonomousEngine, generateAIActions, activityTracker, workLog]);
+  }, [autonomousEngine, generateAIActions, activityTracker, workLog, lifeManagementEngine, polymarketService, aiBrain]);
 
   // Refresh trading status display every 10 seconds
   useEffect(() => {
@@ -1837,6 +2187,11 @@ Return ONLY a JSON array, no other text.`;
                 setStreamingText("");
                 setIsProcessing(false);
                 engineState.setStatus("idle");
+
+                // Track conversation for learning
+                conversationTracker.record(userMessage, fullText, {
+                  category: conversationTracker.categorizeMessage(userMessage)
+                });
               } else if (chunk.type === "error") {
                 setMessages((prev) => [
                   ...prev,
@@ -1886,6 +2241,11 @@ Return ONLY a JSON array, no other text.`;
           ]);
           setIsProcessing(false);
           engineState.setStatus("idle");
+
+          // Track conversation for learning
+          conversationTracker.record(userMessage, result.response, {
+            category: conversationTracker.categorizeMessage(userMessage)
+          });
         } catch (error) {
           setMessages((prev) => [
             ...prev,
@@ -4832,6 +5192,7 @@ Folder: ${result.action.id}`,
       version: "3.0.0",
       userDisplay: firebaseUserDisplay
     }),
+    // Main content row
     e(
       Box,
       { flexDirection: "row", height: contentHeight, overflow: "hidden" },
@@ -4846,6 +5207,8 @@ Folder: ${result.action.id}`,
           tickers,
           projects,
           uiClock,
+          userName: linkedInProfile?.name || profile?.name || process.env.USER_NAME || "Frank",
+          aiHealthResponse: null, // Will be populated by AI Brain when available
         })
       ),
       // ===== CENTER COLUMN: Engine Status, Chat =====

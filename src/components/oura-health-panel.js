@@ -1,5 +1,6 @@
 import React, { useMemo } from "react";
 import { Box, Text } from "ink";
+import { getAIStatus, getMultiAIConfig } from "../services/multi-ai.js";
 
 const e = React.createElement;
 
@@ -19,7 +20,7 @@ const ScoreBar = ({ score = 0, width = 12, color = "#22c55e" }) => {
     Box,
     { flexDirection: "row", width },
     filled > 0 && e(Text, { color }, "\u2588".repeat(filled)),
-    empty > 0 && e(Text, { color: "#111827" }, "\u2591".repeat(empty))
+    empty > 0 && e(Text, { color: "#4b5563" }, "\u2591".repeat(empty))
   );
 };
 
@@ -154,24 +155,31 @@ const buildReadinessCounts = (history = []) => {
   return { counts, total: counts.green + counts.orange + counts.red };
 };
 
-const OuraHealthPanel = ({ data, history = [] }) => {
+const OuraHealthPanel = ({ data, history = [], aiResponse = null }) => {
   const connected = data?.connected;
   const summary = data?.today;
   const qualityScore = useMemo(() => getQualityScore(summary, data?.weekAverage), [summary, data?.weekAverage]);
   const stress = useMemo(() => getStressDescriptor(summary?.readinessScore), [summary]);
-  const suggestions = useMemo(() => buildSuggestions(summary, data?.weekAverage), [summary, data?.weekAverage]);
-  const trend = useMemo(() => buildTrendHistory(history), [history]);
-  const sparkline = useMemo(() => toSparkline(trend.map((entry) => entry.computedScore || 0)), [trend]);
-  const avgTrend = useMemo(() => {
-    if (!trend.length) return null;
-    const total = trend.reduce((sum, entry) => sum + (entry.computedScore || 0), 0);
-    return Math.round(total / trend.length);
-  }, [trend]);
-  const aiInsight = useMemo(() => buildInsight(summary, stress), [summary, stress]);
+
+  // Check if model is available
+  const modelStatus = useMemo(() => {
+    const config = getMultiAIConfig();
+    const aiStatus = getAIStatus();
+
+    const hasOpenAI = config.gptInstant?.ready || config.gptThinking?.ready;
+    const hasClaude = config.claude?.ready;
+    const hasModel = hasOpenAI || hasClaude;
+
+    const openaiExceeded = aiStatus.gptInstant?.quotaExceeded || aiStatus.gptThinking?.quotaExceeded;
+    const claudeExceeded = aiStatus.claude?.quotaExceeded;
+    const tokensExceeded = (hasOpenAI && openaiExceeded) || (hasClaude && claudeExceeded && !hasOpenAI);
+
+    return { hasModel, tokensExceeded, isReady: hasModel && !tokensExceeded };
+  }, []);
+
   const baseScore = summary?.readinessScore ?? summary?.activityScore ?? summary?.sleepScore ?? qualityScore;
   const todayScore = Math.round(baseScore ?? 0);
   const todayQuality = useMemo(() => categorizeScore(todayScore), [todayScore]);
-  const readinessBreakdown = useMemo(() => buildReadinessCounts(history), [history]);
 
   if (!connected) {
     return e(
@@ -180,8 +188,8 @@ const OuraHealthPanel = ({ data, history = [] }) => {
         flexDirection: "column",
         borderStyle: "round",
         borderColor: "#1e293b",
-        padding: 1,
-        marginBottom: 1
+        paddingX: 1,
+        paddingY: 0
       },
       e(Text, { color: "#64748b" }, "Oura Ring not connected"),
       e(Text, { color: "#475569" }, "Type /oura or run Setup to add your data.")
@@ -194,24 +202,27 @@ const OuraHealthPanel = ({ data, history = [] }) => {
       flexDirection: "column",
       borderStyle: "round",
       borderColor: "#1e293b",
-      padding: 1,
-      marginBottom: 1
+      paddingX: 1,
+      paddingTop: 0,
+      paddingBottom: 0
     },
+    // Header
     e(
       Box,
       { flexDirection: "row", justifyContent: "space-between", marginBottom: 1 },
-      e(Text, { color: "#f97316", bold: true }, "Oura Health"),
-      e(Text, { color: "#475569" }, `Last checked ${formatDateTime(data?.lastUpdated)}`)
+      e(Text, { color: "#f97316", bold: true }, "Health"),
+      e(Text, { color: "#475569" }, `${formatDateTime(data?.lastUpdated)}`)
     ),
+
+    // Today's overall score
     e(
       Box,
       { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
       e(
         Box,
         { flexDirection: "column" },
-        e(Text, { color: todayQuality.color, bold: true }, todayScore ? `${todayScore}%` : "Score pending"),
-        e(Text, { color: "#64748b" }, `Today · ${todayQuality.label}`),
-        e(Text, { color: "#94a3b8" }, `Readiness ${todayScore >= 0 ? `${todayScore}` : "--"}`)
+        e(Text, { color: todayQuality.color, bold: true }, todayScore ? `${todayScore}%` : "--"),
+        e(Text, { color: "#64748b" }, `${todayQuality.label}`)
       ),
       e(ScoreBar, {
         score: todayScore || 0,
@@ -219,86 +230,57 @@ const OuraHealthPanel = ({ data, history = [] }) => {
         color: todayQuality.color
       })
     ),
+
+    // Three main scores
     e(
       Box,
       { flexDirection: "row", justifyContent: "space-between", marginTop: 1 },
       e(
         Box,
         { flexDirection: "column" },
-        e(Text, { color: "#94a3b8" }, "🛌 Sleep"),
-        e(Text, { color: "#e2e8f0" }, summary?.sleepScore ? `${summary.sleepScore} sleep` : "--"),
-        e(Text, { color: "#64748b" }, summary?.totalSleepHours ? `${summary.totalSleepHours} hrs` : "--")
+        e(Text, { color: "#94a3b8" }, "Sleep"),
+        e(Text, { color: "#e2e8f0" }, summary?.sleepScore ? `${summary.sleepScore}` : "--"),
+        e(Text, { color: "#64748b", dimColor: true }, summary?.totalSleepHours ? `${summary.totalSleepHours}h` : "")
       ),
       e(
         Box,
         { flexDirection: "column" },
-        e(Text, { color: "#94a3b8" }, "💡 Readiness"),
-        e(Text, { color: "#e2e8f0" }, summary?.readinessScore ? `${summary.readinessScore} readiness` : "--"),
+        e(Text, { color: "#94a3b8" }, "Ready"),
+        e(Text, { color: "#e2e8f0" }, summary?.readinessScore ? `${summary.readinessScore}` : "--"),
         e(Text, { color: stress?.color, dimColor: true }, stress?.label || "")
       ),
       e(
         Box,
         { flexDirection: "column" },
-        e(Text, { color: "#94a3b8" }, "⚡ Activity"),
-        e(Text, { color: "#e2e8f0" }, summary?.activityScore ? `${summary.activityScore} activity` : "--"),
-        e(Text, { color: "#64748b" }, summary?.steps ? `${summary.steps} steps` : "--")
-      )
-    ),
-    e(
-      Box,
-      { flexDirection: "row", justifyContent: "space-between", marginTop: 1 },
-      e(
-        Box,
-        { flexDirection: "column" },
-        e(Text, { color: "#94a3b8" }, "❤️ Heart rate"),
-        e(Text, { color: "#e2e8f0" }, `${summary?.restingHeartRate || 71} bpm`)
+        e(Text, { color: "#94a3b8" }, "Active"),
+        e(Text, { color: "#e2e8f0" }, summary?.activityScore ? `${summary.activityScore}` : "--"),
+        e(Text, { color: "#64748b", dimColor: true }, summary?.steps ? `${summary.steps}` : "")
       ),
       e(
         Box,
         { flexDirection: "column" },
-        e(Text, { color: "#94a3b8" }, "🔥 Calories"),
-        e(Text, { color: "#e2e8f0" }, summary?.activeCalories ? `${Math.round(summary.activeCalories)} kcal` : "--")
+        e(Text, { color: "#94a3b8" }, "Calories"),
+        e(Text, { color: "#e2e8f0" }, summary?.activeCalories ? `${Math.round(summary.activeCalories)}` : "--"),
+        e(Text, { color: "#64748b", dimColor: true }, "kcal")
       )
     ),
+
+    // 28-day average row
+    data?.weekAverage && e(
+      Box,
+      { flexDirection: "row", justifyContent: "flex-start", marginTop: 1 },
+      e(Text, { color: "#475569" }, "28d avg: "),
+      e(Text, { color: "#64748b" }, `${data.weekAverage.readinessScore || "--"} ready`)
+    ),
+
+    // AI Response section - only show if model is ready and has response
     e(
       Box,
-      { flexDirection: "column", marginTop: 1 },
-      e(Text, { color: "#64748b" }, "30-day trend"),
-      e(Text, { color: "#94a3b8" }, sparkline || "Collecting data..."),
-      e(Text, { color: "#475569" }, avgTrend ? `Average ${avgTrend}% over ${trend.length} days` : "Waiting for more days")
-    ),
-    e(
-      Box,
-      { flexDirection: "column", marginTop: 1 },
-      e(Text, { color: "#64748b" }, "60-day readiness"),
-      e(
-        Box,
-        { flexDirection: "row", gap: 2, flexWrap: "wrap" },
-        e(Text, { color: "#22c55e" }, `${readinessBreakdown.counts.green} days ≥ 75`),
-        e(Text, { color: "#f97316" }, `${readinessBreakdown.counts.orange} days 60-74`),
-        e(Text, { color: "#ef4444" }, `${readinessBreakdown.counts.red} days < 60`)
-      ),
-      e(Text, { color: "#94a3b8" }, `${readinessBreakdown.total} days of readiness data`)
-    ),
-    aiInsight ? e(
-      Box,
-      { flexDirection: "column", marginTop: 1 },
-      e(Text, { color: "#f59e0b" }, "AI Insight"),
-      e(Text, { color: "#94a3b8" }, aiInsight)
-    ) : e(
-      Box,
-      { flexDirection: "column", marginTop: 1 },
-      e(Text, { color: "#f59e0b" }, "Guiding questions"),
-      e(Text, { color: "#94a3b8" }, "• What routine wins should you repeat tomorrow?"),
-      e(Text, { color: "#94a3b8" }, "• Which stressor can you remove or reframe right now?")
-    ),
-    e(
-      Box,
-      { flexDirection: "column", marginTop: 1 },
-      e(Text, { color: "#64748b" }, "Actions"),
-      ...suggestions.map((item, index) =>
-        e(Text, { key: `${item}-${index}`, color: "#94a3b8" }, `• ${item}`)
-      )
+      { flexDirection: "column", marginTop: 1, borderTopColor: "#334155" },
+      e(Text, { color: "#334155" }, "─".repeat(32)),
+      modelStatus.isReady && aiResponse
+        ? e(Text, { color: "#94a3b8", wrap: "wrap" }, aiResponse)
+        : e(Text, { color: "#475569", dimColor: true }, "Response when Model is ready")
     )
   );
 };

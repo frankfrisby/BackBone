@@ -6,14 +6,15 @@ const e = React.createElement;
 
 /**
  * Custom comparison for ticker scores to prevent unnecessary re-renders
+ * NOTE: Ignores timestamp prop since time display is cached internally
  */
 const areTickerScoresEqual = (prevProps, nextProps) => {
-  // Check simple props first
+  // Check simple props first (excluding timestamp - cached internally)
   if (prevProps.title !== nextProps.title) return false;
   if (prevProps.maxItems !== nextProps.maxItems) return false;
   if (prevProps.viewMode !== nextProps.viewMode) return false;
   if (prevProps.compact !== nextProps.compact) return false;
-  if (prevProps.timestamp !== nextProps.timestamp) return false;
+  // NOTE: timestamp intentionally ignored - formatDateTime has internal caching
 
   // Deep compare tickers - only check what matters for display
   const prevTickers = prevProps.tickers || [];
@@ -21,8 +22,8 @@ const areTickerScoresEqual = (prevProps, nextProps) => {
 
   if (prevTickers.length !== nextTickers.length) return false;
 
-  // Compare top 10 tickers' key values (symbol, score, change)
-  for (let i = 0; i < Math.min(10, prevTickers.length); i++) {
+  // Compare top 7 tickers' key values (symbol, score, change)
+  for (let i = 0; i < Math.min(7, prevTickers.length); i++) {
     const prev = prevTickers[i] || {};
     const next = nextTickers[i] || {};
     if (prev.symbol !== next.symbol) return false;
@@ -231,12 +232,12 @@ const isTop3Qualified = (score, spyPositive = null) => {
  * - SPY Negative: >= 8.0
  * - Default: >= 8.0
  *
- * Shows: 3 on minimal, 10 on core, 20 on advanced
+ * Shows: 3 on minimal, 7 on core, 15 on advanced
  */
 const TickerScoresPanelBase = ({
   tickers = [],
   title = "Ticker Scores",
-  maxItems = 10,
+  maxItems = 7,
   viewMode = "core",
   compact = false,
   timestamp = null,
@@ -247,7 +248,7 @@ const TickerScoresPanelBase = ({
   const displayTime = formatDateTime(timestamp ? new Date(timestamp) : new Date());
   // Determine max items based on view mode
   const itemCount = viewMode === "minimal" ? 3 :
-                    viewMode === "advanced" ? 20 : 10;
+                    viewMode === "advanced" ? 15 : 7;
   const actualMax = maxItems || itemCount;
 
   // Get dynamic threshold based on SPY

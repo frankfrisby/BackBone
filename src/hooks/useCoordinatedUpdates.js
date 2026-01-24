@@ -47,10 +47,18 @@ export const useCoordinatedUpdates = (key, fetchData, options = {}) => {
       }
     });
 
-    // Subscribe to updates
+    // Subscribe to updates - only update state if data actually changed
+    // This prevents unnecessary re-renders when data is identical
+    let lastDataJson = JSON.stringify(initialData);
+
     const handleUpdate = (updates, tickCount) => {
       if (updates[key] !== undefined) {
-        setData(updates[key]);
+        const newDataJson = JSON.stringify(updates[key]);
+        // Only update if data actually changed (deep comparison)
+        if (newDataJson !== lastDataJson) {
+          lastDataJson = newDataJson;
+          setData(updates[key]);
+        }
         if (onUpdateRef.current) {
           onUpdateRef.current(updates[key], tickCount);
         }

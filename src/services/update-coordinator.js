@@ -10,8 +10,9 @@
 
 import { EventEmitter } from "events";
 
-// Target update rate - 2fps is enough for data display, prevents flicker
-const UPDATE_INTERVAL_MS = 500;
+// Target update rate - 1fps is enough for data display, prevents flicker
+// Slower rate reduces animation-related re-renders
+const UPDATE_INTERVAL_MS = 1000;
 
 class UpdateCoordinator extends EventEmitter {
   constructor() {

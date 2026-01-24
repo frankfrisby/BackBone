@@ -32,9 +32,17 @@ const PULSE_DOTS = ["◐", "◓", "◑", "◒"];
 
 /**
  * Action display - e.g., "→ Update('linkedin.md')"
+ * Always renders a Box for consistent layout height
  */
 const ActionLine = memo(({ action, isMain = true }) => {
-  if (!action) return null;
+  // Always return a Box with consistent structure to prevent layout shifts
+  if (!action) {
+    return e(
+      Box,
+      { flexDirection: "row", paddingLeft: isMain ? 0 : 2, height: 1 },
+      e(Text, { color: THEME.dim }, " ")
+    );
+  }
 
   const icon = action.icon || "→";
   const verb = action.verb || action.type;
@@ -43,7 +51,7 @@ const ActionLine = memo(({ action, isMain = true }) => {
 
   return e(
     Box,
-    { flexDirection: "row", paddingLeft: isMain ? 0 : 2 },
+    { flexDirection: "row", paddingLeft: isMain ? 0 : 2, height: 1 },
     e(Text, { color: THEME.dim }, isMain ? "→ " : "↳ "),
     e(Text, { color, bold: isMain }, verb),
     e(Text, { color: THEME.muted }, "("),
@@ -89,13 +97,20 @@ const DiffLine = memo(({ diff }) => {
 
 /**
  * Observation display - what the agent learned
+ * Always renders a Box for consistent layout height
  */
 const ObservationLine = memo(({ observation }) => {
-  if (!observation) return null;
+  if (!observation) {
+    return e(
+      Box,
+      { flexDirection: "row", paddingLeft: 1, height: 1 },
+      e(Text, { color: THEME.dim }, " ")
+    );
+  }
 
   return e(
     Box,
-    { flexDirection: "row", paddingLeft: 1 },
+    { flexDirection: "row", paddingLeft: 1, height: 1 },
     e(Text, { color: THEME.purple }, "◈ "),
     e(Text, { color: THEME.secondary, italic: true }, observation.text?.slice(0, 60))
   );
@@ -118,7 +133,7 @@ const ShimmerState = memo(({ state, stateInfo }) => {
 
   return e(
     Box,
-    { flexDirection: "row", gap: 1 },
+    { flexDirection: "row", gap: 1, height: 1 },
     e(Text, { color: stateColor }, pulseChar),
     e(Text, { color: stateColor, bold: true }, `${stateText}...`)
   );
@@ -126,13 +141,20 @@ const ShimmerState = memo(({ state, stateInfo }) => {
 
 /**
  * Goal display - what the agent is trying to accomplish
+ * Always renders a Box for consistent layout height
  */
 const GoalLine = memo(({ goal }) => {
-  if (!goal) return null;
+  if (!goal) {
+    return e(
+      Box,
+      { flexDirection: "row", paddingLeft: 1, height: 1 },
+      e(Text, { color: THEME.dim }, " ")
+    );
+  }
 
   return e(
     Box,
-    { flexDirection: "row", paddingLeft: 1 },
+    { flexDirection: "row", paddingLeft: 1, height: 1 },
     e(Text, { color: THEME.dim }, "↓ "),
     e(Text, { color: THEME.primary }, goal.slice(0, 70))
   );
@@ -210,30 +232,28 @@ const AgentActivityPanelBase = () => {
         case "header":
           return e(
             Box,
-            { key: i, flexDirection: "row", justifyContent: "space-between" },
+            { key: i, flexDirection: "row", justifyContent: "space-between", height: 1 },
             e(Text, { color: THEME.muted, bold: true }, "ENGINE"),
             e(Text, { color: THEME.dim }, "◆")
           );
         case "separator":
-          return e(Text, { key: i, color: THEME.dim }, "─".repeat(44));
+          return e(Box, { key: i, height: 1 }, e(Text, { color: THEME.dim }, "─".repeat(44)));
         case "action":
-          return line.action
-            ? e(ActionLine, { key: i, action: line.action, isMain: line.isMain })
-            : e(Text, { key: i, color: THEME.dim }, " ");
+          // ActionLine handles null action with consistent structure
+          return e(ActionLine, { key: i, action: line.action, isMain: line.isMain });
         case "observation":
           return e(ObservationLine, { key: i, observation: line.observation });
         case "state":
           return e(
             Box,
-            { key: i, paddingLeft: 1 },
+            { key: i, paddingLeft: 1, height: 1 },
             e(ShimmerState, { state: line.state, stateInfo: line.stateInfo })
           );
         case "goal":
-          return line.goal
-            ? e(GoalLine, { key: i, goal: line.goal })
-            : e(Text, { key: i, color: THEME.dim }, " ");
+          // GoalLine handles null goal with consistent structure
+          return e(GoalLine, { key: i, goal: line.goal });
         default:
-          return e(Text, { key: i }, " ");
+          return e(Box, { key: i, height: 1 }, e(Text, { color: THEME.dim }, " "));
       }
     })
   );

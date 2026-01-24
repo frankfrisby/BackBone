@@ -22,29 +22,43 @@ const ANSI = {
   CURSOR_SHOW: "\x1b[?25h",
   CLEAR_LINE: "\x1b[2K",
   RESET: "\x1b[0m",
-  // Synchronized output - prevents flickering
+  // Synchronized output - prevents flickering (DEC private mode 2026)
+  // Supported by: Windows Terminal, iTerm2, kitty, modern terminals
+  // NOT supported by: cmd.exe, older terminals
   SYNC_START: "\x1b[?2026h",
   SYNC_END: "\x1b[?2026l",
 };
 
+// Detect if terminal likely supports DEC 2026 sync mode
+// Windows Terminal sets WT_SESSION, modern terminals have TERM containing xterm/256color
+const termSupportsSync = () => {
+  // Windows Terminal supports it
+  if (process.env.WT_SESSION) return true;
+  // iTerm2 supports it
+  if (process.env.TERM_PROGRAM === "iTerm.app") return true;
+  // Check TERM for modern terminal indicators
+  const term = process.env.TERM || "";
+  if (term.includes("xterm") || term.includes("256color") || term.includes("kitty")) return true;
+  // Default to disabled on plain Windows cmd
+  if (process.platform === "win32" && !process.env.WT_SESSION) return false;
+  return false;
+};
+
+const USE_SYNC_MODE = termSupportsSync();
+
 /**
- * Double-buffered synchronized stdout wrapper
- * - Batches all writes into frames
- * - Only flushes at controlled intervals (like vsync)
- * - Uses terminal sync mode to prevent tearing
- * - Compares buffers to skip unchanged frames
+ * Synchronized stdout wrapper
+ * - Wraps writes with terminal sync mode (DEC 2026) to prevent tearing
+ * - Lets Ink handle its own cursor management and incremental rendering
+ * - Only adds sync sequences, doesn't fight Ink's rendering
  */
 class SyncedStdout extends Writable {
   constructor(target) {
     super();
     this.target = target;
-    this.currentBuffer = "";
-    this.lastRendered = "";
-    this.flushTimeout = null;
-    this.flushInterval = 50; // 20fps max - stable, no flicker
-    this.lastFlush = 0;
+    this.pendingWrites = [];
+    this.flushScheduled = false;
     this.frameCount = 0;
-    this.skippedFrames = 0;
 
     // Copy properties from target
     this.columns = target.columns;
@@ -56,114 +70,81 @@ class SyncedStdout extends Writable {
       target.on("resize", () => {
         this.columns = target.columns;
         this.rows = target.rows;
-        this.lastRendered = ""; // Force full redraw on resize
         this.emit("resize");
       });
     }
   }
 
   _write(chunk, encoding, callback) {
-    const str = chunk.toString();
-    this.currentBuffer += str;
+    this.pendingWrites.push(chunk.toString());
 
-    // Schedule a flush if not already scheduled
-    if (!this.flushTimeout) {
-      const now = Date.now();
-      const elapsed = now - this.lastFlush;
-      const delay = Math.max(0, this.flushInterval - elapsed);
-
-      this.flushTimeout = setTimeout(() => {
-        this.flush();
-      }, delay);
+    // Use microtask to batch rapid writes within same frame
+    if (!this.flushScheduled) {
+      this.flushScheduled = true;
+      queueMicrotask(() => this.flush());
     }
 
     callback();
   }
 
   flush() {
-    if (this.flushTimeout) {
-      clearTimeout(this.flushTimeout);
-      this.flushTimeout = null;
-    }
+    this.flushScheduled = false;
 
-    if (this.currentBuffer.length > 0) {
-      // Only render if content changed (double buffering)
-      if (this.currentBuffer !== this.lastRendered) {
-        // Use sync sequences to prevent tearing
-        this.target.write(
-          ANSI.SYNC_START +
-          ANSI.CURSOR_HOME +
-          this.currentBuffer +
-          ANSI.SYNC_END
-        );
-        this.lastRendered = this.currentBuffer;
-        this.frameCount++;
+    if (this.pendingWrites.length > 0) {
+      const content = this.pendingWrites.join("");
+      this.pendingWrites = [];
+
+      // Wrap in sync sequences for atomic display (if terminal supports it)
+      if (USE_SYNC_MODE) {
+        this.target.write(ANSI.SYNC_START + content + ANSI.SYNC_END);
       } else {
-        this.skippedFrames++;
+        this.target.write(content);
       }
-      this.currentBuffer = "";
-      this.lastFlush = Date.now();
+      this.frameCount++;
     }
   }
 
   // Force immediate flush (for cleanup)
   forceFlush() {
-    if (this.flushTimeout) {
-      clearTimeout(this.flushTimeout);
-      this.flushTimeout = null;
-    }
-    if (this.currentBuffer.length > 0) {
-      this.target.write(ANSI.SYNC_START + this.currentBuffer + ANSI.SYNC_END);
-      this.currentBuffer = "";
+    this.flushScheduled = false;
+    if (this.pendingWrites.length > 0) {
+      const content = this.pendingWrites.join("");
+      this.pendingWrites = [];
+      if (USE_SYNC_MODE) {
+        this.target.write(ANSI.SYNC_START + content + ANSI.SYNC_END);
+      } else {
+        this.target.write(content);
+      }
     }
   }
 
-  // Forward other methods
+  // Forward other methods to target
   write(chunk, encoding, callback) {
     return super.write(chunk, encoding, callback);
   }
 
   cursorTo(x, y) {
-    if (this.target.cursorTo) {
-      return this.target.cursorTo(x, y);
-    }
+    if (this.target.cursorTo) return this.target.cursorTo(x, y);
   }
 
   moveCursor(dx, dy) {
-    if (this.target.moveCursor) {
-      return this.target.moveCursor(dx, dy);
-    }
+    if (this.target.moveCursor) return this.target.moveCursor(dx, dy);
   }
 
   clearLine(dir) {
-    if (this.target.clearLine) {
-      return this.target.clearLine(dir);
-    }
+    if (this.target.clearLine) return this.target.clearLine(dir);
   }
 
   clearScreenDown() {
-    if (this.target.clearScreenDown) {
-      return this.target.clearScreenDown();
-    }
+    if (this.target.clearScreenDown) return this.target.clearScreenDown();
   }
 
   getColorDepth() {
-    if (this.target.getColorDepth) {
-      return this.target.getColorDepth();
-    }
-    return 24; // Assume true color
+    return this.target.getColorDepth ? this.target.getColorDepth() : 24;
   }
 
   getWindowSize() {
     return [this.columns, this.rows];
-  }
-
-  getStats() {
-    return {
-      frames: this.frameCount,
-      skipped: this.skippedFrames,
-      fps: this.flushInterval ? Math.round(1000 / this.flushInterval) : 0
-    };
   }
 }
 
@@ -221,10 +202,10 @@ export const updateConsoleTitle = (name) => {
 
 const stdin = process.stdin.isTTY ? process.stdin : undefined;
 
-// Render with synced stdout to prevent flickering
+// Render with optimized settings for smooth updates
 const { unmount, clear } = render(createElement(App, { updateConsoleTitle }), {
   stdin,
-  stdout: syncedStdout, // Use synced stdout wrapper
+  stdout: syncedStdout, // Use synced stdout wrapper for DEC 2026 sync
   exitOnCtrlC: false,
   patchConsole: false, // Don't patch console to avoid interference
 });

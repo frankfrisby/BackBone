@@ -2,35 +2,33 @@ import React, { memo, useMemo, useState, useEffect, useRef } from "react";
 import { Box, Text } from "ink";
 import { getActivityNarrator, AGENT_STATES, ACTION_TOOLS } from "../services/activity-narrator.js";
 import { getAutonomousEngine } from "../services/autonomous-engine.js";
-import { useCoordinatedUpdates, useCoordinatedTick } from "../hooks/useCoordinatedUpdates.js";
+import { useCoordinatedUpdates } from "../hooks/useCoordinatedUpdates.js";
 import { getAIStatus, getMultiAIConfig } from "../services/multi-ai.js";
 import { BILLING_URLS } from "../services/api-quota-monitor.js";
 
 const e = React.createElement;
 
 /**
- * Pulsing text effect - subtle brightness pulse to show activity
- * Uses coordinated tick system to prevent flickering
+ * Flashlight text effect - highlight a few leading letters (no blinking)
  */
-const PulsingText = memo(({ text, baseColor = "#f59e0b", bold = true }) => {
-  // Use the coordinated tick system - returns tickCount number
-  const tickCount = useCoordinatedTick(null, true, { throttle: 1 });
-
-  // Pulse between base color and brighter version
-  const isPulseOn = tickCount % 2 === 0;
-
-  // Color palette for pulse effect
-  const colors = {
-    "#f59e0b": { bright: "#fbbf24", dim: "#d97706" }, // Amber
-    "#60a5fa": { bright: "#93c5fd", dim: "#3b82f6" }, // Blue
-    "#22c55e": { bright: "#4ade80", dim: "#16a34a" }, // Green
-    "#a855f7": { bright: "#c084fc", dim: "#9333ea" }, // Purple
+const FlashlightText = memo(({ text, baseColor = "#f59e0b", bold = true }) => {
+  const palette = {
+    "#f59e0b": "#fbbf24",
+    "#60a5fa": "#93c5fd",
+    "#22c55e": "#4ade80",
+    "#a855f7": "#c084fc",
   };
+  const bright = palette[baseColor] || "#ffffff";
+  const spotlightCount = Math.min(2, text.length);
+  const brightText = text.slice(0, spotlightCount);
+  const restText = text.slice(spotlightCount);
 
-  const palette = colors[baseColor] || { bright: "#ffffff", dim: baseColor };
-  const color = isPulseOn ? palette.bright : baseColor;
-
-  return e(Text, { color, bold }, text);
+  return e(
+    Box,
+    { flexDirection: "row" },
+    e(Text, { color: bright, bold }, brightText),
+    e(Text, { color: baseColor, bold }, restText)
+  );
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -95,7 +93,7 @@ const StatusDot = memo(({ status = "WORKING" }) => {
  *   Goal: Researching the best stocks to buy for Jan 26th week
  *         · Project: Stock Analysis Q1
  */
-const StateDisplay = memo(({ state, stateInfo, goal, projectName }) => {
+const StateDisplay = memo(({ state, stateInfo, goal, projectName, hideStateLine = false }) => {
   const stateText = stateInfo?.text || state || "Idle";
   const color = stateInfo?.color || THEME.warning;
 
@@ -103,7 +101,7 @@ const StateDisplay = memo(({ state, stateInfo, goal, projectName }) => {
     Box,
     { flexDirection: "column", marginBottom: 1 },
     // State with ellipsis - pulsing effect to show system is running
-    e(PulsingText, { text: `${stateText}...`, baseColor: color, bold: true }),
+    !hideStateLine && e(FlashlightText, { text: `${stateText}...`, baseColor: color, bold: true }),
     // Goal with project name
     goal && e(
       Box,
@@ -610,7 +608,7 @@ const ModelStatusBanner = memo(({ status }) => {
  * │   [diff view with green/red lines]                      │
  * └─────────────────────────────────────────────────────────┘
  */
-const AgentActivityPanelBase = () => {
+const AgentActivityPanelBase = ({ overlayHeader = false }) => {
   const narrator = getActivityNarrator();
   const autonomousEngine = getAutonomousEngine();
 
@@ -716,23 +714,38 @@ const AgentActivityPanelBase = () => {
     { flexDirection: "column", paddingX: 1 },
 
     // Header
-    e(
-      Box,
-      { flexDirection: "row", justifyContent: "space-between" },
-      e(Text, { color: THEME.muted, bold: true }, "ENGINE"),
-      metricsLine
-        ? e(Text, { color: THEME.dim }, metricsLine)
-        : e(StatsLine, { stats })
-    ),
-
-    // Separator
-    e(Box, {}, e(Text, { color: THEME.dim }, "─".repeat(60))),
+    overlayHeader
+      ? e(
+          Box,
+          { flexDirection: "column" },
+          e(Text, { color: THEME.dim }, " "),
+          e(Text, { color: THEME.dim }, " ")
+        )
+      : e(
+          React.Fragment,
+          null,
+          e(
+            Box,
+            { flexDirection: "row", justifyContent: "space-between" },
+            e(Text, { color: THEME.muted, bold: true }, "ENGINE"),
+            metricsLine
+              ? e(Text, { color: THEME.dim }, metricsLine)
+              : e(StatsLine, { stats })
+          ),
+          e(Box, {}, e(Text, { color: THEME.dim }, "─".repeat(60)))
+        ),
 
     // Model Status Banner (show when no model or tokens exceeded)
     modelStatus.isPaused && e(ModelStatusBanner, { status: modelStatus }),
 
     // Current STATE with goal and project (only show if not paused)
-    !modelStatus.isPaused && e(StateDisplay, { state, stateInfo, goal, projectName }),
+    !modelStatus.isPaused && e(StateDisplay, {
+      state,
+      stateInfo,
+      goal,
+      projectName,
+      hideStateLine: overlayHeader
+    }),
 
     // Real ACTIONS (bash commands, searches, file operations)
     ...timeline.map((item, i) =>

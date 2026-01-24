@@ -36,8 +36,9 @@ const COL_ICON = 2;   // checkmark/x
 /**
  * Format currency - negative values use parentheses: ($500)
  */
-const formatMoney = (value) => {
+const formatMoney = (value, privateMode = false) => {
   if (value === null || value === undefined) return "--";
+  if (privateMode) return "$••••";
   const absValue = Math.abs(value).toLocaleString("en-US", {
     minimumFractionDigits: 0,
     maximumFractionDigits: 0
@@ -51,8 +52,9 @@ const formatMoney = (value) => {
 /**
  * Format percent with sign
  */
-const formatPct = (value) => {
+const formatPct = (value, privateMode = false) => {
   if (value === null || value === undefined) return "--";
+  if (privateMode) return "••%";
   const sign = value >= 0 ? "+" : "";
   return `${sign}${value.toFixed(1)}%`;
 };
@@ -61,7 +63,7 @@ const formatPct = (value) => {
  * Trading History Panel
  * Shows 8 weeks of P&L, SPY comparison, and growth projection
  */
-const TradingHistoryPanelBase = ({ tradingHistory, isConnected, timestamp = null }) => {
+const TradingHistoryPanelBase = ({ tradingHistory, isConnected, timestamp = null, privateMode = false }) => {
   // Don't show if not connected
   if (!isConnected || !tradingHistory) {
     return null;
@@ -79,38 +81,47 @@ const TradingHistoryPanelBase = ({ tradingHistory, isConnected, timestamp = null
   const displayWeeks = weeks.length > 0 ? weeks : [];
 
   // Build week rows
-  const weekRows = displayWeeks.map((week, index) =>
-    e(
+  const weekRows = displayWeeks.map((week, index) => {
+    const isLive = week.isCurrentWeek;
+    const labelColor = isLive ? "#38bdf8" : "#94a3b8"; // Cyan for live, gray for past
+    const pnlColor = privateMode ? "#94a3b8" : ((week.pnl || 0) >= 0 ? "#22c55e" : "#ef4444");
+
+    // For current week, append "LIVE" indicator to label
+    const weekLabel = isLive
+      ? `${(week.label || "--")} \u25CF` // Bullet point for live
+      : (week.label || "--");
+
+    return e(
       Box,
       { key: `week-${index}`, flexDirection: "row" },
-      // Week label - fixed width, left aligned
-      e(Text, { color: "#94a3b8" }, (week.label || "--").padEnd(COL_WEEK)),
+      // Week label - fixed width, left aligned (cyan + bullet for live week)
+      e(Text, { color: labelColor, bold: isLive }, weekLabel.padEnd(COL_WEEK)),
       // P&L dollar amount - fixed width, right aligned
       e(
         Text,
-        { color: (week.pnl || 0) >= 0 ? "#22c55e" : "#ef4444" },
-        formatMoney(week.pnl || 0).padStart(COL_PNL_AMT)
+        { color: pnlColor, bold: isLive },
+        formatMoney(week.pnl || 0, privateMode).padStart(COL_PNL_AMT)
       ),
       // P&L percent - fixed width, right aligned
       e(
         Text,
-        { color: (week.pnlPercent || 0) >= 0 ? "#22c55e" : "#ef4444" },
-        formatPct(week.pnlPercent || 0).padStart(COL_PNL_PCT)
+        { color: pnlColor, bold: isLive },
+        formatPct(week.pnlPercent || 0, privateMode).padStart(COL_PNL_PCT)
       ),
       // SPY return - fixed width, right aligned
       e(
         Text,
-        { color: "#64748b" },
-        formatPct(week.spyReturn || 0).padStart(COL_SPY)
+        { color: isLive ? "#94a3b8" : "#64748b", bold: isLive },
+        formatPct(week.spyReturn || 0, privateMode).padStart(COL_SPY)
       ),
       // Beat/Miss indicator
       e(
         Text,
-        { color: week.beatSpy ? "#22c55e" : "#ef4444" },
-        (week.beatSpy ? "\u2713" : "\u2717").padStart(COL_ICON)
+        { color: privateMode ? "#475569" : (week.beatSpy ? "#22c55e" : "#ef4444"), bold: isLive },
+        privateMode ? "".padStart(COL_ICON) : (week.beatSpy ? "\u2713" : "\u2717").padStart(COL_ICON)
       )
-    )
-  );
+    );
+  });
 
   return e(
     Box,
@@ -141,7 +152,7 @@ const TradingHistoryPanelBase = ({ tradingHistory, isConnected, timestamp = null
       e(
         Text,
         { color: totalPnL >= 0 ? "#22c55e" : "#ef4444", bold: true },
-        `${formatMoney(totalPnL)} (${formatPct(totalPnLPercent)})`
+        `${formatMoney(totalPnL, privateMode)} (${formatPct(totalPnLPercent, privateMode)})`
       )
     ),
 
@@ -156,7 +167,7 @@ const TradingHistoryPanelBase = ({ tradingHistory, isConnected, timestamp = null
         e(
           Text,
           { color: growthRate >= 0 ? "#22c55e" : "#ef4444" },
-          formatPct(growthRate)
+          formatPct(growthRate, privateMode)
         )
       ),
       e(
@@ -166,7 +177,7 @@ const TradingHistoryPanelBase = ({ tradingHistory, isConnected, timestamp = null
         e(
           Text,
           { color: projectedValue >= 0 ? "#e2e8f0" : "#ef4444" },
-          formatMoney(projectedValue)
+          formatMoney(projectedValue, privateMode)
         )
       )
     ),
@@ -191,8 +202,9 @@ const TradingHistoryPanelBase = ({ tradingHistory, isConnected, timestamp = null
     // Legend
     e(
       Box,
-      { marginTop: 1 },
-      e(Text, { color: "#475569", dimColor: true }, "\u2713 Beat SPY  \u2717 Missed SPY")
+      { marginTop: 1, flexDirection: "column" },
+      !privateMode && e(Text, { color: "#475569", dimColor: true }, "\u2713 Beat SPY  \u2717 Missed SPY"),
+      e(Text, { color: "#38bdf8", dimColor: true }, "\u25CF Current week (real-time)")
     )
   );
 };
@@ -201,6 +213,7 @@ const TradingHistoryPanelBase = ({ tradingHistory, isConnected, timestamp = null
  * Custom comparison to prevent unnecessary re-renders
  */
 const areTradingHistoryPropsEqual = (prevProps, nextProps) => {
+  if (prevProps.privateMode !== nextProps.privateMode) return false;
   if (prevProps.isConnected !== nextProps.isConnected) return false;
 
   const prevHistory = prevProps.tradingHistory;
@@ -219,7 +232,17 @@ const areTradingHistoryPropsEqual = (prevProps, nextProps) => {
   const nextWeeks = nextHistory.weeks || [];
   if (prevWeeks.length !== nextWeeks.length) return false;
 
-  if (prevProps.timestamp !== nextProps.timestamp) return false;
+  // Check current week for real-time updates (P&L changes)
+  const prevCurrentWeek = prevWeeks.find(w => w.isCurrentWeek);
+  const nextCurrentWeek = nextWeeks.find(w => w.isCurrentWeek);
+  if (prevCurrentWeek && nextCurrentWeek) {
+    // Round to 1 decimal to avoid flickering from tiny changes
+    const prevPnl = Math.round((prevCurrentWeek.pnl || 0) * 10) / 10;
+    const nextPnl = Math.round((nextCurrentWeek.pnl || 0) * 10) / 10;
+    if (prevPnl !== nextPnl) return false;
+  }
+
+  // NOTE: timestamp intentionally ignored - formatDateTime has internal caching
 
   return true;
 };

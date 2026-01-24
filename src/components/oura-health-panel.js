@@ -155,7 +155,7 @@ const buildReadinessCounts = (history = []) => {
   return { counts, total: counts.green + counts.orange + counts.red };
 };
 
-const OuraHealthPanel = ({ data, history = [], aiResponse = null }) => {
+const OuraHealthPanel = ({ data, history = [], aiResponse = null, privateMode = false }) => {
   const connected = data?.connected;
   const summary = data?.today;
   const qualityScore = useMemo(() => getQualityScore(summary, data?.weekAverage), [summary, data?.weekAverage]);
@@ -221,13 +221,13 @@ const OuraHealthPanel = ({ data, history = [], aiResponse = null }) => {
       e(
         Box,
         { flexDirection: "column" },
-        e(Text, { color: todayQuality.color, bold: true }, todayScore ? `${todayScore}%` : "--"),
-        e(Text, { color: "#64748b" }, `${todayQuality.label}`)
+        e(Text, { color: todayQuality.color, bold: true }, privateMode ? "--" : (todayScore ? `${todayScore}%` : "--")),
+        e(Text, { color: "#64748b" }, privateMode ? "Private" : `${todayQuality.label}`)
       ),
       e(ScoreBar, {
-        score: todayScore || 0,
+        score: privateMode ? 0 : (todayScore || 0),
         width: 18,
-        color: todayQuality.color
+        color: privateMode ? "#374151" : todayQuality.color
       })
     ),
 
@@ -239,34 +239,34 @@ const OuraHealthPanel = ({ data, history = [], aiResponse = null }) => {
         Box,
         { flexDirection: "column" },
         e(Text, { color: "#94a3b8" }, "Sleep"),
-        e(Text, { color: "#e2e8f0" }, summary?.sleepScore ? `${summary.sleepScore}` : "--"),
-        e(Text, { color: "#64748b", dimColor: true }, summary?.totalSleepHours ? `${summary.totalSleepHours}h` : "")
+        e(Text, { color: "#e2e8f0" }, privateMode ? "--" : (summary?.sleepScore ? `${summary.sleepScore}` : "--")),
+        e(Text, { color: "#64748b", dimColor: true }, privateMode ? "" : (summary?.totalSleepHours ? `${summary.totalSleepHours}h` : ""))
       ),
       e(
         Box,
         { flexDirection: "column" },
         e(Text, { color: "#94a3b8" }, "Ready"),
-        e(Text, { color: "#e2e8f0" }, summary?.readinessScore ? `${summary.readinessScore}` : "--"),
-        e(Text, { color: stress?.color, dimColor: true }, stress?.label || "")
+        e(Text, { color: "#e2e8f0" }, privateMode ? "--" : (summary?.readinessScore ? `${summary.readinessScore}` : "--")),
+        e(Text, { color: stress?.color, dimColor: true }, privateMode ? "" : (stress?.label || ""))
       ),
       e(
         Box,
         { flexDirection: "column" },
         e(Text, { color: "#94a3b8" }, "Active"),
-        e(Text, { color: "#e2e8f0" }, summary?.activityScore ? `${summary.activityScore}` : "--"),
-        e(Text, { color: "#64748b", dimColor: true }, summary?.steps ? `${summary.steps}` : "")
+        e(Text, { color: "#e2e8f0" }, privateMode ? "--" : (summary?.activityScore ? `${summary.activityScore}` : "--")),
+        e(Text, { color: "#64748b", dimColor: true }, privateMode ? "" : (summary?.steps ? `${summary.steps}` : ""))
       ),
       e(
         Box,
         { flexDirection: "column" },
         e(Text, { color: "#94a3b8" }, "Calories"),
-        e(Text, { color: "#e2e8f0" }, summary?.activeCalories ? `${Math.round(summary.activeCalories)}` : "--"),
-        e(Text, { color: "#64748b", dimColor: true }, "kcal")
+        e(Text, { color: "#e2e8f0" }, privateMode ? "--" : (summary?.activeCalories ? `${Math.round(summary.activeCalories)}` : "--")),
+        e(Text, { color: "#64748b", dimColor: true }, privateMode ? "" : "kcal")
       )
     ),
 
     // 28-day average row
-    data?.weekAverage && e(
+    data?.weekAverage && !privateMode && e(
       Box,
       { flexDirection: "row", justifyContent: "flex-start", marginTop: 1 },
       e(Text, { color: "#475569" }, "28d avg: "),
@@ -278,9 +278,9 @@ const OuraHealthPanel = ({ data, history = [], aiResponse = null }) => {
       Box,
       { flexDirection: "column", marginTop: 1, borderTopColor: "#334155" },
       e(Text, { color: "#334155" }, "─".repeat(32)),
-      modelStatus.isReady && aiResponse
+      modelStatus.isReady && aiResponse && !privateMode
         ? e(Text, { color: "#94a3b8", wrap: "wrap" }, aiResponse)
-        : e(Text, { color: "#475569", dimColor: true }, "Response when Model is ready")
+        : e(Text, { color: "#475569", dimColor: true }, privateMode ? "Private mode enabled" : "Response when Model is ready")
     )
   );
 };

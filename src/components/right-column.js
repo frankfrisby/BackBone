@@ -111,6 +111,7 @@ const RightColumnBase = ({
         tradingHistory,
         isConnected: alpacaStatus === "Live",
         timestamp: uiClock,
+        privateMode,
       }),
 
     // Wealth Panel (if Personal Capital connected) or Connections Status Panel
@@ -126,7 +127,40 @@ const RightColumnBase = ({
   );
 };
 
-// Memoize to prevent unnecessary re-renders
-export const RightColumn = memo(RightColumnBase);
+/**
+ * Custom comparison to prevent re-renders from timestamp/uiClock changes
+ */
+const areRightColumnPropsEqual = (prevProps, nextProps) => {
+  // Ignore uiClock - it's only used for timestamp display which has internal caching
+  if (prevProps.viewMode !== nextProps.viewMode) return false;
+  if (prevProps.privateMode !== nextProps.privateMode) return false;
+  if (prevProps.alpacaStatus !== nextProps.alpacaStatus) return false;
+  if (prevProps.alpacaMode !== nextProps.alpacaMode) return false;
+  if (prevProps.portfolioLastUpdated !== nextProps.portfolioLastUpdated) return false;
+  if (prevProps.nextTradeTimeDisplay !== nextProps.nextTradeTimeDisplay) return false;
+
+  // Compare portfolio key values
+  if (prevProps.portfolio?.equity !== nextProps.portfolio?.equity) return false;
+  if (prevProps.portfolio?.cash !== nextProps.portfolio?.cash) return false;
+  if (prevProps.portfolio?.dayPL !== nextProps.portfolio?.dayPL) return false;
+  if (prevProps.portfolio?.positions?.length !== nextProps.portfolio?.positions?.length) return false;
+
+  // Compare trading status
+  if (prevProps.tradingStatus?.statusText !== nextProps.tradingStatus?.statusText) return false;
+  if (prevProps.tradingStatus?.marketOpen !== nextProps.tradingStatus?.marketOpen) return false;
+
+  // Compare tickers length (score lookup)
+  if (prevProps.tickers?.length !== nextProps.tickers?.length) return false;
+
+  // Compare connection statuses (just connected state)
+  const prevConns = Object.values(prevProps.connectionStatuses || {}).map(c => c?.connected).join(",");
+  const nextConns = Object.values(nextProps.connectionStatuses || {}).map(c => c?.connected).join(",");
+  if (prevConns !== nextConns) return false;
+
+  return true;
+};
+
+// Memoize with custom comparison to prevent unnecessary re-renders
+export const RightColumn = memo(RightColumnBase, areRightColumnPropsEqual);
 
 export default RightColumn;

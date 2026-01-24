@@ -57,6 +57,8 @@ class AppStore extends EventEmitter {
         firebaseUser: null,
         userSettings: {},
         showOnboarding: false,
+        firebaseUserDisplay: "",
+        userDisplayName: "",
       },
       [STATE_SLICES.CONNECTIONS]: {
         alpaca: { status: "Not connected", mode: "paper" },
@@ -74,6 +76,9 @@ class AppStore extends EventEmitter {
         tradingHistory: null,
         lastUpdated: null,
         nextTradeTime: null,
+        alpacaStatus: "Not connected",
+        alpacaMode: "paper",
+        personalCapitalData: null,
       },
       [STATE_SLICES.TICKERS]: {
         tickers: [],
@@ -102,6 +107,7 @@ class AppStore extends EventEmitter {
       [STATE_SLICES.HEALTH]: {
         ouraHealth: null,
         ouraHistory: [],
+        aiHealthResponse: null,
       },
       [STATE_SLICES.PROJECTS]: {
         projects: [],

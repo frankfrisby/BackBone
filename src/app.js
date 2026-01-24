@@ -142,7 +142,7 @@ import { ProjectsPanel } from "./components/projects-panel.js";
 import { LifeScoresPanel, ParallelWorldPanel } from "./components/life-scores-panel.js";
 import { EnhancedActionsPanel, CompletedActionsList } from "./components/enhanced-actions-panel.js";
 import { ApprovalOverlay, QuickApprovalBar } from "./components/approval-overlay.js";
-import { ConnectionBar, ConnectionPanel } from "./components/connection-bar.js";
+import { ConnectionPanel } from "./components/connection-bar.js";
 import { WealthPanel, WealthCompact, ConnectionsStatusPanel } from "./components/wealth-panel.js";
 import OuraHealthPanel from "./components/oura-health-panel.js";
 import { OnboardingPanel } from "./components/onboarding-panel.js";
@@ -183,15 +183,19 @@ import { getEngineStateManager, ENGINE_STATUS } from "./services/engine-state.js
 // EngineStatusPanel removed - merged into AgentActivityPanel
 import { EngineStatusLine } from "./components/engine-status-panel.js";
 import { TickerScoresPanel, TickerSummaryLine } from "./components/ticker-scores-panel.js";
+import { getOverlayRenderer } from "./services/overlay-renderer.js";
+import { getActivityNarrator, AGENT_STATES } from "./services/activity-narrator.js";
 
 // Activity tracker for agent status display
 import { getActivityTracker, ACTIVITY_STATUS } from "./services/activity-tracker.js";
 import { AgentActivityPanel, AgentStatusDot } from "./components/agent-activity-panel.js";
+import { useStoreSync, STATE_SLICES } from "./hooks/useStoreSync.js";
 
 // Isolated column components for reduced flickering
-import { LeftColumn } from "./components/left-column.js";
-import { RightColumn } from "./components/right-column.js";
-import { AppFooterBar } from "./components/app-footer-bar.js";
+import { LeftSidebar } from "./components/left-sidebar.js";
+import { RightSidebar } from "./components/right-sidebar.js";
+import { TopStatusBar } from "./components/top-status-bar.js";
+import { BottomStatusBar } from "./components/bottom-status-bar.js";
 
 // Note: Store sync removed - passing props directly to column components now
 
@@ -217,6 +221,11 @@ const VIEW_MODE_LABELS = {
   core: "Core",
   advanced: "Advanced"
 };
+
+const OVERLAY_CONNECTION_HEIGHT = 3;
+const OVERLAY_ENGINE_HEIGHT = 14;
+const OVERLAY_ENGINE_HEADER_HEIGHT = 3;
+const CONNECTION_BAR_MARGIN = 1;
 
 const SCORE_REFRESH_MS = 30_000; // Reduced from 5s to 30s
 const LIVE_SCORE_REFRESH_MS = 60_000; // Reduced from 30s to 60s
@@ -307,6 +316,11 @@ const App = ({ updateConsoleTitle }) => {
       const timeout = setTimeout(() => resizeForMainApp(), delay);
       return timeout;
     });
+    setLayoutReady(false);
+    const finalizeId = setTimeout(() => {
+      setLayoutReady(true);
+    }, Math.max(...delays) + 200);
+    resizeTimersRef.current.push(finalizeId);
   }, []);
 
   // Resize terminal to full size only after onboarding completes
@@ -314,6 +328,7 @@ const App = ({ updateConsoleTitle }) => {
     if (showOnboarding || isInitializing) {
       resizeTimersRef.current.forEach((id) => clearTimeout(id));
       resizeTimersRef.current = [];
+      setLayoutReady(false);
       resizeForOnboarding();
       return () => {
         resizeTimersRef.current.forEach((id) => clearTimeout(id));
@@ -417,6 +432,11 @@ const App = ({ updateConsoleTitle }) => {
 
   const [fineTuningStatus, setFineTuningStatus] = useState(() => loadFineTuningConfig());
   const { stdout } = useStdout();
+  const overlayRendererRef = useRef(null);
+  const overlaySuspendTimerRef = useRef(null);
+  const [overlaySuspended, setOverlaySuspended] = useState(false);
+  const overlayDataRef = useRef({});
+  const activityNarrator = useMemo(() => getActivityNarrator(), []);
 
   // Engine state manager
   const engineState = useMemo(() => getEngineStateManager(), []);
@@ -505,6 +525,7 @@ const App = ({ updateConsoleTitle }) => {
   const [pauseUpdates, setPauseUpdates] = useState(false);
   const pauseUpdatesRef = useRef(false); // Use ref to avoid re-renders in intervals
   const [mainViewReady, setMainViewReady] = useState(false);
+  const [layoutReady, setLayoutReady] = useState(false);
   const readinessTimerRef = useRef(null);
   const linkedInCheckTimerRef = useRef(null);
   const handleLogout = useCallback(() => {
@@ -595,6 +616,10 @@ const App = ({ updateConsoleTitle }) => {
     }
     return baseName;
   }, [firebaseUserName, linkedInProfile]);
+
+  const userDisplayName = useMemo(() => {
+    return linkedInProfile?.name || profile?.name || process.env.USER_NAME || "Frank";
+  }, [linkedInProfile?.name, profile?.name]);
 
   const weightsRef = useRef(weights);
   const portfolioRef = useRef(portfolio);
@@ -753,6 +778,55 @@ const App = ({ updateConsoleTitle }) => {
   const [currentModelInfo, setCurrentModelInfo] = useState(() => {
     const initial = getCurrentModel();
     return { ...initial.model, taskType: initial.taskType };
+  });
+
+  useStoreSync({
+    [STATE_SLICES.UI]: {
+      viewMode,
+      privateMode,
+      currentTier,
+      isInitializing,
+      mainViewReady,
+      lastAction,
+      uiClock,
+    },
+    [STATE_SLICES.USER]: {
+      firebaseUser,
+      userSettings,
+      showOnboarding,
+      firebaseUserDisplay,
+      userDisplayName,
+    },
+    [STATE_SLICES.CONNECTIONS]: connectionStatuses,
+    [STATE_SLICES.PORTFOLIO]: {
+      portfolio,
+      tradingStatus,
+      tradingHistory,
+      lastUpdated: portfolioLastUpdated,
+      nextTradeTime: nextTradeTimeDisplay,
+      alpacaStatus,
+      alpacaMode,
+      personalCapitalData,
+    },
+    [STATE_SLICES.TICKERS]: { tickers },
+    [STATE_SLICES.HEALTH]: { ouraHealth, ouraHistory },
+    [STATE_SLICES.PROJECTS]: { projects },
+    [STATE_SLICES.CHAT]: {
+      messages,
+      isProcessing,
+      streamingText,
+      actionStreamingText,
+      actionStreamingTitle,
+      currentModelInfo,
+    },
+    [STATE_SLICES.OVERLAYS]: {
+      showTestRunner,
+      showSettings,
+      showLinkedInViewer,
+      setupOverlay,
+      linkedInViewerData,
+      showApprovalOverlay,
+    },
   });
 
   // Check AI model connection on mount
@@ -1427,19 +1501,36 @@ const App = ({ updateConsoleTitle }) => {
   // NOTE: Only track connection status changes, not details like timestamps
   useEffect(() => {
     setConnectionStatuses((prev) => {
+      const alpacaConnected = alpacaStatus === "Live";
+      const alpacaStatusState = alpacaConnected ? "connected" : (alpacaStatus === "Offline" ? "broken" : "never");
+      const claudeConnected = claudeStatus === "Connected" || claudeStatus === "OpenAI";
+      const claudeStatusState = claudeConnected
+        ? "connected"
+        : (claudeStatus === "Missing key" || claudeStatus === "Checking..." ? "never" : "broken");
+      const claudeCodeConnected = claudeCodeStatus.available;
+      const claudeCodeStatusState = claudeCodeConnected ? "connected" : "never";
+      const linkedinConnected = linkedInProfile?.connected;
+      const linkedinStatusState = linkedinConnected ? "connected" : "never";
+      const ouraConnected = ouraHealth?.connected;
+      const ouraStatusState = ouraConnected ? "connected" : "never";
+      const yahooConnected = true;
+      const yahooStatusState = "connected";
+      const personalCapitalConnected = personalCapitalData?.connected || false;
+      const personalCapitalStatusState = personalCapitalConnected ? "connected" : "never";
+
       const next = {
-        alpaca: { connected: alpacaStatus === "Live", details: alpacaMode },
-        claude: { connected: claudeStatus === "Connected", details: "" },
-        claudeCode: { connected: claudeCodeStatus.available, details: claudeCodeStatus.available ? "Ready" : "Not installed" },
-        linkedin: { connected: linkedInProfile?.connected, details: "" },
-        oura: { connected: ouraHealth?.connected, details: "" },
-        yahoo: { connected: true, details: "" }, // Removed lastQuoteUpdate to prevent flickering
-        personalCapital: { connected: personalCapitalData?.connected || false, details: "" }
+        alpaca: { connected: alpacaConnected, status: alpacaStatusState, details: alpacaMode },
+        claude: { connected: claudeConnected, status: claudeStatusState, details: "" },
+        claudeCode: { connected: claudeCodeConnected, status: claudeCodeStatusState, details: claudeCodeStatus.available ? "Ready" : "Not installed" },
+        linkedin: { connected: linkedinConnected, status: linkedinStatusState, details: "" },
+        oura: { connected: ouraConnected, status: ouraStatusState, details: "" },
+        yahoo: { connected: yahooConnected, status: yahooStatusState, details: "" }, // Removed lastQuoteUpdate to prevent flickering
+        personalCapital: { connected: personalCapitalConnected, status: personalCapitalStatusState, details: "" }
       };
       // Only update if connection status actually changed (ignore details)
-      const prevConnected = Object.keys(prev).map(k => prev[k]?.connected).join(",");
-      const nextConnected = Object.keys(next).map(k => next[k]?.connected).join(",");
-      if (prevConnected === nextConnected) {
+      const prevKey = Object.keys(prev).map(k => `${prev[k]?.connected}:${prev[k]?.status || ""}`).join(",");
+      const nextKey = Object.keys(next).map(k => `${next[k]?.connected}:${next[k]?.status || ""}`).join(",");
+      if (prevKey === nextKey) {
         return prev;
       }
       return next;
@@ -1451,14 +1542,14 @@ const App = ({ updateConsoleTitle }) => {
       clearTimeout(readinessTimerRef.current);
       readinessTimerRef.current = null;
     }
-    if (isInitializing || showOnboarding) {
+    if (isInitializing || showOnboarding || !layoutReady) {
       setMainViewReady(false);
       return () => {};
     }
     const connectedCount = Object.keys(connectionStatuses).length;
     const hasConnections = connectedCount >= 3;
     const hasTickers = tickers.length > 0;
-    if (hasConnections && hasTickers) {
+    if (hasConnections && hasTickers && layoutReady) {
       readinessTimerRef.current = setTimeout(() => {
         setMainViewReady(true);
         readinessTimerRef.current = null;
@@ -1472,7 +1563,7 @@ const App = ({ updateConsoleTitle }) => {
         readinessTimerRef.current = null;
       }
     };
-  }, [isInitializing, showOnboarding, connectionStatuses, tickers.length]);
+  }, [isInitializing, showOnboarding, layoutReady, connectionStatuses, tickers.length]);
 
   // Life Engine Boot - Gather all data sources and start optimization when ready
   useEffect(() => {
@@ -5010,8 +5101,12 @@ Folder: ${result.action.id}`,
     return [...tickers].sort((a, b) => b.score - a.score).slice(0, 20);
   }, [tickers]);
 
-  const terminalWidth = stdout?.columns || 160;
-  const terminalHeight = stdout?.rows || 40;
+  const rawTerminalWidth = stdout?.columns || 160;
+  const rawTerminalHeight = stdout?.rows || 40;
+  const maxViewWidth = 2200;
+  const maxViewHeight = 1100;
+  const terminalWidth = isInitializing ? rawTerminalWidth : Math.min(rawTerminalWidth, maxViewWidth);
+  const terminalHeight = isInitializing ? rawTerminalHeight : Math.min(rawTerminalHeight, maxViewHeight);
   const minHeight = 30;
   const minWidth = 120;
   // Use full terminal height
@@ -5021,6 +5116,269 @@ Folder: ${result.action.id}`,
   const isNarrow = terminalWidth < 80;
   // Medium width: hide some panels but keep horizontal layout
   const isMedium = terminalWidth >= 80 && terminalWidth < 140;
+  const overlayEnabled = !isNarrow && !showOnboarding && !isInitializing && mainViewReady && !overlaySuspended;
+  const overlayEngineHeaderEnabled = true;
+
+  useEffect(() => {
+    overlayDataRef.current = {
+      terminalWidth,
+      terminalHeight,
+      appHeight,
+      isMedium,
+      viewMode,
+      firebaseUserDisplay,
+      connectionStatuses
+    };
+  }, [
+    terminalWidth,
+    terminalHeight,
+    appHeight,
+    isMedium,
+    viewMode,
+    firebaseUserDisplay,
+    connectionStatuses
+  ]);
+
+  useEffect(() => {
+    if (!stdout?.on) return;
+    const handleResize = () => {
+      if (overlaySuspendTimerRef.current) {
+        clearTimeout(overlaySuspendTimerRef.current);
+      }
+      setOverlaySuspended(true);
+      overlaySuspendTimerRef.current = setTimeout(() => {
+        setOverlaySuspended(false);
+      }, 250);
+    };
+    stdout.on("resize", handleResize);
+    return () => {
+      stdout.off("resize", handleResize);
+      if (overlaySuspendTimerRef.current) {
+        clearTimeout(overlaySuspendTimerRef.current);
+        overlaySuspendTimerRef.current = null;
+      }
+    };
+  }, [stdout]);
+
+  useEffect(() => {
+    if (!overlayEnabled) {
+      overlayRendererRef.current?.stop();
+      return;
+    }
+    const renderer = getOverlayRenderer({ fps: 8, silent: true });
+    overlayRendererRef.current = renderer;
+    renderer.start();
+    return () => renderer.stop();
+  }, [overlayEnabled]);
+
+  useEffect(() => {
+    if (!overlayEnabled) return;
+    const renderer = overlayRendererRef.current;
+    if (!renderer) return;
+
+    const leftWidth = viewMode !== VIEW_MODES.MINIMAL && !isMedium
+      ? Math.floor(terminalWidth * 0.25)
+      : 0;
+    const centerWidth = Math.floor(
+      terminalWidth * ((viewMode === VIEW_MODES.MINIMAL || isMedium) ? 0.75 : 0.5)
+    );
+    const centerCol = leftWidth + 1; // account for center paddingX
+    const innerCenterWidth = Math.max(10, centerWidth - 2);
+    const engineHeaderCol = centerCol + 1; // AgentActivityPanel paddingX
+    const engineHeaderWidth = Math.max(10, centerWidth - 4);
+    const engineHeaderRow = OVERLAY_CONNECTION_HEIGHT + CONNECTION_BAR_MARGIN;
+
+    renderer.setRegion("connection-bar", {
+      row: 0,
+      col: 0,
+      width: terminalWidth,
+      height: OVERLAY_CONNECTION_HEIGHT
+    });
+
+    if (overlayEngineHeaderEnabled) {
+      renderer.setRegion("engine-header", {
+        row: engineHeaderRow,
+        col: engineHeaderCol,
+        width: engineHeaderWidth,
+        height: OVERLAY_ENGINE_HEADER_HEIGHT
+      });
+    }
+
+    renderer.render();
+  }, [overlayEnabled, overlayEngineHeaderEnabled, terminalWidth, isMedium, viewMode]);
+
+  useEffect(() => {
+    if (!overlayEnabled) return;
+    const renderer = overlayRendererRef.current;
+    if (!renderer) return;
+
+    const segmentLength = (segments) =>
+      segments.reduce((sum, seg) => sum + (seg?.text?.length || 0), 0);
+
+    const truncateSegments = (segments, maxLen) => {
+      const out = [];
+      let remaining = maxLen;
+      for (const seg of segments) {
+        if (remaining <= 0) break;
+        const text = seg.text || "";
+        if (text.length <= remaining) {
+          out.push(seg);
+          remaining -= text.length;
+        } else {
+          out.push({ ...seg, text: text.slice(0, remaining) });
+          remaining = 0;
+        }
+      }
+      return out;
+    };
+
+    const buildBorderLine = (width, left, mid, right) => {
+      if (width < 2) return [{ text: "".padEnd(width, " ") }];
+      return [{ text: `${left}${mid.repeat(width - 2)}${right}` }];
+    };
+
+    const formatRuntime = (ms) => {
+      const secs = Math.floor(ms / 1000);
+      const mins = Math.floor(secs / 60);
+      if (mins > 0) return `${mins}m ${secs % 60}s`;
+      return `${secs}s`;
+    };
+
+    const highlightPalette = {
+      "#f59e0b": { bright: "#fbbf24", base: "#d97706" },
+      "#60a5fa": { bright: "#93c5fd", base: "#3b82f6" },
+      "#22c55e": { bright: "#4ade80", base: "#16a34a" },
+      "#a855f7": { bright: "#c084fc", base: "#9333ea" }
+    };
+
+    const buildConnectionLines = (width, data) => {
+      const innerWidth = Math.max(0, width - 2);
+      const services = [
+        { key: "alpaca", label: "Alpaca" },
+        { key: "claude", label: "Claude" },
+        { key: "claudeCode", label: "Code" },
+        { key: "linkedin", label: "LinkedIn" },
+        { key: "oura", label: "Oura" },
+        { key: "yahoo", label: "Yahoo" },
+        { key: "personalCapital", label: "Finance" }
+      ];
+
+      const statuses = data.connectionStatuses || {};
+      const connectedCount = services.filter((s) => statuses[s.key]?.connected).length;
+
+      const leftSegments = [
+        { text: "◇ ", color: "#f59e0b" },
+        { text: "BACKBONE", color: "#f59e0b" },
+        { text: " ENGINE", color: "#64748b" },
+        { text: " v3.0.0", color: "#475569" },
+        { text: " | ", color: "#1e293b" },
+        { text: `${connectedCount}/${services.length}`, color: connectedCount > 0 ? "#22c55e" : "#64748b" },
+        { text: " connected", color: "#475569" }
+      ];
+
+      if (data.firebaseUserDisplay) {
+        leftSegments.push({ text: " | ", color: "#1e293b" });
+        leftSegments.push({ text: data.firebaseUserDisplay, color: "#94a3b8" });
+      }
+
+      const rightSegments = [];
+      services.forEach((service, idx) => {
+        const connected = statuses[service.key]?.connected || false;
+        rightSegments.push({
+          text: connected ? "●" : "○",
+          color: connected ? "#22c55e" : "#475569"
+        });
+        rightSegments.push({ text: ` ${service.label}`, color: "#94a3b8" });
+        if (idx < services.length - 1) {
+          rightSegments.push({ text: " | ", color: "#1e293b" });
+        }
+      });
+
+      const leftLen = segmentLength(leftSegments);
+      const rightLen = segmentLength(rightSegments);
+      const space = innerWidth - leftLen - rightLen;
+      const spacer = space > 0 ? " ".repeat(space) : " ";
+      const trimmedRight = space > 0 ? rightSegments : truncateSegments(rightSegments, Math.max(0, innerWidth - leftLen - 1));
+
+      const content = [
+        { text: "│", color: "#0f172a" },
+        ...leftSegments,
+        { text: spacer },
+        ...trimmedRight,
+        { text: "│", color: "#0f172a" }
+      ];
+
+      return [
+        buildBorderLine(width, "╭", "─", "╮"),
+        content,
+        buildBorderLine(width, "╰", "─", "╯")
+      ];
+    };
+
+    const buildEngineHeaderLines = (width, data) => {
+      const lines = [];
+      const innerWidth = width;
+      const stateId = data.state || "OBSERVING";
+      const stateInfo = data.stateInfo || AGENT_STATES.OBSERVING;
+      const stateText = stateInfo.text || stateId;
+      const stats = data.stats || { tokens: 0, runtime: 0 };
+      const metrics = data.metricsLine || `✧ ${stats.tokens.toLocaleString()} tokens | ${formatRuntime(stats.runtime)}`;
+
+      const headerLeft = [{ text: "ENGINE", color: "#64748b" }];
+      const headerRight = [{ text: metrics, color: "#475569" }];
+      const headerSpace = innerWidth - segmentLength(headerLeft) - segmentLength(headerRight);
+      lines.push([
+        ...headerLeft,
+        { text: headerSpace > 0 ? " ".repeat(headerSpace) : " " },
+        ...truncateSegments(headerRight, Math.max(0, innerWidth - segmentLength(headerLeft) - 1))
+      ]);
+
+      lines.push([{ text: "-".repeat(innerWidth), color: "#1e293b" }]);
+
+      const baseColor = stateInfo.color || "#f59e0b";
+      const palette = highlightPalette[baseColor] || { bright: "#ffffff", base: baseColor };
+      const spotlightCount = Math.min(2, stateText.length);
+      const brightText = stateText.slice(0, spotlightCount);
+      const restText = stateText.slice(spotlightCount);
+
+      lines.push([
+        { text: "  ", color: "#1e293b" },
+        { text: brightText, color: palette.bright },
+        { text: restText, color: palette.base },
+        { text: "...", color: palette.base }
+      ]);
+
+      while (lines.length < OVERLAY_ENGINE_HEADER_HEIGHT) {
+        lines.push([{ text: " " }]);
+      }
+
+      return lines.slice(0, OVERLAY_ENGINE_HEADER_HEIGHT);
+    };
+
+    const tick = () => {
+      const data = overlayDataRef.current;
+      if (!data) return;
+      const connectionLines = buildConnectionLines(data.terminalWidth, data);
+      renderer.updateRegion("connection-bar", connectionLines);
+
+      if (overlayEngineHeaderEnabled) {
+        const leftWidth = data.viewMode !== VIEW_MODES.MINIMAL && !data.isMedium
+          ? Math.floor(data.terminalWidth * 0.25)
+          : 0;
+        const centerWidth = Math.floor(
+          data.terminalWidth * ((data.viewMode === VIEW_MODES.MINIMAL || data.isMedium) ? 0.75 : 0.5)
+        );
+        const engineWidth = Math.max(10, centerWidth - 4);
+        const engineData = activityNarrator.getDisplayData();
+        const engineLines = buildEngineHeaderLines(engineWidth, engineData);
+        renderer.updateRegion("engine-header", engineLines);
+      }
+    };
+
+    tick();
+    const intervalId = setInterval(tick, 120);
+    return () => clearInterval(intervalId);
+  }, [overlayEnabled, overlayEngineHeaderEnabled, activityNarrator]);
 
   // Action approval handlers
   const handleApproveAction = useCallback((actionId) => {
@@ -5102,13 +5460,17 @@ Folder: ${result.action.id}`,
       Box,
       {
         flexDirection: "column",
-        alignItems: "center",
-        justifyContent: "center",
-        height: "100%",
-        paddingX: 2
+        height: appHeight,
+        overflow: "hidden"
       },
-      e(Text, { color: "#f97316", bold: true }, "Loading..."),
-      e(Text, { color: "#94a3b8" }, "Preparing your workspace")
+      e(TopStatusBar, null),
+      e(
+        Box,
+        { flexDirection: "column", alignItems: "center", justifyContent: "center", flexGrow: 1, paddingX: 2 },
+        e(Text, { color: "#f97316", bold: true }, "Loading..."),
+        e(Text, { color: "#94a3b8" }, "Preparing your workspace")
+      ),
+      e(BottomStatusBar, null)
     );
   }
 
@@ -5185,13 +5547,8 @@ Folder: ${result.action.id}`,
   return e(
     Box,
     { flexDirection: "column", height: appHeight, overflow: "hidden" },
-    // Connection Bar at top
-    e(ConnectionBar, {
-      connections: connectionStatuses,
-      title: "BACKBONE",
-      version: "3.0.0",
-      userDisplay: firebaseUserDisplay
-    }),
+    // Connection Bar at top (Ink base + overlay for smooth updates)
+    e(TopStatusBar, null),
     // Main content row
     e(
       Box,
@@ -5200,23 +5557,14 @@ Folder: ${result.action.id}`,
       viewMode !== VIEW_MODES.MINIMAL && !isMedium && e(
         Box,
         { flexDirection: "column", width: "25%", paddingRight: 1, overflow: "hidden" },
-        e(LeftColumn, {
-          viewMode,
-          ouraHealth,
-          ouraHistory,
-          tickers,
-          projects,
-          uiClock,
-          userName: linkedInProfile?.name || profile?.name || process.env.USER_NAME || "Frank",
-          aiHealthResponse: null, // Will be populated by AI Brain when available
-        })
+        e(LeftSidebar, null)
       ),
       // ===== CENTER COLUMN: Engine Status, Chat =====
       e(
         Box,
         { flexDirection: "column", width: viewMode === VIEW_MODES.MINIMAL || isMedium ? "75%" : "50%", paddingX: 1, overflow: "hidden" },
-        // Engine Status - self-contained panel (no props to prevent re-renders)
-        e(AgentActivityPanel, null),
+        // Engine Status - overlay-rendered when enabled
+        e(AgentActivityPanel, { overlayHeader: overlayEnabled && overlayEngineHeaderEnabled }),
         // Conversation Panel
         e(ConversationPanel, { messages, isLoading: isProcessing, streamingText, actionStreamingText, actionStreamingTitle }),
         // LinkedIn Data Viewer overlay
@@ -5535,25 +5883,11 @@ Folder: ${result.action.id}`,
       !isMedium && e(
         Box,
         { flexDirection: "column", width: "25%", paddingLeft: 1, overflow: "hidden" },
-        e(RightColumn, {
-          viewMode,
-          portfolio,
-          tradingStatus,
-          tradingHistory,
-          portfolioLastUpdated,
-          nextTradeTimeDisplay,
-          privateMode,
-          alpacaStatus,
-          alpacaMode,
-          tickers,
-          personalCapitalData,
-          connectionStatuses,
-          uiClock,
-        })
+        e(RightSidebar, null)
       )
     ),
     // Footer bar
-    e(AppFooterBar, { currentTier, viewMode, privateMode, firebaseUser }),
+    e(BottomStatusBar, null),
     // Approval Overlay (modal)
     showApprovalOverlay && e(ApprovalOverlay, {
       actions: autonomousState.proposedActions || [],

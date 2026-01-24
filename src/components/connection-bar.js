@@ -32,7 +32,15 @@ const StatusDot = ({ connected, color }) => {
  * Connection Bar Component - Shows colored status dots with service names
  * Static indicators to prevent flickering
  */
-const ConnectionBarBase = ({ connections = {}, title = "BACKBONE", version = "", userDisplay = "" }) => {
+const ConnectionBarBase = ({
+  connections = {},
+  title = "BACKBONE",
+  version = "",
+  userDisplay = "",
+  statusText = "",
+  statusVariant = "online",
+  blinkActive = false,
+}) => {
   const services = Object.keys(SERVICE_CONFIG);
   const connectedCount = services.filter(key => connections[key]?.connected).length;
 
@@ -59,7 +67,9 @@ const ConnectionBarBase = ({ connections = {}, title = "BACKBONE", version = "",
       e(Text, { color: connectedCount > 0 ? "#22c55e" : "#64748b" }, `${connectedCount}/${services.length}`),
       e(Text, { color: "#475569" }, "connected"),
       userDisplay && e(Text, { color: "#1e293b" }, " │"),
-      userDisplay && e(Text, { color: "#94a3b8" }, userDisplay)
+      userDisplay && e(Text, { color: "#94a3b8" }, userDisplay),
+      statusText && e(Text, { color: "#1e293b" }, " │"),
+      statusText && e(Text, { color: statusVariant === "offline" ? "#ef4444" : (blinkActive ? "#22c55e" : "#166534") }, statusText)
     ),
     // Connection indicators with static dots
     e(
@@ -69,14 +79,26 @@ const ConnectionBarBase = ({ connections = {}, title = "BACKBONE", version = "",
         const config = SERVICE_CONFIG[key];
         const conn = connections[key];
         const connected = conn?.connected || false;
-        const textColor = connected ? "#94a3b8" : "#475569";
+        const status = conn?.status || (connected ? "connected" : "never");
+        const isBroken = status === "broken";
+        const isNever = status === "never";
+        const dotColor = isBroken
+          ? "#ef4444"
+          : connected
+            ? (blinkActive ? (config.color || "#22c55e") : (config.dimColor || "#166534"))
+            : "#334155";
+        const textColor = isBroken
+          ? "#ef4444"
+          : connected
+            ? "#94a3b8"
+            : "#475569";
 
         return e(
           Box,
           { key, flexDirection: "row", gap: 0 },
           e(StatusDot, {
-            connected,
-            color: config.color
+            connected: connected || isBroken,
+            color: dotColor
           }),
           e(Text, { color: textColor }, config.label),
           idx < services.length - 1 && e(Text, { color: "#1e293b" }, " │")

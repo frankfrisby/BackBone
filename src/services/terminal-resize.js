@@ -6,10 +6,10 @@
 import { spawn, exec } from "child_process";
 
 // Size presets (in characters - columns x rows)
-// 1800x1000 pixels approx 195 columns x 60 rows (assuming ~9px char width, ~17px char height)
+// 2200x1100 pixels approx 240 columns x 64 rows (assuming ~9px char width, ~17px char height)
 export const TERMINAL_SIZES = {
   onboarding: { cols: 120, rows: 35 },  // Compact for onboarding
-  main: { cols: 205, rows: 60 }          // Full size for main app (approx 1800x1000px)
+  main: { cols: 240, rows: 64 }          // Full size for main app (approx 2200x1100px)
 };
 
 /**
@@ -18,8 +18,8 @@ export const TERMINAL_SIZES = {
  */
 const resizeWindowsTerminal = async (cols, rows) => {
   // Target pixel dimensions
-  const targetWidth = 1800;
-  const targetHeight = 1000;
+  const targetWidth = 2200;
+  const targetHeight = 1100;
 
   return new Promise((resolve) => {
     const psScript = `
@@ -104,6 +104,13 @@ export const resizeTerminal = async (preset = "main") => {
   const { cols, rows } = size;
 
   try {
+    if (preset === "main") {
+      const current = getCurrentSize();
+      if (current.cols >= cols && current.rows >= rows) {
+        return true;
+      }
+    }
+
     const platform = process.platform;
 
     if (platform === "win32") {

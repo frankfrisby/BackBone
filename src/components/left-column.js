@@ -39,6 +39,9 @@ const VIEW_MODES = {
  * - tickers: Array of ticker data with scores
  * - projects: Array of project data
  * - uiClock: Timestamp for ticker panel updates
+ * - userName: User's display name
+ * - aiHealthResponse: AI-generated health insight (when model is ready)
+ * - privateMode: Whether to hide sensitive data
  */
 const LeftColumnBase = ({
   viewMode = VIEW_MODES.CORE,
@@ -47,6 +50,9 @@ const LeftColumnBase = ({
   tickers = [],
   projects = [],
   uiClock,
+  userName = null,
+  aiHealthResponse = null,
+  privateMode = false,
 }) => {
   // Use coordinated updates for frequently changing data (like activity narrator pattern)
   const lifeScores = getLifeScores();
@@ -77,17 +83,22 @@ const LeftColumnBase = ({
     Box,
     { flexDirection: "column", width: "100%", overflow: "hidden" },
 
-    // Life Scores Panel
+    // Life Scores Panel - now with user name and goal comparison
     e(LifeScoresPanel, {
       data: lifeScoresData,
       title: "Progress",
       compact: true,
+      userName: userName,
+      userGoals: Array.isArray(goalsData) ? goalsData : [],
+      privateMode,
     }),
 
-    // Oura Health Panel
+    // Oura Health Panel - with AI response when available
     e(OuraHealthPanel, {
       data: ouraHealth,
       history: ouraHistory,
+      aiResponse: aiHealthResponse,
+      privateMode,
     }),
 
     // Goal Progress Panel (show top 2 goals)
@@ -116,7 +127,38 @@ const LeftColumnBase = ({
   );
 };
 
-// Memoize to prevent unnecessary re-renders from parent
-export const LeftColumn = memo(LeftColumnBase);
+/**
+ * Custom comparison to prevent re-renders from uiClock changes
+ */
+const areLeftColumnPropsEqual = (prevProps, nextProps) => {
+  // Ignore uiClock - timestamp display has internal caching
+  if (prevProps.viewMode !== nextProps.viewMode) return false;
+
+  // Compare oura health key values
+  if (prevProps.ouraHealth?.connected !== nextProps.ouraHealth?.connected) return false;
+  if (prevProps.ouraHealth?.today?.sleep?.score !== nextProps.ouraHealth?.today?.sleep?.score) return false;
+
+  // Compare tickers length and top scores
+  if (prevProps.tickers?.length !== nextProps.tickers?.length) return false;
+  const prevTopScore = prevProps.tickers?.[0]?.score;
+  const nextTopScore = nextProps.tickers?.[0]?.score;
+  if (prevTopScore !== nextTopScore) return false;
+
+  // Compare projects length
+  if (prevProps.projects?.length !== nextProps.projects?.length) return false;
+
+  // Compare userName
+  if (prevProps.userName !== nextProps.userName) return false;
+
+  // Compare AI health response
+  if (prevProps.aiHealthResponse !== nextProps.aiHealthResponse) return false;
+
+  if (prevProps.privateMode !== nextProps.privateMode) return false;
+
+  return true;
+};
+
+// Memoize with custom comparison to prevent unnecessary re-renders
+export const LeftColumn = memo(LeftColumnBase, areLeftColumnPropsEqual);
 
 export default LeftColumn;

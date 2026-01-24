@@ -61,7 +61,8 @@ export const LifeScoresPanel = ({
   compact = false,
   comparisons = null,
   userName = null,
-  userGoals = []
+  userGoals = [],
+  privateMode = false
 }) => {
   // Get real progress data from research service
   const progressData = useMemo(() => {
@@ -127,6 +128,8 @@ export const LifeScoresPanel = ({
   // Calculate a baseline score based on what we know
   // Show score if we have any data (goals or connected services)
   const effectiveProgress = overallProgress > 0 ? overallProgress : (hasData || hasGoals ? 0 : null);
+  const showComparisons = !privateMode;
+  const progressDisplay = privateMode ? "--" : (effectiveProgress !== null ? `${effectiveProgress}` : "--");
 
   return e(
     Box,
@@ -155,13 +158,11 @@ export const LifeScoresPanel = ({
         { flexDirection: "row" },
         e(Text, { color: "#e2e8f0", bold: true }, displayName),
         e(Text, { color: "#64748b" }, " · "),
-        effectiveProgress !== null
-          ? e(Text, { color: getScoreColor(effectiveProgress), bold: true }, `${effectiveProgress}`)
-          : e(Text, { color: "#475569" }, "--"),
-        effectiveProgress !== null && e(Text, { color: trendColor }, ` ${trendIcon}`)
+        e(Text, { color: privateMode ? "#64748b" : getScoreColor(effectiveProgress || 0), bold: true }, progressDisplay),
+        !privateMode && effectiveProgress !== null && e(Text, { color: trendColor }, ` ${trendIcon}`)
       ),
       // Right side: Target name · score
-      e(
+      showComparisons && e(
         Box,
         { flexDirection: "row" },
         e(Text, { color: "#22c55e" }, topFigure.name),
@@ -174,12 +175,12 @@ export const LifeScoresPanel = ({
     e(
       Box,
       { flexDirection: "row", justifyContent: "space-between", gap: 2, marginTop: 1 },
-      e(ScoreBar, { score: effectiveProgress || 0, width: 12, color: effectiveProgress ? getScoreColor(effectiveProgress) : "#374151" }),
-      e(ScoreBar, { score: topFigure.score, width: 12, color: "#22c55e" })
+      e(ScoreBar, { score: privateMode ? 0 : (effectiveProgress || 0), width: 12, color: privateMode ? "#374151" : (effectiveProgress ? getScoreColor(effectiveProgress) : "#374151") }),
+      showComparisons && e(ScoreBar, { score: topFigure.score, width: 12, color: "#22c55e" })
     ),
 
     // Average Person row (lighter text)
-    e(
+    showComparisons && e(
       Box,
       { flexDirection: "row", justifyContent: "center", marginTop: 1 },
       e(Text, { color: "#374151" }, "Average Person"),

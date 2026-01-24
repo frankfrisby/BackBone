@@ -3,7 +3,7 @@
  * Professional loading screen with animated logo
  */
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, memo } from "react";
 import { Box, Text } from "ink";
 import { execSync } from "child_process";
 import fs from "fs";
@@ -150,7 +150,7 @@ const LoadingSpinner = ({ color = BRAND_COLOR }) => {
 /**
  * Main Splash Screen Component
  */
-export const SplashScreen = ({ message = "Initializing", showCredits = true }) => {
+const SplashScreenBase = ({ message = "Initializing", showCredits = true }) => {
   const { version, commitHash } = getVersionInfo();
   const versionString = `v${version}.${commitHash}`;
 
@@ -168,19 +168,15 @@ export const SplashScreen = ({ message = "Initializing", showCredits = true }) =
     // Top spacer
     e(Box, { flexGrow: 1 }),
 
-    // Logo section
+    // Spinning B Logo only
     e(
       Box,
       { flexDirection: "column", alignItems: "center" },
       e(SpinningBLogo, { color: BRAND_COLOR })
     ),
 
-    // Brand name
-    e(Box, { marginTop: 1 }),
-    e(Text, { color: BRAND_COLOR, bold: true }, "B A C K B O N E"),
-
-    // Tagline
-    e(Box, { marginTop: 1 }),
+    // Tagline (no BACKBONE text - the spinning B is the logo)
+    e(Box, { marginTop: 2 }),
     e(Text, { color: TEXT_SECONDARY }, "AI-Powered Life Operating System"),
 
     // Loading indicator
@@ -223,5 +219,7 @@ export const SplashScreen = ({ message = "Initializing", showCredits = true }) =
     )
   );
 };
+
+export const SplashScreen = memo(SplashScreenBase);
 
 export default SplashScreen;

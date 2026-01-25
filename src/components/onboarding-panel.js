@@ -59,6 +59,7 @@ import { openUrl } from "../services/open-url.js";
 import { requestPhoneCode, verifyPhoneCode, getPhoneRecord } from "../services/phone-auth.js";
 import { getMobileService } from "../services/mobile.js";
 import { startOAuthFlow as startClaudeOAuth, hasValidCredentials as hasClaudeCredentials } from "../services/claude-oauth.js";
+import { startOAuthFlow as startCodexOAuth, hasValidCredentials as hasCodexCredentials } from "../services/codex-oauth.js";
 
 const e = React.createElement;
 
@@ -179,9 +180,9 @@ const BRAND_COLOR = "#f97316";
 // Model provider options
 // Model options in priority order for fallback chain
 const MODEL_OPTIONS = [
-  { id: "claude-oauth", label: "Claude Pro/Max", description: "Login with your Claude subscription", oauth: true, priority: 1 },
-  { id: "openai-codex", label: "OpenAI Codex", description: "Code-optimized GPT model", priority: 2 },
-  { id: "openai", label: "OpenAI API", description: "GPT-4 and ChatGPT family", priority: 3 },
+  { id: "claude-oauth", label: "Claude Pro/Max", description: "Login with Claude subscription", oauth: true, priority: 1 },
+  { id: "openai-codex", label: "OpenAI Codex", description: "Login with OpenAI account", oauth: true, priority: 2 },
+  { id: "openai", label: "OpenAI API", description: "GPT-4 API key", priority: 3 },
   { id: "anthropic", label: "Claude API", description: "Anthropic API key", priority: 4 },
   { id: "google", label: "Gemini (Google)", description: "Google AI - Optional", priority: 5, optional: true }
 ];
@@ -192,7 +193,7 @@ const isModelConnected = (modelId) => {
     case "claude-oauth":
       return hasClaudeCredentials();
     case "openai-codex":
-      return isProviderConfigured("openai"); // Shares OpenAI key
+      return hasCodexCredentials();
     case "openai":
       return isProviderConfigured("openai");
     case "anthropic":
@@ -210,6 +211,7 @@ const getConnectionLabel = (modelId) => {
     case "claude-oauth":
       return hasClaudeCredentials() ? "Logged In" : null;
     case "openai-codex":
+      return hasCodexCredentials() ? "Logged In" : null;
     case "openai":
       return isProviderConfigured("openai") ? "API Key" : null;
     case "anthropic":
@@ -719,31 +721,59 @@ const ModelSelectionStep = ({ onComplete, onError }) => {
     }
   };
 
+  // Handle Codex OAuth flow
+  const handleCodexOAuth = async () => {
+    setSubStep("oauth");
+    setOauthStatus("Starting Codex login...");
+
+    try {
+      const result = await startCodexOAuth((status) => {
+        setOauthStatus(status);
+      });
+
+      if (result.success) {
+        setMessage("OpenAI Codex connected!");
+        setTimeout(() => onComplete({ provider: "openai-codex", method: result.method }), 1500);
+      } else {
+        setMessage(`Codex login: ${result.error}`);
+        setOauthStatus("");
+        setTimeout(() => {
+          setSubStep("select");
+        }, 2000);
+      }
+    } catch (error) {
+      setMessage(`Codex error: ${error.message}`);
+      setSubStep("select");
+    }
+  };
+
   // Execute setup for a provider
   const executeProviderSetup = (provider) => {
     if (provider.id === "claude-oauth") {
       // Claude Pro/Max - open browser for OAuth
       handleClaudeOAuth();
+    } else if (provider.id === "openai-codex") {
+      // OpenAI Codex - open browser for OAuth
+      handleCodexOAuth();
     } else if (provider.id === "google" && provider.optional) {
       // Google is optional - can skip
       onComplete({ provider: provider.id, skipped: true });
     } else {
       // API key flow for other providers
-      const providerId = provider.id === "openai-codex" ? "openai" : provider.id;
       setSubStep("api-key");
-      openProviderKeyPage(providerId);
+      openProviderKeyPage(provider.id);
       if (useInlineKeyEntry) {
         setMessage(`Paste your ${provider.label} API key below.`);
       } else {
-        createApiKeyFile(providerId);
+        createApiKeyFile(provider.id);
         setMessage(`Opening ${provider.label} API key page...`);
         setTimeout(() => openApiKeyInEditor(), 500);
         fileWatcherRef.current = watchApiKeyFile(async (key) => {
           setSubStep("validating");
           setMessage("Validating API key...");
-          const result = await validateApiKey(providerId, key);
+          const result = await validateApiKey(provider.id, key);
           if (result.valid) {
-            saveApiKeyToEnv(providerId, key);
+            saveApiKeyToEnv(provider.id, key);
             cleanupApiKeyFile();
             setMessage("API key validated!");
             setTimeout(() => onComplete({ provider: provider.id }), 1000);
@@ -764,21 +794,30 @@ const ModelSelectionStep = ({ onComplete, onError }) => {
       return;
     }
     if (subStep === "select") {
-      // Navigation - works in both modes
+      // Up/Down navigation - ALWAYS works regardless of panel mode
       if (key.upArrow) {
         setSelectedProvider((p) => (p - 1 + MODEL_OPTIONS.length) % MODEL_OPTIONS.length);
-      } else if (key.downArrow) {
+        return;
+      }
+      if (key.downArrow) {
         setSelectedProvider((p) => (p + 1) % MODEL_OPTIONS.length);
-      } else if (key.rightArrow) {
-        // Enter options mode - orange border
+        return;
+      }
+      // Right arrow - enter options mode (orange border)
+      if (key.rightArrow) {
         setActivePanel("sub");
-      } else if (key.leftArrow) {
-        // Exit options mode - gray border
+        return;
+      }
+      // Left arrow - exit options mode (gray border)
+      if (key.leftArrow) {
         setActivePanel("main");
-      } else if (key.return) {
-        // Execute setup for selected provider
+        return;
+      }
+      // Enter - execute setup for selected provider
+      if (key.return) {
         const provider = MODEL_OPTIONS[selectedProvider];
         executeProviderSetup(provider);
+        return;
       }
     } else if (subStep === "pro-check") {
       if (key.return) {

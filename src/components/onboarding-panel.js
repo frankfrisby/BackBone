@@ -1605,9 +1605,9 @@ const OptionalSetupStep = ({ step, onComplete, onSkip }) => {
  */
 export const OnboardingPanel = ({ onComplete, userDisplay = "" }) => {
   const { exit } = useApp();
-  const [currentStepIndex, setCurrentStepIndex] = useState(0);
+
+  // Initialize step statuses based on existing configuration
   const [stepStatuses, setStepStatuses] = useState(() => {
-    // Initialize statuses based on existing configuration
     const statuses = {};
     for (const step of ONBOARDING_STEPS) {
       statuses[step.id] = "pending";
@@ -1637,9 +1637,6 @@ export const OnboardingPanel = ({ onComplete, userDisplay = "" }) => {
         statuses.phone = "complete";
       }
     }
-    // Personal Capital is disabled - skip it by default
-    // It will be auto-skipped when the user reaches it
-
     // Check Plaid configuration
     if (isPlaidConfigured()) {
       statuses.plaid = "complete";
@@ -1647,51 +1644,52 @@ export const OnboardingPanel = ({ onComplete, userDisplay = "" }) => {
 
     return statuses;
   });
+
+  // Find the first incomplete step to use as default
+  const getFirstIncompleteIndex = useCallback((statuses) => {
+    // First check required steps
+    for (let i = 0; i < ONBOARDING_STEPS.length; i++) {
+      const step = ONBOARDING_STEPS[i];
+      if (step.disabled) continue;
+      if (statuses[step.id] !== "complete" && step.required) {
+        return i;
+      }
+    }
+    // Then check optional steps
+    for (let i = 0; i < ONBOARDING_STEPS.length; i++) {
+      const step = ONBOARDING_STEPS[i];
+      if (step.disabled) continue;
+      if (statuses[step.id] !== "complete") {
+        return i;
+      }
+    }
+    return 0; // Default to first if all complete
+  }, []);
+
+  // Current selected step index - default to first incomplete
+  const [currentStepIndex, setCurrentStepIndex] = useState(() => getFirstIncompleteIndex(stepStatuses));
   const [errorMessage, setErrorMessage] = useState(null);
+
+  // Track if user is manually navigating (to prevent auto-advance)
+  const [userNavigating, setUserNavigating] = useState(false);
 
   const currentStep = ONBOARDING_STEPS[currentStepIndex];
 
-  // Find next incomplete required step
-  useEffect(() => {
-    // Skip to first incomplete step
-    for (let i = 0; i < ONBOARDING_STEPS.length; i++) {
-      const step = ONBOARDING_STEPS[i];
-      // Skip disabled steps automatically
-      if (step.disabled && stepStatuses[step.id] !== "complete") {
-        // Don't mark as complete yet - let the disabled step component handle it
-        if (i === currentStepIndex) {
-          // Currently on a disabled step - it will auto-skip via component
-          return;
-        }
-        continue;
-      }
-      if (stepStatuses[step.id] !== "complete" && step.required) {
-        if (i !== currentStepIndex) {
-          setCurrentStepIndex(i);
-        }
-        return;
-      }
-    }
-
-    // All required steps complete - check if any optional are pending (non-disabled)
-    for (let i = 0; i < ONBOARDING_STEPS.length; i++) {
-      const step = ONBOARDING_STEPS[i];
-      // Skip disabled steps
-      if (step.disabled) continue;
-      if (stepStatuses[step.id] === "pending" && !step.required) {
-        if (i !== currentStepIndex) {
-          setCurrentStepIndex(i);
-        }
-        return;
-      }
-    }
-
-    // All steps done - complete onboarding
-    handleComplete();
-  }, [stepStatuses]);
-
   const handleStepComplete = useCallback((stepId, data) => {
-    setStepStatuses((prev) => ({ ...prev, [stepId]: "complete" }));
+    setStepStatuses((prev) => {
+      const newStatuses = { ...prev, [stepId]: "complete" };
+
+      // Auto-advance to next incomplete step after a short delay
+      // (unless user is manually navigating)
+      if (!userNavigating) {
+        setTimeout(() => {
+          const nextIndex = getFirstIncompleteIndex(newStatuses);
+          setCurrentStepIndex(nextIndex);
+        }, 500);
+      }
+
+      return newStatuses;
+    });
     setErrorMessage(null);
 
     // Update user settings
@@ -1709,7 +1707,7 @@ export const OnboardingPanel = ({ onComplete, userDisplay = "" }) => {
       updateSetting("phoneNumber", data.phone);
       updateSetting("connections", { ...loadUserSettings().connections, phone: true });
     }
-  }, []);
+  }, [userNavigating, getFirstIncompleteIndex]);
 
   const handleStepLogout = useCallback((stepId) => {
     setStepStatuses((prev) => ({ ...prev, [stepId]: "pending" }));
@@ -1738,8 +1736,28 @@ export const OnboardingPanel = ({ onComplete, userDisplay = "" }) => {
   // Check if required steps are complete (login and model)
   const requiredStepsComplete = stepStatuses.google === "complete" && stepStatuses.model === "complete";
 
-  // Handle keyboard shortcuts
+  // Handle keyboard shortcuts including arrow navigation
   useInput((input, key) => {
+    // Arrow Up - navigate to previous step
+    if (key.upArrow) {
+      setUserNavigating(true);
+      setCurrentStepIndex((prev) => {
+        const newIndex = prev > 0 ? prev - 1 : ONBOARDING_STEPS.length - 1;
+        return newIndex;
+      });
+      return;
+    }
+
+    // Arrow Down - navigate to next step
+    if (key.downArrow) {
+      setUserNavigating(true);
+      setCurrentStepIndex((prev) => {
+        const newIndex = prev < ONBOARDING_STEPS.length - 1 ? prev + 1 : 0;
+        return newIndex;
+      });
+      return;
+    }
+
     // Ctrl+M or 'x' to go to main (only if required steps done)
     if ((key.ctrl && input === "m") || input.toLowerCase() === "x") {
       if (requiredStepsComplete) {
@@ -1747,6 +1765,7 @@ export const OnboardingPanel = ({ onComplete, userDisplay = "" }) => {
       }
       return;
     }
+
     // Escape or 'q' to quit the program
     if (key.escape || input.toLowerCase() === "q") {
       exit();
@@ -1899,13 +1918,14 @@ export const OnboardingPanel = ({ onComplete, userDisplay = "" }) => {
       e(
         Box,
         { flexDirection: "row", gap: 2 },
+        e(Text, { color: "#f97316" }, "[↑↓] Navigate"),
         e(Text, { color: "#64748b" }, "[Enter] Continue"),
         e(Text, { color: "#64748b" }, "[S] Skip"),
         // Exit to main - only show if required steps done
         requiredComplete >= requiredCount
-          ? e(Text, { color: "#22c55e" }, "[X/Ctrl+M] Main")
-          : e(Text, { color: "#475569", dimColor: true }, "[X] Main (complete login & model)"),
-        e(Text, { color: "#64748b" }, "[Q/Esc] Quit"),
+          ? e(Text, { color: "#22c55e" }, "[X] Main")
+          : e(Text, { color: "#475569", dimColor: true }, "[X] Main"),
+        e(Text, { color: "#64748b" }, "[Q] Quit"),
         showLogoutHint && e(Text, { color: "#f59e0b" }, "[O] Logout")
       ),
       e(

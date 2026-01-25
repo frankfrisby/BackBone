@@ -614,10 +614,16 @@ const PhoneVerificationStep = ({ onComplete, onError }) => {
 
 /**
  * Model Selection Step Component
+ * Two-panel navigation:
+ * - Left/Right arrows switch between main list and sub-options
+ * - Up/Down arrows navigate within current panel
+ * - Enter confirms selection
  */
 const ModelSelectionStep = ({ onComplete, onError }) => {
   const [selectedProvider, setSelectedProvider] = useState(0);
   const [subStep, setSubStep] = useState("select"); // select, pro-check, api-key, validating, oauth
+  const [activePanel, setActivePanel] = useState("main"); // "main" or "sub"
+  const [selectedSubOption, setSelectedSubOption] = useState(0);
   const [apiKey, setApiKey] = useState("");
   const [apiKeyInput, setApiKeyInput] = useState("");
   const [message, setMessage] = useState("");
@@ -625,6 +631,39 @@ const ModelSelectionStep = ({ onComplete, onError }) => {
   const fileWatcherRef = useRef(null);
   const proCheckTimeoutRef = useRef(null);
   const useInlineKeyEntry = isModernTerminal();
+
+  // Get sub-options for currently selected provider
+  const getSubOptions = (providerId) => {
+    switch (providerId) {
+      case "claude-oauth":
+        return [
+          { id: "login", label: "Login with Browser", action: "oauth" },
+          { id: "switch-api", label: "Use API Key Instead", action: "switch", target: "anthropic" },
+        ];
+      case "openai-codex":
+        return [
+          { id: "setup", label: "Setup API Key", action: "api-key" },
+          { id: "switch-gpt", label: "Use GPT API Instead", action: "switch", target: "openai" },
+        ];
+      case "openai":
+        return [
+          { id: "setup", label: "Setup API Key", action: "api-key" },
+          { id: "switch-codex", label: "Use Codex Instead", action: "switch", target: "openai-codex" },
+        ];
+      case "anthropic":
+        return [
+          { id: "setup", label: "Setup API Key", action: "api-key" },
+          { id: "switch-oauth", label: "Login with Claude Pro/Max", action: "switch", target: "claude-oauth" },
+        ];
+      case "google":
+        return [
+          { id: "setup", label: "Setup API Key", action: "api-key" },
+          { id: "skip", label: "Skip (Optional)", action: "skip" },
+        ];
+      default:
+        return [{ id: "setup", label: "Setup", action: "api-key" }];
+    }
+  };
 
   // Check if any provider is already configured
   useEffect(() => {
@@ -696,97 +735,43 @@ const ModelSelectionStep = ({ onComplete, onError }) => {
     }
   };
 
-  useInput((input, key) => {
-    if (subStep === "api-key" && useInlineKeyEntry) {
-      return;
-    }
-    if (subStep === "oauth") {
-      // Don't handle input during OAuth flow
-      return;
-    }
-    if (subStep === "select") {
-      if (key.upArrow) {
-        setSelectedProvider((p) => (p - 1 + MODEL_OPTIONS.length) % MODEL_OPTIONS.length);
-      } else if (key.downArrow) {
-        setSelectedProvider((p) => (p + 1) % MODEL_OPTIONS.length);
-      } else if (key.return) {
-        const provider = MODEL_OPTIONS[selectedProvider];
-
-        // Handle Claude OAuth option
-        if (provider.id === "claude-oauth") {
-          handleClaudeOAuth();
-          return;
+  // Execute a sub-option action
+  const executeSubOption = (subOption, provider) => {
+    switch (subOption.action) {
+      case "oauth":
+        handleClaudeOAuth();
+        break;
+      case "switch":
+        // Switch to a different provider
+        const targetIndex = MODEL_OPTIONS.findIndex(m => m.id === subOption.target);
+        if (targetIndex >= 0) {
+          setSelectedProvider(targetIndex);
+          setActivePanel("main");
+          setSelectedSubOption(0);
         }
-
-        // Handle OpenAI Codex - same flow as OpenAI but different messaging
-        if (provider.id === "openai-codex") {
-          setSubStep("api-key");
-          openProviderKeyPage("openai");
-          if (useInlineKeyEntry) {
-            setMessage("Paste your OpenAI API key (works for Codex too).");
-          } else {
-            createApiKeyFile("openai");
-            setMessage("Opening OpenAI API keys...");
-            setTimeout(() => openApiKeyInEditor(), 500);
-          }
-
-          // Start watching for file changes
-          if (!useInlineKeyEntry) {
-            fileWatcherRef.current = watchApiKeyFile(async (key) => {
-              setSubStep("validating");
-              setMessage("Validating API key...");
-              const result = await validateApiKey("openai", key);
-              if (result.valid) {
-                saveApiKeyToEnv("openai", key);
-                cleanupApiKeyFile();
-                setMessage("OpenAI API key validated!");
-                setTimeout(() => onComplete({ provider: "openai-codex" }), 1000);
-              } else {
-                setSubStep("api-key");
-                setMessage(`Invalid key: ${result.error}. Try again.`);
-              }
-            });
-          }
-          return;
-        }
-
-        if (provider.id === "openai") {
-          setSubStep("pro-check");
-          setMessage("Opening ChatGPT (Pro/Max)...");
-          openUrl("https://chatgpt.com");
-          proCheckTimeoutRef.current = setTimeout(() => {
-            setSubStep("api-key");
-            openProviderKeyPage(provider.id);
-            if (useInlineKeyEntry) {
-              setMessage("Paste your OpenAI API key below.");
-            } else {
-              createApiKeyFile(provider.id);
-              setMessage("Opening OpenAI API keys...");
-              setTimeout(() => openApiKeyInEditor(), 500);
-            }
-          }, 4000);
-          return;
-        }
+        break;
+      case "skip":
+        onComplete({ provider: provider.id, skipped: true });
+        break;
+      case "api-key":
+      default:
+        // Start API key flow
+        const providerId = provider.id === "openai-codex" ? "openai" : provider.id;
         setSubStep("api-key");
-        openProviderKeyPage(provider.id);
+        openProviderKeyPage(providerId);
         if (useInlineKeyEntry) {
           setMessage(`Paste your ${provider.label} API key below.`);
         } else {
-          createApiKeyFile(provider.id);
+          createApiKeyFile(providerId);
           setMessage(`Opening ${provider.label} API key page...`);
-        }
-
-        // Start watching for file changes
-        if (!useInlineKeyEntry) {
+          setTimeout(() => openApiKeyInEditor(), 500);
+          // Start watching for file changes
           fileWatcherRef.current = watchApiKeyFile(async (key) => {
             setSubStep("validating");
             setMessage("Validating API key...");
-
-            const provider = MODEL_OPTIONS[selectedProvider];
-            const result = await validateApiKey(provider.id, key);
-
+            const result = await validateApiKey(providerId, key);
             if (result.valid) {
-              saveApiKeyToEnv(provider.id, key);
+              saveApiKeyToEnv(providerId, key);
               cleanupApiKeyFile();
               setMessage("API key validated!");
               setTimeout(() => onComplete({ provider: provider.id }), 1000);
@@ -796,10 +781,50 @@ const ModelSelectionStep = ({ onComplete, onError }) => {
             }
           });
         }
+        break;
+    }
+  };
 
-        // Also open editor
-        if (!useInlineKeyEntry) {
-          setTimeout(() => openApiKeyInEditor(), 500);
+  useInput((input, key) => {
+    if (subStep === "api-key" && useInlineKeyEntry) {
+      return;
+    }
+    if (subStep === "oauth") {
+      // Don't handle input during OAuth flow
+      return;
+    }
+    if (subStep === "select") {
+      const provider = MODEL_OPTIONS[selectedProvider];
+      const subOptions = getSubOptions(provider.id);
+
+      if (activePanel === "main") {
+        // Main panel navigation
+        if (key.upArrow) {
+          setSelectedProvider((p) => (p - 1 + MODEL_OPTIONS.length) % MODEL_OPTIONS.length);
+          setSelectedSubOption(0); // Reset sub-option when changing provider
+        } else if (key.downArrow) {
+          setSelectedProvider((p) => (p + 1) % MODEL_OPTIONS.length);
+          setSelectedSubOption(0);
+        } else if (key.rightArrow) {
+          // Move to sub-options panel
+          setActivePanel("sub");
+          setSelectedSubOption(0);
+        } else if (key.return) {
+          // Quick action - execute first sub-option (usually "setup" or "login")
+          executeSubOption(subOptions[0], provider);
+        }
+      } else if (activePanel === "sub") {
+        // Sub-options panel navigation
+        if (key.upArrow) {
+          setSelectedSubOption((s) => (s - 1 + subOptions.length) % subOptions.length);
+        } else if (key.downArrow) {
+          setSelectedSubOption((s) => (s + 1) % subOptions.length);
+        } else if (key.leftArrow) {
+          // Move back to main panel
+          setActivePanel("main");
+        } else if (key.return) {
+          // Execute selected sub-option
+          executeSubOption(subOptions[selectedSubOption], provider);
         }
       }
     } else if (subStep === "pro-check") {
@@ -835,45 +860,93 @@ const ModelSelectionStep = ({ onComplete, onError }) => {
   }, []);
 
   if (subStep === "select") {
+    const currentProvider = MODEL_OPTIONS[selectedProvider];
+    const subOptions = getSubOptions(currentProvider.id);
+
     return e(
       Box,
       { flexDirection: "column", paddingX: 1 },
       e(Text, { color: "#e2e8f0", bold: true }, "Select AI Provider"),
-      e(Text, { color: "#64748b" }, "Use arrows to select, Enter to confirm"),
-      e(Text, { color: "#64748b", dimColor: true, marginBottom: 1 }, "Priority: 1=Primary, 2=Fallback, etc."),
-      ...MODEL_OPTIONS.map((opt, i) => {
-        const isConnected = isModelConnected(opt.id);
-        const isSelected = i === selectedProvider;
-        return e(
+      e(Text, { color: "#64748b" }, "↑↓ Navigate  → Options  ← Back  Enter Confirm"),
+      e(Text, { color: "#64748b", dimColor: true, marginBottom: 1 }, "Priority: 1=Primary → 5=Last Fallback"),
+
+      // Two-panel layout
+      e(
+        Box,
+        { flexDirection: "row", gap: 2 },
+
+        // Left panel - Provider list
+        e(
           Box,
-          { key: opt.id, flexDirection: "row", gap: 1 },
-          // Selection arrow
-          e(Text, { color: isSelected ? "#f97316" : "#1e293b" },
-            isSelected ? "▶" : " "
-          ),
-          // Priority number
-          e(Text, { color: "#64748b", dimColor: true }, `${opt.priority}.`),
-          // Connection status indicator
-          e(Text, { color: isConnected ? "#22c55e" : "#475569" },
-            isConnected ? "●" : "○"
-          ),
-          // Label and description
-          e(
-            Box,
-            { flexDirection: "column" },
-            e(
+          {
+            flexDirection: "column",
+            borderStyle: activePanel === "main" ? "single" : "single",
+            borderColor: activePanel === "main" ? "#f97316" : "#334155",
+            paddingX: 1,
+            width: 24
+          },
+          ...MODEL_OPTIONS.map((opt, i) => {
+            const isConnected = isModelConnected(opt.id);
+            const isSelected = i === selectedProvider;
+            const isActive = isSelected && activePanel === "main";
+            return e(
               Box,
-              { flexDirection: "row", gap: 1 },
+              { key: opt.id, flexDirection: "row", gap: 1 },
+              // Selection indicator
+              e(Text, { color: isActive ? "#f97316" : (isSelected ? "#64748b" : "#1e293b") },
+                isActive ? "▶" : (isSelected ? "›" : " ")
+              ),
+              // Priority
+              e(Text, { color: "#475569", dimColor: true }, `${opt.priority}`),
+              // Status dot
+              e(Text, { color: isConnected ? "#22c55e" : "#475569" },
+                isConnected ? "●" : "○"
+              ),
+              // Label
               e(Text, {
-                color: isConnected ? "#22c55e" : (isSelected ? "#e2e8f0" : "#94a3b8"),
-                bold: isSelected || isConnected
-              }, opt.label),
-              isConnected && e(Text, { color: "#22c55e", dimColor: true }, "Connected")
-            ),
-            e(Text, { color: "#64748b", dimColor: true }, opt.description)
-          )
-        );
-      })
+                color: isConnected ? "#22c55e" : (isSelected ? "#e2e8f0" : "#64748b"),
+                bold: isSelected,
+                backgroundColor: isActive ? "#1e293b" : undefined
+              }, opt.label.length > 14 ? opt.label.slice(0, 12) + ".." : opt.label)
+            );
+          })
+        ),
+
+        // Right panel - Sub-options for selected provider
+        e(
+          Box,
+          {
+            flexDirection: "column",
+            borderStyle: activePanel === "sub" ? "single" : "single",
+            borderColor: activePanel === "sub" ? "#f97316" : "#334155",
+            paddingX: 1,
+            width: 28
+          },
+          // Provider name header
+          e(Text, { color: "#e2e8f0", bold: true, marginBottom: 1 },
+            isModelConnected(currentProvider.id) ? `${currentProvider.label} ✓` : currentProvider.label
+          ),
+          // Sub-options
+          ...subOptions.map((sub, i) => {
+            const isActive = i === selectedSubOption && activePanel === "sub";
+            const isSelected = i === selectedSubOption;
+            return e(
+              Box,
+              { key: sub.id, flexDirection: "row", gap: 1 },
+              e(Text, { color: isActive ? "#f97316" : (isSelected && activePanel === "sub" ? "#64748b" : "#1e293b") },
+                isActive ? "▶" : (isSelected && activePanel === "sub" ? "›" : " ")
+              ),
+              e(Text, {
+                color: isActive ? "#ffffff" : (isSelected && activePanel === "sub" ? "#e2e8f0" : "#94a3b8"),
+                backgroundColor: isActive ? "#f97316" : undefined,
+                bold: isActive
+              }, ` ${sub.label} `)
+            );
+          }),
+          // Description
+          e(Text, { color: "#64748b", dimColor: true, marginTop: 1 }, currentProvider.description)
+        )
+      )
     );
   }
 

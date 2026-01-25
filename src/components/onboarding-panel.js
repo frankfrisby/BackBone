@@ -192,6 +192,7 @@ const isModelConnected = (modelId) => {
     case "claude-oauth":
       return hasClaudeCredentials();
     case "openai-codex":
+      return isProviderConfigured("openai"); // Shares OpenAI key
     case "openai":
       return isProviderConfigured("openai");
     case "anthropic":
@@ -200,6 +201,23 @@ const isModelConnected = (modelId) => {
       return isProviderConfigured("google");
     default:
       return false;
+  }
+};
+
+// Get connection label for display
+const getConnectionLabel = (modelId) => {
+  switch (modelId) {
+    case "claude-oauth":
+      return hasClaudeCredentials() ? "Logged In" : null;
+    case "openai-codex":
+    case "openai":
+      return isProviderConfigured("openai") ? "API Key" : null;
+    case "anthropic":
+      return isProviderConfigured("anthropic") ? "API Key" : null;
+    case "google":
+      return isProviderConfigured("google") ? "API Key" : null;
+    default:
+      return null;
   }
 };
 
@@ -886,6 +904,7 @@ const ModelSelectionStep = ({ onComplete, onError }) => {
         // Provider list - always visible
         ...MODEL_OPTIONS.map((opt, i) => {
           const isConnected = isModelConnected(opt.id);
+          const connectionLabel = getConnectionLabel(opt.id);
           const isSelected = i === selectedProvider;
           const isActiveInSubMenu = isSelected && isInSubMenu;
           const optSubOptions = getSubOptions(opt.id);
@@ -916,8 +935,8 @@ const ModelSelectionStep = ({ onComplete, onError }) => {
                 color: isConnected ? "#22c55e" : (isSelected ? "#e2e8f0" : "#94a3b8"),
                 bold: isSelected
               }, opt.label),
-              // Connected indicator
-              isConnected && e(Text, { color: "#22c55e", dimColor: true }, " Connected"),
+              // Connection type label (API Key, Logged In, etc.)
+              connectionLabel && e(Text, { color: "#22c55e", dimColor: true }, ` (${connectionLabel})`),
               // Arrow hint when selected in main mode
               !isInSubMenu && isSelected && e(Text, { color: "#64748b" }, " →")
             ),

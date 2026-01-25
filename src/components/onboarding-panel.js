@@ -862,89 +862,75 @@ const ModelSelectionStep = ({ onComplete, onError }) => {
   if (subStep === "select") {
     const currentProvider = MODEL_OPTIONS[selectedProvider];
     const subOptions = getSubOptions(currentProvider.id);
+    const isInSubMenu = activePanel === "sub";
 
     return e(
       Box,
       { flexDirection: "column", paddingX: 1 },
       e(Text, { color: "#e2e8f0", bold: true }, "Select AI Provider"),
-      e(Text, { color: "#64748b" }, "↑↓ Navigate  → Options  ← Back  Enter Confirm"),
-      e(Text, { color: "#64748b", dimColor: true, marginBottom: 1 }, "Priority: 1=Primary → 5=Last Fallback"),
+      e(Text, { color: "#64748b", marginBottom: 1 },
+        isInSubMenu ? "↑↓ Select  ← Back  Enter Confirm" : "↑↓ Navigate  → Options  Enter Setup"
+      ),
 
-      // Two-panel layout
+      // Single box - shows either main list or sub-options
       e(
         Box,
-        { flexDirection: "row", gap: 2 },
+        {
+          flexDirection: "column",
+          borderStyle: "single",
+          borderColor: isInSubMenu ? "#f97316" : "#334155",
+          paddingX: 1,
+          paddingY: 0
+        },
 
-        // Left panel - Provider list
-        e(
-          Box,
-          {
-            flexDirection: "column",
-            borderStyle: activePanel === "main" ? "single" : "single",
-            borderColor: activePanel === "main" ? "#f97316" : "#334155",
-            paddingX: 1,
-            width: 24
-          },
-          ...MODEL_OPTIONS.map((opt, i) => {
-            const isConnected = isModelConnected(opt.id);
-            const isSelected = i === selectedProvider;
-            const isActive = isSelected && activePanel === "main";
-            return e(
-              Box,
-              { key: opt.id, flexDirection: "row", gap: 1 },
-              // Selection indicator
-              e(Text, { color: isActive ? "#f97316" : (isSelected ? "#64748b" : "#1e293b") },
-                isActive ? "▶" : (isSelected ? "›" : " ")
-              ),
-              // Priority
-              e(Text, { color: "#475569", dimColor: true }, `${opt.priority}`),
-              // Status dot
-              e(Text, { color: isConnected ? "#22c55e" : "#475569" },
-                isConnected ? "●" : "○"
-              ),
-              // Label
-              e(Text, {
-                color: isConnected ? "#22c55e" : (isSelected ? "#e2e8f0" : "#64748b"),
-                bold: isSelected,
-                backgroundColor: isActive ? "#1e293b" : undefined
-              }, opt.label.length > 14 ? opt.label.slice(0, 12) + ".." : opt.label)
-            );
-          })
-        ),
+        // Main provider list (when not in sub-menu)
+        !isInSubMenu && MODEL_OPTIONS.map((opt, i) => {
+          const isConnected = isModelConnected(opt.id);
+          const isSelected = i === selectedProvider;
+          return e(
+            Box,
+            { key: opt.id, flexDirection: "row", gap: 1 },
+            // Selection arrow
+            e(Text, { color: isSelected ? "#f97316" : "#1e293b" },
+              isSelected ? "▶" : " "
+            ),
+            // Status dot
+            e(Text, { color: isConnected ? "#22c55e" : "#475569" },
+              isConnected ? "●" : "○"
+            ),
+            // Label
+            e(Text, {
+              color: isConnected ? "#22c55e" : (isSelected ? "#e2e8f0" : "#94a3b8"),
+              bold: isSelected
+            }, opt.label),
+            // Connected indicator
+            isConnected && e(Text, { color: "#22c55e", dimColor: true }, " Connected")
+          );
+        }),
 
-        // Right panel - Sub-options for selected provider
-        e(
+        // Sub-options (when in sub-menu)
+        isInSubMenu && e(
           Box,
-          {
-            flexDirection: "column",
-            borderStyle: activePanel === "sub" ? "single" : "single",
-            borderColor: activePanel === "sub" ? "#f97316" : "#334155",
-            paddingX: 1,
-            width: 28
-          },
-          // Provider name header
-          e(Text, { color: "#e2e8f0", bold: true, marginBottom: 1 },
-            isModelConnected(currentProvider.id) ? `${currentProvider.label} ✓` : currentProvider.label
+          { flexDirection: "column" },
+          // Header showing which provider
+          e(Text, { color: "#f97316", bold: true, marginBottom: 1 },
+            `${currentProvider.label} Options:`
           ),
-          // Sub-options
+          // Sub-option list
           ...subOptions.map((sub, i) => {
-            const isActive = i === selectedSubOption && activePanel === "sub";
             const isSelected = i === selectedSubOption;
             return e(
               Box,
               { key: sub.id, flexDirection: "row", gap: 1 },
-              e(Text, { color: isActive ? "#f97316" : (isSelected && activePanel === "sub" ? "#64748b" : "#1e293b") },
-                isActive ? "▶" : (isSelected && activePanel === "sub" ? "›" : " ")
+              e(Text, { color: isSelected ? "#f97316" : "#1e293b" },
+                isSelected ? "▶" : " "
               ),
               e(Text, {
-                color: isActive ? "#ffffff" : (isSelected && activePanel === "sub" ? "#e2e8f0" : "#94a3b8"),
-                backgroundColor: isActive ? "#f97316" : undefined,
-                bold: isActive
-              }, ` ${sub.label} `)
+                color: isSelected ? "#e2e8f0" : "#94a3b8",
+                bold: isSelected
+              }, sub.label)
             );
-          }),
-          // Description
-          e(Text, { color: "#64748b", dimColor: true, marginTop: 1 }, currentProvider.description)
+          })
         )
       )
     );

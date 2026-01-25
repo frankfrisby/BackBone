@@ -639,9 +639,8 @@ const PhoneVerificationStep = ({ onComplete, onError }) => {
  */
 const ModelSelectionStep = ({ onComplete, onError }) => {
   const [selectedProvider, setSelectedProvider] = useState(0);
-  const [subStep, setSubStep] = useState("select"); // select, pro-check, api-key, validating, oauth
-  const [activePanel, setActivePanel] = useState("main"); // "main" or "sub"
-  const [selectedSubOption, setSelectedSubOption] = useState(0);
+  const [subStep, setSubStep] = useState("select"); // select, api-key, validating, oauth
+  const [activePanel, setActivePanel] = useState("main"); // "main" = gray border, "sub" = orange border
   const [apiKey, setApiKey] = useState("");
   const [apiKeyInput, setApiKeyInput] = useState("");
   const [message, setMessage] = useState("");
@@ -649,39 +648,6 @@ const ModelSelectionStep = ({ onComplete, onError }) => {
   const fileWatcherRef = useRef(null);
   const proCheckTimeoutRef = useRef(null);
   const useInlineKeyEntry = isModernTerminal();
-
-  // Get sub-options for currently selected provider
-  const getSubOptions = (providerId) => {
-    switch (providerId) {
-      case "claude-oauth":
-        return [
-          { id: "login", label: "Login with Browser", action: "oauth" },
-          { id: "switch-api", label: "Use API Key Instead", action: "switch", target: "anthropic" },
-        ];
-      case "openai-codex":
-        return [
-          { id: "setup", label: "Setup API Key", action: "api-key" },
-          { id: "switch-gpt", label: "Use GPT API Instead", action: "switch", target: "openai" },
-        ];
-      case "openai":
-        return [
-          { id: "setup", label: "Setup API Key", action: "api-key" },
-          { id: "switch-codex", label: "Use Codex Instead", action: "switch", target: "openai-codex" },
-        ];
-      case "anthropic":
-        return [
-          { id: "setup", label: "Setup API Key", action: "api-key" },
-          { id: "switch-oauth", label: "Login with Claude Pro/Max", action: "switch", target: "claude-oauth" },
-        ];
-      case "google":
-        return [
-          { id: "setup", label: "Setup API Key", action: "api-key" },
-          { id: "skip", label: "Skip (Optional)", action: "skip" },
-        ];
-      default:
-        return [{ id: "setup", label: "Setup", action: "api-key" }];
-    }
-  };
 
   // Check if any provider is already configured
   useEffect(() => {
@@ -753,53 +719,40 @@ const ModelSelectionStep = ({ onComplete, onError }) => {
     }
   };
 
-  // Execute a sub-option action
-  const executeSubOption = (subOption, provider) => {
-    switch (subOption.action) {
-      case "oauth":
-        handleClaudeOAuth();
-        break;
-      case "switch":
-        // Switch to a different provider
-        const targetIndex = MODEL_OPTIONS.findIndex(m => m.id === subOption.target);
-        if (targetIndex >= 0) {
-          setSelectedProvider(targetIndex);
-          setActivePanel("main");
-          setSelectedSubOption(0);
-        }
-        break;
-      case "skip":
-        onComplete({ provider: provider.id, skipped: true });
-        break;
-      case "api-key":
-      default:
-        // Start API key flow
-        const providerId = provider.id === "openai-codex" ? "openai" : provider.id;
-        setSubStep("api-key");
-        openProviderKeyPage(providerId);
-        if (useInlineKeyEntry) {
-          setMessage(`Paste your ${provider.label} API key below.`);
-        } else {
-          createApiKeyFile(providerId);
-          setMessage(`Opening ${provider.label} API key page...`);
-          setTimeout(() => openApiKeyInEditor(), 500);
-          // Start watching for file changes
-          fileWatcherRef.current = watchApiKeyFile(async (key) => {
-            setSubStep("validating");
-            setMessage("Validating API key...");
-            const result = await validateApiKey(providerId, key);
-            if (result.valid) {
-              saveApiKeyToEnv(providerId, key);
-              cleanupApiKeyFile();
-              setMessage("API key validated!");
-              setTimeout(() => onComplete({ provider: provider.id }), 1000);
-            } else {
-              setSubStep("api-key");
-              setMessage(`Invalid key: ${result.error}. Try again.`);
-            }
-          });
-        }
-        break;
+  // Execute setup for a provider
+  const executeProviderSetup = (provider) => {
+    if (provider.id === "claude-oauth") {
+      // Claude Pro/Max - open browser for OAuth
+      handleClaudeOAuth();
+    } else if (provider.id === "google" && provider.optional) {
+      // Google is optional - can skip
+      onComplete({ provider: provider.id, skipped: true });
+    } else {
+      // API key flow for other providers
+      const providerId = provider.id === "openai-codex" ? "openai" : provider.id;
+      setSubStep("api-key");
+      openProviderKeyPage(providerId);
+      if (useInlineKeyEntry) {
+        setMessage(`Paste your ${provider.label} API key below.`);
+      } else {
+        createApiKeyFile(providerId);
+        setMessage(`Opening ${provider.label} API key page...`);
+        setTimeout(() => openApiKeyInEditor(), 500);
+        fileWatcherRef.current = watchApiKeyFile(async (key) => {
+          setSubStep("validating");
+          setMessage("Validating API key...");
+          const result = await validateApiKey(providerId, key);
+          if (result.valid) {
+            saveApiKeyToEnv(providerId, key);
+            cleanupApiKeyFile();
+            setMessage("API key validated!");
+            setTimeout(() => onComplete({ provider: provider.id }), 1000);
+          } else {
+            setSubStep("api-key");
+            setMessage(`Invalid key: ${result.error}. Try again.`);
+          }
+        });
+      }
     }
   };
 
@@ -808,42 +761,24 @@ const ModelSelectionStep = ({ onComplete, onError }) => {
       return;
     }
     if (subStep === "oauth") {
-      // Don't handle input during OAuth flow
       return;
     }
     if (subStep === "select") {
-      const provider = MODEL_OPTIONS[selectedProvider];
-      const subOptions = getSubOptions(provider.id);
-
-      if (activePanel === "main") {
-        // Main panel navigation
-        if (key.upArrow) {
-          setSelectedProvider((p) => (p - 1 + MODEL_OPTIONS.length) % MODEL_OPTIONS.length);
-          setSelectedSubOption(0); // Reset sub-option when changing provider
-        } else if (key.downArrow) {
-          setSelectedProvider((p) => (p + 1) % MODEL_OPTIONS.length);
-          setSelectedSubOption(0);
-        } else if (key.rightArrow) {
-          // Move to sub-options panel
-          setActivePanel("sub");
-          setSelectedSubOption(0);
-        } else if (key.return) {
-          // Quick action - execute first sub-option (usually "setup" or "login")
-          executeSubOption(subOptions[0], provider);
-        }
-      } else if (activePanel === "sub") {
-        // Sub-options panel navigation
-        if (key.upArrow) {
-          setSelectedSubOption((s) => (s - 1 + subOptions.length) % subOptions.length);
-        } else if (key.downArrow) {
-          setSelectedSubOption((s) => (s + 1) % subOptions.length);
-        } else if (key.leftArrow) {
-          // Move back to main panel
-          setActivePanel("main");
-        } else if (key.return) {
-          // Execute selected sub-option
-          executeSubOption(subOptions[selectedSubOption], provider);
-        }
+      // Navigation - works in both modes
+      if (key.upArrow) {
+        setSelectedProvider((p) => (p - 1 + MODEL_OPTIONS.length) % MODEL_OPTIONS.length);
+      } else if (key.downArrow) {
+        setSelectedProvider((p) => (p + 1) % MODEL_OPTIONS.length);
+      } else if (key.rightArrow) {
+        // Enter options mode - orange border
+        setActivePanel("sub");
+      } else if (key.leftArrow) {
+        // Exit options mode - gray border
+        setActivePanel("main");
+      } else if (key.return) {
+        // Execute setup for selected provider
+        const provider = MODEL_OPTIONS[selectedProvider];
+        executeProviderSetup(provider);
       }
     } else if (subStep === "pro-check") {
       if (key.return) {
@@ -878,88 +813,51 @@ const ModelSelectionStep = ({ onComplete, onError }) => {
   }, []);
 
   if (subStep === "select") {
-    const currentProvider = MODEL_OPTIONS[selectedProvider];
-    const subOptions = getSubOptions(currentProvider.id);
-    const isInSubMenu = activePanel === "sub";
+    const isInOptionsMode = activePanel === "sub";
 
     return e(
       Box,
       { flexDirection: "column", paddingX: 1 },
       e(Text, { color: "#e2e8f0", bold: true }, "Select AI Provider"),
       e(Text, { color: "#64748b", marginBottom: 1 },
-        isInSubMenu ? "↑↓ Select Option  ← Back  Enter Confirm" : "↑↓ Navigate  → Options  Enter Setup"
+        isInOptionsMode ? "↑↓ Navigate  ← Back  Enter Setup" : "↑↓ Navigate  Enter Setup"
       ),
 
-      // Single box with all providers - same box always
+      // Single box with orange border when in options mode
       e(
         Box,
         {
           flexDirection: "column",
           borderStyle: "single",
-          borderColor: "#334155",
+          borderColor: isInOptionsMode ? "#f97316" : "#334155",
           paddingX: 1,
           paddingY: 0
         },
 
-        // Provider list - always visible
+        // Provider list
         ...MODEL_OPTIONS.map((opt, i) => {
           const isConnected = isModelConnected(opt.id);
           const connectionLabel = getConnectionLabel(opt.id);
           const isSelected = i === selectedProvider;
-          const isActiveInSubMenu = isSelected && isInSubMenu;
-          const optSubOptions = getSubOptions(opt.id);
 
           return e(
             Box,
-            { key: opt.id, flexDirection: "column" },
-            // Provider row
-            e(
-              Box,
-              {
-                flexDirection: "row",
-                gap: 1,
-                borderStyle: isActiveInSubMenu ? "single" : undefined,
-                borderColor: isActiveInSubMenu ? "#f97316" : undefined,
-                paddingX: isActiveInSubMenu ? 1 : 0
-              },
-              // Selection arrow (only when in main mode)
-              !isInSubMenu && e(Text, { color: isSelected ? "#f97316" : "#1e293b" },
-                isSelected ? "▶" : " "
-              ),
-              // Status dot
-              e(Text, { color: isConnected ? "#22c55e" : "#475569" },
-                isConnected ? "●" : "○"
-              ),
-              // Label
-              e(Text, {
-                color: isConnected ? "#22c55e" : (isSelected ? "#e2e8f0" : "#94a3b8"),
-                bold: isSelected
-              }, opt.label),
-              // Connection type label (API Key, Logged In, etc.)
-              connectionLabel && e(Text, { color: "#22c55e", dimColor: true }, ` (${connectionLabel})`),
-              // Arrow hint when selected in main mode
-              !isInSubMenu && isSelected && e(Text, { color: "#64748b" }, " →")
+            { key: opt.id, flexDirection: "row", gap: 1 },
+            // Selection arrow
+            e(Text, { color: isSelected ? "#f97316" : "#1e293b" },
+              isSelected ? "▶" : " "
             ),
-
-            // Sub-options - only show for selected provider when in sub-menu
-            isActiveInSubMenu && e(
-              Box,
-              { flexDirection: "column", paddingLeft: 2, marginBottom: 1 },
-              ...optSubOptions.map((sub, si) => {
-                const isSubSelected = si === selectedSubOption;
-                return e(
-                  Box,
-                  { key: sub.id, flexDirection: "row", gap: 1 },
-                  e(Text, { color: isSubSelected ? "#f97316" : "#1e293b" },
-                    isSubSelected ? "▶" : " "
-                  ),
-                  e(Text, {
-                    color: isSubSelected ? "#e2e8f0" : "#94a3b8",
-                    bold: isSubSelected
-                  }, sub.label)
-                );
-              })
-            )
+            // Status dot
+            e(Text, { color: isConnected ? "#22c55e" : "#475569" },
+              isConnected ? "●" : "○"
+            ),
+            // Label
+            e(Text, {
+              color: isConnected ? "#22c55e" : (isSelected ? "#e2e8f0" : "#94a3b8"),
+              bold: isSelected
+            }, opt.label),
+            // Connection type label (API Key, Logged In, etc.)
+            connectionLabel && e(Text, { color: "#22c55e", dimColor: true }, ` (${connectionLabel})`)
           );
         })
       )

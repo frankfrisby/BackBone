@@ -2,6 +2,7 @@
 import "dotenv/config";
 import { createElement } from "react";
 import { render } from "ink";
+import { exec } from "child_process";
 import App from "../src/app.js";
 import { loadLinkedInProfile } from "../src/services/linkedin-scraper.js";
 import { Writable } from "stream";
@@ -11,6 +12,60 @@ if (process.platform === "win32") {
   process.env.FORCE_COLOR = "1";
   process.env.TERM = process.env.TERM || "xterm-256color";
 }
+
+/**
+ * Center window on screen immediately on startup (before rendering)
+ * This runs synchronously to position the window before any content is shown
+ */
+const centerWindowOnStart = () => {
+  const platform = process.platform;
+  const width = 1100;  // Onboarding window width
+  const height = 700;  // Onboarding window height
+  const cols = 120;
+  const rows = 35;
+
+  if (platform === "win32") {
+    // Use PowerShell to center the console window immediately
+    const psScript = `
+      Add-Type @"
+        using System;
+        using System.Runtime.InteropServices;
+        public class Win32 {
+          [DllImport("user32.dll")]
+          public static extern bool MoveWindow(IntPtr hWnd, int X, int Y, int nWidth, int nHeight, bool bRepaint);
+          [DllImport("kernel32.dll")]
+          public static extern IntPtr GetConsoleWindow();
+          [DllImport("user32.dll")]
+          public static extern int GetSystemMetrics(int nIndex);
+        }
+"@
+      $hwnd = [Win32]::GetConsoleWindow()
+      $screenWidth = [Win32]::GetSystemMetrics(0)
+      $screenHeight = [Win32]::GetSystemMetrics(1)
+      $x = [Math]::Max(0, ($screenWidth - ${width}) / 2)
+      $y = [Math]::Max(0, ($screenHeight - ${height}) / 2)
+      [Win32]::MoveWindow($hwnd, $x, $y, ${width}, ${height}, $true)
+    `.replace(/\n/g, " ");
+
+    // Run synchronously-ish with spawn, but don't block
+    exec(`powershell -NoProfile -Command "${psScript}"`, { windowsHide: true });
+
+    // Also set terminal size via ANSI
+    process.stdout.write(`\x1b[8;${rows};${cols}t`);
+    process.stdout.write(`\x1b[4;${height};${width}t`);
+  } else if (platform === "darwin") {
+    // macOS - use ANSI escape and AppleScript
+    process.stdout.write(`\x1b[8;${rows};${cols}t`);
+    const script = `osascript -e 'tell application "System Events" to set frontApp to name of first application process whose frontmost is true' -e 'if frontApp is "Terminal" then' -e 'tell application "Terminal" to set bounds of front window to {400, 200, ${400 + width}, ${200 + height}}' -e 'end if'`;
+    exec(script);
+  } else {
+    // Linux - use ANSI escape
+    process.stdout.write(`\x1b[8;${rows};${cols}t`);
+  }
+};
+
+// Center the window IMMEDIATELY before anything else
+centerWindowOnStart();
 
 // ANSI escape sequences
 const ANSI = {

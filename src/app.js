@@ -485,9 +485,9 @@ const App = ({ updateConsoleTitle }) => {
       setLastAction("Test Runner opened");
     }
     if (key.ctrl && !key.shift && input === "s") {
-      // Ctrl+S: Open settings panel
-      setShowSettings(true);
-      setLastAction("Settings opened");
+      // Ctrl+S: Go to onboarding/setup view
+      setShowOnboarding(true);
+      setLastAction("Setup opened");
     }
     if (key.ctrl && input === "p") {
       // Ctrl+P: Toggle private mode

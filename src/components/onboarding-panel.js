@@ -869,69 +869,80 @@ const ModelSelectionStep = ({ onComplete, onError }) => {
       { flexDirection: "column", paddingX: 1 },
       e(Text, { color: "#e2e8f0", bold: true }, "Select AI Provider"),
       e(Text, { color: "#64748b", marginBottom: 1 },
-        isInSubMenu ? "↑↓ Select  ← Back  Enter Confirm" : "↑↓ Navigate  → Options  Enter Setup"
+        isInSubMenu ? "↑↓ Select Option  ← Back  Enter Confirm" : "↑↓ Navigate  → Options  Enter Setup"
       ),
 
-      // Single box - shows either main list or sub-options
+      // Single box with all providers - same box always
       e(
         Box,
         {
           flexDirection: "column",
           borderStyle: "single",
-          borderColor: isInSubMenu ? "#f97316" : "#334155",
+          borderColor: "#334155",
           paddingX: 1,
           paddingY: 0
         },
 
-        // Main provider list (when not in sub-menu)
-        !isInSubMenu && MODEL_OPTIONS.map((opt, i) => {
+        // Provider list - always visible
+        ...MODEL_OPTIONS.map((opt, i) => {
           const isConnected = isModelConnected(opt.id);
           const isSelected = i === selectedProvider;
+          const isActiveInSubMenu = isSelected && isInSubMenu;
+          const optSubOptions = getSubOptions(opt.id);
+
           return e(
             Box,
-            { key: opt.id, flexDirection: "row", gap: 1 },
-            // Selection arrow
-            e(Text, { color: isSelected ? "#f97316" : "#1e293b" },
-              isSelected ? "▶" : " "
-            ),
-            // Status dot
-            e(Text, { color: isConnected ? "#22c55e" : "#475569" },
-              isConnected ? "●" : "○"
-            ),
-            // Label
-            e(Text, {
-              color: isConnected ? "#22c55e" : (isSelected ? "#e2e8f0" : "#94a3b8"),
-              bold: isSelected
-            }, opt.label),
-            // Connected indicator
-            isConnected && e(Text, { color: "#22c55e", dimColor: true }, " Connected")
-          );
-        }),
-
-        // Sub-options (when in sub-menu)
-        isInSubMenu && e(
-          Box,
-          { flexDirection: "column" },
-          // Header showing which provider
-          e(Text, { color: "#f97316", bold: true, marginBottom: 1 },
-            `${currentProvider.label} Options:`
-          ),
-          // Sub-option list
-          ...subOptions.map((sub, i) => {
-            const isSelected = i === selectedSubOption;
-            return e(
+            { key: opt.id, flexDirection: "column" },
+            // Provider row
+            e(
               Box,
-              { key: sub.id, flexDirection: "row", gap: 1 },
-              e(Text, { color: isSelected ? "#f97316" : "#1e293b" },
+              {
+                flexDirection: "row",
+                gap: 1,
+                borderStyle: isActiveInSubMenu ? "single" : undefined,
+                borderColor: isActiveInSubMenu ? "#f97316" : undefined,
+                paddingX: isActiveInSubMenu ? 1 : 0
+              },
+              // Selection arrow (only when in main mode)
+              !isInSubMenu && e(Text, { color: isSelected ? "#f97316" : "#1e293b" },
                 isSelected ? "▶" : " "
               ),
+              // Status dot
+              e(Text, { color: isConnected ? "#22c55e" : "#475569" },
+                isConnected ? "●" : "○"
+              ),
+              // Label
               e(Text, {
-                color: isSelected ? "#e2e8f0" : "#94a3b8",
+                color: isConnected ? "#22c55e" : (isSelected ? "#e2e8f0" : "#94a3b8"),
                 bold: isSelected
-              }, sub.label)
-            );
-          })
-        )
+              }, opt.label),
+              // Connected indicator
+              isConnected && e(Text, { color: "#22c55e", dimColor: true }, " Connected"),
+              // Arrow hint when selected in main mode
+              !isInSubMenu && isSelected && e(Text, { color: "#64748b" }, " →")
+            ),
+
+            // Sub-options - only show for selected provider when in sub-menu
+            isActiveInSubMenu && e(
+              Box,
+              { flexDirection: "column", paddingLeft: 2, marginBottom: 1 },
+              ...optSubOptions.map((sub, si) => {
+                const isSubSelected = si === selectedSubOption;
+                return e(
+                  Box,
+                  { key: sub.id, flexDirection: "row", gap: 1 },
+                  e(Text, { color: isSubSelected ? "#f97316" : "#1e293b" },
+                    isSubSelected ? "▶" : " "
+                  ),
+                  e(Text, {
+                    color: isSubSelected ? "#e2e8f0" : "#94a3b8",
+                    bold: isSubSelected
+                  }, sub.label)
+                );
+              })
+            )
+          );
+        })
       )
     );
   }

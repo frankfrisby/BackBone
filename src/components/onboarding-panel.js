@@ -58,6 +58,7 @@ import { loadUserSettings, updateSetting, updateSettings } from "../services/use
 import { openUrl } from "../services/open-url.js";
 import { requestPhoneCode, verifyPhoneCode, getPhoneRecord } from "../services/phone-auth.js";
 import { getMobileService } from "../services/mobile.js";
+import { startOAuthFlow as startClaudeOAuth, hasValidCredentials as hasClaudeCredentials } from "../services/claude-oauth.js";
 
 const e = React.createElement;
 
@@ -177,7 +178,8 @@ const BRAND_COLOR = "#f97316";
 
 // Model provider options
 const MODEL_OPTIONS = [
-  { id: "anthropic", label: "Claude (Anthropic)", description: "Recommended - Best reasoning" },
+  { id: "claude-oauth", label: "Claude Pro/Max (Login)", description: "Login with your Claude subscription", oauth: true },
+  { id: "anthropic", label: "Claude (API Key)", description: "Recommended - Best reasoning" },
   { id: "openai", label: "GPT (OpenAI)", description: "Most popular - ChatGPT family" },
   { id: "google", label: "Gemini (Google)", description: "Fast - Google AI" }
 ];
@@ -591,18 +593,26 @@ const PhoneVerificationStep = ({ onComplete, onError }) => {
  */
 const ModelSelectionStep = ({ onComplete, onError }) => {
   const [selectedProvider, setSelectedProvider] = useState(0);
-  const [subStep, setSubStep] = useState("select"); // select, pro-check, api-key, validating
+  const [subStep, setSubStep] = useState("select"); // select, pro-check, api-key, validating, oauth
   const [apiKey, setApiKey] = useState("");
   const [apiKeyInput, setApiKeyInput] = useState("");
   const [message, setMessage] = useState("");
+  const [oauthStatus, setOauthStatus] = useState("");
   const fileWatcherRef = useRef(null);
   const proCheckTimeoutRef = useRef(null);
   const useInlineKeyEntry = isModernTerminal();
 
   // Check if any provider is already configured
   useEffect(() => {
+    // First check Claude OAuth credentials
+    if (hasClaudeCredentials()) {
+      setMessage("Claude Pro/Max already connected!");
+      setTimeout(() => onComplete({ provider: "claude-oauth", existing: true }), 1000);
+      return;
+    }
+
     for (const opt of MODEL_OPTIONS) {
-      if (isProviderConfigured(opt.id)) {
+      if (opt.id !== "claude-oauth" && isProviderConfigured(opt.id)) {
         setMessage(`${opt.label} already configured!`);
         setTimeout(() => onComplete({ provider: opt.id, existing: true }), 1000);
         return;
@@ -610,8 +620,54 @@ const ModelSelectionStep = ({ onComplete, onError }) => {
     }
   }, [onComplete]);
 
+  // Handle Claude OAuth flow
+  const handleClaudeOAuth = async () => {
+    setSubStep("oauth");
+    setOauthStatus("Starting OAuth flow...");
+
+    try {
+      const result = await startClaudeOAuth((status) => {
+        setOauthStatus(status);
+      });
+
+      if (result.success) {
+        if (result.method === "oauth") {
+          setMessage("Claude Pro/Max connected via OAuth!");
+        } else if (result.method === "api_key_via_oauth") {
+          // Save the API key to env
+          saveApiKeyToEnv("anthropic", result.apiKey);
+          setMessage("Claude API key created successfully!");
+        }
+        setTimeout(() => onComplete({ provider: "anthropic", method: result.method }), 1500);
+      } else {
+        // OAuth failed - offer to fall back to API key
+        setMessage(`OAuth failed: ${result.error}`);
+        setOauthStatus("Falling back to API key...");
+        setTimeout(() => {
+          setSubStep("api-key");
+          setSelectedProvider(1); // Select "Claude (API Key)" option
+          openProviderKeyPage("anthropic");
+          if (useInlineKeyEntry) {
+            setMessage("Paste your Anthropic API key below.");
+          } else {
+            createApiKeyFile("anthropic");
+            setMessage("Opening Anthropic console...");
+            setTimeout(() => openApiKeyInEditor(), 500);
+          }
+        }, 2000);
+      }
+    } catch (error) {
+      setMessage(`OAuth error: ${error.message}`);
+      setSubStep("select");
+    }
+  };
+
   useInput((input, key) => {
     if (subStep === "api-key" && useInlineKeyEntry) {
+      return;
+    }
+    if (subStep === "oauth") {
+      // Don't handle input during OAuth flow
       return;
     }
     if (subStep === "select") {
@@ -621,6 +677,13 @@ const ModelSelectionStep = ({ onComplete, onError }) => {
         setSelectedProvider((p) => (p + 1) % MODEL_OPTIONS.length);
       } else if (key.return) {
         const provider = MODEL_OPTIONS[selectedProvider];
+
+        // Handle Claude OAuth option
+        if (provider.id === "claude-oauth") {
+          handleClaudeOAuth();
+          return;
+        }
+
         if (provider.id === "openai") {
           setSubStep("pro-check");
           setMessage("Opening ChatGPT (Pro/Max)...");
@@ -726,6 +789,18 @@ const ModelSelectionStep = ({ onComplete, onError }) => {
           )
         )
       )
+    );
+  }
+
+  if (subStep === "oauth") {
+    return e(
+      Box,
+      { flexDirection: "column", paddingX: 1 },
+      e(Text, { color: "#e2e8f0", bold: true }, "Claude Pro/Max Login"),
+      e(Text, { color: "#f97316" }, oauthStatus || "Starting..."),
+      message && e(Text, { color: message.includes("failed") || message.includes("error") ? "#ef4444" : "#22c55e" }, message),
+      e(Text, { color: "#64748b", dimColor: true, marginTop: 1 }, "A browser window will open for you to log in."),
+      e(Text, { color: "#64748b", dimColor: true }, "After logging in, you'll be redirected back automatically.")
     );
   }
 

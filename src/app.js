@@ -309,6 +309,18 @@ const App = ({ updateConsoleTitle }) => {
   }, []);
 
   const resizeTimersRef = useRef([]);
+
+  // Nudge the terminal size by adding 1 column and row to trigger layout adjustment
+  const nudgeTerminalSize = useCallback(() => {
+    const { columns, rows } = process.stdout;
+    // Send ANSI escape to resize terminal slightly (+1 col, +1 row)
+    process.stdout.write(`\x1b[8;${rows + 1};${columns + 1}t`);
+    // Then resize back after a brief moment
+    setTimeout(() => {
+      process.stdout.write(`\x1b[8;${rows};${columns}t`);
+    }, 100);
+  }, []);
+
   const scheduleResize = useCallback(() => {
     resizeTimersRef.current.forEach((id) => clearTimeout(id));
     const delays = [0, 500, 1100, 1900];
@@ -325,9 +337,11 @@ const App = ({ updateConsoleTitle }) => {
     // Trigger an additional re-render after 1 second to ensure all components adjust
     const rerenderDelayId = setTimeout(() => {
       setForceRenderKey((k) => k + 1);
+      // Also nudge terminal size to trigger layout recalculation
+      nudgeTerminalSize();
     }, Math.max(...delays) + 1000);
     resizeTimersRef.current.push(rerenderDelayId);
-  }, []);
+  }, [nudgeTerminalSize]);
 
   // Resize terminal to full size only after onboarding completes
   useEffect(() => {

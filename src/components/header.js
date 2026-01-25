@@ -67,15 +67,31 @@ const getDateTime = () => {
 };
 
 /**
+ * Extract profession/role from LinkedIn headline
+ */
+const extractProfession = (headline) => {
+  if (!headline) return null;
+  // Common patterns: "Software Engineer at Company", "CEO | Founder", "AI Researcher"
+  const parts = headline.split(/\s+at\s+|\s*[|,]\s*/i);
+  const role = parts[0]?.trim();
+  if (role && role.length < 40) return role;
+  return headline.slice(0, 35) + (headline.length > 35 ? "..." : "");
+};
+
+/**
  * Header component with big BACKBONE logo
  */
-const HeaderBase = ({ claudeStatus, version = "2.0.0", compact = false, integrations = {} }) => {
+const HeaderBase = ({ claudeStatus, version = "2.0.0", compact = false, integrations = {}, userName = null, userProfession = null }) => {
   const statusColor = getStatusColor(claudeStatus);
   const statusIcon = getStatusIcon(claudeStatus);
 
   // Count connected integrations
   const connectedCount = Object.values(integrations).filter((v) => v === "Connected").length;
   const totalCount = Object.keys(integrations).length;
+
+  // Get display name (first name only for compact view)
+  const displayName = userName ? userName.split(" ")[0] : null;
+  const profession = userProfession ? extractProfession(userProfession) : null;
 
   if (compact) {
     return e(
@@ -91,19 +107,16 @@ const HeaderBase = ({ claudeStatus, version = "2.0.0", compact = false, integrat
         Box,
         { flexDirection: "row", gap: 1, alignItems: "center" },
         e(Text, { color: "#667eea", bold: true }, BACKBONE_COMPACT),
+        // Show user name and profession if available
+        displayName && e(Text, { color: "#334155" }, "│"),
+        displayName && e(Text, { color: "#f59e0b", bold: true }, displayName),
+        profession && e(Text, { color: "#64748b" }, ` · ${profession}`),
         e(Text, { color: "#334155" }, "│"),
         e(Text, { color: "#475569" }, `v${version}`)
       ),
       e(
         Box,
         { flexDirection: "row", gap: 2, alignItems: "center" },
-        e(
-          Box,
-          { flexDirection: "row", gap: 1 },
-          e(Text, { color: statusColor, bold: true }, statusIcon),
-          e(Text, { color: statusColor }, claudeStatus)
-        ),
-        e(Text, { color: "#334155" }, "│"),
         e(
           Box,
           { flexDirection: "row", gap: 1 },
@@ -156,14 +169,6 @@ const HeaderBase = ({ claudeStatus, version = "2.0.0", compact = false, integrat
       e(
         Box,
         { flexDirection: "row", gap: 3 },
-        e(
-          Box,
-          { flexDirection: "row", gap: 1 },
-          e(Text, { color: "#64748b" }, "Claude"),
-          e(Text, { color: statusColor, bold: true }, statusIcon),
-          e(Text, { color: statusColor }, claudeStatus)
-        ),
-        e(Text, { color: "#334155" }, "│"),
         e(
           Box,
           { flexDirection: "row", gap: 1 },

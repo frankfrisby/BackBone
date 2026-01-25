@@ -154,68 +154,43 @@ const SplashScreenBase = ({ message = "Initializing", showCredits = true }) => {
   const { version, commitHash } = getVersionInfo();
   const versionString = `v${version}.${commitHash}`;
 
+  // Get terminal dimensions for true centering
+  const termHeight = process.stdout.rows || 24;
+  const termWidth = process.stdout.columns || 80;
+
   return e(
     Box,
     {
       flexDirection: "column",
       alignItems: "center",
       justifyContent: "center",
-      width: "100%",
-      height: "100%",
-      paddingY: 2
+      width: termWidth,
+      height: termHeight
     },
 
-    // Top spacer
-    e(Box, { flexGrow: 1 }),
-
-    // Spinning B Logo only
+    // Single centered content block
     e(
       Box,
       { flexDirection: "column", alignItems: "center" },
-      e(SpinningBLogo, { color: BRAND_COLOR })
-    ),
 
-    // Tagline (no BACKBONE text - the spinning B is the logo)
-    e(Box, { marginTop: 2 }),
-    e(Text, { color: TEXT_SECONDARY }, "AI-Powered Life Operating System"),
+      // Spinning B Logo
+      e(SpinningBLogo, { color: BRAND_COLOR }),
 
-    // Loading indicator
-    e(
-      Box,
-      { marginTop: 3, flexDirection: "row", gap: 1, alignItems: "center" },
-      e(LoadingSpinner, { color: BRAND_COLOR }),
-      e(Text, { color: TEXT_MUTED }, ` ${message}`)
-    ),
-
-    // Bottom spacer
-    e(Box, { flexGrow: 1 }),
-
-    // Footer section
-    showCredits && e(
-      Box,
-      {
-        flexDirection: "column",
-        alignItems: "center",
-        paddingTop: 2,
-        borderStyle: "single",
-        borderColor: "#334155",
-        borderTop: true,
-        borderBottom: false,
-        borderLeft: false,
-        borderRight: false,
-        width: 50
-      },
+      // Tagline
       e(Box, { marginTop: 1 }),
-      e(Text, { color: TEXT_MUTED }, "Created by Frank Frisby"),
+      e(Text, { color: TEXT_SECONDARY }, "AI-Powered Life Operating System"),
+
+      // Loading indicator
       e(
         Box,
-        { flexDirection: "row", gap: 2, marginTop: 1 },
-        e(Text, { color: TEXT_MUTED, dimColor: true }, "Est. 2026"),
-        e(Text, { color: TEXT_MUTED, dimColor: true }, "•"),
-        e(Text, { color: TEXT_MUTED, dimColor: true }, versionString)
+        { marginTop: 2, flexDirection: "row", gap: 1, alignItems: "center" },
+        e(LoadingSpinner, { color: BRAND_COLOR }),
+        e(Text, { color: TEXT_MUTED }, ` ${message}`)
       ),
-      e(Box, { marginTop: 1 }),
-      e(Text, { color: "#475569", dimColor: true }, "franklindfrisby@gmail.com")
+
+      // Version
+      e(Box, { marginTop: 2 }),
+      e(Text, { color: "#475569", dimColor: true }, versionString)
     )
   );
 };

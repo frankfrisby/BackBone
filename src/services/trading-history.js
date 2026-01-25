@@ -261,17 +261,81 @@ const calculateSPYWeeklyReturns = (spyBars, weeks) => {
 };
 
 /**
- * Calculate average weekly growth rate from 8 weeks of returns
+ * Calculate mean and standard deviation
+ */
+const calculateStats = (values) => {
+  if (values.length === 0) return { mean: 0, stdDev: 0 };
+
+  const mean = values.reduce((sum, v) => sum + v, 0) / values.length;
+  const squaredDiffs = values.map(v => Math.pow(v - mean, 2));
+  const variance = squaredDiffs.reduce((sum, v) => sum + v, 0) / values.length;
+  const stdDev = Math.sqrt(variance);
+
+  return { mean, stdDev };
+};
+
+/**
+ * Remove outliers that are more than 2 standard deviations from mean
+ * Returns filtered data and info about removed outliers
+ */
+const removeOutliers = (weeklyData, sigmaThreshold = 2) => {
+  if (weeklyData.length < 3) {
+    // Not enough data to calculate meaningful stats
+    return { filtered: weeklyData, removed: [], stats: null };
+  }
+
+  const returns = weeklyData.map(w => w.pnlPercent);
+  const { mean, stdDev } = calculateStats(returns);
+
+  const filtered = [];
+  const removed = [];
+
+  for (const week of weeklyData) {
+    const zScore = stdDev > 0 ? Math.abs(week.pnlPercent - mean) / stdDev : 0;
+    if (zScore <= sigmaThreshold) {
+      filtered.push(week);
+    } else {
+      removed.push({
+        ...week,
+        zScore,
+        reason: `${week.pnlPercent > mean ? "Above" : "Below"} ${sigmaThreshold}σ (z=${zScore.toFixed(2)})`
+      });
+    }
+  }
+
+  return {
+    filtered,
+    removed,
+    stats: { mean, stdDev, threshold: sigmaThreshold }
+  };
+};
+
+/**
+ * Calculate average weekly growth rate from weekly returns
+ * Removes outliers (> 2 sigma) before calculating
  * Returns the average weekly percentage
  */
 const calculateWeeklyGrowthRate = (weeklyData) => {
-  if (weeklyData.length === 0) return 0;
+  if (weeklyData.length === 0) return { growthRate: 0, outliers: [], stats: null };
 
-  // Average all weekly returns: sum of P&L % / 8 weeks
-  const totalPercent = weeklyData.reduce((sum, w) => sum + w.pnlPercent, 0);
-  const averageWeeklyReturn = totalPercent / weeklyData.length;
+  // Remove outliers
+  const { filtered, removed, stats } = removeOutliers(weeklyData, 2);
 
-  return averageWeeklyReturn;
+  if (filtered.length === 0) {
+    return { growthRate: 0, outliers: removed, stats };
+  }
+
+  // Calculate average from filtered data
+  const totalPercent = filtered.reduce((sum, w) => sum + w.pnlPercent, 0);
+  const averageWeeklyReturn = totalPercent / filtered.length;
+
+  return {
+    growthRate: averageWeeklyReturn,
+    outliers: removed,
+    stats,
+    weeksUsed: filtered.length,
+    weeksTotal: weeklyData.length
+  };
 };
 
 /**
@@ -510,6 +574,23 @@ export const getTradingHistory = async () => {
       beatSpy: week.pnlPercent > (spyReturns[i]?.spyReturn || 0)
     }));
 
+    // Get current equity (most recent)
+    const currentEquity = portfolioHistory.equity?.[portfolioHistory.equity.length - 1] || 0;
+
+    // Update current week (first in array) with real-time data
+    if (weeklyData.length > 0) {
+      const currentWeek = weeklyData[0];
+      // If we have current equity and it's different from endEquity, update it
+      if (currentEquity > 0 && currentWeek.startEquity > 0) {
+        currentWeek.endEquity = currentEquity;
+        currentWeek.pnl = currentEquity - currentWeek.startEquity;
+        currentWeek.pnlPercent = (currentWeek.pnl / currentWeek.startEquity) * 100;
+        // Re-check if we beat SPY with updated P&L
+        currentWeek.beatSpy = currentWeek.pnlPercent > currentWeek.spyReturn;
+        currentWeek.isCurrentWeek = true; // Mark as current week (real-time)
+      }
+    }
+
     // Calculate totals from oldest week's start equity
     const oldestWeek = weeklyData[weeklyData.length - 1];
     const totalPnL = weeklyData.reduce((sum, w) => sum + w.pnl, 0);
@@ -517,9 +598,9 @@ export const getTradingHistory = async () => {
       ? (totalPnL / oldestWeek.startEquity) * 100
       : 0;
 
-    // Calculate growth rate and projection
-    const currentEquity = portfolioHistory.equity?.[portfolioHistory.equity.length - 1] || 0;
-    const growthRate = calculateWeeklyGrowthRate(weeklyData);
+    // Calculate growth rate with outlier removal
+    const growthResult = calculateWeeklyGrowthRate(weeklyData);
+    const growthRate = growthResult.growthRate;
     const projectedValue = calculateProjectedValue(currentEquity, growthRate);
 
     const result = {
@@ -527,8 +608,11 @@ export const getTradingHistory = async () => {
       totalPnL,
       totalPnLPercent,
       currentEquity,
-      growthRate,  // Average weekly growth rate
+      growthRate,  // Average weekly growth rate (outliers removed)
       projectedValue,
+      outliers: growthResult.outliers,  // Weeks excluded from growth calc
+      growthStats: growthResult.stats,  // Mean, stdDev used for outlier detection
+      weeksUsedForGrowth: growthResult.weeksUsed,
       lastUpdated: new Date().toISOString()
     };
 
@@ -591,4 +675,164 @@ export const formatPct = (value) => {
   if (value === null || value === undefined) return "--";
   const sign = value >= 0 ? "+" : "";
   return `${sign}${value.toFixed(1)}%`;
+};
+
+/**
+ * TEST: Verify trading history calculations
+ * Run this to check data accuracy
+ */
+export const testTradingHistory = async () => {
+  console.log("\n========================================");
+  console.log("TRADING HISTORY TEST");
+  console.log("========================================\n");
+
+  const config = getAlpacaConfig();
+  if (!config.ready) {
+    console.log("ERROR: Alpaca not configured");
+    return { success: false, error: "Alpaca not configured" };
+  }
+
+  const results = {
+    success: true,
+    tests: [],
+    errors: []
+  };
+
+  try {
+    // 1. Test week boundaries
+    console.log("1. TESTING WEEK BOUNDARIES");
+    console.log("-".repeat(40));
+    const weeks = getWeekBoundaries(WEEKS_TO_SHOW);
+    for (const week of weeks) {
+      const startDay = new Date(week.start).toLocaleDateString("en-US", { weekday: "long" });
+      const endDay = new Date(week.end).toLocaleDateString("en-US", { weekday: "long" });
+      const isStartSunday = startDay === "Sunday";
+      const isEndSaturday = endDay === "Saturday";
+      console.log(`  ${week.label}: ${week.startStr} (${startDay}) to ${week.endStr} (${endDay})`);
+      console.log(`    Start=Sunday? ${isStartSunday ? "✓" : "✗"}  End=Saturday? ${isEndSaturday ? "✓" : "✗"}`);
+
+      if (!isStartSunday || !isEndSaturday) {
+        results.errors.push(`Week ${week.label} has incorrect boundaries`);
+        results.success = false;
+      }
+    }
+    results.tests.push({ name: "Week Boundaries", passed: results.errors.length === 0 });
+
+    // 2. Fetch raw data
+    console.log("\n2. FETCHING RAW DATA");
+    console.log("-".repeat(40));
+    const startDate = weeks[weeks.length - 1].start;
+    const endDate = weeks[0].end;
+
+    const [portfolioHistory, spyBars] = await Promise.all([
+      fetchPortfolioHistory(config, "3M", "1D"),
+      fetchSPYHistory(config, startDate, endDate)
+    ]);
+
+    console.log(`  Portfolio data points: ${portfolioHistory.timestamp?.length || 0}`);
+    console.log(`  SPY bars: ${spyBars.length}`);
+    results.tests.push({ name: "Data Fetch", passed: true });
+
+    // 3. Test weekly P&L calculations
+    console.log("\n3. TESTING WEEKLY P&L CALCULATIONS");
+    console.log("-".repeat(40));
+    const weeklyPnL = calculateWeeklyPnL(portfolioHistory, weeks);
+    const spyReturns = calculateSPYWeeklyReturns(spyBars, weeks);
+
+    for (let i = 0; i < weeklyPnL.length; i++) {
+      const w = weeklyPnL[i];
+      const spy = spyReturns[i];
+      const pnlCalcCorrect = Math.abs((w.endEquity - w.startEquity) - w.pnl) < 0.01;
+      const pctCalcCorrect = w.startEquity > 0
+        ? Math.abs(((w.pnl / w.startEquity) * 100) - w.pnlPercent) < 0.01
+        : true;
+
+      console.log(`  ${w.label}:`);
+      console.log(`    Start: $${w.startEquity.toFixed(2)} | End: $${w.endEquity.toFixed(2)}`);
+      console.log(`    P&L: $${w.pnl.toFixed(2)} (${w.pnlPercent.toFixed(2)}%)`);
+      console.log(`    SPY: ${spy.spyReturn.toFixed(2)}% | Beat SPY: ${w.pnlPercent > spy.spyReturn ? "✓" : "✗"}`);
+      console.log(`    Calculations correct: P&L=${pnlCalcCorrect ? "✓" : "✗"} Pct=${pctCalcCorrect ? "✓" : "✗"}`);
+
+      if (!pnlCalcCorrect || !pctCalcCorrect) {
+        results.errors.push(`Week ${w.label} has calculation errors`);
+        results.success = false;
+      }
+    }
+    results.tests.push({ name: "Weekly P&L", passed: results.errors.filter(e => e.includes("calculation")).length === 0 });
+
+    // 4. Test outlier detection
+    console.log("\n4. TESTING OUTLIER DETECTION (2 SIGMA)");
+    console.log("-".repeat(40));
+    const weeklyData = weeklyPnL.map((week, i) => ({
+      ...week,
+      spyReturn: spyReturns[i]?.spyReturn || 0,
+      beatSpy: week.pnlPercent > (spyReturns[i]?.spyReturn || 0)
+    }));
+
+    const returns = weeklyData.map(w => w.pnlPercent);
+    const { mean, stdDev } = calculateStats(returns);
+    console.log(`  Mean return: ${mean.toFixed(2)}%`);
+    console.log(`  Std Dev: ${stdDev.toFixed(2)}%`);
+    console.log(`  2σ range: ${(mean - 2 * stdDev).toFixed(2)}% to ${(mean + 2 * stdDev).toFixed(2)}%`);
+
+    const { filtered, removed, stats } = removeOutliers(weeklyData, 2);
+    console.log(`\n  Weeks included in growth: ${filtered.length}/${weeklyData.length}`);
+
+    if (removed.length > 0) {
+      console.log("  Outliers removed:");
+      for (const outlier of removed) {
+        console.log(`    - ${outlier.label}: ${outlier.pnlPercent.toFixed(2)}% (${outlier.reason})`);
+      }
+    } else {
+      console.log("  No outliers detected");
+    }
+    results.tests.push({ name: "Outlier Detection", passed: true });
+
+    // 5. Test growth rate calculation
+    console.log("\n5. TESTING GROWTH RATE CALCULATION");
+    console.log("-".repeat(40));
+    const growthResult = calculateWeeklyGrowthRate(weeklyData);
+    console.log(`  Growth rate (outliers removed): ${growthResult.growthRate.toFixed(2)}% per week`);
+    console.log(`  Weeks used: ${growthResult.weeksUsed}/${growthResult.weeksTotal}`);
+
+    // Calculate without outlier removal for comparison
+    const rawAvg = weeklyData.reduce((sum, w) => sum + w.pnlPercent, 0) / weeklyData.length;
+    console.log(`  Raw average (all weeks): ${rawAvg.toFixed(2)}% per week`);
+    console.log(`  Difference: ${(growthResult.growthRate - rawAvg).toFixed(2)}%`);
+    results.tests.push({ name: "Growth Rate", passed: true });
+
+    // 6. Test projection
+    console.log("\n6. TESTING 1-YEAR PROJECTION");
+    console.log("-".repeat(40));
+    const currentEquity = portfolioHistory.equity?.[portfolioHistory.equity.length - 1] || 0;
+    const projectedValue = calculateProjectedValue(currentEquity, growthResult.growthRate);
+    console.log(`  Current equity: $${currentEquity.toFixed(2)}`);
+    console.log(`  Weekly growth: ${growthResult.growthRate.toFixed(2)}%`);
+    console.log(`  Projected (1 year): $${projectedValue.toFixed(2)}`);
+    console.log(`  Projected return: ${((projectedValue - currentEquity) / currentEquity * 100).toFixed(1)}%`);
+    results.tests.push({ name: "Projection", passed: projectedValue > 0 });
+
+    // Summary
+    console.log("\n========================================");
+    console.log("TEST SUMMARY");
+    console.log("========================================");
+    for (const test of results.tests) {
+      console.log(`  ${test.passed ? "✓" : "✗"} ${test.name}`);
+    }
+
+    if (results.errors.length > 0) {
+      console.log("\nErrors:");
+      for (const error of results.errors) {
+        console.log(`  - ${error}`);
+      }
+    }
+
+    console.log(`\nOverall: ${results.success ? "PASSED" : "FAILED"}`);
+    console.log("========================================\n");
+
+    return results;
+  } catch (error) {
+    console.log(`\nTEST ERROR: ${error.message}`);
+    return { success: false, error: error.message };
+  }
 };

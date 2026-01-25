@@ -69,7 +69,7 @@ import { saveAllMemory } from "./services/memory.js";
 import { getEmailConfig, buildEmailSummary } from "./services/email.js";
 import { getWealthConfig, buildWealthSummary } from "./services/wealth.js";
 import { fetchTickers as fetchYahooTickers, startServer as startYahooServer, isServerRunning } from "./services/yahoo-client.js";
-import { extractLinkedInProfile, saveLinkedInProfile, loadLinkedInProfile, isProfileIncomplete, refreshAndGenerateLinkedInMarkdown } from "./services/linkedin-scraper.js";
+import { extractLinkedInProfile, saveLinkedInProfile, loadLinkedInProfile, isProfileIncomplete, refreshAndGenerateLinkedInMarkdown, generateLinkedInMarkdown } from "./services/linkedin-scraper.js";
 import { getDataFreshnessChecker } from "./services/data-freshness-checker.js";
 import { getGoalsStatus, launchGoalsVoiceApp } from "./services/goals-voice.js";
 import { loadTradingStatus, saveTradingStatus, buildTradingStatusDisplay, recordTradeAttempt, resetTradingStatus } from "./services/trading-status.js";
@@ -158,6 +158,8 @@ import { processAndSaveContext, buildContextForAI } from "./services/conversatio
 import { MENTORS, MENTOR_CATEGORIES, getMentorsByCategory, getDailyWisdom, formatMentorDisplay, getAllMentorsDisplay, getMentorAdvice } from "./services/mentors.js";
 import { generateDailyInsights, generateWeeklyReport, formatInsightsDisplay, formatWeeklyReportDisplay, getQuickStatus } from "./services/insights-engine.js";
 import { processMessageForGoals, getGoalSummary, formatGoalsDisplay, loadGoals } from "./services/goal-extractor.js";
+import { generateGoalsFromData, generateGoalsFromInput, generateDiscoveryQuestions, processDiscoveryAnswers, saveGeneratedGoals, quickGenerateGoals } from "./services/goal-generator.js";
+import { loadUserContextFiles } from "./services/service-utils.js";
 import { getFreshnessReport, getSuggestedActions, runFullDataCheck } from "./services/data-freshness-checker.js";
 import { getTodayHabits, getHabitsSummary, formatHabitsDisplay, addHabit, completeHabit, RECOMMENDED_HABITS } from "./services/habits.js";
 import { sendDailyDigest, sendWeeklyReport, getNotificationStatus, NOTIFICATION_TYPES } from "./services/notifications.js";
@@ -863,6 +865,31 @@ const App = ({ updateConsoleTitle }) => {
   const toolEventActionMapRef = useRef(new Map());
   const toolEventKeysRef = useRef(new Set());
   const [uiClock, setUiClock] = useState(() => Date.now());
+
+  // Recent user queries for conversation display (shows under ENGINE panel)
+  // Each entry: { id, content, expiresAt }
+  const [recentUserQueries, setRecentUserQueries] = useState([]);
+
+  // Calculate display time based on word count (reading + thinking time)
+  // Min 1 minute, max 5 minutes
+  // Formula: ~200 words/min reading + 30 sec thinking time
+  const calculateQueryDisplayTime = useCallback((text) => {
+    const wordCount = text.trim().split(/\s+/).length;
+    const readingTimeSeconds = (wordCount / 200) * 60; // 200 words per minute
+    const thinkingTimeSeconds = 30; // Base thinking time
+    const totalSeconds = readingTimeSeconds + thinkingTimeSeconds;
+    // Clamp between 60 seconds (1 min) and 300 seconds (5 min)
+    return Math.max(60, Math.min(300, totalSeconds)) * 1000; // Return milliseconds
+  }, []);
+
+  // Clean up expired user queries
+  useEffect(() => {
+    const cleanupInterval = setInterval(() => {
+      const now = Date.now();
+      setRecentUserQueries((prev) => prev.filter((q) => q.expiresAt > now));
+    }, 5000); // Check every 5 seconds
+    return () => clearInterval(cleanupInterval);
+  }, []);
 
   // Current AI model tracking for display
   const [currentModelInfo, setCurrentModelInfo] = useState(() => {
@@ -2468,6 +2495,23 @@ Execute this task and provide concrete results.`);
         }
       ]);
 
+      // Add to recent user queries for conversation display
+      const queryId = `query-${Date.now()}`;
+      const displayTime = calculateQueryDisplayTime(userMessage);
+      setRecentUserQueries((prev) => {
+        // Keep only last 2 + new one = 3 max
+        const recent = prev.slice(-2);
+        return [
+          ...recent,
+          {
+            id: queryId,
+            content: userMessage,
+            timestamp: Date.now(),
+            expiresAt: Date.now() + displayTime
+          }
+        ];
+      });
+
       // Extract and save user context from the message
       try {
         const contextResult = processAndSaveContext(userMessage);
@@ -2548,21 +2592,31 @@ Execute this task and provide concrete results.`);
       // Set engine state to thinking
       engineState.setStatus("thinking", "Processing your message...");
 
-      // Build context from current state (includes conversation history for profile building)
+      // Build context from current state AND from data files (LinkedIn, projects, etc.)
       const savedUserContext = buildContextForAI(); // Include previously extracted user context
+      const fileContext = await loadUserContextFiles(); // Load rich context from files
       const context = {
+        // User identity from files
+        user: fileContext.user,
+        linkedIn: fileContext.linkedIn,
+        profile: fileContext.profile,
+        // Live data from state
         portfolio: {
           equity: portfolio.equity,
           cash: portfolio.cash,
           dayPL: portfolio.dayPL,
+          dayPLPercent: portfolio.dayPLPercent,
           positions: portfolio.positions?.slice(0, 5)
         },
-        goals: profile.goals,
+        goals: fileContext.goals || profile.goals,
+        lifeScores: fileContext.lifeScores,
+        projects: fileContext.projects,
         topTickers: tickers.slice(0, 5).map((t) => ({ symbol: t.symbol, score: t.score })),
-        health: ouraHealth?.today || null,
+        health: ouraHealth?.today || ouraHealth || null,
         education: profile.education || null,
         userContext: savedUserContext, // Previously learned user information
-        recentMessages: messages.slice(-10).map(m => ({ role: m.role, content: m.content.slice(0, 200) })) // Include recent conversation for context
+        conversationHistory: fileContext.conversationHistory,
+        recentMessages: messages.slice(-5).map(m => ({ role: m.role, content: m.content.slice(0, 300) }))
       };
 
       // Use Claude streaming if available, otherwise use multi-ai (OpenAI fallback)
@@ -2648,6 +2702,28 @@ Execute this task and provide concrete results.`);
           conversationTracker.record(userMessage, result.response, {
             category: conversationTracker.categorizeMessage(userMessage)
           });
+
+          // Check if user is expressing goals/priorities and offer to create goals
+          const goalIndicators = [
+            /\bi want to\b/i, /\bi need to\b/i, /\bi wish\b/i, /\bmy goal is\b/i,
+            /\bwhat matters (to me|most)\b/i, /\bi care about\b/i, /\bi'm trying to\b/i,
+            /\bi hope to\b/i, /\bi'd like to\b/i, /\bi want\b/i, /\bimportant to me\b/i
+          ];
+          const isGoalExpression = goalIndicators.some(pattern => pattern.test(userMessage));
+          const goalTracker = getGoalTracker();
+          const hasNoGoals = goalTracker.getActive().length === 0;
+
+          if (isGoalExpression && hasNoGoals && userMessage.length > 20) {
+            // User is expressing goals/priorities and has no goals set - offer to create them
+            setTimeout(() => {
+              setMessages((prev) => [...prev, {
+                role: "assistant",
+                content: "I notice you're sharing what's important to you. Would you like me to create trackable goals from this? Use: /goals ai " + userMessage.slice(0, 50) + "...",
+                timestamp: new Date(),
+                isSystemHint: true
+              }]);
+            }, 1500);
+          }
         } catch (error) {
           setMessages((prev) => [
             ...prev,
@@ -3159,6 +3235,10 @@ Execute this task and provide concrete results.`);
             // Update profile sections with LinkedIn data
             updateFromLinkedIn(linkedInData);
 
+            // Generate linkedin.md file using LLM
+            const mdResult = await generateLinkedInMarkdown(result);
+            const mdStatus = mdResult.success ? "linkedin.md generated" : "markdown generation failed";
+
             // Build readable profile summary
             const p = result.profile || {};
             const profileSummary = [
@@ -3177,7 +3257,7 @@ Execute this task and provide concrete results.`);
               ...prev,
               {
                 role: "assistant",
-                content: `LinkedIn profile captured!\n\n${profileSummary}\n\nData saved. View with /profile or /profile general`,
+                content: `LinkedIn profile captured!\n\n${profileSummary}\n\n${mdStatus}\n\nData saved. View with /profile or /profile general`,
                 timestamp: new Date()
               }
             ]);
@@ -4269,6 +4349,133 @@ Folder: ${result.action.id}`,
         } else {
           setLastAction("Usage: /goals set startups family");
         }
+        return;
+      }
+
+      // /goals generate - AI-powered goal generation from connected data
+      if (resolved === "/goals generate" || resolved === "/goals auto") {
+        setIsProcessing(true);
+        engineState.setStatus("thinking", "Analyzing your data to generate goals...");
+        setMessages((prev) => [...prev, {
+          role: "assistant",
+          content: "Analyzing your connected data to generate personalized goals...",
+          timestamp: new Date()
+        }]);
+
+        try {
+          const result = await generateGoalsFromData();
+          if (result.success && result.goals.length > 0) {
+            const saved = saveGeneratedGoals(result.goals);
+            let content = `Generated ${result.goals.length} goals based on your data (${result.sources.join(", ")}):\n\n`;
+            result.goals.forEach((g, i) => {
+              content += `${i + 1}. ${g.title}\n   Category: ${g.category} | Priority: ${g.priority}\n   ${g.rationale}\n\n`;
+            });
+            content += `${result.summary}\n\n${saved.message}`;
+            setMessages((prev) => [...prev, { role: "assistant", content, timestamp: new Date() }]);
+            setLastAction(`Generated ${result.goals.length} goals`);
+          } else {
+            setMessages((prev) => [...prev, {
+              role: "assistant",
+              content: result.error || "Could not generate goals. Try connecting more data sources (portfolio, health, LinkedIn).",
+              timestamp: new Date()
+            }]);
+            setLastAction("Goal generation failed");
+          }
+        } catch (error) {
+          setMessages((prev) => [...prev, {
+            role: "assistant",
+            content: `Error generating goals: ${error.message}`,
+            timestamp: new Date()
+          }]);
+        }
+        setIsProcessing(false);
+        engineState.setStatus("idle");
+        return;
+      }
+
+      // /goals discover - Start a discovery conversation to help articulate goals
+      if (resolved === "/goals discover" || resolved === "/goals help") {
+        setIsProcessing(true);
+        engineState.setStatus("thinking", "Preparing discovery questions...");
+
+        try {
+          const result = await generateDiscoveryQuestions();
+          if (result.success) {
+            let content = `${result.intro}\n\n`;
+            content += "Answer these questions to help me understand what matters most to you:\n\n";
+            result.questions.forEach((q, i) => {
+              content += `${i + 1}. ${q.question}\n`;
+            });
+            content += "\nType your answers naturally, or use: /goals ai <your answer>";
+            setMessages((prev) => [...prev, { role: "assistant", content, timestamp: new Date() }]);
+            setLastAction("Discovery questions ready");
+          } else {
+            setMessages((prev) => [...prev, {
+              role: "assistant",
+              content: "Default questions: What would you do if money wasn't a concern? What aspect of your health would you most like to improve? Who are the most important people in your life?",
+              timestamp: new Date()
+            }]);
+          }
+        } catch (error) {
+          setMessages((prev) => [...prev, {
+            role: "assistant",
+            content: `Error: ${error.message}`,
+            timestamp: new Date()
+          }]);
+        }
+        setIsProcessing(false);
+        engineState.setStatus("idle");
+        return;
+      }
+
+      // /goals ai <text> - Generate goals from user's description of what matters
+      if (resolved.startsWith("/goals ai ")) {
+        const userInput = resolved.replace("/goals ai ", "").trim();
+        if (userInput.length < 10) {
+          setMessages((prev) => [...prev, {
+            role: "assistant",
+            content: "Please describe what matters to you in more detail.\n\nExample: /goals ai I want to build wealth, improve my health, and spend more time with my family",
+            timestamp: new Date()
+          }]);
+          return;
+        }
+
+        setIsProcessing(true);
+        engineState.setStatus("thinking", "Creating goals from your priorities...");
+        setMessages((prev) => [...prev, {
+          role: "user",
+          content: userInput,
+          timestamp: new Date()
+        }]);
+
+        try {
+          const result = await generateGoalsFromInput(userInput);
+          if (result.success && result.goals.length > 0) {
+            const saved = saveGeneratedGoals(result.goals);
+            let content = `${result.acknowledgment}\n\nCreated ${result.goals.length} goals:\n\n`;
+            result.goals.forEach((g, i) => {
+              content += `${i + 1}. ${g.title}\n   ${g.category} - ${g.rationale}\n\n`;
+            });
+            content += saved.message;
+            setMessages((prev) => [...prev, { role: "assistant", content, timestamp: new Date() }]);
+            setLastAction(`Created ${result.goals.length} goals from your input`);
+          } else {
+            setMessages((prev) => [...prev, {
+              role: "assistant",
+              content: result.error || "Could not generate goals from your input. Please try being more specific.",
+              timestamp: new Date()
+            }]);
+          }
+        } catch (error) {
+          setMessages((prev) => [...prev, {
+            role: "assistant",
+            content: `Error: ${error.message}`,
+            timestamp: new Date()
+          }]);
+        }
+        setIsProcessing(false);
+        engineState.setStatus("idle");
+        return;
       }
 
       // /data - Data scheduler commands
@@ -5882,8 +6089,15 @@ Folder: ${result.action.id}`,
                 )
               : e(Text, { color: "#ef4444", bold: true }, "OFFLINE")
           ),
-          // Right: User name
-          e(Text, { color: "#94a3b8" }, firebaseUserDisplay ? firebaseUserDisplay.split(" ")[0] : "")
+          // Right: User name and profession from LinkedIn
+          e(
+            Box,
+            { flexDirection: "row", gap: 1 },
+            // User name (from LinkedIn first, then Firebase)
+            e(Text, { color: "#f59e0b", bold: true }, linkedInProfile?.name?.split(" ")[0] || firebaseUserDisplay?.split(" ")[0] || ""),
+            // Profession/headline from LinkedIn
+            linkedInProfile?.headline && e(Text, { color: "#64748b" }, `· ${linkedInProfile.headline.split(/\s+at\s+|\s*[|,]\s*/i)[0]?.slice(0, 30)}`)
+          )
         ),
         // Separator line below header - dark gray, full width
         e(Text, { color: "#1e293b" }, "─".repeat(terminalWidth > 0 ? terminalWidth : 80))
@@ -5943,6 +6157,39 @@ Folder: ${result.action.id}`,
           Box,
           { flexDirection: "column", flexGrow: 1, marginTop: 1 },
           e(AgentActivityPanel, { overlayHeader: false, compact: true })
+        ),
+
+        // CONVERSATION DISPLAY - Shows recent messages and AI responses (fixed height to preserve header)
+        (messages.length > 0 || isProcessing) && e(
+          Box,
+          { flexDirection: "column", marginTop: 1, paddingX: 1, borderStyle: "round", borderColor: "#0f172a", height: 6, overflow: "hidden" },
+          e(Text, { color: "#475569", dimColor: true }, "Chat:"),
+          // Show last 2 messages - truncate to prevent overflow
+          ...messages.slice(-2).map((msg, i) => {
+            const isUser = msg.role === "user";
+            // Truncate messages to ~100 chars to fit in fixed height
+            const truncated = msg.content.length > 100 ? msg.content.slice(0, 97) + "..." : msg.content;
+            return e(
+              Box,
+              { key: `msg-${i}-${msg.timestamp}`, flexDirection: "row" },
+              e(Text, { color: isUser ? "#f59e0b" : "#22c55e", bold: true }, isUser ? "You: " : "AI: "),
+              e(Text, { color: isUser ? "#94a3b8" : "#e2e8f0" }, truncated)
+            );
+          }),
+          // Show streaming response if processing (truncated)
+          isProcessing && streamingText && e(
+            Box,
+            { flexDirection: "row" },
+            e(Text, { color: "#22c55e", bold: true }, "AI: "),
+            e(Text, { color: "#a3e635" }, streamingText.slice(-80) || "Thinking...")
+          ),
+          // Show loading indicator if processing but no streaming text yet
+          isProcessing && !streamingText && e(
+            Box,
+            { flexDirection: "row", gap: 1 },
+            e(Text, { color: "#22c55e", bold: true }, "AI:"),
+            e(Text, { color: "#64748b" }, "Thinking...")
+          )
         ),
 
         // PORTFOLIO SUMMARY - One line with equity, day %, top 2 positions

@@ -34,7 +34,7 @@ const buildMatches = (input, commands) => {
  * - displayValue: React state for rendering (synced from ref)
  * - Uses Ink's useInput (proper integration, no conflicts)
  */
-const ChatPanelBase = ({ commands, onSubmit, onTypingChange, modelInfo }) => {
+const ChatPanelBase = ({ commands, onSubmit, onTypingChange, modelInfo, compact = false }) => {
   // The actual input buffer - synchronous, source of truth
   const inputRef = useRef("");
 
@@ -42,16 +42,7 @@ const ChatPanelBase = ({ commands, onSubmit, onTypingChange, modelInfo }) => {
   const [displayValue, setDisplayValue] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
 
-  // Blinking cursor state
-  const [cursorVisible, setCursorVisible] = useState(true);
-
-  // Blink the cursor
-  useEffect(() => {
-    const blinkInterval = setInterval(() => {
-      setCursorVisible(prev => !prev);
-    }, 530);
-    return () => clearInterval(blinkInterval);
-  }, []);
+  // Static cursor (no blink) to avoid global re-renders/flicker
 
   // Callback refs to avoid stale closures
   const onSubmitRef = useRef(onSubmit);
@@ -198,6 +189,30 @@ const ChatPanelBase = ({ commands, onSubmit, onTypingChange, modelInfo }) => {
   const promptColor = isCommand ? "#f59e0b" : "#22c55e";
   const isEmpty = displayValue.length === 0;
   const cursorColor = isCommand ? "#f59e0b" : "#3b82f6";
+  const modelLabel = modelInfo?.displayName
+    || modelInfo?.shortNameWithSource
+    || modelInfo?.shortName
+    || modelInfo?.name
+    || "GPT-5.2";
+
+  // Compact mode: minimal input only
+  if (compact) {
+    return e(
+      Box,
+      {
+        flexDirection: "row",
+        borderStyle: "round",
+        borderColor,
+        paddingX: 1,
+        height: 1
+      },
+      e(Text, { color: promptColor, bold: true }, isCommand ? "⟩ " : "› "),
+      isEmpty
+        ? e(Text, { color: "#64748b" }, 'Ask anything or type / for commands')
+        : e(Text, { color: "#f8fafc" }, displayValue),
+      e(Text, { color: "#ffffff" }, "▌")
+    );
+  }
 
   return e(
     Box,
@@ -239,7 +254,7 @@ const ChatPanelBase = ({ commands, onSubmit, onTypingChange, modelInfo }) => {
       isEmpty
         ? e(Text, { color: "#64748b" }, 'Ask anything... "Fix broken tests" or type / for commands')
         : e(Text, { color: "#f8fafc" }, displayValue),
-      e(Text, { color: cursorVisible ? "#ffffff" : "transparent" }, "▌")
+      e(Text, { color: "#ffffff" }, "▌")
     ),
     // Character count for long inputs
     displayValue.length > 50 && e(
@@ -263,7 +278,7 @@ const ChatPanelBase = ({ commands, onSubmit, onTypingChange, modelInfo }) => {
         Box,
         { flexDirection: "row", gap: 1 },
         e(Text, { color: "#475569" }, "Model:"),
-        e(Text, { color: modelInfo.color || "#10a37f", bold: true }, `${modelInfo.icon || "◇"} ${modelInfo.shortName || modelInfo.name || "GPT-5.2"}`),
+        e(Text, { color: modelInfo.color || "#10a37f", bold: true }, `${modelInfo.icon || "◇"} ${modelLabel}`),
         modelInfo.taskType && e(Text, { color: "#334155" }, "│"),
         modelInfo.taskType && e(Text, { color: "#64748b" }, modelInfo.taskType)
       ),

@@ -133,12 +133,19 @@ export class GoalTracker extends EventEmitter {
         const data = JSON.parse(fs.readFileSync(GOALS_PATH, "utf-8"));
         this.goals = data.goals || [];
       } else {
-        // No default goals - user must set their own via /goals
         this.goals = [];
+      }
+      // Auto-initialize with default goals if none exist
+      if (this.goals.length === 0) {
+        console.log("[GoalTracker] No goals found, initializing defaults...");
+        this.goals = getDefaultGoals();
+        this.save();
+        this.emit("initialized", this.goals);
       }
     } catch (error) {
       console.error("Failed to load goals:", error.message);
-      this.goals = [];
+      this.goals = getDefaultGoals(); // Fallback to defaults on error
+      this.save();
     }
   }
 

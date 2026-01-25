@@ -395,3 +395,182 @@ export const saveLinkedInProfile = (data) => {
   fs.writeFileSync(PROFILE_PATH, JSON.stringify(data, null, 2));
   return { success: true, path: PROFILE_PATH };
 };
+
+/**
+ * Check if profile data is incomplete (all fields null)
+ */
+export const isProfileIncomplete = (profile) => {
+  if (!profile || !profile.success) return true;
+  const p = profile.profile || {};
+  return !p.name && !p.headline && !p.location && !p.about && !p.currentTitle;
+};
+
+/**
+ * Refresh LinkedIn profile data by analyzing existing screenshot
+ * Used when we have a screenshot but DOM extraction failed
+ */
+export const refreshLinkedInFromScreenshot = async () => {
+  const profile = loadLinkedInProfile();
+
+  if (!profile || !profile.screenshotPath) {
+    return { success: false, error: "No screenshot available" };
+  }
+
+  if (!fs.existsSync(profile.screenshotPath)) {
+    return { success: false, error: "Screenshot file not found" };
+  }
+
+  // Analyze with GPT-4o
+  const analysis = await analyzeWithGPT4o(profile.screenshotPath);
+
+  if (!analysis.success) {
+    return { success: false, error: analysis.error };
+  }
+
+  // Merge analysis with existing profile
+  const updatedProfile = {
+    ...profile,
+    profile: {
+      ...profile.profile,
+      ...analysis.profile
+    },
+    gpt4oAnalysis: analysis.profile,
+    refreshedAt: new Date().toISOString()
+  };
+
+  // Save updated profile
+  fs.writeFileSync(PROFILE_PATH, JSON.stringify(updatedProfile, null, 2));
+
+  return { success: true, profile: updatedProfile };
+};
+
+/**
+ * Generate linkedin.md file from profile data using LLM
+ */
+export const generateLinkedInMarkdown = async (profile) => {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    return { success: false, error: "OPENAI_API_KEY not set" };
+  }
+
+  const profileData = profile?.profile || profile?.gpt4oAnalysis || {};
+  const profileUrl = profile?.profileUrl || "";
+
+  // Build profile summary for LLM
+  const profileSummary = JSON.stringify({
+    url: profileUrl,
+    name: profileData.name,
+    headline: profileData.headline,
+    location: profileData.location,
+    currentRole: profileData.currentRole,
+    currentCompany: profileData.currentCompany,
+    about: profileData.about,
+    isStudent: profileData.isStudent,
+    education: profileData.education,
+    skills: profileData.skills,
+    summary: profileData.summary,
+    capturedAt: profile?.capturedAt
+  }, null, 2);
+
+  try {
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey}`
+      },
+      body: JSON.stringify({
+        model: "gpt-4o",
+        messages: [
+          {
+            role: "system",
+            content: `You are a professional profile writer. Convert the provided LinkedIn profile data into a clean, well-formatted Markdown document. Include all available information organized into clear sections.`
+          },
+          {
+            role: "user",
+            content: `Convert this LinkedIn profile data into a professional Markdown document:
+
+${profileSummary}
+
+Create a clean markdown document with these sections (only include sections with data):
+- Header with name and headline
+- Profile URL
+- Location
+- Current Position
+- About/Summary
+- Education
+- Skills
+- Last Updated timestamp
+
+Use proper markdown formatting with headers, bullet points, and emphasis where appropriate. Make it readable and professional.`
+          }
+        ],
+        max_tokens: 2000,
+        temperature: 0.3
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error(`OpenAI error: ${response.status}`);
+    }
+
+    const data = await response.json();
+    const markdown = data.choices?.[0]?.message?.content || "";
+
+    // Save to linkedin.md
+    const mdPath = path.join(DATA_DIR, "linkedin.md");
+    fs.writeFileSync(mdPath, markdown, "utf-8");
+
+    return { success: true, path: mdPath, content: markdown };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+};
+
+/**
+ * Full LinkedIn refresh and markdown generation
+ * Called on app load if LinkedIn is connected but data is incomplete
+ */
+export const refreshAndGenerateLinkedInMarkdown = async () => {
+  console.log("Checking LinkedIn profile data...");
+
+  const profile = loadLinkedInProfile();
+
+  // Check if we need to refresh
+  if (!profile || !profile.success) {
+    return { success: false, error: "No LinkedIn profile saved" };
+  }
+
+  let currentProfile = profile;
+
+  // If profile data is incomplete, try to refresh from screenshot
+  if (isProfileIncomplete(profile)) {
+    console.log("Profile data incomplete, analyzing screenshot...");
+    const refreshResult = await refreshLinkedInFromScreenshot();
+    if (refreshResult.success) {
+      currentProfile = refreshResult.profile;
+      console.log("Profile data refreshed from screenshot");
+    } else {
+      console.log(`Screenshot analysis failed: ${refreshResult.error}`);
+    }
+  }
+
+  // Generate markdown if we have any profile data
+  const hasData = currentProfile?.profile?.name ||
+                  currentProfile?.gpt4oAnalysis?.name ||
+                  currentProfile?.profileUrl;
+
+  if (hasData) {
+    console.log("Generating linkedin.md...");
+    const mdResult = await generateLinkedInMarkdown(currentProfile);
+    if (mdResult.success) {
+      console.log(`LinkedIn markdown saved to ${mdResult.path}`);
+      return { success: true, profile: currentProfile, markdownPath: mdResult.path };
+    } else {
+      console.log(`Markdown generation failed: ${mdResult.error}`);
+      return { success: false, error: mdResult.error, profile: currentProfile };
+    }
+  }
+
+  return { success: false, error: "No profile data available", profile: currentProfile };
+};

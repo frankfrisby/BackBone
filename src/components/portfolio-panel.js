@@ -1,6 +1,5 @@
 import React, { memo } from "react";
 import { Box, Text } from "ink";
-import { getTickerIcon } from "../data/tickers.js";
 
 const e = React.createElement;
 
@@ -173,13 +172,11 @@ const ScoreIndicator = ({ score }) => {
 
 /**
  * Single position row with clean formatting
- * Column widths: SYM(6) QTY(4) VALUE(7) TODAY(8) P/L(8) ACTION(11)
+ * Column widths: NUM(2) SYM(5) QTY(4) VALUE(7) TODAY(8) P/L(8) ACTION(11)
  */
-const PositionRow = ({ position, score, privateMode, isFirst }) => {
-  const icon = getTickerIcon(position.symbol);
-
-  // Today's change - use dayChangePercent first, otherwise calculate from price change
-  const todayPercent = position.dayChangePercent ?? position.todayChangePercent ?? 0;
+const PositionRow = ({ position, score, privateMode, isFirst, index = 0 }) => {
+  // Today's change - use todayChange from Alpaca data (unrealized_intraday_pl based)
+  const todayPercent = position.todayChange ?? position.dayChangePercent ?? position.todayChangePercent ?? 0;
 
   // Total position PnL - use unrealizedPlPercent or calculate from cost basis
   const totalPercent = position.unrealizedPlPercent ?? position.totalChangePercent ?? position.pnlPercent ?? 0;
@@ -192,7 +189,9 @@ const PositionRow = ({ position, score, privateMode, isFirst }) => {
     (position.shares * parseFloat(String(position.lastPrice || 0).replace(/[$,]/g, "")));
 
   // Format values with consistent widths
-  const symDisplay = (icon + position.symbol).padEnd(6);
+  // Number (1-based index) with space, then ticker padded to 5 chars
+  const numDisplay = String(index + 1).padStart(2);
+  const symDisplay = position.symbol.padEnd(5);
   const qtyDisplay = (privateMode ? "••" : String(position.shares || 0)).padStart(4);
   const valDisplay = formatCompact(marketValue, privateMode).padStart(7);
   const todayDisplay = formatPct(todayPercent, privateMode).padStart(8);
@@ -205,7 +204,11 @@ const PositionRow = ({ position, score, privateMode, isFirst }) => {
       paddingY: 0,
       backgroundColor: isFirst ? "#1a2e1a" : undefined
     },
-    // Symbol (6 chars)
+    // Number (2 chars)
+    e(Text, { color: COLORS.dim }, numDisplay),
+    // Space between number and symbol
+    e(Text, null, " "),
+    // Symbol (5 chars, padded)
     e(Text, { color: COLORS.primary, bold: true }, symDisplay),
     // Shares (4 chars)
     e(Text, { color: COLORS.muted }, qtyDisplay),
@@ -287,13 +290,15 @@ const DayPL = ({ portfolio, privateMode }) => {
 
 /**
  * Positions header row
- * Column widths must match PositionRow: SYM(6) QTY(4) VALUE(7) TODAY(8) P/L(8) ACTION(11)
+ * Column widths must match PositionRow: NUM(2) SPACE(1) SYM(5) QTY(4) VALUE(7) TODAY(8) P/L(8) ACTION(11)
  */
 const PositionsHeader = () => {
   return e(
     Box,
     { flexDirection: "row", marginBottom: 0 },
-    e(Text, { color: COLORS.dim }, "SYM   "),      // 6 chars
+    e(Text, { color: COLORS.dim }, "  "),          // 2 chars (number column)
+    e(Text, { color: COLORS.dim }, " "),           // 1 char space
+    e(Text, { color: COLORS.dim }, "SYM  "),       // 5 chars
     e(Text, { color: COLORS.dim }, " QTY"),        // 4 chars
     e(Text, { color: COLORS.dim }, "  VALUE"),     // 7 chars
     e(Text, { color: COLORS.dim }, "   TODAY"),    // 8 chars
@@ -439,8 +444,8 @@ const PortfolioPanelBase = ({
         ),
         // Header row
         e(PositionsHeader),
-          // Separator (matches total column width: 6+4+7+8+8+1+10 = 44)
-          e(Text, { color: COLORS.border }, "\u2500".repeat(44)),
+          // Separator (matches total column width: 2+1+5+4+7+8+8+1+10 = 46)
+          e(Text, { color: COLORS.border }, "\u2500".repeat(46)),
           // Position rows (limit to 6)
           ...sortedPositions.slice(0, 6).map((position, index) =>
             e(PositionRow, {
@@ -448,7 +453,8 @@ const PortfolioPanelBase = ({
               position,
               score: tickerScores[position.symbol],
               privateMode,
-              isFirst: index === 0
+              isFirst: index === 0,
+              index
             })
           ),
           // Show more indicator if > 6 positions
@@ -468,7 +474,7 @@ const PortfolioPanelBase = ({
     (lastUpdatedAgo || nextTradeTime) && e(
       Box,
       { flexDirection: "column", marginTop: 1 },
-      e(Text, { color: COLORS.border }, "\u2500".repeat(44)),
+      e(Text, { color: COLORS.border }, "\u2500".repeat(46)),
       e(
         Box,
         { flexDirection: "row", justifyContent: "space-between" },

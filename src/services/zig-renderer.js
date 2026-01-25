@@ -39,6 +39,7 @@ class ZigRenderer extends EventEmitter {
     this.height = this.stdout.rows || 24;
     this.targetFPS = options.fps || 30;
     this.frameInterval = 1000 / this.targetFPS;
+    this.silent = options.silent === true;
 
     this.useZig = false;
     this.zigLib = null;
@@ -80,20 +81,26 @@ class ZigRenderer extends EventEmitter {
         try {
           // Try to load with node-ffi-napi or similar
           // For now, we'll note that Zig is available but use JS
-          console.log(`[ZigRenderer] Found Zig library at: ${libPath}`);
-          console.log(`[ZigRenderer] Native loading requires node-ffi-napi`);
+          if (!this.silent) {
+            console.log(`[ZigRenderer] Found Zig library at: ${libPath}`);
+            console.log(`[ZigRenderer] Native loading requires node-ffi-napi`);
+          }
           // this.useZig = true;
           // this.zigLib = loadZigLibrary(libPath);
           break;
         } catch (err) {
-          console.log(`[ZigRenderer] Could not load Zig library: ${err.message}`);
+          if (!this.silent) {
+            console.log(`[ZigRenderer] Could not load Zig library: ${err.message}`);
+          }
         }
       }
     }
 
     if (!this.useZig) {
       // Use optimized JavaScript fallback
-      console.log("[ZigRenderer] Using optimized JavaScript renderer");
+      if (!this.silent) {
+        console.log("[ZigRenderer] Using optimized JavaScript renderer");
+      }
     }
   }
 

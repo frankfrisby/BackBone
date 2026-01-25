@@ -27,84 +27,71 @@ const resizeWindowsTerminal = async (cols, rows, options = {}) => {
   const { center = false, maximize = false, width = 2200, height = 1100 } = options;
 
   return new Promise((resolve) => {
-    // Build PowerShell script based on options
-    let psScript = "";
-
-    if (maximize) {
-      // Maximize the window using SendKeys or window API
-      psScript = `
-        Add-Type @"
-          using System;
-          using System.Runtime.InteropServices;
-          public class Win32 {
-            [DllImport("user32.dll")]
-            public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-            [DllImport("kernel32.dll")]
-            public static extern IntPtr GetConsoleWindow();
-          }
-"@
-        try {
-          $hwnd = [Win32]::GetConsoleWindow();
-          [Win32]::ShowWindow($hwnd, 3);
-          $host.UI.RawUI.WindowSize = New-Object System.Management.Automation.Host.Size(${cols}, ${rows});
-          $host.UI.RawUI.BufferSize = New-Object System.Management.Automation.Host.Size(${cols}, ${rows + 500});
-        } catch {}
-      `;
-    } else if (center) {
-      // Center the window on the primary monitor
-      psScript = `
-        Add-Type @"
-          using System;
-          using System.Runtime.InteropServices;
-          public class Win32 {
-            [DllImport("user32.dll")]
-            public static extern bool MoveWindow(IntPtr hWnd, int X, int Y, int nWidth, int nHeight, bool bRepaint);
-            [DllImport("user32.dll")]
-            public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
-            [DllImport("kernel32.dll")]
-            public static extern IntPtr GetConsoleWindow();
-            [DllImport("user32.dll")]
-            public static extern int GetSystemMetrics(int nIndex);
-            public struct RECT { public int Left, Top, Right, Bottom; }
-          }
-"@
-        try {
-          $hwnd = [Win32]::GetConsoleWindow();
-          $screenWidth = [Win32]::GetSystemMetrics(0);
-          $screenHeight = [Win32]::GetSystemMetrics(1);
-          $winWidth = ${width};
-          $winHeight = ${height};
-          $x = [Math]::Max(0, ($screenWidth - $winWidth) / 2);
-          $y = [Math]::Max(0, ($screenHeight - $winHeight) / 2);
-          [Win32]::MoveWindow($hwnd, $x, $y, $winWidth, $winHeight, $true);
-          $host.UI.RawUI.WindowSize = New-Object System.Management.Automation.Host.Size(${cols}, ${rows});
-          $host.UI.RawUI.BufferSize = New-Object System.Management.Automation.Host.Size(${cols}, ${rows + 500});
-        } catch {}
-      `;
-    } else {
-      // Just resize
-      psScript = `
-        try {
-          $host.UI.RawUI.WindowSize = New-Object System.Management.Automation.Host.Size(${cols}, ${rows});
-          $host.UI.RawUI.BufferSize = New-Object System.Management.Automation.Host.Size(${cols}, ${rows + 500});
-        } catch {}
-      `;
-    }
+    // Detect if running in Windows Terminal (has WT_SESSION env var)
+    const isWindowsTerminal = !!process.env.WT_SESSION;
 
     const runResize = () => {
-      // Use ANSI escape sequences for terminal resize
+      // Method 1: ANSI escape sequences (works with Windows Terminal)
       process.stdout.write(`\x1b[8;${rows};${cols}t`);
-      process.stdout.write(`\x1b[4;${height};${width}t`);
-      // Run PowerShell for Windows-specific positioning
-      exec(`powershell -NoProfile -Command "${psScript.replace(/\n/g, " ").replace(/"/g, '\\"')}"`, () => {});
+
+      if (maximize) {
+        // For maximize, use pixel-based ANSI sequence with large values
+        // This effectively maximizes by requesting a size larger than the screen
+        process.stdout.write(`\x1b[4;9999;9999t`);
+
+        // Also try PowerShell to maximize the window
+        const maximizeScript = `
+          Add-Type -Name Win -Namespace Native -MemberDefinition '
+            [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+            [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+          ';
+          $hwnd = [Native.Win]::GetForegroundWindow();
+          [Native.Win]::ShowWindow($hwnd, 3)
+        `.replace(/\n/g, " ");
+
+        exec(`powershell -NoProfile -ExecutionPolicy Bypass -Command "${maximizeScript}"`, { windowsHide: true }, () => {});
+      } else if (center) {
+        // Set specific pixel size for centered window
+        process.stdout.write(`\x1b[4;${height};${width}t`);
+
+        // Use PowerShell to center the window
+        const centerScript = `
+          Add-Type -Name Win -Namespace Native -MemberDefinition '
+            [DllImport("user32.dll")] public static extern bool MoveWindow(IntPtr hWnd, int X, int Y, int W, int H, bool repaint);
+            [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+            [DllImport("user32.dll")] public static extern int GetSystemMetrics(int n);
+          ';
+          $hwnd = [Native.Win]::GetForegroundWindow();
+          $sw = [Native.Win]::GetSystemMetrics(0);
+          $sh = [Native.Win]::GetSystemMetrics(1);
+          $x = [Math]::Max(0, ($sw - ${width}) / 2);
+          $y = [Math]::Max(0, ($sh - ${height}) / 2);
+          [Native.Win]::MoveWindow($hwnd, $x, $y, ${width}, ${height}, $true)
+        `.replace(/\n/g, " ");
+
+        exec(`powershell -NoProfile -ExecutionPolicy Bypass -Command "${centerScript}"`, { windowsHide: true }, () => {});
+      } else {
+        // Just set pixel size
+        process.stdout.write(`\x1b[4;${height};${width}t`);
+      }
+
+      // Method 2: For legacy console, also use mode con (doesn't hurt)
+      if (!isWindowsTerminal) {
+        exec(`mode con: cols=${cols} lines=${rows}`, { windowsHide: true }, () => {});
+      }
     };
 
-    const delays = [0, 500, 1100, 1900];
+    // Run resize with delays to ensure it takes effect
+    const delays = [0, 300, 800];
     delays.forEach((delay, index) => {
       setTimeout(() => {
         runResize();
         if (index === delays.length - 1) {
-          resolve(true);
+          // Emit resize event to notify the app
+          setTimeout(() => {
+            process.stdout.emit("resize");
+            resolve(true);
+          }, 200);
         }
       }, delay);
     });

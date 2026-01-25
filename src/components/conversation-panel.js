@@ -48,7 +48,7 @@ const AIMessage = ({ message, timestamp, modelInfo }) => {
       { flexDirection: "row", gap: 1, marginBottom: 0 },
       e(Text, { color: "#ffffff" }, "●"),
       e(Text, { color: "#22c55e", bold: true }, "Backbone"),
-      modelInfo && e(Text, { color: "#475569", dimColor: true }, `(${modelInfo.shortName || modelInfo.name || "AI"})`),
+      modelInfo && e(Text, { color: "#475569", dimColor: true }, `(${modelInfo.displayName || modelInfo.shortNameWithSource || modelInfo.shortName || modelInfo.name || "AI"})`),
       e(Text, { color: "#475569", dimColor: true }, formatTimestamp(timestamp))
     ),
     e(

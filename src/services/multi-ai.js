@@ -228,21 +228,81 @@ const getSystemPrompt = (context, taskType) => {
     return context.systemPrompt;
   }
 
-  const basePrompt = `You are BACKBONE, an AI life operating system assistant. You help the user manage their life across domains: finance, health, career, education, and personal growth.
+  // Get user name from context
+  const userName = context.user?.displayName?.split(" ")[0] ||
+                   context.linkedIn?.details?.name?.split(" ")[0] ||
+                   context.profile?.name?.split(" ")[0] ||
+                   "User";
 
-Current context:
-- Portfolio: ${JSON.stringify(context.portfolio || "Not connected")}
-- Health: ${JSON.stringify(context.health || "Not connected")}
-- Goals: ${JSON.stringify(context.goals || [])}
-- Education: ${JSON.stringify(context.education || "Not detected")}
+  // Build rich context summary
+  let contextSummary = "";
 
-Be concise, actionable, and honest. Focus on what matters most.`;
+  // LinkedIn/Profile info
+  if (context.linkedIn?.summary) {
+    contextSummary += `\n\nUSER PROFILE:\n${context.linkedIn.summary.slice(0, 800)}`;
+  } else if (context.linkedIn?.details) {
+    const li = context.linkedIn.details;
+    contextSummary += `\n\nUSER: ${li.name || userName}`;
+    if (li.headline) contextSummary += ` - ${li.headline}`;
+    if (li.currentRole) contextSummary += `\nRole: ${li.currentRole} at ${li.currentCompany || "Unknown"}`;
+  }
+
+  // Portfolio
+  if (context.portfolio?.equity) {
+    contextSummary += `\n\nPORTFOLIO: $${context.portfolio.equity.toLocaleString()} equity`;
+    if (context.portfolio.dayPL) {
+      const sign = context.portfolio.dayPL >= 0 ? "+" : "";
+      contextSummary += ` (${sign}$${context.portfolio.dayPL.toFixed(0)} today)`;
+    }
+    if (context.portfolio.positions?.length) {
+      const topPos = context.portfolio.positions.slice(0, 3).map(p => p.symbol).join(", ");
+      contextSummary += `\nTop holdings: ${topPos}`;
+    }
+  }
+
+  // Health
+  if (context.health) {
+    const h = context.health;
+    contextSummary += `\n\nHEALTH:`;
+    if (h.sleepScore) contextSummary += ` Sleep ${h.sleepScore}`;
+    if (h.readinessScore) contextSummary += ` | Readiness ${h.readinessScore}`;
+    if (h.steps) contextSummary += ` | ${h.steps.toLocaleString()} steps`;
+  }
+
+  // Goals
+  if (context.goals?.length > 0) {
+    const goalList = context.goals.slice(0, 3).map(g => `- ${g.title || g}`).join("\n");
+    contextSummary += `\n\nGOALS:\n${goalList}`;
+  }
+
+  // Life scores
+  if (context.lifeScores?.overall) {
+    contextSummary += `\n\nLIFE SCORE: ${context.lifeScores.overall}%`;
+  }
+
+  // Projects
+  if (context.projects?.length > 0) {
+    const projectList = context.projects.slice(0, 3).map(p => `- ${p.name}: ${p.status || "active"}`).join("\n");
+    contextSummary += `\n\nPROJECTS:\n${projectList}`;
+  }
+
+  const basePrompt = `You are BACKBONE, ${userName}'s personal AI assistant. You know ${userName} well and help with their life: finances, health, career, and goals.
+
+CRITICAL RULES:
+1. Be CONCISE - max 3-4 sentences for simple questions
+2. Be SPECIFIC - use actual data from context, not generic advice
+3. Be HELPFUL - answer the question directly, don't deflect
+4. Reference ${userName}'s actual situation (portfolio, health, goals) when relevant
+5. Only give longer responses (5+ sentences) for plans, tables, or code
+${contextSummary}
+
+If you don't have data about something, say so briefly and suggest how to get it.`;
 
   if (taskType === TASK_TYPES.CODING) {
-    return basePrompt + "\n\nYou are in coding mode. Provide clean, well-documented code with explanations.";
+    return basePrompt + "\n\nProvide clean, working code with brief explanations.";
   }
   if (taskType === TASK_TYPES.COMPLEX || taskType === TASK_TYPES.AGENTIC) {
-    return basePrompt + "\n\nThink step by step. Break down complex problems into manageable parts.";
+    return basePrompt + "\n\nThink step by step for complex problems.";
   }
   return basePrompt;
 };
@@ -509,10 +569,44 @@ export const sendMessage = async (message, context = {}, taskType = "auto") => {
       }
       break;
 
+    case TASK_TYPES.COMPLEX:
+    case TASK_TYPES.AGENTIC:
+      // Use GPT-5.2 Codex for complex/agentic tasks (best available)
+      if (config.gptCodex?.ready) {
+        modelConfig = config.gptCodex;
+        modelKey = "gpt-5.2-codex";
+        currentModel = MODELS.GPT52_CODEX;
+      } else if (config.gptPro?.ready) {
+        modelConfig = config.gptPro;
+        modelKey = "gpt-5.2-pro";
+        currentModel = MODELS.GPT52_PRO;
+      } else if (config.gpt52?.ready) {
+        modelConfig = config.gpt52;
+        modelKey = "gpt-5.2";
+        currentModel = MODELS.GPT52;
+      } else if (config.claude.ready) {
+        currentModel = MODELS.CLAUDE_OPUS;
+        return {
+          model: "claude",
+          modelInfo: MODELS.CLAUDE_OPUS,
+          taskType,
+          response: await sendToClaude(message, context)
+        };
+      }
+      break;
+
     case TASK_TYPES.STANDARD:
     default:
-      // Use GPT-5 Mini for standard tasks (balanced cost/performance)
-      if (config.gptMini?.ready) {
+      // PREFER Codex for all tasks when available, fall back to GPT-5.2
+      if (config.gptCodex?.ready) {
+        modelConfig = config.gptCodex;
+        modelKey = "gpt-5.2-codex";
+        currentModel = MODELS.GPT52_CODEX;
+      } else if (config.gpt52?.ready) {
+        modelConfig = config.gpt52;
+        modelKey = "gpt-5.2";
+        currentModel = MODELS.GPT52;
+      } else if (config.gptMini?.ready) {
         modelConfig = config.gptMini;
         modelKey = "gpt-5-mini";
         currentModel = MODELS.GPT5_MINI;

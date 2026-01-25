@@ -37,6 +37,7 @@ const DATA_SOURCES = {
     updateFn: "updateLinkedInProfile",
     category: "career",
     priority: 2,
+    autoUpdate: false,
   },
   "personal-capital": {
     dataFile: "personal-capital.json",
@@ -400,6 +401,11 @@ class DataFreshnessChecker extends EventEmitter {
       return { success: false, reason: "auto_update_disabled" };
     }
 
+    const config = DATA_SOURCES[source];
+    if (config?.autoUpdate === false) {
+      return { success: false, reason: "auto_update_disabled" };
+    }
+
     if (!this.isStale(source)) {
       return { success: false, reason: "not_stale" };
     }
@@ -431,7 +437,7 @@ class DataFreshnessChecker extends EventEmitter {
       const config = DATA_SOURCES[source.source];
 
       // Only auto-update sources that have an update function
-      if (config && config.updateFn) {
+      if (config && config.updateFn && config.autoUpdate !== false) {
         const result = await this.updateDataSource(source.source);
         if (result.success) {
           results.updated.push(source.source);
@@ -439,7 +445,7 @@ class DataFreshnessChecker extends EventEmitter {
           results.skipped.push({ source: source.source, reason: result.reason || result.error });
         }
       } else {
-        results.skipped.push({ source: source.source, reason: "no_auto_update" });
+        results.skipped.push({ source: source.source, reason: config?.autoUpdate === false ? "auto_update_disabled" : "no_auto_update" });
       }
     }
 

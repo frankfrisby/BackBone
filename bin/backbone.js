@@ -255,7 +255,11 @@ export const updateConsoleTitle = (name) => {
   setConsoleTitle(name ? `backbone - ${name}` : "backbone");
 };
 
-const stdin = process.stdin.isTTY ? process.stdin : undefined;
+const stdin = process.stdin;
+if (!stdin.isTTY) {
+  // Keep the process alive in non-TTY environments (e.g. when launched via wrappers).
+  stdin.resume();
+}
 
 // Render with optimized settings for smooth updates
 const { unmount, clear } = render(createElement(App, { updateConsoleTitle }), {

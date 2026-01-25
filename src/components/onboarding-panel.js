@@ -60,6 +60,13 @@ import { requestPhoneCode, verifyPhoneCode, getPhoneRecord } from "../services/p
 import { getMobileService } from "../services/mobile.js";
 import { startOAuthFlow as startClaudeOAuth, hasValidCredentials as hasClaudeCredentials } from "../services/claude-oauth.js";
 import { startOAuthFlow as startCodexOAuth, hasValidCredentials as hasCodexCredentials } from "../services/codex-oauth.js";
+import {
+  isClaudeCodeInstalled,
+  isClaudeCodeLoggedIn,
+  getClaudeCodeStatus,
+  spawnClaudeCodeLogin,
+  getInstallInstructions as getClaudeCodeInstallInstructions
+} from "../services/claude-code-cli.js";
 
 const e = React.createElement;
 
@@ -179,17 +186,25 @@ const BRAND_COLOR = "#f97316";
 
 // Model provider options
 // Model options in priority order for fallback chain
+// OpenAI Codex (Pro/Max) is the recommended option - uses GPT-5.2 Codex model
 const MODEL_OPTIONS = [
-  { id: "claude-oauth", label: "Claude Pro/Max", description: "Login with Claude subscription", oauth: true, priority: 1 },
-  { id: "openai-codex", label: "OpenAI Codex", description: "Login with OpenAI account", oauth: true, priority: 2 },
-  { id: "openai", label: "OpenAI API", description: "GPT-4 API key", priority: 3 },
-  { id: "anthropic", label: "Claude API", description: "Anthropic API key", priority: 4 },
+  { id: "openai-codex", label: "OpenAI Codex (Pro/Max)", description: "Login with OpenAI Pro/Max - GPT-5.2 Codex", oauth: true, priority: 0, recommended: true },
+  { id: "claude-code", label: "Claude Code CLI", description: "CLI with Pro/Max subscription", cli: true, priority: 1 },
+  { id: "claude-oauth", label: "Claude Pro/Max (Browser)", description: "OAuth login via browser", oauth: true, priority: 2 },
+  { id: "openai", label: "OpenAI API Key", description: "GPT-5.2 via API key", priority: 3 },
+  { id: "anthropic", label: "Claude API Key", description: "Anthropic API key", priority: 4 },
   { id: "google", label: "Gemini (Google)", description: "Google AI - Optional", priority: 5, optional: true }
 ];
 
 // Check if a specific model is connected
 const isModelConnected = (modelId) => {
   switch (modelId) {
+    case "claude-code": {
+      const status = isClaudeCodeInstalled();
+      if (!status.installed) return false;
+      const auth = isClaudeCodeLoggedIn();
+      return auth.loggedIn;
+    }
     case "claude-oauth":
       return hasClaudeCredentials();
     case "openai-codex":
@@ -208,10 +223,16 @@ const isModelConnected = (modelId) => {
 // Get connection label for display
 const getConnectionLabel = (modelId) => {
   switch (modelId) {
+    case "claude-code": {
+      const status = isClaudeCodeInstalled();
+      if (!status.installed) return "Not Installed";
+      const auth = isClaudeCodeLoggedIn();
+      return auth.loggedIn ? "CLI Logged In" : "Not Logged In";
+    }
     case "claude-oauth":
-      return hasClaudeCredentials() ? "Logged In" : null;
+      return hasClaudeCredentials() ? "Browser OAuth" : null;
     case "openai-codex":
-      return hasCodexCredentials() ? "Logged In" : null;
+      return hasCodexCredentials() ? "Codex Logged In" : null;
     case "openai":
       return isProviderConfigured("openai") ? "API Key" : null;
     case "anthropic":
@@ -653,23 +674,40 @@ const ModelSelectionStep = ({ onComplete, onError }) => {
 
   // Check if any provider is already configured
   useEffect(() => {
-    // First check Claude OAuth credentials
+    // First check Claude Code CLI (best option)
+    const cliStatus = isClaudeCodeInstalled();
+    if (cliStatus.installed) {
+      const authStatus = isClaudeCodeLoggedIn();
+      if (authStatus.loggedIn) {
+        setMessage(`Claude Code connected! (${authStatus.model || "Opus 4.5"})`);
+        setTimeout(() => onComplete({ provider: "claude-code", existing: true, model: authStatus.model }), 1000);
+        return;
+      }
+    }
+
+    // Then check Claude OAuth credentials
     if (hasClaudeCredentials()) {
       setMessage("Claude Pro/Max already connected!");
       setTimeout(() => onComplete({ provider: "claude-oauth", existing: true }), 1000);
       return;
     }
 
+    // Check Codex credentials
+    if (hasCodexCredentials()) {
+      setMessage("OpenAI Codex already connected!");
+      setTimeout(() => onComplete({ provider: "openai-codex", existing: true }), 1000);
+      return;
+    }
+
     // Check other providers - map model IDs to provider IDs
     const providerMap = {
-      "openai-codex": "openai",
       "openai": "openai",
       "anthropic": "anthropic",
       "google": "google",
     };
 
     for (const opt of MODEL_OPTIONS) {
-      if (opt.id === "claude-oauth") continue;
+      if (opt.id === "claude-code" || opt.id === "claude-oauth" || opt.id === "openai-codex") continue;
       const providerId = providerMap[opt.id] || opt.id;
       if (isProviderConfigured(providerId)) {
         setMessage(`${opt.label} already configured!`);
@@ -679,10 +717,61 @@ const ModelSelectionStep = ({ onComplete, onError }) => {
     }
   }, [onComplete]);
 
-  // Handle Claude OAuth flow
+  // Handle Claude Code CLI login (opens terminal)
+  const handleClaudeCodeLogin = async () => {
+    const cliStatus = isClaudeCodeInstalled();
+
+    if (!cliStatus.installed) {
+      // Claude Code not installed - show instructions
+      setSubStep("oauth");
+      const instructions = getClaudeCodeInstallInstructions();
+      setOauthStatus("Claude Code CLI not installed");
+      setMessage(`Run: npm install -g @anthropic-ai/claude-code`);
+      setTimeout(() => {
+        setSubStep("select");
+        setSelectedProvider(1); // Fall back to browser OAuth
+      }, 3000);
+      return;
+    }
+
+    // Check if already logged in
+    const authStatus = isClaudeCodeLoggedIn();
+    if (authStatus.loggedIn) {
+      setMessage(`Claude Code already connected! (${authStatus.model || "Opus 4.5"})`);
+      setTimeout(() => onComplete({ provider: "claude-code", existing: true, model: authStatus.model }), 1000);
+      return;
+    }
+
+    // Spawn Claude Code login terminal
+    setSubStep("oauth");
+    setOauthStatus("Opening Claude Code login terminal...");
+
+    try {
+      const result = await spawnClaudeCodeLogin((status) => {
+        setOauthStatus(status);
+      });
+
+      if (result.success) {
+        setMessage(`Claude Code connected! User: ${result.user || "Pro/Max"}`);
+        setTimeout(() => onComplete({ provider: "claude-code", method: "cli", model: result.model }), 1500);
+      } else {
+        setMessage(`Login failed: ${result.error}`);
+        setOauthStatus("You can try browser OAuth instead");
+        setTimeout(() => {
+          setSubStep("select");
+          setSelectedProvider(1); // Fall back to browser OAuth
+        }, 2000);
+      }
+    } catch (error) {
+      setMessage(`Error: ${error.message}`);
+      setSubStep("select");
+    }
+  };
+
+  // Handle Claude OAuth flow (browser)
   const handleClaudeOAuth = async () => {
     setSubStep("oauth");
-    setOauthStatus("Starting OAuth flow...");
+    setOauthStatus("Starting browser OAuth flow...");
 
     try {
       const result = await startClaudeOAuth((status) => {
@@ -691,20 +780,20 @@ const ModelSelectionStep = ({ onComplete, onError }) => {
 
       if (result.success) {
         if (result.method === "oauth") {
-          setMessage("Claude Pro/Max connected via OAuth!");
+          setMessage("Claude Pro/Max connected via browser OAuth!");
         } else if (result.method === "api_key_via_oauth") {
           // Save the API key to env
           saveApiKeyToEnv("anthropic", result.apiKey);
           setMessage("Claude API key created successfully!");
         }
-        setTimeout(() => onComplete({ provider: "anthropic", method: result.method }), 1500);
+        setTimeout(() => onComplete({ provider: "claude-oauth", method: result.method }), 1500);
       } else {
         // OAuth failed - offer to fall back to API key
         setMessage(`OAuth failed: ${result.error}`);
         setOauthStatus("Falling back to API key...");
         setTimeout(() => {
           setSubStep("api-key");
-          setSelectedProvider(1); // Select "Claude (API Key)" option
+          setSelectedProvider(4); // Select "Claude API" option
           openProviderKeyPage("anthropic");
           if (useInlineKeyEntry) {
             setMessage("Paste your Anthropic API key below.");
@@ -732,7 +821,7 @@ const ModelSelectionStep = ({ onComplete, onError }) => {
       });
 
       if (result.success) {
-        setMessage("OpenAI Codex connected!");
+        setMessage("OpenAI Codex (Pro/Max) connected! GPT-5.2 Codex ready.");
         setTimeout(() => onComplete({ provider: "openai-codex", method: result.method }), 1500);
       } else {
         setMessage(`Codex login: ${result.error}`);
@@ -749,7 +838,10 @@ const ModelSelectionStep = ({ onComplete, onError }) => {
 
   // Execute setup for a provider
   const executeProviderSetup = (provider) => {
-    if (provider.id === "claude-oauth") {
+    if (provider.id === "claude-code") {
+      // Claude Code CLI - spawn terminal for login
+      handleClaudeCodeLogin();
+    } else if (provider.id === "claude-oauth") {
       // Claude Pro/Max - open browser for OAuth
       handleClaudeOAuth();
     } else if (provider.id === "openai-codex") {
@@ -879,6 +971,15 @@ const ModelSelectionStep = ({ onComplete, onError }) => {
           const connectionLabel = getConnectionLabel(opt.id);
           const isSelected = i === selectedProvider;
 
+          // Special handling for Claude Code CLI
+          const isCLI = opt.cli;
+          let labelColor = "#22c55e";
+          if (isCLI && connectionLabel === "Not Installed") {
+            labelColor = "#ef4444"; // Red for not installed
+          } else if (isCLI && connectionLabel === "Not Logged In") {
+            labelColor = "#f59e0b"; // Orange for installed but not logged in
+          }
+
           return e(
             Box,
             { key: opt.id, flexDirection: "row", gap: 1 },
@@ -895,8 +996,10 @@ const ModelSelectionStep = ({ onComplete, onError }) => {
               color: isConnected ? "#22c55e" : (isSelected ? "#e2e8f0" : "#94a3b8"),
               bold: isSelected
             }, opt.label),
+            // Recommended badge for first/best option
+            opt.recommended && !isConnected && e(Text, { color: "#f59e0b", bold: true }, " (Recommended)"),
             // Connection type label (API Key, Logged In, etc.)
-            connectionLabel && e(Text, { color: "#22c55e", dimColor: true }, ` (${connectionLabel})`)
+            connectionLabel && e(Text, { color: labelColor, dimColor: !isConnected }, ` (${connectionLabel})`)
           );
         })
       )
@@ -904,14 +1007,28 @@ const ModelSelectionStep = ({ onComplete, onError }) => {
   }
 
   if (subStep === "oauth") {
+    const currentProvider = MODEL_OPTIONS[selectedProvider];
+    const isCLI = currentProvider?.cli;
+
     return e(
       Box,
       { flexDirection: "column", paddingX: 1 },
-      e(Text, { color: "#e2e8f0", bold: true }, "Claude Pro/Max Login"),
+      e(Text, { color: "#e2e8f0", bold: true }, `${currentProvider.label} Login`),
       e(Text, { color: "#f97316" }, oauthStatus || "Starting..."),
-      message && e(Text, { color: message.includes("failed") || message.includes("error") ? "#ef4444" : "#22c55e" }, message),
-      e(Text, { color: "#64748b", dimColor: true, marginTop: 1 }, "A browser window will open for you to log in."),
-      e(Text, { color: "#64748b", dimColor: true }, "After logging in, you'll be redirected back automatically.")
+      message && e(Text, { color: message.includes("failed") || message.includes("error") || message.includes("not installed") ? "#ef4444" : "#22c55e" }, message),
+      isCLI
+        ? e(
+            Box,
+            { flexDirection: "column", marginTop: 1 },
+            e(Text, { color: "#64748b", dimColor: true }, "A terminal window will open for Claude Code login."),
+            e(Text, { color: "#64748b", dimColor: true }, "Complete the login in the terminal, then return here.")
+          )
+        : e(
+            Box,
+            { flexDirection: "column", marginTop: 1 },
+            e(Text, { color: "#64748b", dimColor: true }, "A browser window will open for you to log in."),
+            e(Text, { color: "#64748b", dimColor: true }, "After logging in, you'll be redirected back automatically.")
+          )
     );
   }
 
@@ -1847,7 +1964,16 @@ export const OnboardingPanel = ({ onComplete, userDisplay = "" }) => {
     if (isSignedIn()) {
       statuses.google = "complete";
     }
-    if (isProviderConfigured("anthropic") || isProviderConfigured("openai") || isProviderConfigured("google")) {
+
+    // Check model connections (Claude Code CLI, OAuth, or API keys)
+    const cliStatus = isClaudeCodeInstalled();
+    const cliAuth = cliStatus.installed ? isClaudeCodeLoggedIn() : { loggedIn: false };
+    const hasClaudeCode = cliAuth.loggedIn;
+    const hasClaudeOAuth = hasClaudeCredentials();
+    const hasCodex = hasCodexCredentials();
+    const hasApiKey = isProviderConfigured("anthropic") || isProviderConfigured("openai") || isProviderConfigured("google");
+
+    if (hasClaudeCode || hasClaudeOAuth || hasCodex || hasApiKey) {
       statuses.model = "complete";
     }
     const alpacaConfig = loadAlpacaConfig();
@@ -1959,6 +2085,8 @@ export const OnboardingPanel = ({ onComplete, userDisplay = "" }) => {
   }, []);
 
   const handleComplete = useCallback(() => {
+    // Clear screen before transition to prevent layout artifacts
+    process.stdout.write("\x1b[2J\x1b[1;1H");
     updateSetting("onboardingComplete", true);
     onComplete();
   }, [onComplete]);
@@ -1968,8 +2096,12 @@ export const OnboardingPanel = ({ onComplete, userDisplay = "" }) => {
 
   // Handle keyboard shortcuts including arrow navigation
   useInput((input, key) => {
-    // Arrow Up - navigate to previous step
-    if (key.upArrow) {
+    // Steps that handle their own up/down navigation (for selecting providers)
+    const stepsWithInternalNavigation = ["model", "email"];
+    const currentStepNeedsArrows = stepsWithInternalNavigation.includes(currentStep?.id);
+
+    // Arrow Up - navigate to previous step (unless current step handles arrows)
+    if (key.upArrow && !currentStepNeedsArrows) {
       setUserNavigating(true);
       setCurrentStepIndex((prev) => {
         const newIndex = prev > 0 ? prev - 1 : ONBOARDING_STEPS.length - 1;
@@ -1978,8 +2110,8 @@ export const OnboardingPanel = ({ onComplete, userDisplay = "" }) => {
       return;
     }
 
-    // Arrow Down - navigate to next step
-    if (key.downArrow) {
+    // Arrow Down - navigate to next step (unless current step handles arrows)
+    if (key.downArrow && !currentStepNeedsArrows) {
       setUserNavigating(true);
       setCurrentStepIndex((prev) => {
         const newIndex = prev < ONBOARDING_STEPS.length - 1 ? prev + 1 : 0;
@@ -2072,26 +2204,20 @@ export const OnboardingPanel = ({ onComplete, userDisplay = "" }) => {
     Box,
     {
       flexDirection: "column",
-      width: "100%",
-      padding: 1,
+      padding: 2,
       borderStyle: "round",
       borderColor: BRAND_COLOR
     },
-    // Header with logo
+    // Header with text only (no spinning B - that's on splash screen)
     e(
       Box,
       { flexDirection: "row", justifyContent: "center", marginBottom: 1 },
       e(
         Box,
-        { flexDirection: "row", alignItems: "center", gap: 3 },
-        e(SpinningBLogo, { color: BRAND_COLOR }),
-        e(
-          Box,
-          { flexDirection: "column" },
-          e(Text, { color: "#e2e8f0", bold: true }, "BACKBONE"),
-          e(Text, { color: "#64748b" }, "Setup Wizard"),
-          userDisplay && e(Text, { color: "#94a3b8" }, userDisplay)
-        )
+        { flexDirection: "column", alignItems: "center" },
+        e(Text, { color: BRAND_COLOR, bold: true }, "BACKBONE"),
+        e(Text, { color: "#64748b" }, "Setup Wizard"),
+        userDisplay && e(Text, { color: "#94a3b8" }, userDisplay)
       )
     ),
 

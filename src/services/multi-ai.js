@@ -1,5 +1,6 @@
 import fetch from "node-fetch";
 import { getAPIQuotaMonitor } from "./api-quota-monitor.js";
+import { hasValidCredentials as hasCodexCredentials, getAccessToken as getCodexAccessToken } from "./codex-oauth.js";
 
 /**
  * Multi-Model AI Service for BACKBONE
@@ -18,30 +19,46 @@ import { getAPIQuotaMonitor } from "./api-quota-monitor.js";
 // Model definitions with display info
 // Primary models (GPT-5.2) with fallbacks (GPT-4o) for older API keys
 export const MODELS = {
-  GPT52_INSTANT: {
-    id: "gpt-5.2-chat-latest",
-    fallbackId: "gpt-4o-mini",  // Fallback for older API keys
-    name: "GPT-5.2 Instant",
-    shortName: "GPT-5.2 Instant",
+  // gpt-5-nano: High-throughput tasks, simple instruction-following or classification
+  GPT5_NANO: {
+    id: "gpt-5-nano",
+    fallbackId: "gpt-4o-mini",
+    name: "GPT-5 Nano",
+    shortName: "GPT-5 Nano",
     icon: "⚡",
-    color: "#10a37f",
-    description: "Fast responses, quick tasks",
+    color: "#06b6d4",
+    description: "High-throughput, simple tasks, classification",
     maxTokens: 2000,
-    contextWindow: 400000,
-    pricing: { input: 1.75, output: 14 } // per 1M tokens
+    contextWindow: 128000,
+    pricing: { input: 0.50, output: 2 }
   },
-  GPT52_THINKING: {
+  // gpt-5-mini: Cost-optimized reasoning and chat; balances speed, cost, and capability
+  GPT5_MINI: {
+    id: "gpt-5-mini",
+    fallbackId: "gpt-4o-mini",
+    name: "GPT-5 Mini",
+    shortName: "GPT-5 Mini",
+    icon: "💨",
+    color: "#10a37f",
+    description: "Cost-optimized reasoning and chat",
+    maxTokens: 4000,
+    contextWindow: 256000,
+    pricing: { input: 1, output: 4 }
+  },
+  // gpt-5.2: Complex reasoning, broad world knowledge, code-heavy or multi-step agentic tasks
+  GPT52: {
     id: "gpt-5.2",
-    fallbackId: "gpt-4o",  // Fallback for older API keys
-    name: "GPT-5.2 Thinking",
-    shortName: "GPT-5.2 Thinking",
+    fallbackId: "gpt-4o",
+    name: "GPT-5.2",
+    shortName: "GPT-5.2",
     icon: "🧠",
     color: "#8b5cf6",
-    description: "Complex reasoning, coding, analysis",
-    maxTokens: 4000,
+    description: "Complex reasoning, agentic tasks, coding",
+    maxTokens: 8000,
     contextWindow: 400000,
     pricing: { input: 1.75, output: 14 }
   },
+  // gpt-5.2-pro: Tough problems that may take longer to solve but require harder thinking
   GPT52_PRO: {
     id: "gpt-5.2-pro",
     fallbackId: "gpt-4o",
@@ -49,10 +66,23 @@ export const MODELS = {
     shortName: "GPT-5.2 Pro",
     icon: "💎",
     color: "#f59e0b",
-    description: "Maximum quality for difficult problems",
-    maxTokens: 8000,
+    description: "Tough problems, harder thinking, longer reasoning",
+    maxTokens: 16000,
     contextWindow: 400000,
     pricing: { input: 3.50, output: 28 }
+  },
+  // gpt-5.2-codex: Interactive coding products; full spectrum of coding tasks (Pro/Max)
+  GPT52_CODEX: {
+    id: "gpt-5.2-codex",
+    name: "GPT-5.2 Codex",
+    shortName: "GPT-5.2 Codex",
+    icon: "🔮",
+    color: "#a855f7",
+    description: "Full spectrum coding tasks (Pro/Max subscription)",
+    maxTokens: 32000,
+    contextWindow: 1000000,
+    requiresCodex: true,
+    pricing: { input: 0, output: 0 }  // Included in Pro/Max subscription
   },
   CLAUDE_SONNET: {
     id: "claude-sonnet-4-20250514",
@@ -88,33 +118,76 @@ export const TASK_TYPES = {
 };
 
 // Current model state (for display)
-let currentModel = MODELS.GPT52_INSTANT;
+let currentModel = MODELS.GPT5_MINI;
 let lastTaskType = TASK_TYPES.STANDARD;
+
+// Check if Codex OAuth is available
+const isCodexAvailable = () => {
+  try {
+    return hasCodexCredentials();
+  } catch (e) {
+    return false;
+  }
+};
 
 export const getMultiAIConfig = () => {
   const openaiKey = process.env.OPENAI_API_KEY;
   const anthropicKey = process.env.ANTHROPIC_API_KEY || process.env.CLAUDE_API_KEY;
+  const codexAvailable = isCodexAvailable();
 
   return {
-    // OpenAI GPT-5.2 Instant (fast tasks)
-    gptInstant: {
+    // GPT-5 Nano: High-throughput, simple tasks, classification
+    gptNano: {
       apiKey: openaiKey,
-      model: MODELS.GPT52_INSTANT.id,
-      modelInfo: MODELS.GPT52_INSTANT,
+      model: MODELS.GPT5_NANO.id,
+      modelInfo: MODELS.GPT5_NANO,
       ready: Boolean(openaiKey)
     },
-    // OpenAI GPT-5.2 Thinking (complex reasoning)
-    gptThinking: {
+    // GPT-5 Mini: Cost-optimized reasoning and chat (fast routing)
+    gptMini: {
       apiKey: openaiKey,
-      model: MODELS.GPT52_THINKING.id,
-      modelInfo: MODELS.GPT52_THINKING,
+      model: MODELS.GPT5_MINI.id,
+      modelInfo: MODELS.GPT5_MINI,
       ready: Boolean(openaiKey)
     },
-    // OpenAI GPT-5.2 Pro (maximum quality)
+    // GPT-5.2: Complex reasoning, agentic tasks (main model)
+    gpt52: {
+      apiKey: openaiKey,
+      model: MODELS.GPT52.id,
+      modelInfo: MODELS.GPT52,
+      ready: Boolean(openaiKey)
+    },
+    // GPT-5.2 Pro: Tough problems, longer reasoning (research)
     gptPro: {
       apiKey: openaiKey,
       model: MODELS.GPT52_PRO.id,
       modelInfo: MODELS.GPT52_PRO,
+      ready: Boolean(openaiKey)
+    },
+    // GPT-5.2 Codex: Full spectrum coding (Pro/Max subscription)
+    gptCodex: {
+      model: MODELS.GPT52_CODEX.id,
+      modelInfo: MODELS.GPT52_CODEX,
+      ready: codexAvailable,
+      requiresCodex: true
+    },
+    // Legacy aliases for backwards compatibility
+    gptInstant: {
+      apiKey: openaiKey,
+      model: MODELS.GPT5_MINI.id,
+      modelInfo: MODELS.GPT5_MINI,
+      ready: Boolean(openaiKey)
+    },
+    gptThinking: {
+      apiKey: openaiKey,
+      model: MODELS.GPT52.id,
+      modelInfo: MODELS.GPT52,
+      ready: Boolean(openaiKey)
+    },
+    gptAgentic: {
+      apiKey: openaiKey,
+      model: MODELS.GPT52.id,
+      modelInfo: MODELS.GPT52,
       ready: Boolean(openaiKey)
     },
     // Claude (alternative for complex tasks)
@@ -124,23 +197,14 @@ export const getMultiAIConfig = () => {
       modelInfo: MODELS.CLAUDE_SONNET,
       ready: Boolean(anthropicKey)
     },
-    // Legacy compatibility
-    gptMini: {
-      apiKey: openaiKey,
-      model: MODELS.GPT52_INSTANT.id,
-      ready: Boolean(openaiKey)
-    },
-    gptAgentic: {
-      apiKey: openaiKey,
-      model: MODELS.GPT52_THINKING.id,
-      ready: Boolean(openaiKey)
-    },
     // Claude Code (background agentic work)
     claudeCode: {
       enabled: process.env.CLAUDE_CODE_ENABLED === "true",
       workDir: process.env.CLAUDE_CODE_WORKDIR || process.cwd(),
       ready: process.env.CLAUDE_CODE_ENABLED === "true"
     },
+    // Codex availability flag
+    codexAvailable,
     primaryModel: process.env.PRIMARY_AI_MODEL || (openaiKey ? "openai" : "claude"),
     ready: Boolean(openaiKey || anthropicKey)
   };
@@ -388,11 +452,16 @@ export const sendMessage = async (message, context = {}, taskType = "auto") => {
   switch (taskType) {
     case TASK_TYPES.INSTANT:
     case TASK_TYPES.ROUTING:
-      // Use GPT-5.2 Instant for fast routing decisions and quick tasks
-      if (config.gptInstant.ready) {
-        modelConfig = config.gptInstant;
-        modelKey = "gpt-5.2-instant";
-        currentModel = MODELS.GPT52_INSTANT;
+      // Use GPT-5 Mini for fast routing decisions and quick tasks
+      if (config.gptMini.ready) {
+        modelConfig = config.gptMini;
+        modelKey = "gpt-5-mini";
+        currentModel = MODELS.GPT5_MINI;
+      } else if (config.gptNano?.ready) {
+        // Fall back to Nano for simple tasks
+        modelConfig = config.gptNano;
+        modelKey = "gpt-5-nano";
+        currentModel = MODELS.GPT5_NANO;
       }
       break;
 
@@ -402,11 +471,11 @@ export const sendMessage = async (message, context = {}, taskType = "auto") => {
         modelConfig = config.gptPro;
         modelKey = "gpt-5.2-pro";
         currentModel = MODELS.GPT52_PRO;
-      } else if (config.gptThinking.ready) {
-        // Fall back to Thinking if Pro not available
-        modelConfig = config.gptThinking;
-        modelKey = "gpt-5.2-thinking";
-        currentModel = MODELS.GPT52_THINKING;
+      } else if (config.gpt52?.ready) {
+        // Fall back to GPT-5.2 if Pro not available
+        modelConfig = config.gpt52;
+        modelKey = "gpt-5.2";
+        currentModel = MODELS.GPT52;
       } else if (config.claude.ready) {
         currentModel = MODELS.CLAUDE_OPUS;
         return {
@@ -419,15 +488,17 @@ export const sendMessage = async (message, context = {}, taskType = "auto") => {
       break;
 
     case TASK_TYPES.CODING:
-    case TASK_TYPES.COMPLEX:
-    case TASK_TYPES.AGENTIC:
-      // Use GPT-5.2 Thinking for actions and complex tasks
-      if (config.gptThinking.ready) {
-        modelConfig = config.gptThinking;
-        modelKey = "gpt-5.2-thinking";
-        currentModel = MODELS.GPT52_THINKING;
+      // Use GPT-5.2 Codex for coding tasks (if Pro/Max subscription available)
+      if (config.gptCodex?.ready) {
+        modelConfig = config.gptCodex;
+        modelKey = "gpt-5.2-codex";
+        currentModel = MODELS.GPT52_CODEX;
+      } else if (config.gpt52?.ready) {
+        // Fall back to GPT-5.2 for coding
+        modelConfig = config.gpt52;
+        modelKey = "gpt-5.2";
+        currentModel = MODELS.GPT52;
       } else if (config.claude.ready) {
-        // Fall back to Claude for complex tasks
         currentModel = MODELS.CLAUDE_SONNET;
         return {
           model: "claude",
@@ -440,11 +511,11 @@ export const sendMessage = async (message, context = {}, taskType = "auto") => {
 
     case TASK_TYPES.STANDARD:
     default:
-      // Use GPT-5.2 Instant for standard tasks (fast)
-      if (config.gptInstant.ready) {
-        modelConfig = config.gptInstant;
-        modelKey = "gpt-5.2-instant";
-        currentModel = MODELS.GPT52_INSTANT;
+      // Use GPT-5 Mini for standard tasks (balanced cost/performance)
+      if (config.gptMini?.ready) {
+        modelConfig = config.gptMini;
+        modelKey = "gpt-5-mini";
+        currentModel = MODELS.GPT5_MINI;
       } else if (config.claude.ready) {
         currentModel = MODELS.CLAUDE_SONNET;
         return {
@@ -634,18 +705,54 @@ export const getAIStatus = () => {
   };
 
   return {
+    // GPT-5 Mini (fast routing, cost-optimized)
+    gptMini: {
+      ready: config.gptMini?.ready && !openaiQuotaExceeded,
+      model: MODELS.GPT5_MINI.id,
+      modelInfo: MODELS.GPT5_MINI,
+      status: getOpenAIStatus(),
+      quotaExceeded: openaiQuotaExceeded,
+      billingUrl: quotaStatus.openai.billingUrl
+    },
+    // GPT-5.2 (complex reasoning, agentic)
+    gpt52: {
+      ready: config.gpt52?.ready && !openaiQuotaExceeded,
+      model: MODELS.GPT52.id,
+      modelInfo: MODELS.GPT52,
+      status: getOpenAIStatus(),
+      quotaExceeded: openaiQuotaExceeded,
+      billingUrl: quotaStatus.openai.billingUrl
+    },
+    // GPT-5.2 Pro (research, tough problems)
+    gptPro: {
+      ready: config.gptPro?.ready && !openaiQuotaExceeded,
+      model: MODELS.GPT52_PRO.id,
+      modelInfo: MODELS.GPT52_PRO,
+      status: getOpenAIStatus(),
+      quotaExceeded: openaiQuotaExceeded,
+      billingUrl: quotaStatus.openai.billingUrl
+    },
+    // GPT-5.2 Codex (coding, Pro/Max subscription)
+    gptCodex: {
+      ready: config.gptCodex?.ready,
+      model: MODELS.GPT52_CODEX.id,
+      modelInfo: MODELS.GPT52_CODEX,
+      status: config.codexAvailable ? "Connected (Pro/Max)" : "Requires Codex Login",
+      requiresCodex: true
+    },
+    // Legacy aliases
     gptInstant: {
-      ready: config.gptInstant.ready && !openaiQuotaExceeded,
-      model: MODELS.GPT52_INSTANT.id,
-      modelInfo: MODELS.GPT52_INSTANT,
+      ready: config.gptMini?.ready && !openaiQuotaExceeded,
+      model: MODELS.GPT5_MINI.id,
+      modelInfo: MODELS.GPT5_MINI,
       status: getOpenAIStatus(),
       quotaExceeded: openaiQuotaExceeded,
       billingUrl: quotaStatus.openai.billingUrl
     },
     gptThinking: {
-      ready: config.gptThinking.ready && !openaiQuotaExceeded,
-      model: MODELS.GPT52_THINKING.id,
-      modelInfo: MODELS.GPT52_THINKING,
+      ready: config.gpt52?.ready && !openaiQuotaExceeded,
+      model: MODELS.GPT52.id,
+      modelInfo: MODELS.GPT52,
       status: getOpenAIStatus(),
       quotaExceeded: openaiQuotaExceeded,
       billingUrl: quotaStatus.openai.billingUrl
@@ -663,6 +770,7 @@ export const getAIStatus = () => {
       workDir: config.claudeCode.workDir,
       status: config.claudeCode.ready ? "Enabled" : "Set CLAUDE_CODE_ENABLED=true"
     },
+    codexAvailable: config.codexAvailable,
     currentModel,
     lastTaskType,
     primaryModel: config.primaryModel,

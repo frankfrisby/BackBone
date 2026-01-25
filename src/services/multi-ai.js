@@ -34,7 +34,7 @@ export const MODELS = {
     id: "gpt-5.2",
     fallbackId: "gpt-4o",  // Fallback for older API keys
     name: "GPT-5.2 Thinking",
-    shortName: "GPT-5.2 Think",
+    shortName: "GPT-5.2 Thinking",
     icon: "🧠",
     color: "#8b5cf6",
     description: "Complex reasoning, coding, analysis",

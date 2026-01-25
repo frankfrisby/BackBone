@@ -106,6 +106,24 @@ export const ACTION_TOOLS = {
     // Used when creating new project directories
   },
 
+  COPY: {
+    id: "COPY",
+    icon: "⊕",
+    verb: "Copy",
+    description: "Copy file or directory",
+    category: "system",
+    // Example: Copy(C:/Users/frank/docs/template.md -> C:/Users/frank/projects/new.md)
+  },
+
+  MOVE: {
+    id: "MOVE",
+    icon: "↝",
+    verb: "Move",
+    description: "Move file or directory",
+    category: "system",
+    // Example: Move(C:/Users/frank/downloads/file.pdf -> C:/Users/frank/docs/)
+  },
+
   // === SEARCH OPERATIONS ===
   // Search files and content with real patterns
 
@@ -1061,10 +1079,28 @@ class ActivityNarrator extends EventEmitter {
   /**
    * Validate that a target is a REAL terminal command (for BASH type)
    * Real commands start with: git, npm, node, python, pip, curl, wget, cd, ls, mkdir, rm, cp, mv, etc.
+   *
+   * STRICT VALIDATION to prevent fake/hallucinated commands:
+   * - Must start with a known command or executable path
+   * - Cannot be abstract descriptions like "run the script"
    */
   isValidBashCommand(target) {
     if (!target || typeof target !== "string") return false;
-    const cmd = target.trim().toLowerCase();
+    const cmd = target.trim();
+    const cmdLower = cmd.toLowerCase();
+
+    // Reject if it looks like a description rather than a command
+    const descriptionPatterns = [
+      /^(run|execute|start|do|perform|check|analyze|process|validate|test)\s+(the|a|this|that|my)/i,
+      /^(search|find|look)\s+for/i,
+      /^(create|make|build)\s+(a|the|new)\s+/i,
+      /^updating/i,
+      /^researching/i,
+      /^analyzing/i,
+    ];
+    if (descriptionPatterns.some(pattern => pattern.test(cmd))) {
+      return false;
+    }
 
     // Valid command prefixes (actual terminal commands)
     const validPrefixes = [
@@ -1074,27 +1110,89 @@ class ActivityNarrator extends EventEmitter {
       "chmod ", "chown ", "sudo ", "apt ", "yum ", "brew ", "docker ", "kubectl ",
       "aws ", "gcloud ", "az ", "terraform ", "ansible ", "make ", "cmake ",
       "cargo ", "rustc ", "go ", "java ", "javac ", "dotnet ", "nuget ",
-      "yarn ", "pnpm ", "bun ", "deno ", "tsx ", "ts-node ",
+      "yarn ", "pnpm ", "bun ", "deno ", "tsx ", "ts-node ", "tsc ",
       "claude ", "code ", "vim ", "nano ", "notepad ", "start ", "open ",
-      "./", "../", "/", "C:\\", "D:\\", "~/"
+      "powershell ", "pwsh ", "bash ", "sh ", "zsh ", "cmd ",
+      "where ", "which ", "set ", "export ", "env ", "printenv ",
+      "touch ", "head ", "tail ", "less ", "more ", "wc ", "sort ", "uniq ",
+      "tar ", "zip ", "unzip ", "gzip ", "gunzip ", "7z ",
+      "ssh ", "scp ", "rsync ", "ftp ", "sftp ",
+      "ping ", "traceroute ", "netstat ", "ifconfig ", "ipconfig ", "nslookup ",
+      "./", "../", "/", "~/"
     ];
 
-    return validPrefixes.some(prefix => cmd.startsWith(prefix));
+    // Also allow Windows drive paths as executable paths
+    const windowsDrivePattern = /^[A-Za-z]:[\\\/]/;
+    if (windowsDrivePattern.test(cmd)) {
+      return true;
+    }
+
+    return validPrefixes.some(prefix => cmdLower.startsWith(prefix));
   }
 
   /**
    * Validate that a target is a real file path (for MKDIR, READ, WRITE, etc.)
+   *
+   * STRICT VALIDATION:
+   * - Must contain path separators OR start with valid path prefix
+   * - Cannot be abstract descriptions
+   * - File paths should look like actual paths with extensions or directory names
    */
   isValidFilePath(target) {
     if (!target || typeof target !== "string") return false;
-    const path = target.trim();
+    const pathStr = target.trim();
 
-    // Must look like a file path (contains / or \ and has reasonable structure)
-    const hasPathSeparator = path.includes("/") || path.includes("\\");
-    const startsWithValidPath = /^(\.\/|\.\.\/|\/|~\/|[A-Za-z]:\\|[A-Za-z]:\/)/i.test(path);
-    const looksLikeFile = /\.[a-zA-Z0-9]+$/.test(path) || path.endsWith("/") || /[\/\\][a-zA-Z0-9_-]+$/.test(path);
+    // Reject if it looks like a description rather than a path
+    const descriptionPatterns = [
+      /^(the|a|this|that|my|new|old)\s+/i,
+      /^(file|folder|directory|document|script)\s+(for|to|with|named)/i,
+      /^(create|make|update|edit|read|write)\s+/i,
+      /\s+(file|folder|directory|document)$/i,
+    ];
+    if (descriptionPatterns.some(pattern => pattern.test(pathStr))) {
+      return false;
+    }
 
-    return hasPathSeparator || startsWithValidPath || looksLikeFile;
+    // Must look like a file path
+    const hasPathSeparator = pathStr.includes("/") || pathStr.includes("\\");
+    const startsWithValidPath = /^(\.\/|\.\.\/|\/|~\/|[A-Za-z]:\\|[A-Za-z]:\/)/i.test(pathStr);
+    const looksLikeFile = /\.[a-zA-Z0-9]+$/.test(pathStr);
+    const looksLikeDir = /[\/\\][a-zA-Z0-9_.-]+$/.test(pathStr) || pathStr.endsWith("/") || pathStr.endsWith("\\");
+
+    // Must have at least one path-like characteristic
+    if (hasPathSeparator || startsWithValidPath) {
+      return looksLikeFile || looksLikeDir || startsWithValidPath;
+    }
+
+    // Single filename without path - must have extension
+    return looksLikeFile;
+  }
+
+  /**
+   * Validate that a target is a valid copy/move operation
+   * Format: source -> destination OR source, destination
+   */
+  isValidCopyMove(target) {
+    if (!target || typeof target !== "string") return false;
+
+    // Check for arrow format: source -> dest
+    if (target.includes("->")) {
+      const parts = target.split("->").map(p => p.trim());
+      return parts.length === 2 &&
+             this.isValidFilePath(parts[0]) &&
+             this.isValidFilePath(parts[1]);
+    }
+
+    // Check for comma format: source, dest
+    if (target.includes(",")) {
+      const parts = target.split(",").map(p => p.trim());
+      return parts.length === 2 &&
+             this.isValidFilePath(parts[0]) &&
+             this.isValidFilePath(parts[1]);
+    }
+
+    // Single path - could be valid for some copy operations
+    return this.isValidFilePath(target);
   }
 
   /**
@@ -1102,10 +1200,12 @@ class ActivityNarrator extends EventEmitter {
    *
    * VALIDATION RULES:
    * - BASH: target MUST be a real terminal command (git, npm, curl, etc.)
-   * - MKDIR: target MUST be a real file path
+   * - MKDIR/DELETE: target MUST be a real file path
    * - READ/WRITE/UPDATE/EDIT: target MUST be a real file path
+   * - COPY/MOVE: target MUST be a valid source -> destination format
    * - WEB_FETCH: target MUST be a URL (http:// or https://)
    * - WEB_SEARCH: target should be a search query
+   * - GREP/GLOB: target should be a search pattern with path
    *
    * @param {string} type - Action type from ACTION_TOOLS
    * @param {string} target - File path, URL, command, or query
@@ -1115,21 +1215,40 @@ class ActivityNarrator extends EventEmitter {
   action(type, target, detail = null, status = ACTION_STATUS.WORKING) {
     const actionType = ACTION_TOOLS[type] || ACTION_TOOLS.BASH;
 
-    // STRICT VALIDATION - reject invalid actions
+    // STRICT VALIDATION - reject invalid actions based on type
+    // This prevents hallucinated/fake actions from appearing in the UI
+
     if (type === "BASH" && !this.isValidBashCommand(target)) {
-      console.warn(`[ActivityNarrator] REJECTED: "${target}" is not a valid bash command`);
-      return null; // Don't log fake bash commands
+      console.warn(`[ActivityNarrator] REJECTED BASH: "${target?.slice(0, 50)}" is not a valid bash command`);
+      return null;
     }
 
-    if ((type === "MKDIR" || type === "READ" || type === "WRITE" || type === "UPDATE" || type === "EDIT")
+    if ((type === "MKDIR" || type === "DELETE" || type === "READ" || type === "WRITE" || type === "UPDATE" || type === "EDIT")
         && !this.isValidFilePath(target)) {
-      console.warn(`[ActivityNarrator] REJECTED: "${target}" is not a valid file path`);
-      return null; // Don't log fake file operations
+      console.warn(`[ActivityNarrator] REJECTED ${type}: "${target?.slice(0, 50)}" is not a valid file path`);
+      return null;
+    }
+
+    if ((type === "COPY" || type === "MOVE") && !this.isValidCopyMove(target)) {
+      console.warn(`[ActivityNarrator] REJECTED ${type}: "${target?.slice(0, 50)}" is not a valid copy/move format`);
+      return null;
     }
 
     if (type === "WEB_FETCH" && !target?.startsWith("http")) {
-      console.warn(`[ActivityNarrator] REJECTED: "${target}" is not a valid URL`);
-      return null; // Don't log fake fetches
+      console.warn(`[ActivityNarrator] REJECTED WEB_FETCH: "${target?.slice(0, 50)}" is not a valid URL`);
+      return null;
+    }
+
+    if (type === "GREP" && !target?.includes(" ")) {
+      // GREP should have at least a pattern and path separated by space
+      console.warn(`[ActivityNarrator] REJECTED GREP: "${target?.slice(0, 50)}" should have pattern and path`);
+      return null;
+    }
+
+    if (type === "GLOB" && !/[*?[\]{}]/.test(target || "") && !this.isValidFilePath(target)) {
+      // GLOB should have glob patterns or be a valid path
+      console.warn(`[ActivityNarrator] REJECTED GLOB: "${target?.slice(0, 50)}" is not a valid glob pattern`);
+      return null;
     }
 
     const action = {
@@ -1438,9 +1557,9 @@ class ActivityNarrator extends EventEmitter {
     if (this._cachedDisplayData && this._lastDisplayDataVersion === this._dataVersion) {
       // Only rebuild every 5 seconds to update runtime display without constant flicker
       const timeSinceRebuild = Date.now() - (this._lastDisplayRebuild || 0);
-      if (timeSinceRebuild < 5000) {
-        return this._cachedDisplayData;
-      }
+        if (timeSinceRebuild < 1000) {
+          return this._cachedDisplayData;
+        }
     }
 
     // Data changed or 5s elapsed - rebuild the display data

@@ -9,24 +9,32 @@ import { BILLING_URLS } from "../services/api-quota-monitor.js";
 const e = React.createElement;
 
 /**
- * Flashlight text effect - highlight a few leading letters (no blinking)
+ * Flashlight text effect - highlight a few leading letters with bright spotlight
+ * Creates a "flashlight" effect where the first few characters are brightly lit
+ * Example: "Researching..." → "Re" is white/bright, "searching..." is base color
+ *
+ * The spotlight simulates a flashlight beam highlighting the beginning of the text.
  */
-const FlashlightText = memo(({ text, baseColor = "#f59e0b", bold = true }) => {
+const FlashlightText = memo(({ text, baseColor = "#f59e0b", bold = true, spotlightCount = 2 }) => {
+  // Bright spotlight colors for each base color - creates the "lit" effect
   const palette = {
-    "#f59e0b": "#fbbf24",
-    "#60a5fa": "#93c5fd",
-    "#22c55e": "#4ade80",
-    "#a855f7": "#c084fc",
+    "#f59e0b": "#fef3c7",  // Orange → Warm white
+    "#60a5fa": "#dbeafe",  // Blue → Light blue
+    "#22c55e": "#dcfce7",  // Green → Light green
+    "#a855f7": "#f3e8ff",  // Purple → Light purple
+    "#64748b": "#e2e8f0",  // Gray → Light gray
   };
   const bright = palette[baseColor] || "#ffffff";
-  const spotlightCount = Math.min(2, text.length);
-  const brightText = text.slice(0, spotlightCount);
-  const restText = text.slice(spotlightCount);
+  const actualSpotlight = Math.min(spotlightCount, text.length);
+  const brightText = text.slice(0, actualSpotlight);
+  const restText = text.slice(actualSpotlight);
 
   return e(
     Box,
     { flexDirection: "row" },
-    e(Text, { color: bright, bold }, brightText),
+    // Bright spotlight section (first chars - very bright, like a flashlight beam)
+    e(Text, { color: bright, bold, backgroundColor: baseColor }, brightText),
+    // Rest of the text in base color
     e(Text, { color: baseColor, bold }, restText)
   );
 });
@@ -375,37 +383,47 @@ const OutcomeLine = memo(({ outcome }) => {
  * Full diff view with line numbers like Claude Code
  * Shows: line numbers | - removed (red bg) | + added (green bg)
  *
+ * Layout:
+ *   ↳ Lines 35-42:
+ *   35 | - const oldAuth = require('old');      [RED BACKGROUND]
+ *   36 | + const newAuth = require('new');      [GREEN BACKGROUND]
+ *   37 | + const config = { secure: true };     [GREEN BACKGROUND]
+ *
  * For Update: shows removed then added
  * For Write: shows all lines as added (new file)
  */
-const DiffView = memo(({ diff, isNewFile = false }) => {
+const DiffView = memo(({ diff, isNewFile = false, filePath = null }) => {
   if (!diff) return null;
 
   const removed = diff.removed || [];
   const added = diff.added || [];
   const startLine = diff.startLine || 1;
 
-  // For new files, show all content as added
+  // For new files, show all content as added with green background
   if (isNewFile && added.length > 0) {
     return e(
       Box,
       { flexDirection: "column", paddingLeft: 2, marginTop: 0 },
+      // Header with file path if provided
       e(Text, { color: THEME.dim }, `  ↳ New file content:`),
+      // Content lines with green background for additions
       ...added.slice(0, 15).map((line, i) => {
         const lineNum = (startLine + i).toString().padStart(4);
         const text = typeof line === "object" ? line.text : line;
         return e(
           Box,
           { key: `a${i}`, flexDirection: "row" },
-          e(Text, { color: THEME.diffAddFg }, `${lineNum} `),
+          // Line number column (muted)
+          e(Text, { color: THEME.muted }, `${lineNum} │ `),
+          // Content with green background for added lines
           e(Text, { color: THEME.diffAddFg, backgroundColor: THEME.diffAddBg },
-            `+ ${text}`)
+            `+ ${text || " "}`)
         );
       }),
       added.length > 15 && e(
         Text,
-        { color: THEME.dim },
-        `     ... and ${added.length - 15} more lines`
+        { color: THEME.dim, paddingLeft: 6 },
+        `... and ${added.length - 15} more lines`
       )
     );
   }
@@ -413,13 +431,16 @@ const DiffView = memo(({ diff, isNewFile = false }) => {
   // For updates, show removed then added
   if (removed.length === 0 && added.length === 0) return null;
 
+  const endLine = diff.endLine || (startLine + removed.length + added.length - 1);
+
   return e(
     Box,
     { flexDirection: "column", paddingLeft: 2, marginTop: 0 },
-    diff.startLine && e(
+    // Header showing line range
+    e(
       Text,
       { color: THEME.dim },
-      `  ↳ Lines ${diff.startLine}-${diff.endLine || diff.startLine + removed.length + added.length}:`
+      `  ↳ Lines ${startLine}-${endLine}:`
     ),
     // Removed lines (red background)
     ...removed.slice(0, 8).map((line, i) => {
@@ -428,9 +449,11 @@ const DiffView = memo(({ diff, isNewFile = false }) => {
       return e(
         Box,
         { key: `r${i}`, flexDirection: "row" },
-        e(Text, { color: THEME.diffRemoveFg }, `${lineNum.toString().padStart(4)} `),
+        // Line number column (muted red)
+        e(Text, { color: THEME.diffRemoveFg }, `${lineNum.toString().padStart(4)} │ `),
+        // Content with red background for removed lines
         e(Text, { color: THEME.diffRemoveFg, backgroundColor: THEME.diffRemoveBg },
-          `- ${text}`)
+          `- ${text || " "}`)
       );
     }),
     // Added lines (green background)
@@ -440,16 +463,18 @@ const DiffView = memo(({ diff, isNewFile = false }) => {
       return e(
         Box,
         { key: `a${i}`, flexDirection: "row" },
-        e(Text, { color: THEME.diffAddFg }, `${lineNum.toString().padStart(4)} `),
+        // Line number column (muted green)
+        e(Text, { color: THEME.diffAddFg }, `${lineNum.toString().padStart(4)} │ `),
+        // Content with green background for added lines
         e(Text, { color: THEME.diffAddFg, backgroundColor: THEME.diffAddBg },
-          `+ ${text}`)
+          `+ ${text || " "}`)
       );
     }),
     // Show count if more lines
     (removed.length > 8 || added.length > 8) && e(
       Text,
-      { color: THEME.dim },
-      `     ... ${Math.max(0, removed.length - 8) + Math.max(0, added.length - 8)} more lines`
+      { color: THEME.dim, paddingLeft: 6 },
+      `... ${Math.max(0, removed.length - 8) + Math.max(0, added.length - 8)} more lines`
     )
   );
 });
@@ -738,12 +763,14 @@ const AgentActivityPanelBase = ({ overlayHeader = false }) => {
     // Model Status Banner (show when no model or tokens exceeded)
     modelStatus.isPaused && e(ModelStatusBanner, { status: modelStatus }),
 
-    // Current STATE with goal and project (only show if not paused)
-    !modelStatus.isPaused && e(StateDisplay, {
-      state,
-      stateInfo,
-      goal,
-      projectName,
+    // Current STATE with goal and project - ALWAYS SHOW with flashlight effect
+    // Shows state like "Researching..." with flashlight on first 2 chars
+    // Below shows Goal and Project context
+    e(StateDisplay, {
+      state: modelStatus.isPaused ? "IDLE" : state,
+      stateInfo: modelStatus.isPaused ? AGENT_STATES.IDLE : stateInfo,
+      goal: modelStatus.isPaused ? "Waiting for model connection..." : goal,
+      projectName: modelStatus.isPaused ? null : projectName,
       hideStateLine: overlayHeader
     }),
 

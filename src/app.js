@@ -321,6 +321,12 @@ const App = ({ updateConsoleTitle }) => {
       setLayoutReady(true);
     }, Math.max(...delays) + 200);
     resizeTimersRef.current.push(finalizeId);
+
+    // Trigger an additional re-render after 1 second to ensure all components adjust
+    const rerenderDelayId = setTimeout(() => {
+      setForceRenderKey((k) => k + 1);
+    }, Math.max(...delays) + 1000);
+    resizeTimersRef.current.push(rerenderDelayId);
   }, []);
 
   // Resize terminal to full size only after onboarding completes
@@ -526,6 +532,7 @@ const App = ({ updateConsoleTitle }) => {
   const pauseUpdatesRef = useRef(false); // Use ref to avoid re-renders in intervals
   const [mainViewReady, setMainViewReady] = useState(false);
   const [layoutReady, setLayoutReady] = useState(false);
+  const [forceRenderKey, setForceRenderKey] = useState(0); // Force re-render after layout adjusts
   const readinessTimerRef = useRef(null);
   const linkedInCheckTimerRef = useRef(null);
   const handleLogout = useCallback(() => {

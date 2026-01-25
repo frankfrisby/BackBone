@@ -1,6 +1,6 @@
 import fetch from "node-fetch";
 import { getAPIQuotaMonitor } from "./api-quota-monitor.js";
-import { hasValidCredentials as hasCodexCredentials, getAccessToken as getCodexAccessToken } from "./codex-oauth.js";
+import { hasValidCredentials as hasCodexCredentials } from "./codex-oauth.js";
 
 /**
  * Multi-Model AI Service for BACKBONE

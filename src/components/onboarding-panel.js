@@ -223,19 +223,59 @@ const StepIndicator = ({ status, isActive }) => {
 
 /**
  * Onboarding Step Item
+ * Highlights the currently selected step with appropriate colors:
+ * - Selected + Complete: Light green background
+ * - Selected + Pending: Orange highlight
+ * - Not selected: Normal colors
  */
 const StepItem = ({ step, status, isActive, isSelected }) => {
   const isComplete = status === "complete";
   const isError = status === "error";
   const isDisabled = step.disabled;
 
-  // Disabled steps are always gray
-  const labelColor = isDisabled ? "#475569" : isComplete ? "#22c55e" : isError ? "#ef4444" : isActive ? "#f97316" : "#94a3b8";
+  // Colors based on state
+  // When selected (isActive): show highlight
+  // When complete: green tones
+  // When pending: orange/gray tones
+  let labelColor, bgColor, indicatorPrefix;
+
+  if (isDisabled) {
+    labelColor = "#475569";
+    bgColor = undefined;
+    indicatorPrefix = "  ";
+  } else if (isActive && isComplete) {
+    // Selected AND complete: light green background
+    labelColor = "#166534";  // Dark green text
+    bgColor = "#86efac";     // Light green background
+    indicatorPrefix = "▶ ";
+  } else if (isActive) {
+    // Selected but not complete: orange highlight
+    labelColor = "#ffffff";  // White text
+    bgColor = "#f97316";     // Orange background
+    indicatorPrefix = "▶ ";
+  } else if (isComplete) {
+    // Complete but not selected: normal green
+    labelColor = "#22c55e";
+    bgColor = undefined;
+    indicatorPrefix = "  ";
+  } else if (isError) {
+    labelColor = "#ef4444";
+    bgColor = undefined;
+    indicatorPrefix = "  ";
+  } else {
+    // Pending, not selected
+    labelColor = "#94a3b8";
+    bgColor = undefined;
+    indicatorPrefix = "  ";
+  }
+
   const descColor = "#64748b";
 
   return e(
     Box,
-    { flexDirection: "row", gap: 2 },
+    { flexDirection: "row", gap: 1 },
+    // Selection indicator arrow
+    e(Text, { color: isActive ? (isComplete ? "#166534" : "#f97316") : "#1e293b" }, indicatorPrefix),
     e(StepIndicator, { status: isDisabled ? "disabled" : status, isActive: isActive && !isDisabled }),
     e(
       Box,
@@ -243,12 +283,16 @@ const StepItem = ({ step, status, isActive, isSelected }) => {
       e(
         Box,
         { flexDirection: "row", gap: 1 },
-        e(Text, { color: labelColor, bold: (isActive || isComplete) && !isDisabled, dimColor: isDisabled }, step.label),
+        // Main label with background highlight when selected
+        bgColor
+          ? e(Text, { color: labelColor, backgroundColor: bgColor, bold: true }, ` ${step.label} `)
+          : e(Text, { color: labelColor, bold: (isActive || isComplete) && !isDisabled, dimColor: isDisabled }, step.label),
         isDisabled && e(Text, { color: "#475569", dimColor: true }, "(Coming Soon)"),
-        !step.required && !isComplete && !isDisabled && e(Text, { color: "#475569", dimColor: true }, "(Optional)"),
-        isComplete && !isDisabled && e(Text, { color: "#22c55e", dimColor: true }, "Done")
+        !step.required && !isComplete && !isDisabled && !isActive && e(Text, { color: "#475569", dimColor: true }, "(Optional)"),
+        isComplete && !isDisabled && !isActive && e(Text, { color: "#22c55e", dimColor: true }, "✓")
       ),
-      isActive && !isComplete && !isDisabled && e(Text, { color: descColor }, step.description),
+      // Show description when selected
+      isActive && !isDisabled && e(Text, { color: isComplete ? "#166534" : descColor }, step.description),
       isDisabled && isActive && e(Text, { color: "#475569", dimColor: true }, step.description)
     )
   );

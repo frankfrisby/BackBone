@@ -177,12 +177,36 @@ const STATUS_COLORS = {
 const BRAND_COLOR = "#f97316";
 
 // Model provider options
+// Model options in priority order for fallback chain
 const MODEL_OPTIONS = [
-  { id: "claude-oauth", label: "Claude Pro/Max (Login)", description: "Login with your Claude subscription", oauth: true },
-  { id: "anthropic", label: "Claude (API Key)", description: "Recommended - Best reasoning" },
-  { id: "openai", label: "GPT (OpenAI)", description: "Most popular - ChatGPT family" },
-  { id: "google", label: "Gemini (Google)", description: "Fast - Google AI" }
+  { id: "claude-oauth", label: "Claude Pro/Max", description: "Login with your Claude subscription", oauth: true, priority: 1 },
+  { id: "openai-codex", label: "OpenAI Codex", description: "Code-optimized GPT model", priority: 2 },
+  { id: "openai", label: "OpenAI API", description: "GPT-4 and ChatGPT family", priority: 3 },
+  { id: "anthropic", label: "Claude API", description: "Anthropic API key", priority: 4 },
+  { id: "google", label: "Gemini (Google)", description: "Google AI - Optional", priority: 5, optional: true }
 ];
+
+// Check if a specific model is connected
+const isModelConnected = (modelId) => {
+  switch (modelId) {
+    case "claude-oauth":
+      return hasClaudeCredentials();
+    case "openai-codex":
+    case "openai":
+      return isProviderConfigured("openai");
+    case "anthropic":
+      return isProviderConfigured("anthropic");
+    case "google":
+      return isProviderConfigured("google");
+    default:
+      return false;
+  }
+};
+
+// Get all connected models in priority order
+const getConnectedModels = () => {
+  return MODEL_OPTIONS.filter(m => isModelConnected(m.id)).sort((a, b) => a.priority - b.priority);
+};
 
 /**
  * Spinning B Logo Component
@@ -611,8 +635,18 @@ const ModelSelectionStep = ({ onComplete, onError }) => {
       return;
     }
 
+    // Check other providers - map model IDs to provider IDs
+    const providerMap = {
+      "openai-codex": "openai",
+      "openai": "openai",
+      "anthropic": "anthropic",
+      "google": "google",
+    };
+
     for (const opt of MODEL_OPTIONS) {
-      if (opt.id !== "claude-oauth" && isProviderConfigured(opt.id)) {
+      if (opt.id === "claude-oauth") continue;
+      const providerId = providerMap[opt.id] || opt.id;
+      if (isProviderConfigured(providerId)) {
         setMessage(`${opt.label} already configured!`);
         setTimeout(() => onComplete({ provider: opt.id, existing: true }), 1000);
         return;
@@ -681,6 +715,38 @@ const ModelSelectionStep = ({ onComplete, onError }) => {
         // Handle Claude OAuth option
         if (provider.id === "claude-oauth") {
           handleClaudeOAuth();
+          return;
+        }
+
+        // Handle OpenAI Codex - same flow as OpenAI but different messaging
+        if (provider.id === "openai-codex") {
+          setSubStep("api-key");
+          openProviderKeyPage("openai");
+          if (useInlineKeyEntry) {
+            setMessage("Paste your OpenAI API key (works for Codex too).");
+          } else {
+            createApiKeyFile("openai");
+            setMessage("Opening OpenAI API keys...");
+            setTimeout(() => openApiKeyInEditor(), 500);
+          }
+
+          // Start watching for file changes
+          if (!useInlineKeyEntry) {
+            fileWatcherRef.current = watchApiKeyFile(async (key) => {
+              setSubStep("validating");
+              setMessage("Validating API key...");
+              const result = await validateApiKey("openai", key);
+              if (result.valid) {
+                saveApiKeyToEnv("openai", key);
+                cleanupApiKeyFile();
+                setMessage("OpenAI API key validated!");
+                setTimeout(() => onComplete({ provider: "openai-codex" }), 1000);
+              } else {
+                setSubStep("api-key");
+                setMessage(`Invalid key: ${result.error}. Try again.`);
+              }
+            });
+          }
           return;
         }
 
@@ -774,21 +840,40 @@ const ModelSelectionStep = ({ onComplete, onError }) => {
       { flexDirection: "column", paddingX: 1 },
       e(Text, { color: "#e2e8f0", bold: true }, "Select AI Provider"),
       e(Text, { color: "#64748b" }, "Use arrows to select, Enter to confirm"),
-            ...MODEL_OPTIONS.map((opt, i) =>
-        e(
+      e(Text, { color: "#64748b", dimColor: true, marginBottom: 1 }, "Priority: 1=Primary, 2=Fallback, etc."),
+      ...MODEL_OPTIONS.map((opt, i) => {
+        const isConnected = isModelConnected(opt.id);
+        const isSelected = i === selectedProvider;
+        return e(
           Box,
-          { key: opt.id, flexDirection: "row", gap: 2 },
-          e(Text, { color: i === selectedProvider ? "#f97316" : "#64748b" },
-            i === selectedProvider ? "\u25B6" : " "
+          { key: opt.id, flexDirection: "row", gap: 1 },
+          // Selection arrow
+          e(Text, { color: isSelected ? "#f97316" : "#1e293b" },
+            isSelected ? "▶" : " "
           ),
+          // Priority number
+          e(Text, { color: "#64748b", dimColor: true }, `${opt.priority}.`),
+          // Connection status indicator
+          e(Text, { color: isConnected ? "#22c55e" : "#475569" },
+            isConnected ? "●" : "○"
+          ),
+          // Label and description
           e(
             Box,
             { flexDirection: "column" },
-            e(Text, { color: i === selectedProvider ? "#e2e8f0" : "#94a3b8", bold: i === selectedProvider }, opt.label),
+            e(
+              Box,
+              { flexDirection: "row", gap: 1 },
+              e(Text, {
+                color: isConnected ? "#22c55e" : (isSelected ? "#e2e8f0" : "#94a3b8"),
+                bold: isSelected || isConnected
+              }, opt.label),
+              isConnected && e(Text, { color: "#22c55e", dimColor: true }, "Connected")
+            ),
             e(Text, { color: "#64748b", dimColor: true }, opt.description)
           )
-        )
-      )
+        );
+      })
     );
   }
 

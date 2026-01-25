@@ -818,8 +818,10 @@ class ActivityNarrator extends EventEmitter {
     }
 
     // Must have specific details (numbers, symbols, names, or action verbs)
+    // Goals should be full sentences with 15+ words for proper detail
+    const wordCount = goal.split(" ").length;
     const hasSpecifics = /\$[\d,]+|\d+%|[A-Z]{2,5}|@|#|\d{4}/.test(goal) || // Numbers, tickers, dates
-                         goal.split(" ").length >= 6; // At least 6 words for detail
+                         wordCount >= 15; // At least 15 words for full detailed sentence
 
     return !hasSpecifics;
   }

@@ -3,41 +3,46 @@ import { Box, Text } from "ink";
 import { getActivityNarrator, AGENT_STATES, ACTION_TOOLS } from "../services/activity-narrator.js";
 import { getAutonomousEngine } from "../services/autonomous-engine.js";
 import { useCoordinatedUpdates } from "../hooks/useCoordinatedUpdates.js";
-import { getAIStatus, getMultiAIConfig } from "../services/multi-ai.js";
+import { getAIStatus, getMultiAIConfig, getCurrentModel } from "../services/multi-ai.js";
 import { BILLING_URLS } from "../services/api-quota-monitor.js";
+import { isClaudeCodeLoggedIn } from "../services/claude-code-cli.js";
 
 const e = React.createElement;
 
 /**
- * Flashlight text effect - highlight a few leading letters with bright spotlight
- * Creates a "flashlight" effect where the first few characters are brightly lit
- * Example: "Researching..." → "Re" is white/bright, "searching..." is base color
- *
- * The spotlight simulates a flashlight beam highlighting the beginning of the text.
+ * Flashlight text effect with shimmer animation
+ * Creates a moving spotlight that sweeps across the text like a shimmer
+ * The spotlight position animates from left to right, creating a "loading" shimmer effect
  */
-const FlashlightText = memo(({ text, baseColor = "#f59e0b", bold = true, spotlightCount = 2 }) => {
-  // Bright spotlight colors for each base color - creates the "lit" effect
-  const palette = {
-    "#f59e0b": "#fef3c7",  // Orange → Warm white
-    "#60a5fa": "#dbeafe",  // Blue → Light blue
-    "#22c55e": "#dcfce7",  // Green → Light green
-    "#a855f7": "#f3e8ff",  // Purple → Light purple
-    "#64748b": "#e2e8f0",  // Gray → Light gray
-  };
-  const bright = palette[baseColor] || "#ffffff";
-  const actualSpotlight = Math.min(spotlightCount, text.length);
-  const brightText = text.slice(0, actualSpotlight);
-  const restText = text.slice(actualSpotlight);
+const FlashlightText = ({ text, baseColor = "#f59e0b", bold = true, spotlightCount = 4 }) => {
+  // Animate spotlight position from 0 to text length
+  const [spotlightPos, setSpotlightPos] = useState(0);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setSpotlightPos(prev => (prev + 1) % (text.length + spotlightCount));
+    }, 100); // Move every 100ms for smooth shimmer
+    return () => clearInterval(interval);
+  }, [text.length, spotlightCount]);
+
+  // Build the text with shimmer effect at current position
+  const beforeSpotlight = text.slice(0, Math.max(0, spotlightPos));
+  const spotlightStart = Math.max(0, spotlightPos);
+  const spotlightEnd = Math.min(text.length, spotlightPos + spotlightCount);
+  const brightText = text.slice(spotlightStart, spotlightEnd);
+  const afterSpotlight = text.slice(spotlightEnd);
 
   return e(
     Box,
     { flexDirection: "row" },
-    // Bright spotlight section (first chars - very bright, like a flashlight beam)
-    e(Text, { color: bright, bold, backgroundColor: baseColor }, brightText),
-    // Rest of the text in base color
-    e(Text, { color: baseColor, bold }, restText)
+    // Text before spotlight (base color)
+    beforeSpotlight && e(Text, { color: baseColor, bold }, beforeSpotlight),
+    // Bright spotlight section (white on colored background)
+    brightText && e(Text, { color: "#ffffff", bold, backgroundColor: baseColor }, brightText),
+    // Text after spotlight (base color)
+    afterSpotlight && e(Text, { color: baseColor, bold }, afterSpotlight)
   );
-});
+};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ENHANCED ENGINE PANEL - Detailed actions, shimmer state, token tracking
@@ -177,23 +182,26 @@ const ActionLine = memo(({ action, showDetail = true }) => {
     resultLines = result.split("\n").filter(line => line.trim());
   }
 
-  // Status indicator: gray dot = working, green dot = done
-  const statusDot = isDone
-    ? e(Text, { color: THEME.success }, "●")
-    : e(Text, { color: THEME.gray }, "●");
+  // Status indicator: gray dot = working, green checkmark = done, red X = failed
+  const isFailed = status === "FAILED" || status === "failed" || status === "error";
+  const statusIcon = isDone
+    ? e(Text, { color: THEME.success, bold: true }, "✓")  // Green checkmark for completed
+    : isFailed
+      ? e(Text, { color: THEME.error, bold: true }, "✗")  // Red X for failed
+      : e(Text, { color: THEME.gray }, "●");  // Gray dot for in-progress
 
   return e(
     Box,
     { flexDirection: "column", marginBottom: 1 },
-    // Main action line: ● Verb(target in white)
+    // Main action line: ✓/●/✗ Verb(target in white)
     e(
       Box,
       { flexDirection: "row" },
-      statusDot,
+      statusIcon,
       e(Text, { color: THEME.muted }, " "),
-      e(Text, { color, bold: true }, verb),
+      e(Text, { color: isDone ? THEME.success : isFailed ? THEME.error : color, bold: true }, verb),
       e(Text, { color: THEME.muted }, "("),
-      e(Text, { color: THEME.white, wrap: "wrap" }, target),
+      e(Text, { color: isDone ? THEME.success : THEME.white, wrap: "wrap" }, target),
       e(Text, { color: THEME.muted }, ")")
     ),
 
@@ -334,13 +342,30 @@ const buildMeaningfulOutcome = (action, userName = "there") => {
 };
 
 /**
- * Check if an outcome is meaningful enough to show
+ * Check if an outcome is a real goal/project completion (not small tasks)
+ * Only show major achievements like completed goals or projects
  */
-const isUselessOutcome = (summary) => {
-  if (!summary) return true;
+const isRealGoalOrProject = (summary) => {
+  if (!summary) return false;
   const lower = summary.toLowerCase();
 
-  // Filter out generic/vague outcomes
+  // Must contain goal/project completion keywords
+  const goalPatterns = [
+    /goal.*complete/i,
+    /project.*complete/i,
+    /complete.*goal/i,
+    /complete.*project/i,
+    /finished.*project/i,
+    /achieved.*goal/i,
+    /milestone.*reached/i,
+    /objective.*complete/i
+  ];
+
+  // Check if it matches goal/project patterns
+  const isGoalOrProject = goalPatterns.some(pattern => pattern.test(lower));
+  if (!isGoalOrProject) return false;
+
+  // Filter out generic/vague outcomes even if they mention goals
   const uselessPatterns = [
     /^completed:/i,
     /^analyzed?\s/i,
@@ -352,30 +377,26 @@ const isUselessOutcome = (summary) => {
     /help.*manage/i
   ];
 
-  return uselessPatterns.some(pattern => pattern.test(lower));
+  return !uselessPatterns.some(pattern => pattern.test(lower));
 };
 
 /**
- * Outcome line - Real achievements/completions
- *
- * Shows actual results with personal touch:
- * - "Hey Frank, I've connected your LinkedIn profile. Now I'm exploring ways to..."
- * - "I've analyzed your health data and found some patterns to optimize."
- * - "Research complete. I've identified 5 opportunities that match your criteria."
+ * Outcome line - Only for completed GOALS or PROJECTS
+ * Shows green dot with white/gray text
  */
 const OutcomeLine = memo(({ outcome }) => {
   if (!outcome) return null;
 
   const summary = outcome.summary || outcome;
 
-  // Don't show useless outcomes
-  if (isUselessOutcome(summary)) return null;
+  // Only show real goal/project completions
+  if (!isRealGoalOrProject(summary)) return null;
 
   return e(
     Box,
     { flexDirection: "row", gap: 1, marginBottom: 1 },
-    e(Text, { color: THEME.success }, "✓"),
-    e(Text, { color: THEME.success, wrap: "wrap" }, summary)
+    e(Text, { color: THEME.success }, "●"),
+    e(Text, { color: THEME.primary, wrap: "wrap" }, summary)
   );
 });
 
@@ -633,9 +654,18 @@ const ModelStatusBanner = memo(({ status }) => {
  * │   [diff view with green/red lines]                      │
  * └─────────────────────────────────────────────────────────┘
  */
-const AgentActivityPanelBase = ({ overlayHeader = false }) => {
+const AgentActivityPanelBase = ({ overlayHeader = false, compact = false }) => {
   const narrator = getActivityNarrator();
   const autonomousEngine = getAutonomousEngine();
+
+  // Blinking dot animation - toggles every second to show engine is alive
+  const [dotVisible, setDotVisible] = useState(true);
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setDotVisible(prev => !prev);
+    }, 1000);
+    return () => clearInterval(interval);
+  }, []);
 
   // Check model status
   const modelStatus = useMemo(() => {
@@ -736,36 +766,97 @@ const AgentActivityPanelBase = ({ overlayHeader = false }) => {
 
   return e(
     Box,
-    { flexDirection: "column", paddingX: 1 },
+    { flexDirection: "column", paddingX: compact ? 0 : 1 },
 
-    // Header
-    overlayHeader
-      ? e(
+    // Header - show ENGINE with actual connected model
+    (() => {
+      const config = getMultiAIConfig();
+      const { model: currentModelInfo } = getCurrentModel();
+
+      // Determine what model is actually available/connected
+      let modelName = "No Model";
+      let modelColor = THEME.error;
+
+      if (config.gptInstant?.ready || config.gptThinking?.ready) {
+        // OpenAI is connected - show the current model being used
+        modelName = currentModelInfo?.shortName || "GPT-5.2";
+        modelColor = currentModelInfo?.color || "#10a37f";
+      } else if (config.claude?.ready) {
+        // Claude is connected
+        modelName = "Claude";
+        modelColor = "#d97706";
+      }
+
+      // If paused, show why
+      if (modelStatus.isPaused) {
+        if (!modelStatus.hasModel) {
+          modelName = "No API Key";
+          modelColor = THEME.error;
+        } else if (modelStatus.tokensExceeded) {
+          modelName = "Quota Exceeded";
+          modelColor = THEME.error;
+        }
+      }
+
+      // Check Claude Code CLI status
+      const claudeCodeStatus = isClaudeCodeLoggedIn();
+      const claudeCodeRunning = claudeCodeStatus.loggedIn;
+
+      if (compact) {
+        return e(
+          Box,
+          { flexDirection: "column", marginBottom: 1 },
+          e(Box, { flexDirection: "row" },
+            e(Text, { color: THEME.muted, bold: true }, "ENGINE"),
+            // Blinking gray dot to show engine is alive
+            e(Text, { color: dotVisible ? THEME.gray : THEME.dim }, " ● "),
+            e(Text, { color: modelColor, bold: true }, modelName),
+            // Show Claude Code CLI status if connected
+            claudeCodeRunning && e(Text, { color: THEME.dim }, " · "),
+            claudeCodeRunning && e(Text, { color: THEME.success }, "Claude CLI "),
+            claudeCodeRunning && e(Text, { color: THEME.gray }, "(Background)")
+          ),
+          e(Text, { color: "#1e293b" }, "─".repeat(50))
+        );
+      }
+
+      if (overlayHeader) {
+        return e(
           Box,
           { flexDirection: "column" },
           e(Text, { color: THEME.dim }, " "),
           e(Text, { color: THEME.dim }, " ")
-        )
-      : e(
-          React.Fragment,
-          null,
-          e(
-            Box,
-            { flexDirection: "row", justifyContent: "space-between" },
+        );
+      }
+
+      return e(
+        React.Fragment,
+        null,
+        e(
+          Box,
+          { flexDirection: "row", justifyContent: "space-between" },
+          e(Box, { flexDirection: "row" },
             e(Text, { color: THEME.muted, bold: true }, "ENGINE"),
-            metricsLine
-              ? e(Text, { color: THEME.dim }, metricsLine)
-              : e(StatsLine, { stats })
+            // Blinking gray dot to show engine is alive
+            e(Text, { color: dotVisible ? THEME.gray : THEME.dim }, " ● "),
+            e(Text, { color: modelColor, bold: true }, modelName),
+            // Show Claude Code CLI status if connected
+            claudeCodeRunning && e(Text, { color: THEME.dim }, " · "),
+            claudeCodeRunning && e(Text, { color: THEME.success }, "Claude CLI Running "),
+            claudeCodeRunning && e(Text, { color: THEME.gray }, "(Background)")
           ),
-          e(Box, {}, e(Text, { color: THEME.dim }, "─".repeat(60)))
+          metricsLine
+            ? e(Text, { color: THEME.dim }, metricsLine)
+            : e(StatsLine, { stats })
         ),
+        e(Box, {}, e(Text, { color: "#1e293b" }, "─".repeat(60)))
+      );
+    })(),
 
     // Model Status Banner (show when no model or tokens exceeded)
     modelStatus.isPaused && e(ModelStatusBanner, { status: modelStatus }),
 
     // Current STATE with goal and project - ALWAYS SHOW with flashlight effect
-    // Shows state like "Researching..." with flashlight on first 2 chars
-    // Below shows Goal and Project context
     e(StateDisplay, {
       state: modelStatus.isPaused ? "IDLE" : state,
       stateInfo: modelStatus.isPaused ? AGENT_STATES.IDLE : stateInfo,
@@ -776,11 +867,11 @@ const AgentActivityPanelBase = ({ overlayHeader = false }) => {
 
     // Real ACTIONS (bash commands, searches, file operations)
     ...timeline.map((item, i) =>
-      e(ActionLine, { key: item.id || `act${i}`, action: item, showDetail: true })
+      e(ActionLine, { key: item.id || `act${i}`, action: item, showDetail: !compact })
     ),
 
     // OBSERVATIONS - What the AI discovered (white dot with spacing)
-    discoveries.length > 0 && e(
+    !compact && discoveries.length > 0 && e(
       Box,
       { flexDirection: "column", marginTop: 1 },
       ...discoveries.map((d, i) =>
@@ -788,32 +879,19 @@ const AgentActivityPanelBase = ({ overlayHeader = false }) => {
       )
     ),
 
-    // OUTCOMES - Real achievements (shown at bottom)
+    // OUTCOMES - Only show completed goals/projects (no label, just green dot + white text)
     outcomes.length > 0 && e(
       Box,
-      { flexDirection: "column", marginTop: 1 },
-      e(Text, { color: THEME.dim }, "─ Outcomes ─"),
+      { flexDirection: "column", marginTop: compact ? 0 : 1 },
       ...outcomes.map((o, i) =>
         e(OutcomeLine, { key: `out${i}`, outcome: o })
       )
     ),
 
-    // Empty state (only if not paused and no timeline)
-    !modelStatus.isPaused && timeline.length === 0 && discoveries.length === 0 && e(
-      Box,
-      { paddingY: 1 },
-      e(Text, { color: THEME.dim, italic: true }, "Analyzing metrics and planning improvements...")
-    ),
+    // Note: Empty state is handled by StateDisplay which shows the current state with flashlight effect
 
-    // Show completed work label if paused and has old work
-    modelStatus.isPaused && timeline.length > 0 && e(
-      Box,
-      { marginTop: 1 },
-      e(Text, { color: THEME.dim, dimColor: true }, "─ Previous work ─")
-    ),
-
-    // Task progress (only if not paused)
-    !modelStatus.isPaused && taskProgress && e(
+    // Task progress (only if not paused and not compact)
+    !compact && !modelStatus.isPaused && taskProgress && e(
       Box,
       { marginTop: 1 },
       e(TaskProgress, { ...taskProgress })

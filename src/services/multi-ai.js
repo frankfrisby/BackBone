@@ -22,7 +22,7 @@ export const MODELS = {
     id: "gpt-5.2-chat-latest",
     fallbackId: "gpt-4o-mini",  // Fallback for older API keys
     name: "GPT-5.2 Instant",
-    shortName: "5.2 Instant",
+    shortName: "GPT-5.2 Instant",
     icon: "⚡",
     color: "#10a37f",
     description: "Fast responses, quick tasks",
@@ -34,7 +34,7 @@ export const MODELS = {
     id: "gpt-5.2",
     fallbackId: "gpt-4o",  // Fallback for older API keys
     name: "GPT-5.2 Thinking",
-    shortName: "5.2 Think",
+    shortName: "GPT-5.2 Think",
     icon: "🧠",
     color: "#8b5cf6",
     description: "Complex reasoning, coding, analysis",
@@ -46,7 +46,7 @@ export const MODELS = {
     id: "gpt-5.2-pro",
     fallbackId: "gpt-4o",
     name: "GPT-5.2 Pro",
-    shortName: "5.2 Pro",
+    shortName: "GPT-5.2 Pro",
     icon: "💎",
     color: "#f59e0b",
     description: "Maximum quality for difficult problems",
@@ -79,10 +79,12 @@ export const MODELS = {
 // Task types for routing
 export const TASK_TYPES = {
   INSTANT: "instant",      // Quick questions, simple tasks
+  ROUTING: "routing",      // Fast routing decisions (use Instant)
   STANDARD: "standard",    // Normal conversations
   COMPLEX: "complex",      // Analysis, planning, reasoning
   CODING: "coding",        // Code generation, debugging
-  AGENTIC: "agentic"       // Multi-step autonomous tasks
+  AGENTIC: "agentic",      // Multi-step autonomous tasks (use Thinking)
+  RESEARCH: "research"     // In-depth research and analysis (use Pro)
 };
 
 // Current model state (for display)
@@ -385,7 +387,8 @@ export const sendMessage = async (message, context = {}, taskType = "auto") => {
 
   switch (taskType) {
     case TASK_TYPES.INSTANT:
-      // Use GPT-5.2 Instant for fast responses
+    case TASK_TYPES.ROUTING:
+      // Use GPT-5.2 Instant for fast routing decisions and quick tasks
       if (config.gptInstant.ready) {
         modelConfig = config.gptInstant;
         modelKey = "gpt-5.2-instant";
@@ -393,10 +396,32 @@ export const sendMessage = async (message, context = {}, taskType = "auto") => {
       }
       break;
 
+    case TASK_TYPES.RESEARCH:
+      // Use GPT-5.2 Pro for in-depth research and analysis
+      if (config.gptPro?.ready) {
+        modelConfig = config.gptPro;
+        modelKey = "gpt-5.2-pro";
+        currentModel = MODELS.GPT52_PRO;
+      } else if (config.gptThinking.ready) {
+        // Fall back to Thinking if Pro not available
+        modelConfig = config.gptThinking;
+        modelKey = "gpt-5.2-thinking";
+        currentModel = MODELS.GPT52_THINKING;
+      } else if (config.claude.ready) {
+        currentModel = MODELS.CLAUDE_OPUS;
+        return {
+          model: "claude",
+          modelInfo: MODELS.CLAUDE_OPUS,
+          taskType,
+          response: await sendToClaude(message, context)
+        };
+      }
+      break;
+
     case TASK_TYPES.CODING:
     case TASK_TYPES.COMPLEX:
     case TASK_TYPES.AGENTIC:
-      // Use GPT-5.2 Thinking for complex tasks
+      // Use GPT-5.2 Thinking for actions and complex tasks
       if (config.gptThinking.ready) {
         modelConfig = config.gptThinking;
         modelKey = "gpt-5.2-thinking";

@@ -402,6 +402,51 @@ Only suggest actions that are genuinely useful based on the data. If there's not
     this.saveThread();
     this.emit("thread-cleared");
   }
+
+  /**
+   * Load files into memory for AI execution context
+   * Reads commonly needed files and adds them to the context
+   */
+  async loadFilesForExecution(filePaths = []) {
+    const filesContext = {};
+
+    // Default files to always load if they exist
+    const defaultFiles = [
+      path.join(DATA_DIR, "goals.json"),
+      path.join(DATA_DIR, "user_profile.json"),
+      path.join(DATA_DIR, "memory.json"),
+      path.join(process.cwd(), ".env.example"),
+      path.join(process.cwd(), "PROJECT.md"),
+    ];
+
+    const allFiles = [...defaultFiles, ...filePaths];
+
+    for (const filePath of allFiles) {
+      try {
+        if (fs.existsSync(filePath)) {
+          const content = fs.readFileSync(filePath, "utf-8");
+          const fileName = path.basename(filePath);
+          // Truncate large files to prevent context overflow
+          filesContext[fileName] = content.length > 5000
+            ? content.slice(0, 5000) + "\n... [truncated]"
+            : content;
+        }
+      } catch (error) {
+        // Skip files that can't be read
+      }
+    }
+
+    // Register as context provider
+    this.registerContextProvider("filesInMemory", filesContext);
+    return filesContext;
+  }
+
+  /**
+   * Get list of files currently in memory
+   */
+  getFilesInMemory() {
+    return this.contextProviders.filesInMemory || {};
+  }
 }
 
 // Singleton

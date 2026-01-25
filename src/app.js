@@ -69,7 +69,7 @@ import { saveAllMemory } from "./services/memory.js";
 import { getEmailConfig, buildEmailSummary } from "./services/email.js";
 import { getWealthConfig, buildWealthSummary } from "./services/wealth.js";
 import { fetchTickers as fetchYahooTickers, startServer as startYahooServer, isServerRunning } from "./services/yahoo-client.js";
-import { extractLinkedInProfile, saveLinkedInProfile, loadLinkedInProfile } from "./services/linkedin-scraper.js";
+import { extractLinkedInProfile, saveLinkedInProfile, loadLinkedInProfile, isProfileIncomplete, refreshAndGenerateLinkedInMarkdown } from "./services/linkedin-scraper.js";
 import { getDataFreshnessChecker } from "./services/data-freshness-checker.js";
 import { getGoalsStatus, launchGoalsVoiceApp } from "./services/goals-voice.js";
 import { loadTradingStatus, saveTradingStatus, buildTradingStatusDisplay, recordTradeAttempt, resetTradingStatus } from "./services/trading-status.js";
@@ -123,6 +123,7 @@ import { TestRunnerPanel } from "./components/test-runner-panel.js";
 import { SettingsPanel } from "./components/settings-panel.js";
 import { LinkedInDataViewer } from "./components/linkedin-data-viewer.js";
 import { loadUserSettings, saveUserSettings, updateSettings as updateUserSettings, updateSetting, getModelConfig, isProviderConfigured } from "./services/user-settings.js";
+import { hasValidCredentials as hasCodexCredentials } from "./services/codex-oauth.js";
 import { loadFineTuningConfig, saveFineTuningConfig, runFineTuningPipeline, queryFineTunedModel } from "./services/fine-tuning.js";
 import { monitorAndTrade, loadConfig as loadTradingConfig, setTradingEnabled } from "./services/auto-trader.js";
 import { isMarketOpen } from "./services/trading-status.js";
@@ -131,9 +132,13 @@ import { analyzeAllPositions, getPositionContext, explainWhyHeld } from "./servi
 // New autonomous system imports
 import { getAutonomousEngine, AI_ACTION_STATUS, AI_ACTION_TYPES, EXECUTION_TOOLS } from "./services/autonomous-engine.js";
 import { getClaudeCodeBackend } from "./services/claude-code-backend.js";
+import { initializeClaudeCodeEngine, EXECUTION_MODE, getClaudeCodeExecutor } from "./services/claude-code-executor.js";
+import { getClaudeCodeStatus, isClaudeCodeLoggedIn } from "./services/claude-code-cli.js";
 import { getWorkLog, LOG_SOURCE, LOG_STATUS } from "./services/work-log.js";
 import { getGoalTracker, GOAL_CATEGORY } from "./services/goal-tracker.js";
 import { getLifeScores } from "./services/life-scores.js";
+import { getProgressResearch } from "./services/progress-research.js";
+import { getTargetPerson } from "./services/person-matcher.js";
 import { getLifeEngine } from "./services/life-engine.js";
 import { getMobileService } from "./services/mobile.js";
 import { WorkLogPanel } from "./components/work-log-panel.js";
@@ -148,7 +153,7 @@ import OuraHealthPanel from "./components/oura-health-panel.js";
 import { OnboardingPanel } from "./components/onboarding-panel.js";
 import { SplashScreen } from "./components/splash-screen.js";
 // ToolActionsPanel removed - merged into AgentActivityPanel
-import { resizeForOnboarding, resizeForMainApp } from "./services/terminal-resize.js";
+import { resizeForOnboarding, resizeForMainApp, TERMINAL_SIZES } from "./services/terminal-resize.js";
 import { processAndSaveContext, buildContextForAI } from "./services/conversation-context.js";
 import { MENTORS, MENTOR_CATEGORIES, getMentorsByCategory, getDailyWisdom, formatMentorDisplay, getAllMentorsDisplay, getMentorAdvice } from "./services/mentors.js";
 import { generateDailyInsights, generateWeeklyReport, formatInsightsDisplay, formatWeeklyReportDisplay, getQuickStatus } from "./services/insights-engine.js";
@@ -226,6 +231,15 @@ const OVERLAY_CONNECTION_HEIGHT = 3;
 const OVERLAY_ENGINE_HEIGHT = 14;
 const OVERLAY_ENGINE_HEADER_HEIGHT = 3;
 const CONNECTION_BAR_MARGIN = 1;
+const DEFAULT_CONNECTION_STATUSES = {
+  alpaca: { connected: false, status: "never", details: "" },
+  claude: { connected: false, status: "never", details: "" },
+  claudeCode: { connected: false, status: "never", details: "" },
+  linkedin: { connected: false, status: "never", details: "" },
+  oura: { connected: false, status: "never", details: "" },
+  yahoo: { connected: true, status: "connected", details: "" },
+  personalCapital: { connected: false, status: "never", details: "" }
+};
 
 const SCORE_REFRESH_MS = 30_000; // Reduced from 5s to 30s
 const LIVE_SCORE_REFRESH_MS = 60_000; // Reduced from 30s to 60s
@@ -249,6 +263,14 @@ const App = ({ updateConsoleTitle }) => {
   const [isInitializing, setIsInitializing] = useState(true);
   const [lifeEngineCoverage, setLifeEngineCoverage] = useState(0);
   const [lifeEngineReady, setLifeEngineReady] = useState(false);
+  // Pulsing dot for connection status (toggles every 500ms)
+  const [pulsingDotVisible, setPulsingDotVisible] = useState(true);
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setPulsingDotVisible(prev => !prev);
+    }, 500);
+    return () => clearInterval(interval);
+  }, []);
   const [activeCommand, setActiveCommand] = useState("/account");
   const [lastAction, setLastAction] = useState("Ready");
   const [currentTier, setCurrentTier] = useState(() => getCurrentTier());
@@ -256,10 +278,51 @@ const App = ({ updateConsoleTitle }) => {
   const [viewMode, setViewMode] = useState(VIEW_MODES.CORE); // Core is default
   const [showTestRunner, setShowTestRunner] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [pauseUpdates, setPauseUpdates] = useState(false);
+  const pauseUpdatesRef = useRef(false); // Use ref to avoid re-renders in intervals
+  const [mainViewReady, setMainViewReady] = useState(false);
+  const [layoutReady, setLayoutReady] = useState(false);
+  const [forceRenderKey, setForceRenderKey] = useState(0); // Force re-render after layout adjusts
+  const readinessTimerRef = useRef(null);
+  const layoutKickTimerRef = useRef(null);
+  const linkedInCheckTimerRef = useRef(null);
+  const { stdout } = useStdout();
   const initialSettingsRef = useRef(loadUserSettings());
   const [userSettings, setUserSettings] = useState(initialSettingsRef.current);
   const [showOnboarding, setShowOnboarding] = useState(!initialSettingsRef.current.onboardingComplete);
   const [firebaseUser, setFirebaseUser] = useState(() => initialSettingsRef.current.firebaseUser || getCurrentFirebaseUser());
+
+  const getOpenAIModelSource = (modelInfo) => {
+    if (!modelInfo) return null;
+    const modelId = modelInfo.id || "";
+    const modelName = modelInfo.name || "";
+    const isOpenAIModel = modelId.startsWith("gpt-") || modelName.startsWith("GPT-");
+    if (!isOpenAIModel) return null;
+
+    const hasCodexAuth = hasCodexCredentials();
+    const prefersCodex = userSettings?.coreModelProvider === "openai-codex";
+
+    if (prefersCodex && hasCodexAuth) return "Codex";
+    if (process.env.OPENAI_API_KEY) return "API";
+    if (hasCodexAuth) return "Codex";
+    return null;
+  };
+
+  const buildModelDisplayInfo = (modelInfo, taskType) => {
+    if (!modelInfo) return null;
+    const sourceLabel = getOpenAIModelSource(modelInfo);
+    const suffix = sourceLabel ? ` (${sourceLabel})` : "";
+    const nameBase = modelInfo.name || modelInfo.shortName || "GPT-5.2";
+    const shortNameBase = modelInfo.shortName || modelInfo.name || "GPT-5.2";
+
+    return {
+      ...modelInfo,
+      taskType,
+      sourceLabel,
+      displayName: `${nameBase}${suffix}`,
+      shortNameWithSource: `${shortNameBase}${suffix}`
+    };
+  };
   // Basic firebase user name (job title added later when linkedInProfile is available)
   const firebaseUserName = useMemo(() => {
     if (!firebaseUser) return "";
@@ -281,6 +344,16 @@ const App = ({ updateConsoleTitle }) => {
     setFirebaseUser(latestUser);
   }, [userSettings]);
 
+  const nudgeStdoutSize = useCallback((preset) => {
+    if (!stdout) return;
+    const size = TERMINAL_SIZES[preset] || TERMINAL_SIZES.main;
+    stdout.columns = size.cols;
+    stdout.rows = size.rows;
+    if (stdout.emit) {
+      stdout.emit("resize");
+    }
+  }, [stdout]);
+
   // Initialize app: load remote config from Firebase, then show main app
   useEffect(() => {
     const init = async () => {
@@ -291,76 +364,70 @@ const App = ({ updateConsoleTitle }) => {
       // This clears quota exceeded state if tokens were added
       try {
         const quotaMonitor = getAPIQuotaMonitor();
-        const healthResults = await quotaMonitor.checkAllProviders();
-        console.log("API Health Check:",
-          healthResults.openai?.success ? "OpenAI OK" : `OpenAI: ${healthResults.openai?.error}`,
-          healthResults.anthropic?.success ? "Anthropic OK" : `Anthropic: ${healthResults.anthropic?.error}`
-        );
+        await quotaMonitor.checkAllProviders();
       } catch (e) {
-        console.error("Health check failed:", e.message);
+        // Silent fail - health check is optional
       }
 
-      // Wait minimum 2 seconds for splash screen
+      // Wait minimum 1 second for splash screen (reduced for faster startup)
       setTimeout(() => {
+        // Clear screen before transitioning from splash to main view
+        process.stdout.write("\x1b[2J\x1b[1;1H");
         setIsInitializing(false);
-      }, 2000);
+        // Don't resize terminal - run in current terminal size
+        // Emit resize event to ensure layout calculates correctly
+        setTimeout(() => {
+          if (process.stdout.emit) {
+            process.stdout.emit("resize");
+          }
+        }, 50);
+      }, 1000);
     };
     init();
-  }, []);
+  }, [nudgeStdoutSize]);
 
   const resizeTimersRef = useRef([]);
+  const mainViewTimersRef = useRef([]);
 
-  // Nudge the terminal size by adding 1 column and row to trigger layout adjustment
-  const nudgeTerminalSize = useCallback(() => {
-    const { columns, rows } = process.stdout;
-    // Send ANSI escape to resize terminal slightly (+1 col, +1 row)
-    process.stdout.write(`\x1b[8;${rows + 1};${columns + 1}t`);
-    // Then resize back after a brief moment
-    setTimeout(() => {
-      process.stdout.write(`\x1b[8;${rows};${columns}t`);
-    }, 100);
+  const clearResizeTimers = useCallback(() => {
+    resizeTimersRef.current.forEach((id) => clearTimeout(id));
+    resizeTimersRef.current = [];
   }, []);
 
+  const clearMainViewTimers = useCallback(() => {
+    mainViewTimersRef.current.forEach((id) => clearTimeout(id));
+    mainViewTimersRef.current = [];
+  }, []);
+
+  // Force layout recalculation by emitting resize event and clearing screen
+  const forceLayoutRefresh = useCallback(() => {
+    // Clear screen and reset cursor (more aggressive than just nudging)
+    process.stdout.write("\x1b[2J\x1b[1;1H");
+    // Emit resize event to force Ink to recalculate layout
+    if (process.stdout.emit) {
+      process.stdout.emit("resize");
+    }
+    // Also trigger a state update to force re-render
+    setForceRenderKey((k) => k + 1);
+  }, []);
+
+  // Simple layout setup - no multiple refreshes, just show the view
   const scheduleResize = useCallback(() => {
-    resizeTimersRef.current.forEach((id) => clearTimeout(id));
-    const delays = [0, 500, 1100, 1900];
-    resizeTimersRef.current = delays.map((delay) => {
-      const timeout = setTimeout(() => resizeForMainApp(), delay);
-      return timeout;
-    });
-    setLayoutReady(false);
-    const finalizeId = setTimeout(() => {
-      setLayoutReady(true);
-    }, Math.max(...delays) + 200);
-    resizeTimersRef.current.push(finalizeId);
+    clearResizeTimers();
+    // Clear screen once
+    process.stdout.write("\x1b[2J\x1b[1;1H");
+    // Mark layout ready immediately - no delays
+    setLayoutReady(true);
+  }, [clearResizeTimers]);
 
-    // Trigger an additional re-render after 1 second to ensure all components adjust
-    const rerenderDelayId = setTimeout(() => {
-      setForceRenderKey((k) => k + 1);
-      // Also nudge terminal size to trigger layout recalculation
-      nudgeTerminalSize();
-    }, Math.max(...delays) + 1000);
-    resizeTimersRef.current.push(rerenderDelayId);
-  }, [nudgeTerminalSize]);
-
-  // Resize terminal to full size only after onboarding completes
+  // Layout setup after onboarding completes - simple, no glitching
   useEffect(() => {
     if (showOnboarding || isInitializing) {
-      resizeTimersRef.current.forEach((id) => clearTimeout(id));
-      resizeTimersRef.current = [];
       setLayoutReady(false);
-      resizeForOnboarding();
-      return () => {
-        resizeTimersRef.current.forEach((id) => clearTimeout(id));
-        resizeTimersRef.current = [];
-      };
+      return;
     }
-
+    // Just mark ready, no multiple refreshes
     scheduleResize();
-    return () => {
-      resizeTimersRef.current.forEach((id) => clearTimeout(id));
-      resizeTimersRef.current = [];
-    };
   }, [showOnboarding, isInitializing, scheduleResize]);
 
   // Oura Ring data sync scheduler (8am and 8pm daily)
@@ -451,7 +518,6 @@ const App = ({ updateConsoleTitle }) => {
   }, []);
 
   const [fineTuningStatus, setFineTuningStatus] = useState(() => loadFineTuningConfig());
-  const { stdout } = useStdout();
   const overlayRendererRef = useRef(null);
   const overlaySuspendTimerRef = useRef(null);
   const [overlaySuspended, setOverlaySuspended] = useState(false);
@@ -530,8 +596,17 @@ const App = ({ updateConsoleTitle }) => {
         const hasLogin = !!firebaseUser;
         const hasModel = isProviderConfigured("anthropic") || isProviderConfigured("openai") || isProviderConfigured("google");
         if (hasLogin && hasModel) {
+          // Clear screen to prevent layout artifacts during transition
+          process.stdout.write("\x1b[2J\x1b[1;1H");
           setShowOnboarding(false);
           setLastAction("Returned to main");
+          // Force layout recalculation
+          setTimeout(() => {
+            if (process.stdout.emit) {
+              process.stdout.emit("resize");
+            }
+            setForceRenderKey((k) => k + 1);
+          }, 50);
         }
       } else if (showSettings) {
         setShowSettings(false);
@@ -542,13 +617,6 @@ const App = ({ updateConsoleTitle }) => {
       }
     }
   });
-  const [pauseUpdates, setPauseUpdates] = useState(false);
-  const pauseUpdatesRef = useRef(false); // Use ref to avoid re-renders in intervals
-  const [mainViewReady, setMainViewReady] = useState(false);
-  const [layoutReady, setLayoutReady] = useState(false);
-  const [forceRenderKey, setForceRenderKey] = useState(0); // Force re-render after layout adjusts
-  const readinessTimerRef = useRef(null);
-  const linkedInCheckTimerRef = useRef(null);
   const handleLogout = useCallback(() => {
     signOutFirebase();
     const currentSettings = loadUserSettings();
@@ -717,7 +785,7 @@ const App = ({ updateConsoleTitle }) => {
   });
   const [showApprovalOverlay, setShowApprovalOverlay] = useState(false);
   const [selectedActionIndex, setSelectedActionIndex] = useState(0);
-  const [connectionStatuses, setConnectionStatuses] = useState({});
+  const [connectionStatuses, setConnectionStatuses] = useState(() => ({ ...DEFAULT_CONNECTION_STATUSES }));
   const evaluationContextRef = useRef({
     tickers: [],
     portfolio: null,
@@ -792,14 +860,28 @@ const App = ({ updateConsoleTitle }) => {
   const currentActionIdRef = useRef(null);
   const [toolEvents, setToolEvents] = useState([]);
   const toolEventsRef = useRef([]);
+  const toolEventActionMapRef = useRef(new Map());
   const toolEventKeysRef = useRef(new Set());
   const [uiClock, setUiClock] = useState(() => Date.now());
 
   // Current AI model tracking for display
   const [currentModelInfo, setCurrentModelInfo] = useState(() => {
     const initial = getCurrentModel();
-    return { ...initial.model, taskType: initial.taskType };
+    return buildModelDisplayInfo(initial.model, initial.taskType) || { ...initial.model, taskType: initial.taskType };
   });
+
+  useEffect(() => {
+    if (!currentModelInfo) return;
+    const refreshed = buildModelDisplayInfo(currentModelInfo, currentModelInfo.taskType);
+    if (!refreshed) return;
+    if (
+      refreshed.displayName !== currentModelInfo.displayName ||
+      refreshed.shortNameWithSource !== currentModelInfo.shortNameWithSource ||
+      refreshed.sourceLabel !== currentModelInfo.sourceLabel
+    ) {
+      setCurrentModelInfo(refreshed);
+    }
+  }, [userSettings?.coreModelProvider]);
 
   useStoreSync({
     [STATE_SLICES.UI]: {
@@ -885,6 +967,7 @@ const App = ({ updateConsoleTitle }) => {
     toolEventKeysRef.current = new Set();
     toolEventsRef.current = [];
     setToolEvents([]);
+    toolEventActionMapRef.current.clear();
   }, []);
 
   const addToolEvent = useCallback((event) => {
@@ -901,7 +984,90 @@ const App = ({ updateConsoleTitle }) => {
     setToolEvents(next);
   }, []);
 
-  const TOOL_REGEX = /\b(WebSearch|WebFetch|Fetch|Grep|Glob|Read|Bash|Copy|Mkdir|Write|Edit|Delete)\s*\(([^)]{0,200})\)/g;
+  const TOOL_REGEX = /\b(WebSearch|WebFetch|Fetch|Grep|Glob|Read|Bash|Copy|Mkdir|Write|Edit|Update|Move|Delete)\s*\(([^)]{0,200})\)/g;
+  const TOOL_OUTPUT_GUIDE = useMemo(() => [
+    "ACTION LOG FORMAT (required for tool use):",
+    "- Before each tool call, print exactly one line in this format:",
+    "  Bash(<command>)",
+    "  Read(<path>)",
+    "  Write(<path>)",
+    "  Update(<path>)",
+    "  Edit(<path>)",
+    "  Delete(<path>)",
+    "  Copy(<source -> dest>)",
+    "  Move(<source -> dest>)",
+    "  Mkdir(<path>)",
+    "  Grep(<pattern> <path>)",
+    "  Glob(<pattern>)",
+    "  WebSearch(<query>)",
+    "  Fetch(<url>)",
+    "- Then immediately run the tool.",
+    "- Only print a tool line when you are about to run that tool.",
+    "- Use real paths/commands/urls. Keep targets under 200 characters.",
+    "- Do not wrap tool lines in backticks or code blocks."
+  ].join("\n"), []);
+  const withToolGuide = useCallback((prompt) => {
+    if (!prompt) return TOOL_OUTPUT_GUIDE;
+    if (prompt.includes("ACTION LOG FORMAT")) return prompt;
+    return `${prompt}\n\n${TOOL_OUTPUT_GUIDE}`;
+  }, [TOOL_OUTPUT_GUIDE]);
+
+  const mapToolNameToActionType = (tool) => {
+    switch (tool) {
+      case "WebSearch":
+        return "WEB_SEARCH";
+      case "WebFetch":
+      case "Fetch":
+        return "WEB_FETCH";
+      case "Grep":
+        return "GREP";
+      case "Glob":
+        return "GLOB";
+      case "Read":
+        return "READ";
+      case "Write":
+        return "WRITE";
+      case "Update":
+        return "UPDATE";
+      case "Edit":
+        return "EDIT";
+      case "Delete":
+        return "DELETE";
+      case "Copy":
+        return "COPY";
+      case "Move":
+        return "MOVE";
+      case "Mkdir":
+        return "MKDIR";
+      case "Bash":
+      default:
+        return "BASH";
+    }
+  };
+
+  const buildDiffFromLines = (lines) => {
+    if (!lines || lines.length === 0) return null;
+    const hunkLine = lines.find((line) => line.startsWith("@@"));
+    const hunkMatch = hunkLine
+      ? /@@\s*-(\d+)(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s*@@/.exec(hunkLine)
+      : null;
+    const startLine = hunkMatch ? Number(hunkMatch[1]) : 1;
+
+    const removed = lines
+      .filter((line) => line.startsWith("-") && !line.startsWith("---"))
+      .map((line) => line.slice(1));
+    const added = lines
+      .filter((line) => line.startsWith("+") && !line.startsWith("+++"))
+      .map((line) => line.slice(1));
+
+    if (removed.length === 0 && added.length === 0) return null;
+
+    return {
+      startLine,
+      removed,
+      added
+    };
+  };
 
   const extractToolEvents = useCallback((chunk, source = "claude-code") => {
     if (!chunk) return;
@@ -915,8 +1081,9 @@ const App = ({ updateConsoleTitle }) => {
         continue;
       }
       toolEventKeysRef.current.add(key);
+      const eventId = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
       addToolEvent({
-        id: `${Date.now()}_${Math.random().toString(36).slice(2)}`,
+        id: eventId,
         tool,
         target,
         status: "working",
@@ -925,6 +1092,11 @@ const App = ({ updateConsoleTitle }) => {
         tokens: "n/a",
         diffLines: []
       });
+      const actionType = mapToolNameToActionType(tool);
+      const actionId = activityNarrator.action(actionType, target);
+      if (actionId) {
+        toolEventActionMapRef.current.set(eventId, actionId);
+      }
     }
 
     const diffLines = lines.filter((line) => line.startsWith("+") || line.startsWith("-") || line.startsWith("@@"));
@@ -933,8 +1105,15 @@ const App = ({ updateConsoleTitle }) => {
       updateToolEvent(latest.id, {
         diffLines: [...(latest.diffLines || []), ...diffLines].slice(-10)
       });
+      const actionId = toolEventActionMapRef.current.get(latest.id);
+      if (actionId) {
+        const diff = buildDiffFromLines(diffLines);
+        if (diff) {
+          activityNarrator.attachDiff(actionId, diff);
+        }
+      }
     }
-  }, [addToolEvent, updateToolEvent]);
+  }, [addToolEvent, updateToolEvent, activityNarrator]);
 
   const appendActionStream = useCallback((chunk) => {
     if (!chunk) return;
@@ -1024,16 +1203,31 @@ const App = ({ updateConsoleTitle }) => {
       // Log system startup
       workLog.logSystem("BACKBONE Started", "Autonomous system initializing");
 
-      // Initialize Claude Code backend
+      // Initialize Claude Code backend and check full status
       const backend = await claudeCodeBackend.initialize();
-      setClaudeCodeStatus({ initialized: true, available: backend.installed });
+      const cliStatus = await getClaudeCodeStatus();
+      setClaudeCodeStatus({
+        initialized: true,
+        available: backend.installed,
+        loggedIn: cliStatus.loggedIn,
+        model: cliStatus.model,
+        ready: cliStatus.ready
+      });
 
-      if (backend.installed) {
-        workLog.logConnection(LOG_SOURCE.CLAUDE_CODE, "Claude Code Connected", backend.version, LOG_STATUS.SUCCESS);
+      if (cliStatus.ready) {
+        // Fully ready - installed and logged in
+        workLog.logConnection(LOG_SOURCE.CLAUDE_CODE, "Claude Code Ready",
+          `${backend.version || "CLI"} | ${cliStatus.model || "Opus 4.5"}`, LOG_STATUS.SUCCESS);
+      } else if (backend.installed && !cliStatus.loggedIn) {
+        // Installed but not logged in
+        workLog.logConnection(LOG_SOURCE.CLAUDE_CODE, "Claude Code - Login Required",
+          "Run 'claude' in terminal to authenticate", LOG_STATUS.WARNING);
+        const narrator = getActivityNarrator();
+        narrator.observe("Claude Code installed but not logged in. Run 'claude' to authenticate with your Pro/Max subscription.");
       } else {
+        // Not installed
         workLog.logConnection(LOG_SOURCE.CLAUDE_CODE, "Claude Code Not Available",
-          "Install Claude Code CLI for complex work: npm install -g @anthropic-ai/claude-code", LOG_STATUS.WARNING);
-        // Let user know via activity narrator
+          "Install: npm install -g @anthropic-ai/claude-code", LOG_STATUS.WARNING);
         const narrator = getActivityNarrator();
         narrator.observe("Claude Code CLI not installed - install for advanced automation: npm install -g @anthropic-ai/claude-code");
       }
@@ -1142,22 +1336,74 @@ const App = ({ updateConsoleTitle }) => {
         }));
       });
 
-      // Register executor for Claude Code tasks
-      autonomousEngine.registerExecutor(EXECUTION_TOOLS.CLAUDE_CODE, async (action) => {
-        workLog.logAction(LOG_SOURCE.CLAUDE_CODE, `Executing: ${action.title}`, action.executionPlan.prompt.slice(0, 50), LOG_STATUS.PENDING);
-        const result = await claudeCodeBackend.executeTask({
-          id: action.id,
-          prompt: action.executionPlan.prompt,
-          workDir: action.executionPlan.workDir,
-          allowedTools: action.executionPlan.allowedTools,
-          timeout: action.executionPlan.timeout
-        });
-        if (result.success) {
-          workLog.logResult(LOG_SOURCE.CLAUDE_CODE, `Completed: ${action.title}`, "Task succeeded", LOG_STATUS.SUCCESS);
-        } else {
-          workLog.logError(LOG_SOURCE.CLAUDE_CODE, `Failed: ${action.title}`, result.error);
+      // Load files into memory for AI execution
+      aiBrain.loadFilesForExecution().catch(err => {
+        console.error("Failed to load files for AI execution:", err.message);
+      });
+
+      // Initialize Claude Code executor with streaming support
+      const claudeExecutor = initializeClaudeCodeEngine(autonomousEngine, {
+        mode: EXECUTION_MODE.SUPERVISED, // Auto-approve writes, but not bash
+        workDir: process.cwd(),
+        maxTurns: 50,
+        timeout: 300000 // 5 minutes
+      });
+
+      // Forward Claude Code events for real-time display
+      autonomousEngine.on("claude-text", ({ text, actionId }) => {
+        if (text && actionId === currentActionIdRef.current) {
+          appendActionStream(text);
         }
-        return result;
+      });
+
+      autonomousEngine.on("claude-tool-use", ({ tool, input, actionId }) => {
+        if (actionId === currentActionIdRef.current) {
+          const inputPreview = typeof input === "string"
+            ? input.slice(0, 60)
+            : JSON.stringify(input).slice(0, 60);
+          workLog.logAction(LOG_SOURCE.CLAUDE_CODE, `Tool: ${tool}`, inputPreview, LOG_STATUS.PENDING);
+
+          // Add to tool events display
+          const eventId = `tool_${Date.now()}`;
+          setToolEvents((prev) => [...prev, {
+            id: eventId,
+            tool,
+            input: inputPreview,
+            status: "working",
+            startedAt: Date.now()
+          }]);
+          toolEventActionMapRef.current.set(eventId, tool);
+        }
+      });
+
+      autonomousEngine.on("claude-tool-result", ({ result, actionId }) => {
+        if (actionId === currentActionIdRef.current) {
+          // Mark last tool event as done
+          setToolEvents((prev) => {
+            const updated = [...prev];
+            for (let i = updated.length - 1; i >= 0; i--) {
+              if (updated[i].status === "working") {
+                updated[i] = { ...updated[i], status: "done", endedAt: Date.now() };
+                break;
+              }
+            }
+            return updated;
+          });
+        }
+      });
+
+      autonomousEngine.on("claude-start", ({ action }) => {
+        workLog.logAction(LOG_SOURCE.CLAUDE_CODE, `Starting: ${action.title}`, action.executionPlan?.prompt?.slice(0, 50) || "", LOG_STATUS.PENDING);
+      });
+
+      autonomousEngine.on("claude-end", ({ success, actionId }) => {
+        if (success) {
+          workLog.logResult(LOG_SOURCE.CLAUDE_CODE, "Task completed", "", LOG_STATUS.SUCCESS);
+        }
+      });
+
+      autonomousEngine.on("claude-error", ({ error }) => {
+        workLog.logError(LOG_SOURCE.CLAUDE_CODE, "Error", error);
       });
 
       // Register executor for API fallback
@@ -1207,6 +1453,9 @@ const App = ({ updateConsoleTitle }) => {
             ? { ...entry, status: "done", endedAt: Date.now() }
             : entry
         )));
+        toolEventActionMapRef.current.forEach((actionId) => {
+          activityNarrator.completeAction(actionId);
+        });
         if (action?.result?.output) {
           const projectId = engineState.state?.activeProject?.id;
           if (projectId) {
@@ -1231,6 +1480,9 @@ const App = ({ updateConsoleTitle }) => {
             ? { ...entry, status: "error", endedAt: Date.now() }
             : entry
         )));
+        toolEventActionMapRef.current.forEach((actionId) => {
+          activityNarrator.failAction(actionId);
+        });
         refreshAutonomousState();
       });
 
@@ -1322,7 +1574,7 @@ const App = ({ updateConsoleTitle }) => {
           { type: "SEARCH", target: "market trends", detail: "scanning opportunities" },
           { type: "FETCH", target: "portfolio data", detail: "checking positions" },
           { type: "ANALYZE", target: "health metrics", detail: "reviewing wellness" },
-          { type: "READ", target: "goal progress", detail: "tracking milestones" },
+          { type: "ANALYZE", target: "goal progress", detail: "tracking milestones" },
           { type: "SYNC", target: "connections", detail: "updating status" }
         ];
         const actionIndex = cycle % cycleActions.length;
@@ -1368,7 +1620,12 @@ const App = ({ updateConsoleTitle }) => {
 
         activityTracker.setAgentState(stateType);
         activityTracker.action(actionType, actionTitle);
-        activityTracker.setGoal(action.description || actionTitle);
+        // Build a detailed goal sentence (15+ words) from action info
+        const goalBase = action.description || actionTitle;
+        const userName = firebaseUserDisplay ? firebaseUserDisplay.split(" ")[0] : "the user";
+        const detailedGoal = goalBase.split(" ").length >= 15 ? goalBase :
+          `${actionTitle} - ${goalBase} to help ${userName} achieve their objectives and improve their daily workflow`;
+        activityTracker.setGoal(detailedGoal);
 
         const actId = activityTracker.log("executing", actionTitle, ACTIVITY_STATUS.WORKING);
         action._activityId = actId;
@@ -1558,33 +1815,18 @@ const App = ({ updateConsoleTitle }) => {
     });
   }, [alpacaStatus, alpacaMode, claudeStatus, claudeCodeStatus.available, linkedInProfile?.connected, ouraHealth?.connected, personalCapitalData?.connected]);
 
+  // Simple main view readiness - no delays, no multiple refreshes
   useEffect(() => {
-    if (readinessTimerRef.current) {
-      clearTimeout(readinessTimerRef.current);
-      readinessTimerRef.current = null;
-    }
-    if (isInitializing || showOnboarding || !layoutReady) {
+    if (isInitializing || showOnboarding) {
       setMainViewReady(false);
-      return () => {};
+      return;
     }
-    const connectedCount = Object.keys(connectionStatuses).length;
-    const hasConnections = connectedCount >= 3;
-    const hasTickers = tickers.length > 0;
-    if (hasConnections && hasTickers && layoutReady) {
-      readinessTimerRef.current = setTimeout(() => {
-        setMainViewReady(true);
-        readinessTimerRef.current = null;
-      }, 400);
-    } else {
-      setMainViewReady(false);
+    // Show main view immediately when layout is ready
+    if (layoutReady) {
+      setMainViewReady(true);
     }
-    return () => {
-      if (readinessTimerRef.current) {
-        clearTimeout(readinessTimerRef.current);
-        readinessTimerRef.current = null;
-      }
-    };
-  }, [isInitializing, showOnboarding, layoutReady, connectionStatuses, tickers.length]);
+  }, [isInitializing, showOnboarding, layoutReady]);
+
 
   // Life Engine Boot - Gather all data sources and start optimization when ready
   useEffect(() => {
@@ -1664,6 +1906,10 @@ const App = ({ updateConsoleTitle }) => {
         return [];
       }
 
+      const applyToolGuide = (prompt) => (
+        claudeCodeStatus.available ? withToolGuide(prompt) : prompt
+      );
+
       // Actions that auto-execute (research and analysis are safe)
       const safeTypes = ["research", "analyze", "plan"];
 
@@ -1675,7 +1921,7 @@ const App = ({ updateConsoleTitle }) => {
         // Build a real, actionable prompt
         let prompt = "";
         if (actionType === "research") {
-          prompt = `RESEARCH TASK: ${a.title}
+          prompt = applyToolGuide(`RESEARCH TASK: ${a.title}
 
 You are doing real research. Find specific, actionable information:
 - Search for relevant data, news, and analysis
@@ -1685,9 +1931,9 @@ You are doing real research. Find specific, actionable information:
 
 ${a.rationale || ""}
 
-Output your findings in a structured format.`;
+Output your findings in a structured format.`);
         } else if (actionType === "analyze") {
-          prompt = `ANALYSIS TASK: ${a.title}
+          prompt = applyToolGuide(`ANALYSIS TASK: ${a.title}
 
 Perform deep analysis:
 - Examine the data for patterns and signals
@@ -1697,13 +1943,13 @@ Perform deep analysis:
 
 ${a.rationale || ""}
 
-Output specific, actionable insights.`;
+Output specific, actionable insights.`);
         } else {
-          prompt = `TASK: ${a.title}
+          prompt = applyToolGuide(`TASK: ${a.title}
 
 ${a.rationale || a.description || ""}
 
-Execute this task and provide concrete results.`;
+Execute this task and provide concrete results.`);
         }
 
         return {
@@ -1726,7 +1972,12 @@ Execute this task and provide concrete results.`;
         if (firstAction.type === "research") {
           activityTracker.action("WEB_SEARCH", firstAction.title);
         } else {
-          activityTracker.setGoal(firstAction.title);
+          // Build detailed goal (15+ words) from action info
+          const goalTitle = firstAction.title || firstAction.description || "task";
+          const userName = firebaseUserDisplay ? firebaseUserDisplay.split(" ")[0] : "the user";
+          const detailedGoal = goalTitle.split(" ").length >= 15 ? goalTitle :
+            `${goalTitle} as part of the ongoing effort to help ${userName} optimize their daily workflow and achieve success`;
+          activityTracker.setGoal(detailedGoal);
         }
       }
 
@@ -1736,7 +1987,7 @@ Execute this task and provide concrete results.`;
       console.error("Action generation error:", error.message);
       return [];
     }
-  }, [claudeCodeStatus.available, activityTracker, aiBrain]);
+  }, [claudeCodeStatus.available, activityTracker, aiBrain, withToolGuide]);
 
   // ===== AUTO-START AUTONOMOUS ENGINE =====
   // This runs once generateAIActions is available
@@ -1752,7 +2003,8 @@ Execute this task and provide concrete results.`;
 
       // Start the engine with Claude Code-style messages
       activityTracker.setAgentState("CONNECTING");
-      activityTracker.setGoal("Initializing autonomous agent to help manage your life");
+      const userName = firebaseUserDisplay ? firebaseUserDisplay.split(" ")[0] : "the user";
+      activityTracker.setGoal(`Connecting to BACKBONE ENGINE services and preparing the daily workflow system for ${userName} including portfolio tracking, health metrics, and goal management`);
       activityTracker.action("BASH", "backbone-engine", "starting services");
 
       // Configure auto-approval for safe action types (research, analyze don't make real changes)
@@ -1860,9 +2112,33 @@ Execute this task and provide concrete results.`;
     const initLinkedIn = async () => {
       // First, try to load saved profile from disk (persistent)
       const savedProfile = loadLinkedInProfile();
-      if (savedProfile && savedProfile.success && savedProfile.profile) {
+      if (savedProfile && savedProfile.success) {
+        // Check if profile data is complete or needs refresh
+        if (isProfileIncomplete(savedProfile)) {
+          // Profile is connected but data is incomplete - refresh from screenshot and generate markdown
+          console.log("LinkedIn connected but profile data incomplete, refreshing...");
+          const refreshResult = await refreshAndGenerateLinkedInMarkdown();
+          if (refreshResult.success) {
+            const refreshedProfile = refreshResult.profile;
+            const linkedInData = {
+              ...(refreshedProfile.profile || {}),
+              ...(refreshedProfile.gpt4oAnalysis || {}),
+              profileUrl: refreshedProfile.profileUrl,
+              connected: true,
+              verified: true,
+              capturedAt: refreshedProfile.capturedAt
+            };
+            setLinkedInProfile(linkedInData);
+            updateFromLinkedIn(linkedInData);
+            console.log("LinkedIn profile refreshed and markdown generated");
+            return;
+          }
+        }
+
+        // Profile data is complete, use it directly
         const linkedInData = {
           ...savedProfile.profile,
+          ...(savedProfile.gpt4oAnalysis || {}),
           profileUrl: savedProfile.profileUrl,
           connected: true,
           verified: true,
@@ -2212,21 +2488,33 @@ Execute this task and provide concrete results.`;
         if (agenticCaps.available) {
           setIsProcessing(true);
           engineState.setStatus("working", "Running agentic task...");
-          setActionStreamingTitle(agenticCaps.claudeCode ? "Claude Code" : "Codex");
+          const agenticTitle = agenticCaps.claudeCode ? "Claude Code" : "Codex";
+          resetActionStream(agenticTitle);
+          resetToolEvents();
           setActionStreamingText("Starting task...");
 
           // Execute agentic task with streaming output
+          const agenticPrompt = withToolGuide(userMessage);
           const result = await executeAgenticTask(
-            userMessage,
+            agenticPrompt,
             process.cwd(),
             (event) => {
               if (event.type === "stdout" || event.type === "stderr") {
+                extractToolEvents(event.text, agenticCaps.claudeCode ? "claude-code" : "codex");
                 // Show last 500 chars of output
                 const displayText = event.output.slice(-500);
                 setActionStreamingText(displayText);
               } else if (event.type === "done") {
                 setActionStreamingText("");
                 setActionStreamingTitle("");
+                setToolEvents((prev) => prev.map((entry) => (
+                  entry.status === "working"
+                    ? { ...entry, status: "done", endedAt: Date.now() }
+                    : entry
+                )));
+                toolEventActionMapRef.current.forEach((actionId) => {
+                  activityNarrator.completeAction(actionId);
+                });
               }
             }
           );
@@ -2338,8 +2626,10 @@ Execute this task and provide concrete results.`;
         try {
           const result = await sendMultiAI(userMessage, context, "auto");
           // Update model info for display
-          if (result.modelInfo) {
-            setCurrentModelInfo({ ...result.modelInfo, taskType: result.taskType });
+          let resolvedModelInfo = result.modelInfo || null;
+          if (resolvedModelInfo) {
+            resolvedModelInfo = buildModelDisplayInfo(resolvedModelInfo, result.taskType) || { ...resolvedModelInfo, taskType: result.taskType };
+            setCurrentModelInfo(resolvedModelInfo);
           }
           setMessages((prev) => [
             ...prev,
@@ -2348,7 +2638,7 @@ Execute this task and provide concrete results.`;
               content: result.response,
               timestamp: new Date(),
               model: result.model,
-              modelInfo: result.modelInfo
+              modelInfo: resolvedModelInfo || result.modelInfo
             }
           ]);
           setIsProcessing(false);
@@ -2372,7 +2662,20 @@ Execute this task and provide concrete results.`;
         }
       }
     },
-    [portfolio, profile.goals, profile.education, tickers, ouraHealth, engineState]
+    [
+      portfolio,
+      profile.goals,
+      profile.education,
+      tickers,
+      ouraHealth,
+      engineState,
+      withToolGuide,
+      resetActionStream,
+      resetToolEvents,
+      extractToolEvents,
+      activityNarrator,
+      conversationTracker
+    ]
   );
 
   useEffect(() => {
@@ -3020,7 +3323,7 @@ Execute this task and provide concrete results.`;
       if (resolved === "/models" || resolved === "/model" || resolved === "/models status" || resolved === "/model status") {
         const status = getConnectionStatus();
         const lines = [
-          `AI Models · Tier: ${status.tierLabel}`,
+          `AI Models - Tier: ${status.tierLabel}`,
           `Press Ctrl+T to change tier (low/medium/high/xhigh)`,
           ""
         ];
@@ -3028,7 +3331,7 @@ Execute this task and provide concrete results.`;
         for (const provider of PROVIDER_LIST) {
           const p = status.providers[provider.id];
           const icon = p.connected ? "●" : "○";
-          const connStatus = p.connected ? `Connected · ${p.model}` : "Not connected";
+          const connStatus = p.connected ? `Connected - ${p.model}` : "Not connected";
           const primary = status.primary === provider.id ? " [PRIMARY]" : "";
 
           lines.push(`${p.icon} ${p.displayName}${primary}`);
@@ -5132,12 +5435,15 @@ Folder: ${result.action.id}`,
   const minWidth = 120;
   // Use full terminal height
   const appHeight = terminalHeight - 1;
+  // Calculate available height for content (terminal height minus header/footer)
+  const contentHeight = Math.max(20, appHeight - 6);
   const isCompact = terminalWidth < minWidth;
   // Responsive mode: narrow/sidebar layout when width < 80
   const isNarrow = terminalWidth < 80;
   // Medium width: hide some panels but keep horizontal layout
   const isMedium = terminalWidth >= 80 && terminalWidth < 140;
-  const overlayEnabled = !isNarrow && !showOnboarding && !isInitializing && mainViewReady && !overlaySuspended;
+  // Overlay only for full view (width >= 140), not for compact/medium views
+  const overlayEnabled = !isNarrow && !isMedium && !showOnboarding && !isInitializing && mainViewReady && !overlaySuspended;
   const overlayEngineHeaderEnabled = true;
 
   useEffect(() => {
@@ -5446,10 +5752,10 @@ Folder: ${result.action.id}`,
 
   const notifications = [
     sizeWarning,
-    claudeStatus !== "Connected" && "Type /models · connect an AI model",
-    !personalCapitalData?.connected && "Type /finances · connect your financial wealth",
-    !ouraHealth?.connected && "Type /oura · connect your health data",
-    !linkedInProfile?.connected && "Type /linkedin · connect your career profile"
+    claudeStatus !== "Connected" && "Type /models - connect an AI model",
+    !personalCapitalData?.connected && "Type /finances - connect your financial wealth",
+    !ouraHealth?.connected && "Type /oura - connect your health data",
+    !linkedInProfile?.connected && "Type /linkedin - connect your career profile"
   ].filter(Boolean);
 
 
@@ -5459,13 +5765,22 @@ Folder: ${result.action.id}`,
   }
 
   // Show onboarding wizard for first-time users or when requested
+  // Fullscreen centered - nothing else visible
   if (showOnboarding) {
     return e(
       Box,
-      { flexDirection: "column", paddingTop: 1, paddingX: 2 },
+      {
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        width: terminalWidth,
+        height: terminalHeight
+      },
       e(OnboardingPanel, {
         userDisplay: firebaseUserDisplay,
         onComplete: () => {
+          // Clear screen and transition to main view
+          process.stdout.write("\x1b[2J\x1b[1;1H");
           updateSetting("onboardingComplete", true);
           setShowOnboarding(false);
           pauseUpdatesRef.current = false;
@@ -5477,9 +5792,11 @@ Folder: ${result.action.id}`,
   }
 
   if (!showOnboarding && !mainViewReady) {
+    // Use same structure as main view so Ink calculates correct layout
     return e(
       Box,
       {
+        key: "loading-view",
         flexDirection: "column",
         height: appHeight,
         overflow: "hidden"
@@ -5487,9 +5804,29 @@ Folder: ${result.action.id}`,
       e(TopStatusBar, null),
       e(
         Box,
-        { flexDirection: "column", alignItems: "center", justifyContent: "center", flexGrow: 1, paddingX: 2 },
-        e(Text, { color: "#f97316", bold: true }, "Loading..."),
-        e(Text, { color: "#94a3b8" }, "Preparing your workspace")
+        { flexDirection: "row", height: contentHeight, overflow: "hidden" },
+        // Match main view column structure for proper layout calculation
+        viewMode !== VIEW_MODES.MINIMAL && !isMedium && e(
+          Box,
+          { flexDirection: "column", width: "25%", paddingRight: 1, overflow: "hidden" }
+        ),
+        e(
+          Box,
+          {
+            flexDirection: "column",
+            width: viewMode === VIEW_MODES.MINIMAL || isMedium ? "75%" : "50%",
+            paddingX: 1,
+            overflow: "hidden",
+            alignItems: "center",
+            justifyContent: "center"
+          },
+          e(Text, { color: "#f97316", bold: true }, "Loading..."),
+          e(Text, { color: "#94a3b8" }, "Preparing your workspace")
+        ),
+        viewMode !== VIEW_MODES.MINIMAL && e(
+          Box,
+          { flexDirection: "column", width: "25%", paddingLeft: 1, overflow: "hidden" }
+        )
       ),
       e(BottomStatusBar, null)
     );
@@ -5508,66 +5845,351 @@ Folder: ${result.action.id}`,
     );
   }
 
-  // Calculate available height (terminal height minus header/footer)
-  const contentHeight = Math.max(20, appHeight - 6);
+  // Compact layout for default terminal sizes (< 140 width)
+  // Engine-focused view with essentials only
+  if (isNarrow || isMedium) {
+    // Calculate connected services count
+    const connectedServices = Object.values(connectionStatuses || {}).filter(s => s?.connected).length;
+    const totalServices = Object.keys(connectionStatuses || {}).length || 7;
 
-  // Narrow/sidebar layout - stacks vertically with scrolling
-  if (isNarrow) {
     return e(
       Box,
       { flexDirection: "column", height: appHeight, overflow: "hidden" },
-      // Compact header
+
+      // ===== COMPACT HEADER (always visible) =====
       e(
         Box,
-        { flexDirection: "row", justifyContent: "space-between", paddingX: 1, borderStyle: "single", borderColor: "#1e293b", borderBottom: true, borderTop: false, borderLeft: false, borderRight: false },
-        e(Text, { color: "#f59e0b", bold: true }, "BACKBONE"),
-        e(Text, { color: "#64748b" }, firebaseUserDisplay ? firebaseUserDisplay.split(" ")[0] : "")
+        { flexDirection: "column" },
+        // Header row: BACKBONE ENGINE · x/n services · CONNECTED/OFFLINE
+        e(
+          Box,
+          { flexDirection: "row", justifyContent: "space-between", paddingX: 1 },
+          // Left: Logo + services + status (always shows, even when disconnected)
+          e(
+            Box,
+            { flexDirection: "row" },
+            e(Text, { color: "#f59e0b", bold: true }, "BACKBONE"),
+            e(Text, { color: "#64748b", bold: true }, " ENGINE"),
+            e(Text, { color: "#475569" }, " · "),
+            // Services count: green if >=5, orange if 2-4, red if <=1
+            e(Text, { color: connectedServices >= 5 ? "#22c55e" : connectedServices >= 2 ? "#f59e0b" : "#ef4444" }, `${connectedServices}/${totalServices} services`),
+            e(Text, { color: "#475569" }, " · "),
+            // Connection status - CONNECTED with pulsing green dot or OFFLINE
+            connectedServices > 0
+              ? e(Box, { flexDirection: "row" },
+                  e(Text, { color: "#22c55e", bold: true }, "CONNECTED "),
+                  e(Text, { color: pulsingDotVisible ? "#22c55e" : "#14532d" }, "●")
+                )
+              : e(Text, { color: "#ef4444", bold: true }, "OFFLINE")
+          ),
+          // Right: User name
+          e(Text, { color: "#94a3b8" }, firebaseUserDisplay ? firebaseUserDisplay.split(" ")[0] : "")
+        ),
+        // Separator line below header - dark gray, full width
+        e(Text, { color: "#1e293b" }, "─".repeat(terminalWidth > 0 ? terminalWidth : 80))
       ),
-      // Scrollable content area
+
+      // ===== MAIN CONTENT ROW (two columns) =====
       e(
         Box,
-        { flexDirection: "column", flexGrow: 1, overflow: "hidden", paddingX: 1 },
-        // Oura Health Panel (compact)
-        e(OuraHealthPanel, { data: ouraHealth, history: ouraHistory, compact: true }),
-        // Life Scores (compact)
-        e(LifeScoresPanel, { data: lifeScoresData, title: "Progress", compact: true }),
-        // Goals (compact)
-        e(GoalProgressPanel, { goals: goals.slice(0, 2), title: "Goals" }),
-        // Portfolio (compact)
-        e(PortfolioPanel, {
-          portfolio: { ...portfolio, status: alpacaStatus, mode: alpacaMode },
-          formatPercent,
-          tradingStatus,
-          lastUpdatedAgo: portfolioLastUpdated ? formatTimeAgo(portfolioLastUpdated) : null,
-          nextTradeTime: nextTradeTimeDisplay,
-          privateMode,
-          tickerScores: tickers.reduce((acc, t) => {
-            if (t.symbol && typeof t.score === "number") acc[t.symbol] = t.score;
-            return acc;
-          }, {})
-        }),
-        // Ticker scores (compact list)
-        e(TickerScoresPanel, {
-          tickers: topTickers,
-          title: "Top Tickers",
-          viewMode: VIEW_MODES.MINIMAL,
-          maxItems: 5,
-          compact: true,
-          timestamp: uiClock
-        }),
-        // Conversation/Chat at bottom
-        e(ConversationPanel, { messages, isLoading: isProcessing, streamingText, actionStreamingText, actionStreamingTitle }),
-        // Chat input
-        setupOverlay.active
-          ? e(SetupOverlay, { title: "Setup", tabs: [], onCancel: closeSetupOverlay, onComplete: closeSetupOverlay })
-          : e(ChatPanel, { commands: COMMANDS, onSubmit, onTypingChange: handleTypingChange, modelInfo: currentModelInfo })
+        { flexDirection: "row", flexGrow: 1, overflow: "hidden" },
+
+        // ===== LEFT COLUMN: Main content (75%) =====
+        e(
+          Box,
+          { flexDirection: "column", width: "75%", paddingX: 1, overflow: "hidden" },
+
+          // USER PROGRESS - Frank vs Target vs Average (all lined up)
+          (() => {
+          // Build connected data for person matching
+          const connectedData = {
+            firebase: { connected: !!firebaseUserDisplay },
+            ouraHealth: { connected: !!ouraHealth?.connected },
+            portfolio: { connected: !!(alpacaStatus === "connected" || portfolio?.equity) },
+            linkedIn: { connected: !!linkedInProfile?.connected }
+          };
+
+          // Get dynamically matched target person based on user's data
+          const targetPerson = getTargetPerson(connectedData);
+          const progressData = getProgressResearch().getProgressComparison();
+
+          const userName = firebaseUserDisplay ? firebaseUserDisplay.split(" ")[0] : "Frank";
+          const userScore = progressData?.user?.score || 0;
+          const targetName = targetPerson.name;
+          const targetScore = targetPerson.score;
+          const avgScore = progressData?.avgPerson?.score || 27;
+
+          const getScoreColor = (score) => score >= 70 ? "#22c55e" : score >= 40 ? "#f59e0b" : "#ef4444";
+
+          return e(
+            Box,
+            { flexDirection: "row", gap: 2, marginTop: 1, height: 1 },
+            // User
+            e(Text, { color: "#f59e0b", bold: true }, userName),
+            e(Text, { color: getScoreColor(userScore), bold: true }, ` ${userScore}%`),
+            e(Text, { color: "#334155" }, " | "),
+            // Target person (full name)
+            e(Text, { color: "#22c55e" }, targetName),
+            e(Text, { color: "#22c55e", bold: true }, ` ${targetScore}%`),
+            e(Text, { color: "#334155" }, " | "),
+            // Average Person
+            e(Text, { color: "#64748b" }, "Avg Person"),
+            e(Text, { color: "#64748b" }, ` ${avgScore}%`)
+          );
+        })(),
+
+        // ENGINE PANEL - Primary focus (takes most space, no header in compact)
+        e(
+          Box,
+          { flexDirection: "column", flexGrow: 1, marginTop: 1 },
+          e(AgentActivityPanel, { overlayHeader: false, compact: true })
+        ),
+
+        // PORTFOLIO SUMMARY - One line with equity, day %, top 2 positions
+        portfolio && portfolio.equity && e(
+          Box,
+          { flexDirection: "row", gap: 1, marginTop: 1, height: 1 },
+          e(Text, { color: "#64748b" }, "$"),
+          e(Text, { color: "#e2e8f0", bold: true }, privateMode ? "***" : (portfolio.equity || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })),
+          e(Text, { color: "#334155" }, " | "),
+          // Today's change as % (not amount)
+          (() => {
+            const dayPct = portfolio.dayPLPercent || (portfolio.dayPL && portfolio.equity ? (portfolio.dayPL / (portfolio.equity - portfolio.dayPL)) * 100 : 0);
+            const isUp = dayPct >= 0;
+            const color = privateMode ? "#64748b" : (isUp ? "#22c55e" : "#ef4444");
+            return e(Text, { color, bold: !privateMode }, privateMode ? "**%" : `${isUp ? "+" : ""}${dayPct.toFixed(2)}%`);
+          })(),
+          e(Text, { color: "#334155" }, " | "),
+          e(Text, { color: "#64748b" }, `${(portfolio.positions || []).length} pos`),
+          // Top 2 positions - background = today's change, percentage = total position
+          ...(portfolio.positions || []).slice(0, 2).flatMap((pos, i) => {
+            // Today's change for background color (todayChange is already a percentage)
+            const todayPct = pos.todayChange || 0;
+            const todayUp = todayPct >= 0;
+            // Total position P/L for percentage display (unrealizedPlPercent is already a percentage)
+            const totalPct = pos.unrealizedPlPercent || pos.pnlPercent || 0;
+            const totalUp = totalPct >= 0;
+            // Background based on TODAY (green/red tells user how today is going)
+            const symBg = privateMode ? undefined : (todayUp ? "#14532d" : "#7f1d1d");
+            const symColor = privateMode ? "#94a3b8" : "#ffffff";
+            // Percentage color based on TOTAL position gain/loss
+            const pctColor = privateMode ? "#64748b" : (totalUp ? "#22c55e" : "#ef4444");
+            return [
+              e(Text, { key: `sep${i}`, color: "#334155" }, " | "),
+              e(Text, { key: `sym${i}`, color: symColor, backgroundColor: symBg, bold: true }, ` ${pos.symbol} `),
+              e(Text, { key: `val${i}`, color: pctColor, bold: true }, privateMode ? "**%" : `${totalUp ? "+" : ""}${totalPct.toFixed(1)}%`)
+            ];
+          })
+        ),
+
+        // TOP 5 TICKERS - Compact inline display with decimals, green if > 8
+        topTickers.length > 0 && e(
+          Box,
+          { flexDirection: "row", gap: 1, marginTop: 1, height: 1 },
+          e(Text, { color: "#64748b" }, "TOP "),
+          ...topTickers.slice(0, 5).map((t, i) => {
+            const score = t.score || 0;
+            const isHigh = score > 8;
+            const isTop3 = i < 3;
+            return e(
+              Box,
+              { key: t.symbol, flexDirection: "row", gap: 0, backgroundColor: isTop3 && isHigh ? "#14532d" : undefined },
+              e(Text, { color: isTop3 && isHigh ? "#22c55e" : "#f59e0b", backgroundColor: isTop3 && isHigh ? "#14532d" : undefined }, ` ${t.symbol} `),
+              e(Text, { color: isHigh ? "#22c55e" : "#94a3b8", backgroundColor: isTop3 && isHigh ? "#14532d" : undefined, bold: isHigh }, score.toFixed(1)),
+              i < 4 && e(Text, { color: "#334155" }, " ")
+            );
+          })
+        ),
+
+        // HEALTH SUMMARY - Readiness, Sleep, Calories, HR with backgrounds and trend arrows
+        ouraHealth?.connected && e(
+          Box,
+          { flexDirection: "row", gap: 1, marginTop: 1, height: 1 },
+          e(Text, { color: "#64748b" }, "HEALTH "),
+          // Readiness with background (high = relaxed, low = stressed)
+          (() => {
+            const score = ouraHealth.today?.readinessScore ?? ouraHealth.readiness?.score;
+            const avgScore = ouraHealth.weekAverage?.readinessScore;
+            if (score == null) return e(Text, { color: "#64748b" }, "Ready --");
+            const isGood = score >= 70;
+            const bg = isGood ? "#14532d" : "#7f1d1d";
+            const trend = avgScore ? (score > avgScore ? " ↑ " : score < avgScore ? " ↓ " : "") : "";
+            const trendColor = score > avgScore ? "#22c55e" : "#ef4444";
+            const trendBg = score > avgScore ? "#14532d" : "#7f1d1d";
+            return e(Box, { flexDirection: "row" },
+              e(Text, { backgroundColor: bg, color: "#ffffff", bold: true }, ` ${isGood ? "Relaxed" : "Stressed"} ${score} `),
+              trend && e(Text, { color: "#ffffff", backgroundColor: trendBg, bold: true }, trend)
+            );
+          })(),
+          e(Text, { color: "#334155" }, " | "),
+          // Sleep with background
+          (() => {
+            const score = ouraHealth.today?.sleepScore ?? ouraHealth.sleep?.score;
+            const avgScore = ouraHealth.weekAverage?.sleepScore;
+            if (score == null) return e(Text, { color: "#64748b" }, "Sleep --");
+            const isGood = score >= 70;
+            const bg = isGood ? "#14532d" : "#7f1d1d";
+            const trend = avgScore ? (score > avgScore ? " ↑ " : score < avgScore ? " ↓ " : "") : "";
+            const trendColor = score > avgScore ? "#22c55e" : "#ef4444";
+            const trendBg = score > avgScore ? "#14532d" : "#7f1d1d";
+            return e(Box, { flexDirection: "row" },
+              e(Text, { backgroundColor: bg, color: "#ffffff", bold: true }, ` Sleep ${score} `),
+              trend && e(Text, { color: "#ffffff", backgroundColor: trendBg, bold: true }, trend)
+            );
+          })(),
+          // Calories burned - goal is 500 active calories per day
+          (() => {
+            const cals = ouraHealth.today?.activeCalories ?? ouraHealth.activity?.activeCalories;
+            if (!cals) return null;
+            const calorieGoal = 500; // Daily active calorie goal
+            const isGood = cals >= calorieGoal;
+            return [
+              e(Text, { key: "calsep", color: "#334155" }, " | "),
+              e(Text, { key: "cal", color: isGood ? "#22c55e" : "#ef4444" }, `${cals} cal`)
+            ];
+          })(),
+          // Resting heart rate
+          (() => {
+            const hr = ouraHealth.today?.restingHeartRate;
+            if (!hr) return null;
+            const isGood = hr <= 65;
+            return [
+              e(Text, { key: "hrsep", color: "#334155" }, " | "),
+              e(Text, { key: "hr", color: isGood ? "#22c55e" : "#f59e0b" }, `${hr} bpm`)
+            ];
+          })(),
+          // Steps - goal is 10,000 steps per day
+          (() => {
+            const steps = ouraHealth.today?.steps ?? ouraHealth.activity?.steps;
+            if (!steps) return null;
+            const stepGoal = 10000; // Daily step goal
+            const isGood = steps >= stepGoal;
+            return [
+              e(Text, { key: "stepsep", color: "#334155" }, " | "),
+              e(Text, { key: "steps", color: isGood ? "#22c55e" : "#ef4444" }, `${(steps / 1000).toFixed(1)}k steps`)
+            ];
+          })()
+        ),
+
+        // CHAT INPUT - Compact mode (no header/footer)
+        e(
+          Box,
+          { marginTop: 1 },
+          setupOverlay.active
+            ? e(SetupOverlay, { title: "Setup", tabs: [], onCancel: closeSetupOverlay, onComplete: closeSetupOverlay })
+            : e(ChatPanel, { commands: COMMANDS, onSubmit, onTypingChange: handleTypingChange, modelInfo: currentModelInfo, compact: true })
+        )
+      ),
+
+      // ===== RIGHT COLUMN: Goals Sidebar (25%) =====
+        e(
+          Box,
+          {
+            flexDirection: "column",
+            width: "25%",
+            paddingLeft: 1,
+            borderStyle: "single",
+            borderColor: "#1e293b",
+            borderLeft: true,
+            borderTop: false,
+            borderBottom: false,
+            borderRight: false,
+            overflow: "hidden"
+          },
+          // Goals header
+          e(Text, { color: "#f59e0b", bold: true }, "Goals"),
+          e(Text, { color: "#1e293b" }, "─".repeat(20)),
+
+          // Working on (current goal from activity tracker)
+          e(
+            Box,
+            { flexDirection: "column", marginTop: 1 },
+            e(Text, { color: "#64748b" }, "Working on:"),
+            e(
+              Box,
+              { flexDirection: "row", marginTop: 0 },
+              e(Text, { color: "#f59e0b" }, "● "),
+              e(Text, { color: "#94a3b8", wrap: "wrap" },
+                (() => {
+                  const data = activityTracker.getDisplayData();
+                  return data.goal || data.workDescription || "Monitoring systems...";
+                })()
+              )
+            )
+          ),
+
+          // Observations
+          e(
+            Box,
+            { flexDirection: "column", marginTop: 1, flexGrow: 1 },
+            e(Text, { color: "#64748b" }, "Observations:"),
+            ...(() => {
+              const data = activityTracker.getDisplayData();
+              const observations = data.observations || [];
+              if (observations.length === 0) {
+                return [e(Text, { key: "no-obs", color: "#475569", dimColor: true }, "  No observations yet")];
+              }
+              return observations.slice(0, 5).map((obs, i) => {
+                // Determine status: completed (green), active (orange), abandoned (red), gray for pending
+                const text = obs.text?.toLowerCase() || (typeof obs === "string" ? obs.toLowerCase() : "");
+                const isCompleted = text.includes("completed") || text.includes("done") || text.includes("success");
+                const isAbandoned = text.includes("abandoned") || text.includes("cancelled") || text.includes("stopped");
+                const isFailed = text.includes("failed") || text.includes("error");
+                // Color coding: green = completed, red = abandoned/failed, orange = active, gray = pending
+                const dotColor = isCompleted ? "#22c55e" : isAbandoned ? "#ef4444" : isFailed ? "#ef4444" : "#f59e0b";
+                const textColor = isCompleted ? "#22c55e" : isAbandoned ? "#64748b" : isFailed ? "#64748b" : "#94a3b8";
+                return e(
+                  Box,
+                  { key: `obs-${i}`, flexDirection: "row", marginTop: 0 },
+                  e(Text, { color: dotColor }, "● "),
+                  e(Text, { color: textColor, wrap: "truncate-end" }, (obs.text || obs).slice(0, 30))
+                );
+              });
+            })()
+          )
+        )
+      ),
+
+      // ===== COMPACT FOOTER =====
+      e(
+        Box,
+        {
+          flexDirection: "row",
+          justifyContent: "space-between",
+          paddingX: 1,
+          height: 1,
+          borderStyle: "single",
+          borderColor: "#1e293b",
+          borderTop: true,
+          borderBottom: false,
+          borderLeft: false,
+          borderRight: false
+        },
+        // Left: Key commands
+        e(
+          Box,
+          { flexDirection: "row", gap: 1 },
+          e(Text, { color: "#f59e0b" }, "/"),
+          e(Text, { color: "#64748b" }, "cmds"),
+          e(Text, { color: "#334155" }, "|"),
+          e(Text, { color: "#f59e0b" }, "/models"),
+          e(Text, { color: "#334155" }, "|"),
+          e(Text, { color: "#f59e0b" }, "/portfolio")
+        ),
+        // Right: Expand hint
+        e(
+          Box,
+          { flexDirection: "row", gap: 1 },
+          e(Text, { color: "#475569" }, "Expand terminal for full view"),
+          e(Text, { color: "#64748b" }, `${terminalWidth}x${terminalHeight}`)
+        )
       )
     );
   }
 
   return e(
     Box,
-    { flexDirection: "column", height: appHeight, overflow: "hidden" },
+    { key: "main-view-" + forceRenderKey, flexDirection: "column", height: appHeight, overflow: "hidden" },
     // Connection Bar at top (Ink base + overlay for smooth updates)
     e(TopStatusBar, null),
     // Main content row

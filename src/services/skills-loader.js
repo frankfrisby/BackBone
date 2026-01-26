@@ -14,17 +14,73 @@ const SKILL_REPOS = [
   { name: "anthropics/anthropic-cookbook", url: "https://api.github.com/repos/anthropics/anthropic-cookbook/contents" }
 ];
 
+// Default skills that come bundled with the app
+const DEFAULT_SKILLS = [
+  // Office Suite
+  { id: "word-document", name: "Word Document Creation", description: "Create professional Microsoft Word documents (.docx)", category: "Office" },
+  { id: "excel-spreadsheet", name: "Excel Spreadsheet", description: "Create and manipulate Excel files (.xlsx)", category: "Office" },
+  { id: "powerpoint-presentation", name: "PowerPoint Presentation", description: "Create PowerPoint presentations (.pptx)", category: "Office" },
+  { id: "pdf-document", name: "PDF Document", description: "Create and manipulate PDF documents", category: "Office" },
+
+  // Communication
+  { id: "email-automation", name: "Email Automation", description: "Send emails programmatically via SMTP/Gmail", category: "Communication" },
+  { id: "sms-messaging", name: "SMS Messaging", description: "Send SMS messages via Twilio", category: "Communication" },
+  { id: "social-media", name: "Social Media Integration", description: "Post to Twitter, Facebook, LinkedIn", category: "Communication" },
+
+  // AI & Voice
+  { id: "claude-code-cli", name: "Claude Code CLI", description: "Use Claude Code CLI for AI-powered development", category: "AI" },
+  { id: "elevenlabs-voice", name: "ElevenLabs Voice AI", description: "Generate realistic AI voices with ElevenLabs", category: "AI" },
+  { id: "openai-platform", name: "OpenAI Platform", description: "Connect to OpenAI models (GPT-4, DALL-E, Whisper)", category: "AI" },
+
+  // Data & Analysis
+  { id: "web-scraping", name: "Web Scraping", description: "Extract data from websites", category: "Data" },
+  { id: "data-analysis", name: "Data Analysis", description: "Analyze and visualize data with statistics", category: "Data" },
+  { id: "database-operations", name: "Database Operations", description: "Work with SQLite, PostgreSQL, MongoDB", category: "Data" },
+
+  // Research
+  { id: "market-research", name: "Market Research", description: "Conduct market analysis, competitor research, consumer insights", category: "Research" },
+  { id: "academic-research", name: "Academic Research", description: "Academic methodology, citations, literature review", category: "Research" },
+  { id: "economic-policy", name: "Economic Policy", description: "Analyze economic indicators, monetary/fiscal policy", category: "Research" },
+  { id: "geopolitical-analysis", name: "Geopolitical Analysis", description: "International relations, regional analysis, strategic assessment", category: "Research" },
+  { id: "rare-earth-resources", name: "Rare Earth & Resources", description: "Critical minerals, supply chains, strategic resources", category: "Research" },
+
+  // Media
+  { id: "image-processing", name: "Image Processing", description: "Process and manipulate images", category: "Media" },
+  { id: "video-processing", name: "Video Processing", description: "Process and manipulate videos with FFmpeg", category: "Media" },
+  { id: "text-to-speech", name: "Text to Speech", description: "Convert text to audio", category: "Media" },
+
+  // System & Development
+  { id: "file-management", name: "File Management", description: "Manage files and directories", category: "System" },
+  { id: "api-integration", name: "API Integration", description: "Integrate with external APIs and webhooks", category: "Development" },
+  { id: "task-automation", name: "Task Automation", description: "Automate tasks with scheduling and workflows", category: "Automation" },
+  { id: "calendar-scheduling", name: "Calendar & Scheduling", description: "Manage calendar events and scheduling", category: "Productivity" }
+];
+
 class SkillsLoader extends EventEmitter {
   constructor() {
     super();
     this.skills = new Map();
     this.loadedSkills = new Set();
+    this.defaultSkills = new Map();
     this._loadIndex();
     this._ensureSkillsDir();
+    this._registerDefaultSkills();
   }
 
   _ensureSkillsDir() {
     if (!fs.existsSync(SKILLS_DIR)) fs.mkdirSync(SKILLS_DIR, { recursive: true });
+  }
+
+  _registerDefaultSkills() {
+    for (const skill of DEFAULT_SKILLS) {
+      const filepath = path.join(SKILLS_DIR, `${skill.id}.md`);
+      this.defaultSkills.set(skill.id, {
+        ...skill,
+        filepath,
+        isDefault: true,
+        isAvailable: fs.existsSync(filepath)
+      });
+    }
   }
 
   _loadIndex() {
@@ -98,12 +154,79 @@ class SkillsLoader extends EventEmitter {
     } catch (e) { return []; }
   }
 
-  getAllSkills() { return [...Array.from(this.skills.values()), ...this.getLocalSkills().filter(s => !this.skills.has(s.id))]; }
+  getAllSkills() {
+    const allSkills = new Map();
+
+    // Add default skills first
+    for (const [id, skill] of this.defaultSkills) {
+      allSkills.set(id, skill);
+    }
+
+    // Add downloaded/indexed skills
+    for (const [id, skill] of this.skills) {
+      allSkills.set(id, skill);
+    }
+
+    // Add any other local skills
+    for (const skill of this.getLocalSkills()) {
+      if (!allSkills.has(skill.id)) {
+        allSkills.set(skill.id, skill);
+      }
+    }
+
+    return Array.from(allSkills.values());
+  }
+
+  getDefaultSkills() {
+    return Array.from(this.defaultSkills.values());
+  }
+
+  getSkillsByCategory(category) {
+    return this.getAllSkills().filter(s => s.category === category);
+  }
+
+  getCategories() {
+    const categories = new Set();
+    this.getAllSkills().forEach(s => {
+      if (s.category) categories.add(s.category);
+    });
+    return Array.from(categories);
+  }
+
   isLoaded(skillId) { return this.loadedSkills.has(skillId); }
   unloadSkill(skillId) { this.loadedSkills.delete(skillId); this.emit("skill:unloaded", { skillId }); }
 
   getDisplayData() {
-    return { total: this.getAllSkills().length, loaded: this.loadedSkills.size, skills: this.getAllSkills().map(s => ({ id: s.id, name: s.name, loaded: this.loadedSkills.has(s.id) })) };
+    const skills = this.getAllSkills();
+    const categories = {};
+
+    skills.forEach(s => {
+      const cat = s.category || "Other";
+      if (!categories[cat]) categories[cat] = [];
+      categories[cat].push({
+        id: s.id,
+        name: s.name,
+        description: s.description,
+        loaded: this.loadedSkills.has(s.id),
+        isDefault: s.isDefault || false,
+        isAvailable: s.isAvailable !== false
+      });
+    });
+
+    return {
+      total: skills.length,
+      loaded: this.loadedSkills.size,
+      defaultCount: this.defaultSkills.size,
+      categories,
+      skills: skills.map(s => ({
+        id: s.id,
+        name: s.name,
+        description: s.description,
+        category: s.category,
+        loaded: this.loadedSkills.has(s.id),
+        isDefault: s.isDefault || false
+      }))
+    };
   }
 }
 

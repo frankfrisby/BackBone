@@ -6712,7 +6712,9 @@ Folder: ${result.action.id}`,
         height: appHeight,
         width: terminalWidth,
         alignItems: "center",
-        justifyContent: "center"
+        justifyContent: "center",
+        paddingTop: 6,
+        paddingBottom: 6
       },
       e(SplashScreen, { message: "Initializing" })
     );

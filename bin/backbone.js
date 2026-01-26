@@ -3,6 +3,8 @@ import "dotenv/config";
 import { createElement } from "react";
 import { render } from "ink";
 import { exec } from "child_process";
+import fs from "fs";
+import path from "path";
 import App from "../src/app.js";
 import { loadLinkedInProfile } from "../src/services/linkedin-scraper.js";
 import { Writable } from "stream";
@@ -248,11 +250,27 @@ const getUserName = () => {
   }
 };
 
-const userName = getUserName();
-setConsoleTitle(userName ? `backbone - ${userName}` : "backbone");
+// Get app name from settings (sync)
+const getAppNameSync = () => {
+  try {
+    const settingsPath = path.join(process.cwd(), "data", "user-settings.json");
+    if (fs.existsSync(settingsPath)) {
+      const settings = JSON.parse(fs.readFileSync(settingsPath, "utf-8"));
+      return settings.appName || "Backbone";
+    }
+  } catch {
+    // Ignore
+  }
+  return "Backbone";
+};
 
-export const updateConsoleTitle = (name) => {
-  setConsoleTitle(name ? `backbone - ${name}` : "backbone");
+const appName = getAppNameSync();
+const userName = getUserName();
+setConsoleTitle(userName ? `${appName} · ${userName}` : appName);
+
+export const updateConsoleTitle = (name, customAppName = null) => {
+  const titleAppName = customAppName || getAppNameSync();
+  setConsoleTitle(name ? `${titleAppName} · ${name}` : titleAppName);
 };
 
 const stdin = process.stdin;

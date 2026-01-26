@@ -1,0 +1,2 @@
+# This file ensures the screenshots/ directory exists when cloning
+# All other contents of this directory are ignored by git

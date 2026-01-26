@@ -131,6 +131,9 @@ import { analyzeAllPositions, getPositionContext, explainWhyHeld } from "./servi
 
 // New autonomous system imports
 import { getAutonomousEngine, AI_ACTION_STATUS, AI_ACTION_TYPES, EXECUTION_TOOLS } from "./services/autonomous-engine.js";
+import { getGoalManager, WORK_PHASES, GOAL_PRIORITY } from "./services/goal-manager.js";
+import { getToolExecutor, TOOL_TYPES, EXECUTION_STATUS } from "./services/tool-executor.js";
+import { getClaudeOrchestrator, EVALUATION_DECISION, ORCHESTRATION_STATE } from "./services/claude-orchestrator.js";
 import { getClaudeCodeBackend } from "./services/claude-code-backend.js";
 import { initializeClaudeCodeEngine, EXECUTION_MODE, getClaudeCodeExecutor } from "./services/claude-code-executor.js";
 import { getClaudeCodeStatus, isClaudeCodeLoggedIn } from "./services/claude-code-cli.js";
@@ -143,6 +146,7 @@ import { getLifeEngine } from "./services/life-engine.js";
 import { getMobileService } from "./services/mobile.js";
 import { WorkLogPanel } from "./components/work-log-panel.js";
 import { GoalProgressPanel } from "./components/goal-progress-panel.js";
+import { SmartGoalsPanel } from "./components/goals-panel.js";
 import { ProjectsPanel } from "./components/projects-panel.js";
 import { LifeScoresPanel, ParallelWorldPanel } from "./components/life-scores-panel.js";
 import { EnhancedActionsPanel, CompletedActionsList } from "./components/enhanced-actions-panel.js";
@@ -530,6 +534,10 @@ const App = ({ updateConsoleTitle }) => {
   const engineState = useMemo(() => getEngineStateManager(), []);
   const [engineStatus, setEngineStatus] = useState(() => engineState.getDisplayData());
 
+  // Engine scroll offset for keyboard navigation (up/down arrows when not typing)
+  const [engineScrollOffset, setEngineScrollOffset] = useState(0);
+  const maxEngineScroll = 20; // Maximum number of actions to scroll through
+
   // Typing state refs - declared early so keyboard shortcuts can check them
   const isTypingRef = useRef(false);
   const typingTimeoutRef = useRef(null);
@@ -591,6 +599,16 @@ const App = ({ updateConsoleTitle }) => {
       setShowOnboarding(true);
       setLastAction("Setup wizard opened");
     }
+    // Arrow keys: Scroll engine section when not typing
+    if (key.upArrow) {
+      setEngineScrollOffset(prev => Math.max(0, prev - 1));
+      return;
+    }
+    if (key.downArrow) {
+      setEngineScrollOffset(prev => Math.min(maxEngineScroll, prev + 1));
+      return;
+    }
+
     if (key.ctrl && input === "m") {
       // Ctrl+M: Go to main view (close any overlays if allowed)
       if (showOnboarding) {
@@ -735,6 +753,8 @@ const App = ({ updateConsoleTitle }) => {
 
   // ===== NEW AUTONOMOUS SYSTEM STATE =====
   const autonomousEngine = useMemo(() => getAutonomousEngine(), []);
+  const goalManager = useMemo(() => getGoalManager(), []);
+  const toolExecutor = useMemo(() => getToolExecutor(), []);
   const claudeCodeBackend = useMemo(() => getClaudeCodeBackend(), []);
   const workLog = useMemo(() => getWorkLog(), []);
   const goalTracker = useMemo(() => getGoalTracker(), []);
@@ -752,6 +772,61 @@ const App = ({ updateConsoleTitle }) => {
 
   // ===== AI BRAIN - Real AI-driven decision engine =====
   const aiBrain = useMemo(() => getAIBrain(), []);
+
+  // ===== AUTONOMOUS ENGINE AUTO-START =====
+  // Connect all systems and auto-start the autonomous loop on app launch
+  const autonomousEngineInitializedRef = useRef(false);
+
+  useEffect(() => {
+    if (autonomousEngineInitializedRef.current) return;
+    if (showOnboarding) return; // Don't auto-start during onboarding
+
+    const initializeAutonomousEngine = async () => {
+      try {
+        // Connect systems
+        autonomousEngine.setGoalManager(goalManager);
+        autonomousEngine.setAIBrain(aiBrain);
+        autonomousEngine.setNarrator(getActivityNarrator());
+        autonomousEngine.setToolExecutor(toolExecutor);
+
+        // Initialize goal manager
+        await goalManager.initialize();
+
+        // Check for existing goals or create from context
+        const existingGoals = goalManager.getActiveGoals();
+        if (existingGoals.length === 0) {
+          // No goals - generate from user context (portfolio, health, profile)
+          const narrator = getActivityNarrator();
+          narrator.setState("THINKING");
+          narrator.observe("Analyzing your data to identify priorities...");
+
+          const suggestedGoals = await aiBrain.generateGoalsFromContext();
+          if (suggestedGoals.length > 0) {
+            for (const goal of suggestedGoals) {
+              goalManager.addGoal(goal, false);
+            }
+          }
+        }
+
+        // AUTO-START: Start the autonomous loop
+        // Engine will auto-select highest priority goal
+        const config = getMultiAIConfig();
+        const hasModel = config.gptInstant?.ready || config.gptThinking?.ready || config.claude?.ready;
+
+        // Always start the autonomous loop - it will handle missing models gracefully
+        console.log("[App] Starting autonomous engine, hasModel:", hasModel);
+        autonomousEngine.startAutonomousLoop();
+
+        autonomousEngineInitializedRef.current = true;
+      } catch (error) {
+        console.error("[App] Failed to initialize autonomous engine:", error.message);
+      }
+    };
+
+    // Delay initialization to let other systems start first
+    const timer = setTimeout(initializeAutonomousEngine, 3000);
+    return () => clearTimeout(timer);
+  }, [showOnboarding, autonomousEngine, goalManager, aiBrain, toolExecutor]);
 
   // ===== API QUOTA MONITOR =====
   const quotaMonitor = useMemo(() => getAPIQuotaMonitor(), []);
@@ -1464,15 +1539,17 @@ const App = ({ updateConsoleTitle }) => {
 
       // Listen for autonomous engine events
       autonomousEngine.on("action-started", (action) => {
-        workLog.logAction(LOG_SOURCE.AUTONOMOUS, `Started: ${action.title}`, action.type, LOG_STATUS.PENDING);
+        const actionTitle = action.title || `${action.action || action.type || "Task"}(${(action.target || "").slice(0, 30)})`;
+        workLog.logAction(LOG_SOURCE.AUTONOMOUS, `Started: ${actionTitle}`, action.type || action.action, LOG_STATUS.PENDING);
         currentActionIdRef.current = action.id;
-        resetActionStream(action.title);
+        resetActionStream(actionTitle);
         resetToolEvents();
         refreshAutonomousState();
       });
 
       autonomousEngine.on("action-completed", (action) => {
-        workLog.logResult(LOG_SOURCE.AUTONOMOUS, `Completed: ${action.title}`, "", LOG_STATUS.SUCCESS);
+        const actionTitle = action.title || `${action.action || action.type || "Task"}(${(action.target || "").slice(0, 30)})`;
+        workLog.logResult(LOG_SOURCE.AUTONOMOUS, `Completed: ${actionTitle}`, "", LOG_STATUS.SUCCESS);
         currentActionIdRef.current = null;
         resetActionStream("");
         setToolEvents((prev) => prev.map((entry) => (
@@ -1499,7 +1576,8 @@ const App = ({ updateConsoleTitle }) => {
       });
 
       autonomousEngine.on("action-failed", (action) => {
-        workLog.logError(LOG_SOURCE.AUTONOMOUS, `Failed: ${action.title}`, action.error);
+        const actionTitle = action.title || `${action.action || action.type || "Task"}(${(action.target || "").slice(0, 30)})`;
+        workLog.logError(LOG_SOURCE.AUTONOMOUS, `Failed: ${actionTitle}`, action.error);
         currentActionIdRef.current = null;
         resetActionStream("");
         setToolEvents((prev) => prev.map((entry) => (
@@ -1592,30 +1670,13 @@ const App = ({ updateConsoleTitle }) => {
       setWorkLogEntries(workLog.getDisplayData(15));
 
       // ===== ACTIVITY TRACKER WIRING (Claude Code Style) =====
-      // Wire activity tracker to autonomous engine events with meaningful messages
-      autonomousEngine.on("cycle-start", (cycle) => {
-        activityTracker.incrementCycle();
-
-        // Vary the displayed action based on what we're checking
-        const cycleActions = [
-          { type: "SEARCH", target: "market trends", detail: "scanning opportunities" },
-          { type: "FETCH", target: "portfolio data", detail: "checking positions" },
-          { type: "ANALYZE", target: "health metrics", detail: "reviewing wellness" },
-          { type: "ANALYZE", target: "goal progress", detail: "tracking milestones" },
-          { type: "SYNC", target: "connections", detail: "updating status" }
-        ];
-        const actionIndex = cycle % cycleActions.length;
-        const cycleAction = cycleActions[actionIndex];
-
-        activityTracker.setAgentState("ANALYZING");
-        activityTracker.action(cycleAction.type, cycleAction.target, cycleAction.detail);
-      });
+      // Wire activity tracker to autonomous engine events
+      // NOTE: The fake cycle-start actions were removed - now using real AI-generated actions
+      // from the autonomous loop (Claude Code CLI or AI Brain fallback)
 
       autonomousEngine.on("proposals-updated", (proposals) => {
         if (proposals.length > 0) {
           activityTracker.setAgentState("PLANNING");
-          // Note: Real AI observations are now added in generateAIActions via AI Brain
-          // The observation shows the AI's actual reasoning, not a hardcoded count
         }
       });
 
@@ -1662,7 +1723,9 @@ const App = ({ updateConsoleTitle }) => {
         if (action._activityId) {
           activityTracker.complete(action._activityId);
         }
-        activityTracker.addObservation(`Completed: ${action.title}`);
+        // Build title from action type and target if title is missing
+        const actionTitle = action.title || `${action.action || action.type || "Task"}(${(action.target || "").slice(0, 30)})`;
+        activityTracker.addObservation(`Completed: ${actionTitle}`);
         activityTracker.setAgentState("OBSERVING");
         activityTracker.setGoal(null);
       });
@@ -1671,7 +1734,8 @@ const App = ({ updateConsoleTitle }) => {
         if (action._activityId) {
           activityTracker.error(action._activityId, action.error);
         }
-        activityTracker.addObservation(`Failed: ${action.title} - ${action.error?.slice(0, 30) || "unknown error"}`);
+        const failedTitle = action.title || `${action.action || action.type || "Task"}(${(action.target || "").slice(0, 30)})`;
+        activityTracker.addObservation(`Failed: ${failedTitle} - ${action.error?.slice(0, 30) || "unknown error"}`);
         activityTracker.setAgentState("REFLECTING");
       });
 
@@ -2028,23 +2092,25 @@ Execute this task and provide concrete results.`);
       if (autoStartedRef.current) return;
       autoStartedRef.current = true;
 
-      // Start the engine with Claude Code-style messages
-      activityTracker.setAgentState("CONNECTING");
+      // Start the engine - show realistic startup state
+      activityTracker.setAgentState("THINKING");
       const userName = firebaseUserDisplay ? firebaseUserDisplay.split(" ")[0] : "the user";
-      activityTracker.setGoal(`Connecting to BACKBONE ENGINE services and preparing the daily workflow system for ${userName} including portfolio tracking, health metrics, and goal management`);
-      activityTracker.action("BASH", "backbone-engine", "starting services");
+      activityTracker.setGoal(`Initializing AI systems for ${userName}...`);
+      activityTracker.addObservation("Connecting to AI services and preparing autonomous workflow");
 
-      // Configure auto-approval for safe action types (research, analyze don't make real changes)
+      // Configure auto-approval for safe action types
       autonomousEngine.updateConfig({
         autoApproveTypes: ["research", "analyze", "plan"],
-        cycleIntervalMs: 60000, // Run cycle every 60 seconds
-        requireApproval: false  // Allow auto-execution for safe types
+        cycleIntervalMs: 60000,
+        requireApproval: false
       });
 
-      autonomousEngine.start(generateAIActions);
+      // NOTE: OLD loop removed - using NEW autonomous loop (startAutonomousLoop)
+      // which uses Claude Code CLI with GPT-5.2 supervision, or AI Brain fallback
+      // The NEW loop was already started in the initialization useEffect above
       activityTracker.setRunning(true);
-      activityTracker.setAgentState("ANALYZING");
-      workLog.logSystem("Autonomous Engine", "AI Brain started - GPT-5.2/Claude reasoning");
+      activityTracker.setAgentState("THINKING");
+      workLog.logSystem("Autonomous Engine", "AI Brain initialized - using Claude Code CLI or AI Brain fallback");
 
       // Initialize Life Management Engine services (but DON'T start its rule-based cycle)
       // The AI Brain now handles intelligent decision-making
@@ -5934,10 +6000,11 @@ Folder: ${result.action.id}`,
   }, [autonomousEngine, workLog]);
 
   const handleStartAutonomous = useCallback(() => {
-    autonomousEngine.start(generateAIActions);
+    // Use the NEW autonomous loop with Claude Code CLI or AI Brain fallback
+    autonomousEngine.startAutonomousLoop();
     refreshAutonomousState();
-    workLog.logSystem("Autonomous Mode Started", "AI will generate and execute actions");
-  }, [autonomousEngine, generateAIActions, workLog]);
+    workLog.logSystem("Autonomous Mode Started", "Using Claude Code CLI with GPT-5.2 supervision");
+  }, [autonomousEngine, workLog]);
 
   const handleStopAutonomous = useCallback(() => {
     autonomousEngine.stop();
@@ -6156,7 +6223,7 @@ Folder: ${result.action.id}`,
         e(
           Box,
           { flexDirection: "column", flexGrow: 1, marginTop: 1 },
-          e(AgentActivityPanel, { overlayHeader: false, compact: true })
+          e(AgentActivityPanel, { overlayHeader: false, compact: true, scrollOffset: engineScrollOffset })
         ),
 
         // CONVERSATION DISPLAY - Shows recent messages and AI responses (fixed height to preserve header)
@@ -6328,13 +6395,13 @@ Folder: ${result.action.id}`,
         )
       ),
 
-      // ===== RIGHT COLUMN: Goals Sidebar (25%) =====
+      // ===== RIGHT COLUMN: Goals Sidebar (28% - wider for better readability) =====
         e(
           Box,
           {
             flexDirection: "column",
-            width: "25%",
-            paddingLeft: 1,
+            width: "28%",
+            paddingLeft: 2,  // More padding for dot spacing
             borderStyle: "single",
             borderColor: "#1e293b",
             borderLeft: true,
@@ -6343,11 +6410,13 @@ Folder: ${result.action.id}`,
             borderRight: false,
             overflow: "hidden"
           },
-          // Goals header
-          e(Text, { color: "#f59e0b", bold: true }, "Goals"),
-          e(Text, { color: "#1e293b" }, "─".repeat(20)),
+          // Smart Goals Panel - auto-generates 5-7 SPECIFIC goals on load
+          // Format: ● Goal title (can wrap to 2 lines)
+          //           Project Name (gray, below)
+          // Dots: gray=pending, gray-blink=working, green=complete, red=failed
+          e(SmartGoalsPanel, { autoGenerate: true }),
 
-          // Working on (current goal from activity tracker)
+          // Current work (from narrator - has goal info)
           e(
             Box,
             { flexDirection: "column", marginTop: 1 },
@@ -6358,38 +6427,36 @@ Folder: ${result.action.id}`,
               e(Text, { color: "#f59e0b" }, "● "),
               e(Text, { color: "#94a3b8", wrap: "wrap" },
                 (() => {
-                  const data = activityTracker.getDisplayData();
-                  return data.goal || data.workDescription || "Monitoring systems...";
+                  const data = activityNarrator.getDisplayData();
+                  return data.goal || data.workDescription || "Initializing...";
                 })()
               )
             )
           ),
 
-          // Observations
+          // Observations (from narrator)
           e(
             Box,
             { flexDirection: "column", marginTop: 1, flexGrow: 1 },
             e(Text, { color: "#64748b" }, "Observations:"),
             ...(() => {
-              const data = activityTracker.getDisplayData();
+              const data = activityNarrator.getDisplayData();
               const observations = data.observations || [];
               if (observations.length === 0) {
                 return [e(Text, { key: "no-obs", color: "#475569", dimColor: true }, "  No observations yet")];
               }
-              return observations.slice(0, 5).map((obs, i) => {
-                // Determine status: completed (green), active (orange), abandoned (red), gray for pending
+              return observations.slice(0, 3).map((obs, i) => {
                 const text = obs.text?.toLowerCase() || (typeof obs === "string" ? obs.toLowerCase() : "");
                 const isCompleted = text.includes("completed") || text.includes("done") || text.includes("success");
                 const isAbandoned = text.includes("abandoned") || text.includes("cancelled") || text.includes("stopped");
                 const isFailed = text.includes("failed") || text.includes("error");
-                // Color coding: green = completed, red = abandoned/failed, orange = active, gray = pending
                 const dotColor = isCompleted ? "#22c55e" : isAbandoned ? "#ef4444" : isFailed ? "#ef4444" : "#f59e0b";
                 const textColor = isCompleted ? "#22c55e" : isAbandoned ? "#64748b" : isFailed ? "#64748b" : "#94a3b8";
                 return e(
                   Box,
                   { key: `obs-${i}`, flexDirection: "row", marginTop: 0 },
                   e(Text, { color: dotColor }, "● "),
-                  e(Text, { color: textColor, wrap: "truncate-end" }, (obs.text || obs).slice(0, 30))
+                  e(Text, { color: textColor, wrap: "truncate-end" }, (obs.text || obs).slice(0, 28))
                 );
               });
             })()
@@ -6454,7 +6521,7 @@ Folder: ${result.action.id}`,
         Box,
         { flexDirection: "column", width: viewMode === VIEW_MODES.MINIMAL || isMedium ? "75%" : "50%", paddingX: 1, overflow: "hidden" },
         // Engine Status - overlay-rendered when enabled
-        e(AgentActivityPanel, { overlayHeader: overlayEnabled && overlayEngineHeaderEnabled }),
+        e(AgentActivityPanel, { overlayHeader: overlayEnabled && overlayEngineHeaderEnabled, scrollOffset: engineScrollOffset }),
         // Conversation Panel
         e(ConversationPanel, { messages, isLoading: isProcessing, streamingText, actionStreamingText, actionStreamingTitle }),
         // LinkedIn Data Viewer overlay

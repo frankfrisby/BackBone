@@ -10,13 +10,195 @@ import { SCORE_THRESHOLDS, getSignalFromScore } from "./score-engine.js";
  * Based on BackBoneApp production trading system
  *
  * Features:
+ * - Market hours enforcement (9:30 AM - 4:00 PM ET)
  * - Dynamic buy threshold based on SPY direction (7.1 positive, 8.0 negative)
  * - Momentum protection (don't interrupt +8% gains)
  * - Technical override (sell protected positions if score ≤2.7)
  * - Day trade limits (3 per 5-day window)
  * - Position limits (max 2 concurrent)
  * - Multi-channel notifications (Pushover, Ntfy, Firebase, local)
+ * - Scheduled evaluations every 10 minutes during market hours
  */
+
+/**
+ * Market Hours Configuration (Eastern Time)
+ */
+const MARKET_HOURS = {
+  open: { hour: 9, minute: 30 },   // 9:30 AM ET
+  close: { hour: 16, minute: 0 },  // 4:00 PM ET
+  preMarketStart: { hour: 5, minute: 30 }, // 5:30 AM ET for ticker updates
+  timezone: "America/New_York"
+};
+
+/**
+ * Get current time in Eastern timezone
+ */
+const getEasternTime = () => {
+  const now = new Date();
+  const options = {
+    timeZone: MARKET_HOURS.timezone,
+    hour: 'numeric',
+    minute: 'numeric',
+    second: 'numeric',
+    hour12: false
+  };
+  const etString = now.toLocaleString('en-US', options);
+  const [time] = etString.split(', ');
+  const [hours, minutes, seconds] = time.split(':').map(Number);
+
+  // Also get the day of week (0 = Sunday, 6 = Saturday)
+  const dayOptions = { timeZone: MARKET_HOURS.timezone, weekday: 'short' };
+  const dayOfWeek = now.toLocaleString('en-US', dayOptions);
+
+  return { hours, minutes, seconds, dayOfWeek, date: now };
+};
+
+/**
+ * Check if market is currently open
+ * Market hours: 9:30 AM - 4:00 PM ET, Monday-Friday
+ */
+export const isMarketOpen = () => {
+  const { hours, minutes, dayOfWeek } = getEasternTime();
+
+  // Weekend check
+  if (dayOfWeek === 'Sat' || dayOfWeek === 'Sun') {
+    return { open: false, reason: 'Weekend - market closed' };
+  }
+
+  // Convert to minutes since midnight for easier comparison
+  const currentMinutes = hours * 60 + minutes;
+  const openMinutes = MARKET_HOURS.open.hour * 60 + MARKET_HOURS.open.minute;
+  const closeMinutes = MARKET_HOURS.close.hour * 60 + MARKET_HOURS.close.minute;
+
+  if (currentMinutes < openMinutes) {
+    const minutesUntilOpen = openMinutes - currentMinutes;
+    const hoursUntil = Math.floor(minutesUntilOpen / 60);
+    const minsUntil = minutesUntilOpen % 60;
+    return {
+      open: false,
+      reason: `Pre-market - opens in ${hoursUntil}h ${minsUntil}m`,
+      nextOpen: getNextMarketOpen()
+    };
+  }
+
+  if (currentMinutes >= closeMinutes) {
+    return {
+      open: false,
+      reason: 'After hours - market closed',
+      nextOpen: getNextMarketOpen()
+    };
+  }
+
+  const minutesUntilClose = closeMinutes - currentMinutes;
+  const hoursUntil = Math.floor(minutesUntilClose / 60);
+  const minsUntil = minutesUntilClose % 60;
+
+  return {
+    open: true,
+    reason: `Market open - closes in ${hoursUntil}h ${minsUntil}m`,
+    closesAt: `${MARKET_HOURS.close.hour}:${String(MARKET_HOURS.close.minute).padStart(2, '0')} ET`
+  };
+};
+
+/**
+ * Check if it's pre-market hours (5:30 AM ET onwards) for ticker updates
+ */
+export const isPreMarketTime = () => {
+  const { hours, minutes, dayOfWeek } = getEasternTime();
+
+  if (dayOfWeek === 'Sat' || dayOfWeek === 'Sun') {
+    return false;
+  }
+
+  const currentMinutes = hours * 60 + minutes;
+  const preMarketMinutes = MARKET_HOURS.preMarketStart.hour * 60 + MARKET_HOURS.preMarketStart.minute;
+  const closeMinutes = MARKET_HOURS.close.hour * 60 + MARKET_HOURS.close.minute;
+
+  return currentMinutes >= preMarketMinutes && currentMinutes < closeMinutes;
+};
+
+/**
+ * Get next market open time
+ */
+export const getNextMarketOpen = () => {
+  const { hours, minutes, dayOfWeek, date } = getEasternTime();
+  const currentMinutes = hours * 60 + minutes;
+  const openMinutes = MARKET_HOURS.open.hour * 60 + MARKET_HOURS.open.minute;
+
+  let daysToAdd = 0;
+
+  // If it's before market open today (and weekday), it opens today
+  if (dayOfWeek !== 'Sat' && dayOfWeek !== 'Sun' && currentMinutes < openMinutes) {
+    daysToAdd = 0;
+  }
+  // If it's Saturday, next open is Monday
+  else if (dayOfWeek === 'Sat') {
+    daysToAdd = 2;
+  }
+  // If it's Sunday, next open is Monday
+  else if (dayOfWeek === 'Sun') {
+    daysToAdd = 1;
+  }
+  // Otherwise (after hours on weekday), it opens tomorrow (or Monday if Friday)
+  else if (dayOfWeek === 'Fri') {
+    daysToAdd = 3;
+  }
+  else {
+    daysToAdd = 1;
+  }
+
+  const nextOpen = new Date(date);
+  nextOpen.setDate(nextOpen.getDate() + daysToAdd);
+
+  return {
+    date: nextOpen.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }),
+    time: `${MARKET_HOURS.open.hour}:${String(MARKET_HOURS.open.minute).padStart(2, '0')} ET`,
+    daysAway: daysToAdd
+  };
+};
+
+/**
+ * Get next evaluation time (every 10 minutes during market hours)
+ */
+export const getNextEvaluationTime = () => {
+  const { hours, minutes, dayOfWeek } = getEasternTime();
+  const marketStatus = isMarketOpen();
+
+  if (!marketStatus.open) {
+    const nextOpen = getNextMarketOpen();
+    return {
+      nextEval: `${nextOpen.date} ${nextOpen.time}`,
+      reason: marketStatus.reason,
+      marketOpen: false
+    };
+  }
+
+  // Round up to next 10-minute mark
+  const currentMinutes = hours * 60 + minutes;
+  const nextEvalMinutes = Math.ceil((currentMinutes + 1) / 10) * 10;
+  const nextHour = Math.floor(nextEvalMinutes / 60);
+  const nextMin = nextEvalMinutes % 60;
+
+  // Check if next eval would be after market close
+  const closeMinutes = MARKET_HOURS.close.hour * 60 + MARKET_HOURS.close.minute;
+  if (nextEvalMinutes >= closeMinutes) {
+    const nextOpen = getNextMarketOpen();
+    return {
+      nextEval: `${nextOpen.date} ${nextOpen.time}`,
+      reason: 'Market closing soon',
+      marketOpen: false
+    };
+  }
+
+  const minutesUntil = nextEvalMinutes - currentMinutes;
+
+  return {
+    nextEval: `${nextHour}:${String(nextMin).padStart(2, '0')} ET`,
+    minutesUntil,
+    reason: `Next evaluation in ${minutesUntil} minutes`,
+    marketOpen: true
+  };
+};
 
 const DATA_DIR = path.join(process.cwd(), "data");
 const TRADES_LOG = path.join(DATA_DIR, "trades-log.json");
@@ -311,10 +493,17 @@ export const evaluateSellSignal = (ticker, position = null) => {
 
 /**
  * Execute buy order via Alpaca
+ * Enforces market hours (9:30 AM - 4:00 PM ET)
  */
 export const executeBuy = async (symbol, price, reason) => {
   if (!config.enabled) {
     return { success: false, error: "Auto-trading not enabled" };
+  }
+
+  // Enforce market hours
+  const marketStatus = isMarketOpen();
+  if (!marketStatus.open) {
+    return { success: false, error: `Market closed: ${marketStatus.reason}` };
   }
 
   const canTradeResult = canTrade(symbol);
@@ -388,10 +577,17 @@ export const executeBuy = async (symbol, price, reason) => {
 
 /**
  * Execute sell order via Alpaca
+ * Enforces market hours (9:30 AM - 4:00 PM ET)
  */
 export const executeSell = async (symbol, price, quantity, reason) => {
   if (!config.enabled) {
     return { success: false, error: "Auto-trading not enabled" };
+  }
+
+  // Enforce market hours
+  const marketStatus = isMarketOpen();
+  if (!marketStatus.open) {
+    return { success: false, error: `Market closed: ${marketStatus.reason}` };
   }
 
   const canTradeResult = canTrade(symbol);
@@ -556,6 +752,7 @@ export const sendTradeNotification = async (trade) => {
 /**
  * Monitor tickers and execute trades
  * Uses BackBoneApp trading logic:
+ * - Market hours enforcement (9:30 AM - 4:00 PM ET)
  * - Only buys from top 3 qualified tickers
  * - Dynamic threshold based on SPY direction
  * - Momentum protection for +8% positions
@@ -572,6 +769,20 @@ export const monitorAndTrade = async (tickers, positions = [], marketContext = {
     return { monitored: false, reason: "Auto-trading disabled" };
   }
 
+  // Check market hours
+  const marketStatus = isMarketOpen();
+  const nextEval = getNextEvaluationTime();
+
+  if (!marketStatus.open) {
+    return {
+      monitored: false,
+      reason: marketStatus.reason,
+      marketOpen: false,
+      nextEvaluation: nextEval.nextEval,
+      nextMarketOpen: marketStatus.nextOpen
+    };
+  }
+
   const { spyChange = 0 } = marketContext;
   const spyPositive = spyChange >= 0;
 
@@ -580,6 +791,9 @@ export const monitorAndTrade = async (tickers, positions = [], marketContext = {
 
   const results = {
     monitored: true,
+    marketOpen: true,
+    marketStatus: marketStatus.reason,
+    nextEvaluation: nextEval.nextEval,
     spyPositive,
     effectiveBuyThreshold,
     buySignals: [],
@@ -683,13 +897,20 @@ export const monitorAndTrade = async (tickers, positions = [], marketContext = {
 };
 
 /**
- * Get trading status
+ * Get trading status including market hours
  */
 export const getTradingStatus = () => {
   loadConfig();
+  const marketStatus = isMarketOpen();
+  const nextEval = getNextEvaluationTime();
+
   return {
     enabled: config.enabled,
     mode: config.mode,
+    marketOpen: marketStatus.open,
+    marketStatus: marketStatus.reason,
+    nextEvaluation: nextEval.nextEval,
+    nextMarketOpen: marketStatus.nextOpen,
     buyThreshold: config.buyThreshold,
     sellThreshold: config.sellThreshold,
     dailyTradeCount,

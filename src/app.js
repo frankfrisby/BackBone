@@ -3323,8 +3323,36 @@ Execute this task and provide concrete results.`);
     // Initial fetch after delay for server startup
     setTimeout(fetchFromYahoo, 3000);
 
-    // Refresh every 5 minutes (user requested)
-    const interval = setInterval(fetchFromYahoo, 5 * 60 * 1000);
+    // Check if we're in pre-market or market hours (5:30 AM - 4:00 PM ET)
+    const shouldRefreshTickers = () => {
+      const now = new Date();
+      const etOptions = { timeZone: 'America/New_York', hour: 'numeric', minute: 'numeric', hour12: false };
+      const etString = now.toLocaleString('en-US', etOptions);
+      const [time] = etString.split(', ');
+      const [hours, minutes] = time.split(':').map(Number);
+      const dayOptions = { timeZone: 'America/New_York', weekday: 'short' };
+      const dayOfWeek = now.toLocaleString('en-US', dayOptions);
+
+      // Weekend - no refresh
+      if (dayOfWeek === 'Sat' || dayOfWeek === 'Sun') return false;
+
+      const currentMinutes = hours * 60 + minutes;
+      const preMarketStart = 5 * 60 + 30;   // 5:30 AM ET
+      const marketClose = 16 * 60;          // 4:00 PM ET
+
+      // Refresh from 5:30 AM to 4:00 PM ET
+      return currentMinutes >= preMarketStart && currentMinutes < marketClose;
+    };
+
+    // Smart refresh - every 10 minutes during trading hours, less frequent otherwise
+    const smartRefresh = async () => {
+      if (shouldRefreshTickers()) {
+        await fetchFromYahoo();
+      }
+    };
+
+    // Refresh every 10 minutes (from 5:30 AM ET onwards during weekdays)
+    const interval = setInterval(smartRefresh, 10 * 60 * 1000);
 
     return () => {
       cancelled = true;

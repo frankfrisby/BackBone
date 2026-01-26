@@ -61,7 +61,8 @@ const CommandPaletteBase = ({
   activeIndex,
   title = "Commands",
   isFocused = false,
-  countLabel = "matches"
+  countLabel = "matches",
+  compact = false  // In compact mode, render above input without extra margin
 }) => {
   if (!items.length) {
     return null;
@@ -95,7 +96,8 @@ const CommandPaletteBase = ({
     Box,
     {
       flexDirection: "column",
-      marginTop: 1,
+      marginTop: compact ? 0 : 1,
+      marginBottom: compact ? 1 : 0,  // Space between palette and input in compact mode
       borderStyle: "round",
       borderColor,
       padding: 1

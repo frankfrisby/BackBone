@@ -195,22 +195,38 @@ const ChatPanelBase = ({ commands, onSubmit, onTypingChange, modelInfo, compact 
     || modelInfo?.name
     || "GPT-5.2";
 
-  // Compact mode: minimal input only
+  // Compact mode: minimal input with command palette ABOVE (since input is at bottom)
   if (compact) {
     return e(
       Box,
       {
-        flexDirection: "row",
-        borderStyle: "round",
-        borderColor,
-        paddingX: 1,
-        height: 1
+        flexDirection: "column"
       },
-      e(Text, { color: promptColor, bold: true }, isCommand ? "⟩ " : "› "),
-      isEmpty
-        ? e(Text, { color: "#64748b" }, 'Ask anything or type / for commands')
-        : e(Text, { color: "#f8fafc" }, displayValue),
-      e(Text, { color: "#ffffff" }, "▌")
+      // Command palette - renders ABOVE input in compact mode
+      showPalette && e(CommandPalette, {
+        items: matches,
+        activeIndex,
+        title: "Commands",
+        isFocused: true,
+        countLabel: "matches",
+        compact: true
+      }),
+      // Input line
+      e(
+        Box,
+        {
+          flexDirection: "row",
+          borderStyle: "round",
+          borderColor,
+          paddingX: 1,
+          height: 1
+        },
+        e(Text, { color: promptColor, bold: true }, isCommand ? "⟩ " : "› "),
+        isEmpty
+          ? e(Text, { color: "#64748b" }, 'Ask anything or type / for commands')
+          : e(Text, { color: "#f8fafc" }, displayValue),
+        e(Text, { color: "#ffffff" }, "▌")
+      )
     );
   }
 

@@ -9,6 +9,7 @@ import { getClaudeCodeStatus } from "./claude-code-cli.js";
 import { getActionScheduler, ACTION_PRIORITY, ACTION_STATUS } from "./action-scheduler.js";
 import { getProjectManager } from "./project-manager.js";
 import { getWorkerCoordination, WORKER_MODE } from "./worker-coordination.js";
+import { showActivityTitle, showNotificationTitle, restoreBaseTitle } from "./terminal-resize.js";
 
 /**
  * Autonomous Engine for BACKBONE
@@ -342,6 +343,11 @@ export class AutonomousEngine extends EventEmitter {
     // Switch to project for this goal
     if (goal) {
       await this.switchToProjectForGoal(goal);
+      // Update terminal title to show active goal (30 seconds)
+      showActivityTitle(`Working on: ${goal.title.slice(0, 40)}`, 30000);
+    } else {
+      // Restore base title when no goal is active
+      restoreBaseTitle();
     }
 
     this.emit("goal-set", goal);
@@ -933,6 +939,9 @@ export class AutonomousEngine extends EventEmitter {
         console.error("[AutonomousEngine] Loop error:", error.message);
         this.emit("loop-error", error);
 
+        // Show error in terminal title (30 seconds)
+        showNotificationTitle("error", `Error: ${error.message.slice(0, 30)}`, 30000);
+
         // Wait before retrying
         await this.wait(5000);
       }
@@ -1356,6 +1365,9 @@ export class AutonomousEngine extends EventEmitter {
     this.currentProject = null;
     this.actionHistory = [];
     this.actionCount = 0;
+
+    // Show goal completion in title
+    showNotificationTitle("goal", `Completed: ${completedGoal.title.slice(0, 30)}`, 30000);
 
     this.emit("goal-completed", completedGoal);
 

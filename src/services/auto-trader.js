@@ -4,6 +4,7 @@ import path from "path";
 import { getAlpacaConfig } from "./alpaca.js";
 import { TRADING_CONFIG, TRADING_RULES, isGoodMomentum, isProtectedPosition, getActionFromScore } from "./trading-algorithms.js";
 import { SCORE_THRESHOLDS, getSignalFromScore } from "./score-engine.js";
+import { showNotificationTitle } from "./terminal-resize.js";
 
 // Note: Trailing stop manager is imported dynamically to avoid circular dependency
 let trailingStopManager = null;
@@ -588,6 +589,9 @@ export const executeBuy = async (symbol, price, reason) => {
       await sendTradeNotification(trade);
     }
 
+    // Show trade notification in terminal title (30 seconds)
+    showNotificationTitle("trade", `BUY ${symbol} x${quantity} @ $${price.toFixed(2)}`, 30000);
+
     return { success: true, order, trade };
   } catch (error) {
     return { success: false, error: error.message };
@@ -665,6 +669,9 @@ export const executeSell = async (symbol, price, quantity, reason) => {
     if (config.notifyOnTrade) {
       await sendTradeNotification(trade);
     }
+
+    // Show trade notification in terminal title (30 seconds)
+    showNotificationTitle("trade", `SELL ${symbol} x${quantity} @ $${price.toFixed(2)}`, 30000);
 
     return { success: true, order, trade };
   } catch (error) {

@@ -162,7 +162,7 @@ import OuraHealthPanel from "./components/oura-health-panel.js";
 import { OnboardingPanel } from "./components/onboarding-panel.js";
 import { SplashScreen } from "./components/splash-screen.js";
 // ToolActionsPanel removed - merged into AgentActivityPanel
-import { resizeForOnboarding, resizeForMainApp, TERMINAL_SIZES } from "./services/terminal-resize.js";
+import { resizeForOnboarding, resizeForMainApp, TERMINAL_SIZES, setBaseTitle, showActivityTitle, showNotificationTitle, restoreBaseTitle } from "./services/terminal-resize.js";
 import { processAndSaveContext, buildContextForAI } from "./services/conversation-context.js";
 import { MENTORS, MENTOR_CATEGORIES, getMentorsByCategory, getDailyWisdom, formatMentorDisplay, getAllMentorsDisplay, getMentorAdvice } from "./services/mentors.js";
 import { generateDailyInsights, generateWeeklyReport, formatInsightsDisplay, formatWeeklyReportDisplay, getQuickStatus } from "./services/insights-engine.js";
@@ -742,6 +742,12 @@ const App = ({ updateConsoleTitle }) => {
     }
     return baseName;
   }, [firebaseUserName, linkedInProfile]);
+
+  // Set terminal title to "Backbone · [username]" across all views
+  useEffect(() => {
+    const firstName = firebaseUserName?.split(" ")[0] || null;
+    setBaseTitle(firstName);
+  }, [firebaseUserName]);
 
   const userDisplayName = useMemo(() => {
     return linkedInProfile?.name || profile?.name || process.env.USER_NAME || "Frank";

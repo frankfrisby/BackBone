@@ -28,6 +28,7 @@ import fs from "fs";
 import path from "path";
 import { fetchTwilioConfig } from "./firebase-config.js";
 import { trackUserQuery, QUERY_SOURCE } from "./query-tracker.js";
+import { showNotificationTitle } from "./terminal-resize.js";
 
 const DATA_DIR = path.join(process.cwd(), "data");
 const TWILIO_CONFIG_PATH = path.join(DATA_DIR, "twilio-config.json");
@@ -309,6 +310,10 @@ export class TwilioWhatsAppService extends EventEmitter {
         userId,
         messageId: messageSid
       });
+
+      // Show WhatsApp message notification in terminal title
+      const preview = messageBody.length > 25 ? messageBody.slice(0, 25) + "..." : messageBody;
+      showNotificationTitle("message", `WhatsApp: ${preview}`, 30000);
     }
 
     this.emit("message-received", messageData);

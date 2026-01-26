@@ -8,7 +8,8 @@ import { spawn, exec } from "child_process";
 // Size presets (in characters - columns x rows)
 // 2200x1100 pixels approx 240 columns x 64 rows (assuming ~9px char width, ~17px char height)
 export const TERMINAL_SIZES = {
-  onboarding: { cols: 120, rows: 35, width: 1100, height: 700 },  // Compact for onboarding, centered
+  mini: { cols: 90, rows: 24, width: 800, height: 600 },          // Compact size
+  onboarding: { cols: 120, rows: 45, width: 1100, height: 900 },  // Taller for onboarding, centered
   main: { cols: 240, rows: 64, width: 2200, height: 1100 }        // Full size for main app (maximized)
 };
 
@@ -24,7 +25,7 @@ export const TERMINAL_SIZES = {
  * @param {number} options.height - Target height in pixels
  */
 const resizeWindowsTerminal = async (cols, rows, options = {}) => {
-  const { center = false, maximize = false, width = 2200, height = 1100 } = options;
+  const { center = false, maximize = false, forceSize = false, width = 2200, height = 1100 } = options;
 
   return new Promise((resolve) => {
     // Detect if running in Windows Terminal (has WT_SESSION env var)
@@ -50,26 +51,35 @@ const resizeWindowsTerminal = async (cols, rows, options = {}) => {
         `.replace(/\n/g, " ");
 
         exec(`powershell -NoProfile -ExecutionPolicy Bypass -Command "${maximizeScript}"`, { windowsHide: true }, () => {});
-      } else if (center) {
-        // Set specific pixel size for centered window
+      } else if (center || forceSize) {
+        // Set specific pixel size (and center if requested)
         process.stdout.write(`\x1b[4;${height};${width}t`);
 
-        // Use PowerShell to center the window
-        const centerScript = `
+        // Use PowerShell to resize (and optionally center) the window
+        const resizeScript = `
           Add-Type -Name Win -Namespace Native -MemberDefinition '
             [DllImport("user32.dll")] public static extern bool MoveWindow(IntPtr hWnd, int X, int Y, int W, int H, bool repaint);
             [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
             [DllImport("user32.dll")] public static extern int GetSystemMetrics(int n);
+            [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+            [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
           ';
           $hwnd = [Native.Win]::GetForegroundWindow();
+          ${center ? `
           $sw = [Native.Win]::GetSystemMetrics(0);
           $sh = [Native.Win]::GetSystemMetrics(1);
           $x = [Math]::Max(0, ($sw - ${width}) / 2);
           $y = [Math]::Max(0, ($sh - ${height}) / 2);
+          ` : `
+          $rect = New-Object Native.Win+RECT;
+          [Native.Win]::GetWindowRect($hwnd, [ref]$rect) | Out-Null;
+          $x = $rect.Left;
+          $y = $rect.Top;
+          `}
           [Native.Win]::MoveWindow($hwnd, $x, $y, ${width}, ${height}, $true)
         `.replace(/\n/g, " ");
 
-        exec(`powershell -NoProfile -ExecutionPolicy Bypass -Command "${centerScript}"`, { windowsHide: true }, () => {});
+        exec(`powershell -NoProfile -ExecutionPolicy Bypass -Command "${resizeScript}"`, { windowsHide: true }, () => {});
       } else {
         // Just set pixel size
         process.stdout.write(`\x1b[4;${height};${width}t`);
@@ -251,7 +261,8 @@ export const resizeTerminal = async (preset = "main") => {
     width,
     height,
     center: preset === "onboarding",  // Center for onboarding
-    maximize: preset === "main"        // Maximize for main app
+    maximize: preset === "main",       // Maximize for main app
+    forceSize: preset === "mini"       // Force specific size for mini
   };
 
   try {
@@ -276,6 +287,11 @@ export const resizeTerminal = async (preset = "main") => {
     return false;
   }
 };
+
+/**
+ * Resize to mini size
+ */
+export const resizeForMini = () => resizeTerminal("mini");
 
 /**
  * Resize to onboarding size
@@ -303,13 +319,113 @@ export const supportsResize = () => {
   return process.stdout.isTTY;
 };
 
+// Store the base title to restore after temporary titles
+let baseTitle = "Backbone";
+let tempTitleTimeout = null;
+
+/**
+ * Set terminal title using ANSI escape sequence
+ * Works on Windows Terminal, iTerm2, most Linux terminals
+ * @param {string} title - The title to set
+ */
+export const setTerminalTitle = (title) => {
+  if (process.stdout.isTTY) {
+    // Use OSC escape sequence to set window title
+    // \x1b]0; - Set both icon name and window title
+    // \x07 - Bell character (terminator)
+    process.stdout.write(`\x1b]0;${title}\x07`);
+  }
+};
+
+/**
+ * Set the base title (persists across views)
+ * @param {string} userName - User's name to include in title
+ */
+export const setBaseTitle = (userName) => {
+  baseTitle = userName ? `Backbone · ${userName}` : "Backbone";
+  setTerminalTitle(baseTitle);
+};
+
+/**
+ * Get the current base title
+ */
+export const getBaseTitle = () => baseTitle;
+
+/**
+ * Show temporary title for a duration, then restore base title
+ * @param {string} title - Temporary title to show
+ * @param {number} duration - Duration in milliseconds (default 30000 = 30 seconds)
+ */
+export const showTemporaryTitle = (title, duration = 30000) => {
+  // Clear any existing timeout
+  if (tempTitleTimeout) {
+    clearTimeout(tempTitleTimeout);
+  }
+
+  // Set the temporary title
+  setTerminalTitle(title);
+
+  // Restore base title after duration
+  tempTitleTimeout = setTimeout(() => {
+    setTerminalTitle(baseTitle);
+    tempTitleTimeout = null;
+  }, duration);
+};
+
+/**
+ * Show activity in title (e.g., "Backbone · Frank · Working on: Find jobs")
+ * @param {string} activity - Activity description
+ * @param {number} duration - Duration in milliseconds
+ */
+export const showActivityTitle = (activity, duration = 30000) => {
+  const title = `${baseTitle} · ${activity}`;
+  showTemporaryTitle(title, duration);
+};
+
+/**
+ * Show notification in title (for trades, messages, errors)
+ * @param {string} type - "trade" | "message" | "error"
+ * @param {string} text - Notification text
+ * @param {number} duration - Duration in milliseconds
+ */
+export const showNotificationTitle = (type, text, duration = 30000) => {
+  const icons = {
+    trade: "📈",
+    message: "💬",
+    error: "⚠️",
+    goal: "🎯"
+  };
+  const icon = icons[type] || "●";
+  const title = `${icon} ${text} · ${baseTitle}`;
+  showTemporaryTitle(title, duration);
+};
+
+/**
+ * Restore base title immediately
+ */
+export const restoreBaseTitle = () => {
+  if (tempTitleTimeout) {
+    clearTimeout(tempTitleTimeout);
+    tempTitleTimeout = null;
+  }
+  setTerminalTitle(baseTitle);
+};
+
 export default {
   TERMINAL_SIZES,
   resizeTerminal,
+  resizeForMini,
   resizeForOnboarding,
   resizeForMainApp,
   getCurrentSize,
-  supportsResize
+  supportsResize,
+  setTerminalTitle,
+  setBaseTitle,
+  getBaseTitle,
+  showTemporaryTitle,
+  showActivityTitle,
+  showNotificationTitle,
+  restoreBaseTitle
 };
 
 

@@ -6,6 +6,8 @@ import { getToolExecutor, TOOL_TYPES } from "./tool-executor.js";
 import { STATE_FOR_ACTIVITY, getStateForActivity } from "./engine-state.js";
 import { getClaudeOrchestrator, EVALUATION_DECISION, ORCHESTRATION_STATE } from "./claude-orchestrator.js";
 import { getClaudeCodeStatus } from "./claude-code-cli.js";
+import { getActionScheduler, ACTION_PRIORITY, ACTION_STATUS } from "./action-scheduler.js";
+import { getProjectManager } from "./project-manager.js";
 
 /**
  * Autonomous Engine for BACKBONE
@@ -161,6 +163,11 @@ export class AutonomousEngine extends EventEmitter {
     this.autoChain = true;
     this.maxActionsPerGoal = 50;
     this.actionCount = 0;
+
+    // Action scheduler and project integration
+    this.actionScheduler = null;
+    this.projectManager = null;
+    this.currentProject = null;
   }
 
   /**
@@ -192,15 +199,148 @@ export class AutonomousEngine extends EventEmitter {
   }
 
   /**
-   * Set the current goal directly
+   * Set the action scheduler instance
    */
-  setCurrentGoal(goal) {
+  setActionScheduler(scheduler) {
+    this.actionScheduler = scheduler;
+  }
+
+  /**
+   * Set the project manager instance
+   */
+  setProjectManager(manager) {
+    this.projectManager = manager;
+  }
+
+  /**
+   * Initialize action scheduler and project manager
+   */
+  initializeServices() {
+    if (!this.actionScheduler) {
+      this.actionScheduler = getActionScheduler();
+    }
+    if (!this.projectManager) {
+      this.projectManager = getProjectManager();
+    }
+  }
+
+  /**
+   * Switch to a project for the current goal
+   * Creates project if it doesn't exist
+   */
+  async switchToProjectForGoal(goal) {
+    if (!goal || !this.projectManager) return null;
+
+    try {
+      // Create or get project for this goal
+      const project = await this.projectManager.createProjectForGoal(goal);
+
+      if (project) {
+        this.currentProject = project;
+
+        // Update action scheduler context
+        if (this.actionScheduler) {
+          this.actionScheduler.setContext(goal, project);
+        }
+
+        // Log project switch
+        if (this.narrator) {
+          this.narrator.observe(`Switched to project: ${project.name}`);
+        }
+
+        this.emit("project-switched", { goal, project });
+        return project;
+      }
+    } catch (error) {
+      console.error("[AutonomousEngine] Failed to switch project:", error.message);
+    }
+
+    return null;
+  }
+
+  /**
+   * Schedule an action for later execution
+   */
+  scheduleAction(action) {
+    if (!this.actionScheduler) {
+      this.initializeServices();
+    }
+
+    const scheduledAction = this.actionScheduler.scheduleAction({
+      ...action,
+      goalId: action.goalId || this.currentGoal?.id,
+      projectId: action.projectId || this.currentProject?.name
+    });
+
+    this.emit("action-scheduled", scheduledAction);
+    return scheduledAction;
+  }
+
+  /**
+   * Schedule multiple actions in sequence (with dependencies)
+   */
+  scheduleActionSequence(actions) {
+    if (!this.actionScheduler) {
+      this.initializeServices();
+    }
+
+    const scheduledActions = [];
+    let previousActionId = null;
+
+    for (const action of actions) {
+      const scheduledAction = this.scheduleAction({
+        ...action,
+        dependsOn: previousActionId ? [previousActionId] : []
+      });
+      scheduledActions.push(scheduledAction);
+      previousActionId = scheduledAction.id;
+    }
+
+    return scheduledActions;
+  }
+
+  /**
+   * Schedule a recurring action
+   */
+  scheduleRecurringAction(action, recurrence) {
+    return this.scheduleAction({
+      ...action,
+      recurrence
+    });
+  }
+
+  /**
+   * Get next scheduled action
+   */
+  getNextScheduledAction() {
+    if (!this.actionScheduler) return null;
+    return this.actionScheduler.getNextAction();
+  }
+
+  /**
+   * Get scheduler status
+   */
+  getSchedulerStatus() {
+    if (!this.actionScheduler) return null;
+    return this.actionScheduler.getStatus();
+  }
+
+  /**
+   * Set the current goal directly
+   * Also switches to the appropriate project context
+   */
+  async setCurrentGoal(goal) {
     this.currentGoal = goal;
     this.actionHistory = [];
     this.actionCount = 0;
 
     if (this.narrator) {
       this.narrator.setGoal(goal?.title || null);
+    }
+
+    // Switch to project for this goal
+    if (goal) {
+      await this.switchToProjectForGoal(goal);
     }
 
     this.emit("goal-set", goal);
@@ -464,6 +604,10 @@ export class AutonomousEngine extends EventEmitter {
     }
 
     this.running = true;
+
+    // Initialize services
+    this.initializeServices();
+
     this.emit("autonomous-started");
 
     // Run the autonomous loop
@@ -487,6 +631,29 @@ export class AutonomousEngine extends EventEmitter {
 
     while (this.running) {
       try {
+        // 0. Check for scheduled actions first
+        if (this.actionScheduler) {
+          const scheduledAction = this.actionScheduler.getNextAction();
+          if (scheduledAction) {
+            this.setEngineState("executing");
+
+            if (this.narrator) {
+              this.narrator.observe(`Executing scheduled action: ${scheduledAction.type}`);
+            }
+
+            await this.actionScheduler.executeAction(scheduledAction, async (action) => {
+              const executor = this.toolExecutor || getToolExecutor();
+              return await executor.execute({
+                action: action.tool,
+                target: action.target,
+                params: action.params
+              });
+            });
+
+            continue; // Check for more scheduled actions
+          }
+        }
+
         // 1. AUTO-START: Check for current goal, auto-select if none
         if (!this.currentGoal) {
           this.setEngineState("thinking");
@@ -502,6 +669,9 @@ export class AutonomousEngine extends EventEmitter {
             await this.wait(5000);
             continue;
           }
+
+          // Switch to project for this goal
+          await this.switchToProjectForGoal(this.currentGoal);
 
           // Log goal selection
           if (this.narrator) {
@@ -896,22 +1066,36 @@ export class AutonomousEngine extends EventEmitter {
   async completeCurrentGoal() {
     if (!this.currentGoal) return;
 
+    const completedGoal = this.currentGoal;
+
     // Notify narrator
     if (this.narrator) {
-      this.narrator.observe(`Completed goal: ${this.currentGoal.title}`);
+      this.narrator.observe(`Completed goal: ${completedGoal.title}`);
+    }
+
+    // Update project status
+    if (this.projectManager && this.currentProject) {
+      this.projectManager.updateProjectStatus(this.currentProject.name, "completed");
+      this.projectManager.addUpdate("completed", `Goal completed: ${completedGoal.title}`);
+    }
+
+    // Clear scheduled actions for this goal
+    if (this.actionScheduler) {
+      this.actionScheduler.clearGoalActions(completedGoal.id);
     }
 
     // Complete in goal manager
     if (this.goalManager) {
-      this.goalManager.completeCurrentGoal();
+      await this.goalManager.completeCurrentGoal();
     }
 
     // Reset for next goal
     this.currentGoal = null;
+    this.currentProject = null;
     this.actionHistory = [];
     this.actionCount = 0;
 
-    this.emit("goal-completed", this.currentGoal);
+    this.emit("goal-completed", completedGoal);
 
     // Auto-select next goal (generates plan with GPT-5.2)
     if (this.goalManager) {
@@ -919,6 +1103,8 @@ export class AutonomousEngine extends EventEmitter {
       if (nextGoal) {
         await this.goalManager.setCurrentGoal(nextGoal);
         this.currentGoal = nextGoal;
+        // Project switching happens in setCurrentGoal
+        await this.switchToProjectForGoal(nextGoal);
       }
     }
   }
@@ -950,8 +1136,55 @@ export class AutonomousEngine extends EventEmitter {
       approvedCount: this.state.approvedQueue.length,
       completedCount: this.state.completedActions.length,
       cycleCount: this.state.cycleCount,
-      lastCycleAt: this.state.lastCycleAt
+      lastCycleAt: this.state.lastCycleAt,
+      currentProject: this.currentProject,
+      currentGoal: this.currentGoal,
+      schedulerStatus: this.getSchedulerStatus()
     };
+  }
+
+  /**
+   * Get current project
+   */
+  getCurrentProject() {
+    return this.currentProject;
+  }
+
+  /**
+   * Switch to a different project by name
+   */
+  async switchProject(projectName) {
+    if (!this.projectManager) {
+      this.initializeServices();
+    }
+
+    const project = this.projectManager.loadProject(projectName);
+    if (project) {
+      this.currentProject = project;
+
+      if (this.actionScheduler) {
+        this.actionScheduler.setContext(this.currentGoal, project);
+      }
+
+      if (this.narrator) {
+        this.narrator.observe(`Switched to project: ${project.name}`);
+      }
+
+      this.emit("project-switched", { project });
+      return project;
+    }
+
+    return null;
+  }
+
+  /**
+   * List all projects
+   */
+  listProjects() {
+    if (!this.projectManager) {
+      this.initializeServices();
+    }
+    return this.projectManager.listProjects();
   }
 
   /**

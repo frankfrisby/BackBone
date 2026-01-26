@@ -6721,36 +6721,71 @@ Folder: ${result.action.id}`,
   // Show skeleton placeholders AFTER splash ends but BEFORE data is ready
   // This provides visual structure while data loads
   if (!mainViewReady) {
-    // Skeleton placeholder colors - pulse between visible and dimmed
-    const skeletonColor = pulsingDotVisible ? "#4a5568" : "#2d3748";
+    // Multi-line pulsing colors - alternating shades for depth
+    const skeletonLight = pulsingDotVisible ? "#4a5568" : "#2d3748";
+    const skeletonMid = pulsingDotVisible ? "#3f4f5f" : "#252f3a";
+    const skeletonDark = pulsingDotVisible ? "#374151" : "#1f2937";
     const skeletonDimColor = pulsingDotVisible ? "#374151" : "#1f2937";
 
-    // Skeleton line helper - creates a pulsing gray placeholder line (taller)
-    const SkeletonLine = (width, lineHeight = 1, indent = 0) => e(
+    // Multi-line skeleton block - creates multiple pulsing lines with varying widths
+    const SkeletonBlock = (baseWidth, lines = 3, indent = 0) => e(
       Box,
-      { paddingLeft: indent, height: lineHeight, marginBottom: 1 },
-      e(Text, { color: skeletonColor }, "░".repeat(Math.min(width, 30)))
+      { flexDirection: "column", paddingLeft: indent },
+      ...Array.from({ length: lines }, (_, i) => {
+        const width = Math.max(8, baseWidth - (i * 3) + (i % 2 === 0 ? 2 : -1));
+        const color = i % 3 === 0 ? skeletonLight : i % 3 === 1 ? skeletonMid : skeletonDark;
+        return e(Text, { key: i, color }, "░".repeat(Math.min(width, 30)));
+      })
     );
 
-    // Skeleton goal - dot + title placeholder (taller with more spacing)
+    // Skeleton line helper - single pulsing line
+    const SkeletonLine = (width, indent = 0) => e(
+      Box,
+      { paddingLeft: indent, marginBottom: 1 },
+      e(Text, { color: skeletonLight }, "░".repeat(Math.min(width, 30)))
+    );
+
+    // Skeleton goal - DOUBLED lines for each goal (multi-line pulsing)
     const SkeletonGoal = (titleWidth) => e(
       Box,
-      { flexDirection: "column", marginBottom: 2, height: 4 },
+      { flexDirection: "column", marginBottom: 2 },
+      // Title line with dot
       e(Box, { flexDirection: "row", gap: 1 },
-        e(Text, { color: skeletonDimColor }, "●"),
-        e(Text, { color: skeletonColor }, "░".repeat(titleWidth))
+        e(Text, { color: pulsingDotVisible ? "#f59e0b" : "#92400e" }, "●"),
+        e(Text, { color: skeletonLight }, "░".repeat(titleWidth))
       ),
-      e(Box, { paddingLeft: 3, marginTop: 1 },
-        e(Text, { color: skeletonDimColor }, "░".repeat(Math.floor(titleWidth * 0.7)))
+      // Second title line (doubled)
+      e(Box, { paddingLeft: 3 },
+        e(Text, { color: skeletonMid }, "░".repeat(Math.floor(titleWidth * 0.85)))
+      ),
+      // Progress/detail lines (doubled - 4 lines total)
+      e(Box, { paddingLeft: 3 },
+        e(Text, { color: skeletonDark }, "░".repeat(Math.floor(titleWidth * 0.7)))
+      ),
+      e(Box, { paddingLeft: 3 },
+        e(Text, { color: skeletonMid }, "░".repeat(Math.floor(titleWidth * 0.6)))
+      ),
+      // Status line
+      e(Box, { paddingLeft: 3 },
+        e(Text, { color: skeletonDark }, "░".repeat(Math.floor(titleWidth * 0.5)))
+      ),
+      // Extra detail line (doubled)
+      e(Box, { paddingLeft: 3 },
+        e(Text, { color: skeletonLight }, "░".repeat(Math.floor(titleWidth * 0.4)))
       )
     );
 
-    // Skeleton outcome - green dot + text placeholder (taller)
+    // Skeleton outcome - multi-line with green dot
     const SkeletonOutcome = (textWidth) => e(
       Box,
-      { flexDirection: "row", gap: 1, marginBottom: 1, height: 2 },
-      e(Text, { color: pulsingDotVisible ? "#22c55e" : "#166534" }, "●"),
-      e(Text, { color: skeletonColor }, "░".repeat(textWidth))
+      { flexDirection: "column", marginBottom: 1 },
+      e(Box, { flexDirection: "row", gap: 1 },
+        e(Text, { color: pulsingDotVisible ? "#22c55e" : "#166534" }, "●"),
+        e(Text, { color: skeletonLight }, "░".repeat(textWidth))
+      ),
+      e(Box, { paddingLeft: 3 },
+        e(Text, { color: skeletonMid }, "░".repeat(Math.floor(textWidth * 0.7)))
+      )
     );
 
     return e(
@@ -6762,10 +6797,16 @@ Folder: ${result.action.id}`,
         width: terminalWidth,
         overflow: "hidden"
       },
-      // Header placeholder (matches TopStatusBar height)
-      e(Box, { height: 3, flexDirection: "row", justifyContent: "space-between", paddingX: 1, alignItems: "center" },
-        e(Text, { color: skeletonColor }, "░░░░░░░░░░░░░"),
-        e(Text, { color: skeletonDimColor }, "░░░░░░░░")
+      // Header placeholder - multi-line pulsing
+      e(Box, { height: 3, flexDirection: "row", justifyContent: "space-between", paddingX: 1 },
+        e(Box, { flexDirection: "column" },
+          e(Text, { color: skeletonLight }, "░░░░░░░░░░░░░"),
+          e(Text, { color: skeletonMid }, "░░░░░░░░░░")
+        ),
+        e(Box, { flexDirection: "column", alignItems: "flex-end" },
+          e(Text, { color: skeletonDark }, "░░░░░░░░"),
+          e(Text, { color: skeletonMid }, "░░░░░░")
+        )
       ),
 
       // Main content area with proper column structure
@@ -6773,42 +6814,38 @@ Folder: ${result.action.id}`,
         Box,
         { flexDirection: "row", height: contentHeight, overflow: "hidden" },
 
-        // Left column (25%) - Progress + Health + Tickers skeleton (taller sections)
+        // Left column (25%) - Progress + Health + Tickers with multi-line blocks
         e(Box, { flexDirection: "column", width: "25%", paddingRight: 1, overflow: "hidden" },
-          // Progress section (taller)
-          e(Box, { height: 10, flexDirection: "column", marginBottom: 2 },
+          // Progress section - multi-line pulsing
+          e(Box, { height: 12, flexDirection: "column", marginBottom: 2 },
             e(Text, { color: skeletonDimColor }, "Progress"),
             e(Text, { color: "#1e293b" }, "─".repeat(20)),
             e(Box, { marginTop: 1 }),
-            SkeletonLine(18),
-            SkeletonLine(15),
-            SkeletonLine(12),
-            SkeletonLine(16)
+            SkeletonBlock(20, 4),
+            e(Box, { height: 1 }),
+            SkeletonBlock(18, 3)
           ),
-          // Health section (taller)
-          e(Box, { height: 10, flexDirection: "column", marginBottom: 2 },
+          // Health section - multi-line pulsing
+          e(Box, { height: 12, flexDirection: "column", marginBottom: 2 },
             e(Text, { color: skeletonDimColor }, "Health"),
             e(Text, { color: "#1e293b" }, "─".repeat(20)),
             e(Box, { marginTop: 1 }),
-            SkeletonLine(20),
-            SkeletonLine(16),
-            SkeletonLine(18),
-            SkeletonLine(14)
+            SkeletonBlock(22, 4),
+            e(Box, { height: 1 }),
+            SkeletonBlock(18, 3)
           ),
-          // Ticker section (taller)
-          e(Box, { height: 12, flexDirection: "column" },
+          // Ticker section - multi-line pulsing
+          e(Box, { height: 14, flexDirection: "column" },
             e(Text, { color: skeletonDimColor }, "Scores"),
             e(Text, { color: "#1e293b" }, "─".repeat(20)),
             e(Box, { marginTop: 1 }),
-            SkeletonLine(22),
-            SkeletonLine(20),
-            SkeletonLine(18),
-            SkeletonLine(16),
-            SkeletonLine(14)
+            SkeletonBlock(24, 5),
+            e(Box, { height: 1 }),
+            SkeletonBlock(20, 4)
           )
         ),
 
-        // Center column (50%) - Engine + Chat area (taller sections)
+        // Center column (50%) - Engine + Chat area with multi-line blocks
         e(
           Box,
           {
@@ -6817,54 +6854,66 @@ Folder: ${result.action.id}`,
             paddingX: 1,
             overflow: "hidden"
           },
-          // Engine section with working on placeholder (taller)
-          e(Box, { flexDirection: "column", height: 20, marginBottom: 2 },
+          // Engine section with working on - multi-line pulsing
+          e(Box, { flexDirection: "column", height: 24, marginBottom: 2 },
             e(Text, { color: skeletonDimColor, bold: true }, "Engine"),
             e(Text, { color: "#1e293b" }, "─".repeat(40)),
             e(Box, { marginTop: 1 }),
-            // Working on placeholder (taller)
-            e(Box, { flexDirection: "row", gap: 1, height: 3 },
-              e(Text, { color: pulsingDotVisible ? "#f59e0b" : "#92400e" }, "●"),
-              e(Text, { color: skeletonColor }, "░░░░░░░░░░░░░░░░░░░░░░░░░░")
+            // Working on placeholder - multi-line
+            e(Box, { flexDirection: "column", marginBottom: 2 },
+              e(Box, { flexDirection: "row", gap: 1 },
+                e(Text, { color: pulsingDotVisible ? "#f59e0b" : "#92400e" }, "●"),
+                e(Text, { color: skeletonLight }, "░░░░░░░░░░░░░░░░░░░░░░░░░░░░")
+              ),
+              e(Box, { paddingLeft: 3 },
+                e(Text, { color: skeletonMid }, "░░░░░░░░░░░░░░░░░░░░░░")
+              ),
+              e(Box, { paddingLeft: 3 },
+                e(Text, { color: skeletonDark }, "░░░░░░░░░░░░░░░░")
+              )
             ),
-            e(Box, { paddingLeft: 3, marginBottom: 2 },
-              e(Text, { color: skeletonDimColor }, "░░░░░░░░░░░░░░░░░░")
-            ),
-            // 5 Outcome placeholders (with more spacing)
+            // 5 Outcome placeholders - multi-line each
+            SkeletonOutcome(34),
+            SkeletonOutcome(30),
             SkeletonOutcome(32),
             SkeletonOutcome(28),
-            SkeletonOutcome(30),
-            SkeletonOutcome(26),
-            SkeletonOutcome(29)
+            SkeletonOutcome(31)
           ),
-          // Chat input placeholder area (taller)
+          // Chat input placeholder area - multi-line
           e(Box, { flexGrow: 1, flexDirection: "column", justifyContent: "flex-end" },
-            e(Box, { height: 5, borderStyle: "round", borderColor: "#1e293b", padding: 1 },
-              e(Text, { color: skeletonDimColor }, "> "),
-              e(Text, { color: skeletonColor }, "░░░░░░░░░░░░░░░░░░░░░░░░░░░░")
+            e(Box, { height: 6, borderStyle: "round", borderColor: "#1e293b", padding: 1 },
+              e(Box, { flexDirection: "row" },
+                e(Text, { color: skeletonDimColor }, "> "),
+                e(Text, { color: skeletonLight }, "░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░")
+              ),
+              e(Text, { color: skeletonMid }, "  ░░░░░░░░░░░░░░░░░░░░░░░░"),
+              e(Text, { color: skeletonDark }, "  ░░░░░░░░░░░░░░░░░░")
             )
           )
         ),
 
-        // Right column (25%) - 4 Goals skeleton (taller)
+        // Right column (25%) - 4 Goals skeleton with DOUBLED lines per goal
         e(Box, { flexDirection: "column", width: "25%", paddingLeft: 1, overflow: "hidden" },
           e(Text, { color: "#f59e0b", bold: true }, "Goals"),
           e(Text, { color: "#1e293b" }, "─".repeat(22)),
           e(Box, { marginTop: 1 }),
-          // 4 Goal placeholders (taller with more spacing)
-          SkeletonGoal(20),
-          SkeletonGoal(18),
+          // 4 Goal placeholders - each has 6 lines (doubled)
           SkeletonGoal(22),
-          SkeletonGoal(17)
+          SkeletonGoal(20),
+          SkeletonGoal(24),
+          SkeletonGoal(19)
         )
       ),
 
-      // Footer placeholder (taller)
-      e(Box, { height: 4, flexDirection: "column", justifyContent: "center" },
+      // Footer placeholder - multi-line
+      e(Box, { height: 5, flexDirection: "column", justifyContent: "center" },
         e(Text, { color: "#1e293b" }, "─".repeat(Math.min(terminalWidth - 2, 90))),
-        e(Box, { flexDirection: "row", paddingX: 1, marginTop: 1 },
-          e(Text, { color: skeletonDimColor }, "Loading data..."),
-          e(Text, { color: skeletonColor }, " ░░░░░░░░░░░░")
+        e(Box, { flexDirection: "column", paddingX: 1, marginTop: 1 },
+          e(Box, { flexDirection: "row" },
+            e(Text, { color: skeletonDimColor }, "Loading data..."),
+            e(Text, { color: skeletonLight }, " ░░░░░░░░░░░░░░")
+          ),
+          e(Text, { color: skeletonMid }, "░░░░░░░░░░░░░░░░░░░░")
         )
       )
     );

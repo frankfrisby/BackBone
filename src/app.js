@@ -735,6 +735,7 @@ const App = ({ updateConsoleTitle }) => {
   const portfolioRef = useRef(portfolio);
   const profileRef = useRef(profile);
   const ouraHealthRef = useRef(ouraHealth);
+  const plaidDataRef = useRef(plaidData);
   const socialConnectionsRef = useRef(socialConnections);
   const integrationsRef = useRef(null);
   const [cloudSyncStatus, setCloudSyncStatus] = useState(null);
@@ -1351,6 +1352,20 @@ const App = ({ updateConsoleTitle }) => {
         tickersRef.current.slice(0, 10).map(t => ({ symbol: t.symbol, score: t.score, change: t.change }))
       );
 
+      autonomousEngine.registerContextProvider("netWorth", async () => {
+        const data = plaidDataRef.current;
+        if (!data?.connected) return { connected: false };
+        return {
+          connected: true,
+          total: data.netWorth?.total || 0,
+          assets: data.netWorth?.assets || 0,
+          liabilities: data.netWorth?.liabilities || 0,
+          accountCount: data.accountCount || 0,
+          institutions: data.institutions || [],
+          lastUpdated: data.lastUpdated
+        };
+      });
+
       // Position analysis context - explains why positions are held/sold
       autonomousEngine.registerContextProvider("positionAnalysis", async () => {
         try {
@@ -1428,6 +1443,20 @@ const App = ({ updateConsoleTitle }) => {
           change: ticker.change,
           signal: ticker.signal
         }));
+      });
+
+      aiBrain.registerContextProvider("netWorth", async () => {
+        const data = plaidDataRef.current;
+        if (!data?.connected) return { connected: false };
+        return {
+          connected: true,
+          total: data.netWorth?.total || 0,
+          assets: data.netWorth?.assets || 0,
+          liabilities: data.netWorth?.liabilities || 0,
+          accountCount: data.accountCount || 0,
+          accountsByType: data.accountsByType || {},
+          institutions: data.institutions || []
+        };
       });
 
       aiBrain.registerContextProvider("projects", async () => {
@@ -2490,6 +2519,7 @@ Execute this task and provide concrete results.`);
           portfolio: portfolioRef.current,
           tickers: tickersRef.current.slice(0, 10),
           health: ouraHealthRef.current,
+          netWorth: plaidDataRef.current?.netWorth,
           lastActivity: new Date().toISOString()
         };
         const result = await syncBackboneState(config, state);
@@ -2547,6 +2577,7 @@ Execute this task and provide concrete results.`);
           tickers: tickersRef.current.slice(0, 20),
           weights: weightsRef.current,
           health: ouraHealthRef.current,
+          netWorth: plaidDataRef.current?.netWorth,
           integrations: integrationsRef.current,
           social: socialConnectionsRef.current
         };
@@ -2743,6 +2774,12 @@ Execute this task and provide concrete results.`);
         projects: fileContext.projects,
         topTickers: tickers.slice(0, 5).map((t) => ({ symbol: t.symbol, score: t.score })),
         health: ouraHealth?.today || ouraHealth || null,
+        netWorth: plaidData?.netWorth ? {
+          total: plaidData.netWorth.total,
+          assets: plaidData.netWorth.assets,
+          liabilities: plaidData.netWorth.liabilities,
+          accounts: plaidData.accountCount
+        } : null,
         education: profile.education || null,
         userContext: savedUserContext, // Previously learned user information
         conversationHistory: fileContext.conversationHistory,
@@ -2914,7 +2951,9 @@ Execute this task and provide concrete results.`);
     ouraHealthRef.current = ouraHealth;
   }, [ouraHealth]);
 
-
+  useEffect(() => {
+    plaidDataRef.current = plaidData;
+  }, [plaidData]);
 
   useEffect(() => {
     socialConnectionsRef.current = socialConnections;

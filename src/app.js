@@ -718,6 +718,13 @@ const App = ({ updateConsoleTitle }) => {
   // Initialize with mock data for development, initial tickers for production
   const useMockData = process.env.USE_MOCK_DATA === "true";
   const [tickers, setTickers] = useState(() => (useMockData ? buildMockTickers(tickerEngine) : buildInitialTickers()));
+  const [tickerStatus, setTickerStatus] = useState({
+    refreshing: false,
+    lastRefresh: null,
+    error: null,
+    scanCount: 0,
+    scanDone: false,
+  });
   const [portfolio, setPortfolio] = useState(() => {
     if (useMockData) return buildMockPortfolio();
     return buildEmptyPortfolio();
@@ -1071,7 +1078,7 @@ const App = ({ updateConsoleTitle }) => {
       alpacaMode,
       personalCapitalData,
     },
-    [STATE_SLICES.TICKERS]: { tickers },
+    [STATE_SLICES.TICKERS]: { tickers, tickerStatus },
     [STATE_SLICES.HEALTH]: { ouraHealth, ouraHistory },
     [STATE_SLICES.PROJECTS]: { projects },
     [STATE_SLICES.CHAT]: {
@@ -3330,6 +3337,9 @@ Execute this task and provide concrete results.`);
         return;
       }
 
+      // Set status to refreshing
+      setTickerStatus(prev => ({ ...prev, refreshing: true, error: null }));
+
       try {
         const result = await fetchYahooTickers();
 
@@ -3356,9 +3366,29 @@ Execute this task and provide concrete results.`);
               setLastQuoteUpdate(nextTime);
             }
           }
+          // Update status: done refreshing, record count and time
+          setTickerStatus({
+            refreshing: false,
+            lastRefresh: new Date().toISOString(),
+            error: null,
+            scanCount: result.tickers.length,
+            scanDone: result.tickers.length >= 50,
+          });
+        } else {
+          // No data or unsuccessful - mark as pending
+          setTickerStatus(prev => ({
+            ...prev,
+            refreshing: false,
+            error: result.error || null,
+          }));
         }
       } catch (error) {
-        // Silently handle errors - server might still be starting
+        // Set error status
+        setTickerStatus(prev => ({
+          ...prev,
+          refreshing: false,
+          error: error.message || "Failed to fetch",
+        }));
       }
     };
 

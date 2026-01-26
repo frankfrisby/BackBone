@@ -85,6 +85,13 @@ class AppStore extends EventEmitter {
         weights: null,
         priceHistory: {},
         lastQuoteUpdate: "--:--",
+        tickerStatus: {
+          refreshing: false,
+          lastRefresh: null,
+          error: null,
+          scanCount: 0,
+          scanDone: false,
+        },
       },
       [STATE_SLICES.CHAT]: {
         messages: [],

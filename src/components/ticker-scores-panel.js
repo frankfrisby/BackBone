@@ -242,7 +242,8 @@ const TickerScoresPanelBase = ({
   compact = false,
   timestamp = null,
   spyPositive = null,  // SPY direction for dynamic threshold
-  spyChange = null     // SPY % change for display
+  spyChange = null,    // SPY % change for display
+  tickerStatus = null  // Status: { refreshing, lastRefresh, error, scanCount, scanDone }
 }) => {
   // Format timestamp for display
   const displayTime = formatDateTime(timestamp ? new Date(timestamp) : new Date());
@@ -286,6 +287,16 @@ const TickerScoresPanelBase = ({
 
   // Minimal/compact view
   if (viewMode === "minimal" || compact) {
+    // Calculate market status for indicator
+    const getMarketStatus = () => {
+      if (!tickerStatus) return "pending";
+      if (tickerStatus.refreshing) return "working";
+      if (tickerStatus.error) return "error";
+      if (tickerStatus.scanDone || tickerStatus.scanCount > 0) return "done";
+      return "pending";
+    };
+    const marketStatus = getMarketStatus();
+
     return e(
       Box,
       {
@@ -303,8 +314,16 @@ const TickerScoresPanelBase = ({
           e(Text, { color: "#64748b" }, title),
           e(Text, { color: "#475569", dimColor: true }, `Updated: ${displayTime}`)
         ),
-        e(Text, { color: top3Count > 0 ? "#22c55e" : "#475569" },
-          top3Count > 0 ? `${top3Count} buy` : "0 buy")
+        e(
+          Box,
+          { flexDirection: "row", gap: 1, alignItems: "center" },
+          e(Text, { color: top3Count > 0 ? "#22c55e" : "#475569" },
+            top3Count > 0 ? `${top3Count} buy` : "0 buy"),
+          e(StatusDot, {
+            status: marketStatus,
+            blinking: marketStatus === "working"
+          })
+        )
       ),
       ...sortedTickers.map((ticker, i) => {
         const isTop3 = top3Symbols.has(ticker.symbol);
@@ -486,6 +505,11 @@ const Top3DisplayBase = ({ tickers = [], spyPositive = null }) => {
 
 /**
  * Status indicator dot with blinking support
+ * Status colors:
+ * - done: green (#22c55e) - data loaded successfully
+ * - working: pulsing gray (#6b7280) - currently refreshing
+ * - error: red (#ef4444) - failed to load
+ * - pending: dim gray (#475569) - not yet started
  */
 const StatusDot = ({ status, label, blinking = false }) => {
   const [visible, setVisible] = React.useState(true);
@@ -498,10 +522,11 @@ const StatusDot = ({ status, label, blinking = false }) => {
     setVisible(true);
   }, [blinking]);
 
-  // Status colors: green=done, orange=working, red=not done
+  // Status colors: green=done, gray=working (pulsing), red=error, dim=pending
   const color = status === "done" ? "#22c55e" :
-                status === "working" ? "#f97316" :
-                "#ef4444";
+                status === "working" ? "#6b7280" :
+                status === "error" ? "#ef4444" :
+                "#475569";
 
   return e(
     Box,

@@ -200,6 +200,21 @@ export const isClaudeCodeLoggedIn = () => {
             };
           }
 
+          // Check for claudeAiOauth format (actual Claude Code CLI format)
+          if (data.claudeAiOauth?.accessToken) {
+            const oauth = data.claudeAiOauth;
+            return {
+              loggedIn: true,
+              source: authPath,
+              user: oauth.email || null,
+              model: "claude-sonnet-4-20250514",
+              expiresAt: oauth.expiresAt || null,
+              subscriptionType: oauth.subscriptionType || null,
+              rateLimitTier: oauth.rateLimitTier || null,
+              method: "claude-code-cli",
+            };
+          }
+
           // Check for hasCompletedAuth or similar flags
           if (data.hasCompletedAuth || data.authenticated || data.isAuthenticated || data.loggedIn) {
             return {

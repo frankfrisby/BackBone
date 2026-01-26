@@ -37,6 +37,7 @@ const VIEW_MODES = {
  * - ouraHealth: Oura health data
  * - ouraHistory: Oura history data
  * - tickers: Array of ticker data with scores
+ * - tickerStatus: Status of ticker fetching { refreshing, lastRefresh, error, scanCount, scanDone }
  * - projects: Array of project data
  * - uiClock: Timestamp for ticker panel updates
  * - userName: User's display name
@@ -48,6 +49,7 @@ const LeftColumnBase = ({
   ouraHealth,
   ouraHistory,
   tickers = [],
+  tickerStatus = null,
   projects = [],
   uiClock,
   userName = null,
@@ -118,6 +120,7 @@ const LeftColumnBase = ({
       maxItems: viewMode === VIEW_MODES.MINIMAL ? 3 : viewMode === VIEW_MODES.ADVANCED ? 20 : 10,
       compact: viewMode === VIEW_MODES.MINIMAL,
       timestamp: uiClock,
+      tickerStatus: tickerStatus,
     }),
 
     // Projects Panel (only in advanced mode)

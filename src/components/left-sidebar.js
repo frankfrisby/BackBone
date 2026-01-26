@@ -24,6 +24,7 @@ const LeftSidebarBase = () => {
     ouraHealth: health.ouraHealth,
     ouraHistory: health.ouraHistory,
     tickers: tickers.tickers,
+    tickerStatus: tickers.tickerStatus,
     projects: projects.projects,
     uiClock: ui.uiClock,
     userName: user.userDisplayName,

@@ -298,8 +298,25 @@ export class RealtimeMessaging extends EventEmitter {
           continue;
         }
 
+        // Skip private messages from showing in app (but still process them)
+        // Private messages have showInApp: false
+        if (message.private === true || message.showInApp === false) {
+          this.processedMessageIds.add(messageId);
+          continue;
+        }
+
         // Skip if not a user message or already completed
         if (message.type !== MESSAGE_TYPE.USER) {
+          // For WhatsApp AI responses, emit them to show in conversation
+          if (message.type === MESSAGE_TYPE.AI && message.channel?.includes("whatsapp")) {
+            this.emit("whatsapp-response", {
+              messageId,
+              content: message.content,
+              channel: message.channel,
+              timestamp: message.createdAt
+            });
+          }
+          this.processedMessageIds.add(messageId);
           continue;
         }
         if (message.status === MESSAGE_STATUS.COMPLETED ||

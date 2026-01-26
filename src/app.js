@@ -3275,6 +3275,7 @@ Execute this task and provide concrete results.`);
         if (prev.symbol !== next.symbol) return true;
         if (prev.score !== next.score) return true;
         if (prev.change !== next.change) return true;
+        if (prev.changePercent !== next.changePercent) return true;
       }
       return false;
     };

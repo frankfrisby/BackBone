@@ -28,7 +28,7 @@ const areTickerScoresEqual = (prevProps, nextProps) => {
     const next = nextTickers[i] || {};
     if (prev.symbol !== next.symbol) return false;
     if (prev.score !== next.score) return false;
-    if (prev.change !== next.change && prev.changePercent !== next.changePercent) return false;
+    if (prev.change !== next.change || prev.changePercent !== next.changePercent) return false;
   }
 
   return true;

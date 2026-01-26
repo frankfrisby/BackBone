@@ -6691,8 +6691,41 @@ Folder: ${result.action.id}`,
 
 
   // Show splash screen during initialization
-  // Use full layout structure with placeholder content to ensure proper height calculation
+  // Use full layout structure with skeleton placeholder content to ensure proper height calculation
+  // Skeleton placeholders pulse gray like web app skeleton loaders
   if (isInitializing) {
+    // Skeleton placeholder colors - pulse between visible and dimmed
+    const skeletonColor = pulsingDotVisible ? "#4a5568" : "#2d3748";
+    const skeletonDimColor = pulsingDotVisible ? "#374151" : "#1f2937";
+
+    // Skeleton line helper - creates a pulsing gray placeholder line
+    const SkeletonLine = (width, height = 1, indent = 0) => e(
+      Box,
+      { paddingLeft: indent, height },
+      e(Text, { color: skeletonColor }, "░".repeat(Math.min(width, 25)))
+    );
+
+    // Skeleton goal - dot + title placeholder
+    const SkeletonGoal = (titleWidth) => e(
+      Box,
+      { flexDirection: "column", marginBottom: 1 },
+      e(Box, { flexDirection: "row", gap: 1 },
+        e(Text, { color: skeletonDimColor }, "●"),
+        e(Text, { color: skeletonColor }, "░".repeat(titleWidth))
+      ),
+      e(Box, { paddingLeft: 3 },
+        e(Text, { color: skeletonDimColor }, "░".repeat(Math.floor(titleWidth * 0.6)))
+      )
+    );
+
+    // Skeleton outcome - green dot + text placeholder
+    const SkeletonOutcome = (textWidth) => e(
+      Box,
+      { flexDirection: "row", gap: 1, marginBottom: 0 },
+      e(Text, { color: pulsingDotVisible ? "#22c55e" : "#166534" }, "●"),
+      e(Text, { color: skeletonColor }, "░".repeat(textWidth))
+    );
+
     return e(
       Box,
       {
@@ -6702,43 +6735,98 @@ Folder: ${result.action.id}`,
         width: terminalWidth,
         overflow: "hidden"
       },
-      // Invisible placeholder header (matches TopStatusBar height)
-      e(Box, { height: 2 }),
+      // Header placeholder (matches TopStatusBar height)
+      e(Box, { height: 2, flexDirection: "row", justifyContent: "space-between", paddingX: 1 },
+        e(Text, { color: skeletonColor }, "░░░░░░░░░░░"),
+        e(Text, { color: skeletonDimColor }, "░░░░░░")
+      ),
+
       // Main content area with proper column structure
       e(
         Box,
         { flexDirection: "row", height: contentHeight, overflow: "hidden" },
-        // Left column placeholder (25% for goals)
+
+        // Left column (25%) - Progress + Health + Tickers skeleton
         e(Box, { flexDirection: "column", width: "25%", paddingRight: 1, overflow: "hidden" },
-          // 7 goal line placeholders
+          // Progress section header
+          e(Text, { color: skeletonDimColor }, "Progress"),
+          e(Text, { color: "#1e293b" }, "─".repeat(18)),
+          SkeletonLine(15),
+          SkeletonLine(12),
           e(Box, { height: 1 }),
-          e(Box, { height: 2 }),
-          e(Box, { height: 2 }),
-          e(Box, { height: 2 }),
-          e(Box, { height: 2 }),
-          e(Box, { height: 2 }),
-          e(Box, { height: 2 }),
-          e(Box, { height: 2 })
+          // Health section
+          e(Text, { color: skeletonDimColor }, "Health"),
+          e(Text, { color: "#1e293b" }, "─".repeat(18)),
+          SkeletonLine(18),
+          SkeletonLine(14),
+          e(Box, { height: 1 }),
+          // Ticker section
+          e(Text, { color: skeletonDimColor }, "Scores"),
+          e(Text, { color: "#1e293b" }, "─".repeat(18)),
+          SkeletonLine(20),
+          SkeletonLine(18),
+          SkeletonLine(16)
         ),
-        // Center column (50% for engine + chat)
+
+        // Center column (50%) - Engine + Chat area
         e(
           Box,
           {
             flexDirection: "column",
             width: "50%",
             paddingX: 1,
-            overflow: "hidden",
-            alignItems: "center",
-            justifyContent: "center"
+            overflow: "hidden"
           },
+          // Engine section with working on placeholder
+          e(Box, { flexDirection: "column", height: 12 },
+            e(Text, { color: skeletonDimColor, bold: true }, "Engine"),
+            e(Text, { color: "#1e293b" }, "─".repeat(35)),
+            e(Box, { marginTop: 1 }),
+            // Working on placeholder
+            e(Box, { flexDirection: "row", gap: 1 },
+              e(Text, { color: pulsingDotVisible ? "#f59e0b" : "#92400e" }, "●"),
+              e(Text, { color: skeletonColor }, "░░░░░░░░░░░░░░░░░░░░░░")
+            ),
+            e(Box, { paddingLeft: 3 },
+              e(Text, { color: skeletonDimColor }, "░░░░░░░░░░░░░░")
+            ),
+            e(Box, { marginTop: 1 }),
+            // 5 Outcome placeholders
+            SkeletonOutcome(28),
+            SkeletonOutcome(24),
+            SkeletonOutcome(26),
+            SkeletonOutcome(22),
+            SkeletonOutcome(25)
+          ),
           // Splash screen content centered
-          e(SplashScreen, { message: "Initializing" })
+          e(
+            Box,
+            { flexGrow: 1, alignItems: "center", justifyContent: "center" },
+            e(SplashScreen, { message: "Initializing" })
+          )
         ),
-        // Right column placeholder (25%)
-        e(Box, { flexDirection: "column", width: "25%", paddingLeft: 1, overflow: "hidden" })
+
+        // Right column (25%) - 4 Goals skeleton
+        e(Box, { flexDirection: "column", width: "25%", paddingLeft: 1, overflow: "hidden" },
+          e(Text, { color: "#f59e0b", bold: true }, "Goals"),
+          e(Text, { color: "#1e293b" }, "─".repeat(20)),
+          e(Box, { marginTop: 1 }),
+          // 4 Goal placeholders
+          SkeletonGoal(18),
+          SkeletonGoal(16),
+          SkeletonGoal(20),
+          SkeletonGoal(15)
+        )
       ),
-      // Invisible placeholder footer (matches BottomStatusBar + input height)
-      e(Box, { height: 3 })
+
+      // Footer placeholder (matches BottomStatusBar + input height)
+      e(Box, { height: 3, flexDirection: "column" },
+        e(Text, { color: "#1e293b" }, "─".repeat(Math.min(terminalWidth - 2, 80))),
+        e(Box, { flexDirection: "row", paddingX: 1 },
+          e(Text, { color: skeletonDimColor }, "> "),
+          e(Text, { color: skeletonColor }, "░░░░░░░░░░░░░░░░░░░░")
+        )
+      )
     );
   }
 

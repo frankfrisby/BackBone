@@ -7,6 +7,7 @@ import { getAIStatus, getMultiAIConfig, getCurrentModel } from "../services/mult
 import { BILLING_URLS } from "../services/api-quota-monitor.js";
 import { isClaudeCodeLoggedIn } from "../services/claude-code-cli.js";
 import { getGoalManager } from "../services/goal-manager.js";
+import { getBackgroundProjectsManager, BACKGROUND_PROJECT_TYPE } from "../services/background-projects.js";
 
 const e = React.createElement;
 
@@ -119,6 +120,34 @@ const StateDisplay = memo(({ state, stateInfo, goal, projectName, hideStateLine 
   const color = STATE_COLORS[stateKey] || stateInfo?.color || THEME.warning;
   const isIdle = stateKey === "IDLE";
 
+  // Get background projects to show when idle
+  const backgroundProjects = useMemo(() => {
+    if (!isIdle) return [];
+    try {
+      const bgManager = getBackgroundProjectsManager();
+      const displayData = bgManager.getDisplayData();
+      if (!displayData.initialized) return [];
+
+      // Show active/triggered background projects
+      return displayData.projects
+        .filter(p => p.status === "active" || p.status === "triggered")
+        .map(p => ({
+          title: p.title,
+          insight: p.latestInsight,
+          type: p.type
+        }));
+    } catch (e) {
+      return [];
+    }
+  }, [isIdle]);
+
+  // Background project display names
+  const bgProjectNames = {
+    [BACKGROUND_PROJECT_TYPE.MARKET_RESEARCH]: "Market Research",
+    [BACKGROUND_PROJECT_TYPE.FINANCIAL_GROWTH]: "Financial Growth",
+    [BACKGROUND_PROJECT_TYPE.DISASTER_PLANNING]: "Disaster Planning"
+  };
+
   return e(
     Box,
     { flexDirection: "column", marginBottom: 1 },
@@ -156,8 +185,29 @@ const StateDisplay = memo(({ state, stateInfo, goal, projectName, hideStateLine 
         )
       )
     ),
-    // When idle with no reasons, show generic message
-    isIdle && (!waitingReasons || waitingReasons.length === 0) && goal && e(
+    // When idle with no waiting reasons but has background projects, show those
+    isIdle && (!waitingReasons || waitingReasons.length === 0) && backgroundProjects.length > 0 && e(
+      Box,
+      { flexDirection: "column", paddingLeft: 2 },
+      e(Text, { color: THEME.muted }, "Background work:"),
+      ...backgroundProjects.slice(0, 2).map((bp, i) =>
+        e(
+          Box,
+          { key: i, flexDirection: "column", paddingLeft: 2 },
+          e(Box, { flexDirection: "row" },
+            e(Text, { color: "#64748b" }, "◐ "),
+            e(Text, { color: THEME.secondary }, bgProjectNames[bp.type] || bp.title)
+          ),
+          bp.insight && e(
+            Box,
+            { paddingLeft: 4 },
+            e(Text, { color: THEME.dim, wrap: "wrap" }, bp.insight.slice(0, 60) + (bp.insight.length > 60 ? "..." : ""))
+          )
+        )
+      )
+    ),
+    // When idle with no reasons and no background projects, show generic message
+    isIdle && (!waitingReasons || waitingReasons.length === 0) && backgroundProjects.length === 0 && goal && e(
       Box,
       { paddingLeft: 2, flexDirection: "row", flexWrap: "wrap" },
       e(Text, { color: THEME.muted }, "Status: "),

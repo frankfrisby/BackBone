@@ -1,6 +1,7 @@
 import React, { useMemo } from "react";
 import { Box, Text } from "ink";
 import { getProgressResearch } from "../services/progress-research.js";
+import { getROIDisplayData } from "../services/roi-calculator.js";
 
 const e = React.createElement;
 
@@ -227,49 +228,26 @@ export const OverallScoreDisplay = ({ score, grade, trend }) => {
 
 /**
  * Parallel World Comparison - Shows life trajectory with vs without optimization
- * Illustrates the compounding effect of daily optimizations
+ * 6-month ROI projection with monetary and time savings
  */
 export const ParallelWorldPanel = ({ data, weeksUsing = 0 }) => {
-  // Calculate projected gains based on consistent optimization
-  const categories = data?.categories || [];
+  // Get ROI projection data
+  const roiData = useMemo(() => {
+    try {
+      return getROIDisplayData();
+    } catch (e) {
+      return null;
+    }
+  }, []);
 
-  // Base improvement rates per week (compounding)
-  const IMPROVEMENT_RATES = {
-    finance: 1.5, // 1.5% weekly improvement (compound to 100%+ over year)
-    health: 2.0,  // 2% weekly improvement
-    career: 1.2,  // 1.2% weekly improvement
-    family: 1.0,  // 1% weekly improvement
-    growth: 2.5,  // 2.5% weekly improvement (fastest with AI assistance)
-    education: 1.8 // 1.8% weekly improvement
-  };
+  const daysUsing = roiData?.daysUsing || Math.round(weeksUsing * 7);
+  const currentScore = roiData?.currentScore || 0;
+  const projectedScore = roiData?.projectedScore || 0;
+  const projectedGain = roiData?.projectedGain || 0;
 
-  // Calculate projected scores for parallel worlds
-  const projections = categories.map(cat => {
-    const baseScore = cat.score || 0;
-    const weeklyRate = IMPROVEMENT_RATES[cat.category] || 1.0;
-
-    // Without BACKBONE: slight decline (-0.2% per week due to entropy)
-    const withoutBB = Math.max(0, baseScore - (weeksUsing * 0.2));
-
-    // With BACKBONE: compound improvement
-    const withBB = Math.min(100, baseScore + (weeksUsing * weeklyRate));
-
-    // Difference
-    const diff = withBB - withoutBB;
-
-    return {
-      category: cat.category,
-      without: Math.round(withoutBB),
-      with: Math.round(withBB),
-      diff: Math.round(diff),
-      color: CATEGORY_COLORS[cat.category] || "#64748b"
-    };
-  });
-
-  // Calculate overall difference
-  const totalWithout = projections.reduce((sum, p) => sum + p.without, 0) / (projections.length || 1);
-  const totalWith = projections.reduce((sum, p) => sum + p.with, 0) / (projections.length || 1);
-  const overallDiff = Math.round(totalWith - totalWithout);
+  // Build 6-month timeline
+  const withSystem = roiData?.withSystemLine || [];
+  const withoutSystem = roiData?.withoutSystemLine || [];
 
   return e(
     Box,
@@ -283,60 +261,82 @@ export const ParallelWorldPanel = ({ data, weeksUsing = 0 }) => {
     e(
       Box,
       { flexDirection: "row", justifyContent: "space-between", marginBottom: 1 },
-      e(Text, { color: "#f59e0b", bold: true }, "Parallel Worlds"),
-      e(Text, { color: "#475569" }, `Week ${weeksUsing}`)
+      e(Text, { color: "#f59e0b", bold: true }, "6-Month ROI Projection"),
+      e(Text, { color: "#475569" }, `Day ${daysUsing}`)
     ),
 
-    // Column headers
+    // Current vs Projected
     e(
       Box,
       { flexDirection: "row", marginBottom: 1 },
-      e(Text, { color: "#475569", width: 9 }, ""),
-      e(Text, { color: "#ef4444", width: 8 }, "Without"),
-      e(Text, { color: "#22c55e", width: 8 }, "With"),
-      e(Text, { color: "#3b82f6", width: 6 }, "Gain")
+      e(Text, { color: "#64748b" }, "Now: "),
+      e(Text, { color: "#e2e8f0", bold: true }, `${currentScore}%`),
+      e(Text, { color: "#64748b" }, "  →  6mo: "),
+      e(Text, { color: "#22c55e", bold: true }, `${projectedScore}%`),
+      projectedGain > 0 && e(
+        Text,
+        { color: "#ffffff", backgroundColor: "#166534", bold: true },
+        ` +${projectedGain}% `
+      )
     ),
 
-    // Category rows
-    ...projections.slice(0, 6).map((proj, i) => {
-      const label = proj.category.charAt(0).toUpperCase() + proj.category.slice(1);
-      return e(
-        Box,
-        { key: proj.category || i, flexDirection: "row" },
-        e(Text, { color: proj.color, width: 9 }, label.slice(0, 8)),
-        e(Text, { color: "#ef4444", width: 8 }, `${proj.without}%`),
-        e(Text, { color: "#22c55e", width: 8 }, `${proj.with}%`),
-        e(Text, { color: "#3b82f6", bold: true, width: 6 }, `+${proj.diff}%`)
-      );
-    }),
-
-    // Overall summary
-    e(
-      Box,
-      { marginTop: 1, borderTopColor: "#334155" },
-      e(Text, { color: "#334155" }, "─".repeat(28))
-    ),
+    // Timeline visualization (simple text chart)
+    e(Text, { color: "#334155" }, "─".repeat(32)),
     e(
       Box,
       { flexDirection: "row", marginTop: 1 },
-      e(Text, { color: "#94a3b8", bold: true, width: 9 }, "TOTAL"),
-      e(Text, { color: "#ef4444", width: 8 }, `${Math.round(totalWithout)}%`),
-      e(Text, { color: "#22c55e", width: 8 }, `${Math.round(totalWith)}%`),
-      e(Text, { color: "#f59e0b", bold: true, width: 6 }, `+${overallDiff}%`)
+      e(Text, { color: "#64748b", width: 8 }, "Month"),
+      e(Text, { color: "#22c55e", width: 10 }, "With"),
+      e(Text, { color: "#ef4444", width: 10 }, "Without"),
+      e(Text, { color: "#3b82f6", width: 8 }, "Gain")
     ),
 
-    // Motivation message
+    // Month rows (0, 3, 6)
+    ...[0, 3, 6].map(m => {
+      const withVal = withSystem[m]?.score || currentScore;
+      const withoutVal = withoutSystem[m]?.score || currentScore;
+      const gain = Math.round((withVal - withoutVal) * 10) / 10;
+      return e(
+        Box,
+        { key: m, flexDirection: "row" },
+        e(Text, { color: "#475569", width: 8 }, m === 0 ? "Now" : `${m}mo`),
+        e(Text, { color: "#22c55e", width: 10 }, `${withVal}%`),
+        e(Text, { color: "#ef4444", width: 10 }, `${withoutVal}%`),
+        e(
+          Text,
+          {
+            color: gain > 0 ? "#22c55e" : "#64748b",
+            bold: gain > 5,
+            width: 8
+          },
+          gain > 0 ? `+${gain}%` : "-"
+        )
+      );
+    }),
+
+    // Value metrics
+    e(Text, { color: "#334155", marginTop: 1 }, "─".repeat(32)),
+    roiData?.monetaryGain && e(
+      Box,
+      { flexDirection: "row", marginTop: 1 },
+      e(Text, { color: "#64748b" }, "Potential Savings: "),
+      e(Text, { color: "#eab308", bold: true }, roiData.monetaryGain)
+    ),
+    roiData?.timeSaved && e(
+      Box,
+      { flexDirection: "row" },
+      e(Text, { color: "#64748b" }, "Time Reclaimed: "),
+      e(Text, { color: "#3b82f6", bold: true }, roiData.timeSaved)
+    ),
+
+    // Summary
     e(
       Box,
       { marginTop: 1 },
       e(
         Text,
         { color: "#64748b", dimColor: true },
-        overallDiff > 50
-          ? "You're building a better future."
-          : overallDiff > 20
-            ? "Progress compounds daily."
-            : "Every day of optimization counts."
+        roiData?.summary || "Progress compounds over time."
       )
     )
   );

@@ -144,6 +144,8 @@ import { getProgressResearch } from "./services/progress-research.js";
 import { getTargetPerson } from "./services/person-matcher.js";
 import { getLifeEngine } from "./services/life-engine.js";
 import { getMobileService } from "./services/mobile.js";
+import { sendWhatsAppMessage, isPhoneVerified } from "./services/phone-auth.js";
+import { getChatActionsManager, RISK_LEVEL, ACTION_CATEGORY, CONFIRMATION_STATUS } from "./services/chat-actions.js";
 import { WorkLogPanel } from "./components/work-log-panel.js";
 import { GoalProgressPanel } from "./components/goal-progress-panel.js";
 import { SmartGoalsPanel } from "./components/goals-panel.js";
@@ -373,6 +375,17 @@ const App = ({ updateConsoleTitle }) => {
         await quotaMonitor.checkAllProviders();
       } catch (e) {
         // Silent fail - health check is optional
+      }
+
+      // Initialize AI-powered role model matching (background task)
+      // This uses AI to find the best target person for the user
+      try {
+        const progressResearch = getProgressResearch();
+        progressResearch.initializeAIMatching().catch(e => {
+          console.error("[App] AI matching init failed:", e.message);
+        });
+      } catch (e) {
+        // Silent fail - AI matching will fall back to algorithm
       }
 
       // Wait minimum 1 second for splash screen (reduced for faster startup)
@@ -931,6 +944,8 @@ const App = ({ updateConsoleTitle }) => {
   const [claudeStatus, setClaudeStatus] = useState("Checking...");
   const [messages, setMessages] = useState([]);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [pendingConfirmation, setPendingConfirmation] = useState(null); // For action confirmations
+  const [awaitingPriority, setAwaitingPriority] = useState(null); // For priority questions
   const [streamingText, setStreamingText] = useState("");
   const [actionStreamingText, setActionStreamingText] = useState("");
   const [actionStreamingTitle, setActionStreamingTitle] = useState("");
@@ -2567,6 +2582,52 @@ Execute this task and provide concrete results.`);
     return () => clearInterval(interval);
   }, []);
 
+  // Listen for chat action events (progress, confirmations needed during execution)
+  useEffect(() => {
+    const chatActions = getChatActionsManager();
+
+    const handleActionProgress = ({ actionId, message, progress }) => {
+      setLastAction(`${message} (${progress}%)`);
+    };
+
+    const handleActionStarted = (pending) => {
+      setLastAction(`Executing: ${pending.action?.analysis?.summary || "action"}...`);
+      engineState.setStatus("working", "Executing action...");
+    };
+
+    const handleActionCompleted = (pending) => {
+      setLastAction("Action completed");
+      engineState.setStatus("idle");
+    };
+
+    const handleActionFailed = ({ pending, error }) => {
+      setMessages((prev) => [
+        ...prev,
+        { role: "assistant", content: `Action failed: ${error.message}`, timestamp: new Date(), isError: true }
+      ]);
+      setLastAction("Action failed");
+      engineState.setStatus("idle");
+    };
+
+    const handleGoalCreated = ({ goal, analysis }) => {
+      console.log(`[Backbone] Goal created from chat: ${goal.title}`);
+    };
+
+    chatActions.on("action-progress", handleActionProgress);
+    chatActions.on("action-started", handleActionStarted);
+    chatActions.on("action-completed", handleActionCompleted);
+    chatActions.on("action-failed", handleActionFailed);
+    chatActions.on("goal-created", handleGoalCreated);
+
+    return () => {
+      chatActions.off("action-progress", handleActionProgress);
+      chatActions.off("action-started", handleActionStarted);
+      chatActions.off("action-completed", handleActionCompleted);
+      chatActions.off("action-failed", handleActionFailed);
+      chatActions.off("goal-created", handleGoalCreated);
+    };
+  }, []);
+
   // Save memory periodically
   useEffect(() => {
     const save = async () => {
@@ -3094,7 +3155,11 @@ Execute this task and provide concrete results.`);
 
     const updateNextTradeTime = () => {
       const nextTrade = getNextTradingTime();
-      setNextTradeTimeDisplay((prev) => prev === nextTrade.formatted ? prev : nextTrade.formatted);
+      // Display format: "9:33 AM ET" or "Mon 9:33 AM ET" with market status
+      const displayText = nextTrade.isMarketOpen
+        ? `Next: ${nextTrade.formatted} (${nextTrade.minutesUntil}m)`
+        : `${nextTrade.formatted} | ${nextTrade.marketStatus}`;
+      setNextTradeTimeDisplay((prev) => prev === displayText ? prev : displayText);
     };
 
     // Initial fetch
@@ -3363,12 +3428,93 @@ Execute this task and provide concrete results.`);
           progressContent += `${status} ${goal.title.slice(0, 40)}... ${progress}%\n`;
         }
 
+        // Get AI-powered comparison data
+        try {
+          const comparison = progressResearch.getProgressComparison();
+          if (comparison.aspiration) {
+            progressContent += "\n**Your Target Role Model:**\n";
+            progressContent += `🎯 **${comparison.aspiration.name}** (${comparison.aspiration.domain})\n`;
+            progressContent += `   ${comparison.aspiration.metric}\n`;
+            if (comparison.aspiration.matchReason) {
+              progressContent += `   _${comparison.aspiration.matchReason}_\n`;
+            }
+          }
+          if (comparison.top10Percent) {
+            progressContent += `\n**Age ${comparison.user.age || "?"} Benchmarks:**\n`;
+            progressContent += `   Average Net Worth: ${comparison.avgPerson.ageBenchmark?.netWorth?.formatted?.average || "N/A"}\n`;
+            progressContent += `   Top 10%: ${comparison.top10Percent.netWorth}\n`;
+          }
+        } catch (e) {
+          // Skip comparison if not available
+        }
+
         setMessages((prev) => [
           ...prev,
           { role: "user", content: "/progress", timestamp: new Date() },
           { role: "assistant", content: progressContent, timestamp: new Date() }
         ]);
         setLastAction("Progress score calculated");
+        return;
+      }
+
+      // WhatsApp message command
+      if (resolved.startsWith("/whatsapp ")) {
+        const message = resolved.slice(10).trim();
+        if (!message) {
+          setMessages((prev) => [
+            ...prev,
+            { role: "user", content: "/whatsapp", timestamp: new Date() },
+            { role: "assistant", content: "Usage: /whatsapp <message>\n\nSend a WhatsApp message to your verified phone number.", timestamp: new Date() }
+          ]);
+          return;
+        }
+
+        const user = getCurrentFirebaseUser();
+        if (!user?.id) {
+          setMessages((prev) => [
+            ...prev,
+            { role: "user", content: resolved, timestamp: new Date() },
+            { role: "assistant", content: "You need to be logged in to send WhatsApp messages. Run /setup to sign in.", timestamp: new Date() }
+          ]);
+          return;
+        }
+
+        if (!isPhoneVerified(user.id)) {
+          setMessages((prev) => [
+            ...prev,
+            { role: "user", content: resolved, timestamp: new Date() },
+            { role: "assistant", content: "Your phone number is not verified. Run /setup and complete WhatsApp verification first.", timestamp: new Date() }
+          ]);
+          return;
+        }
+
+        // Send the WhatsApp message
+        setLastAction("Sending WhatsApp message...");
+        try {
+          const result = await sendWhatsAppMessage(user.id, message);
+          if (result.success) {
+            setMessages((prev) => [
+              ...prev,
+              { role: "user", content: resolved, timestamp: new Date() },
+              { role: "assistant", content: `WhatsApp message sent successfully!\n\nMessage: "${message}"`, timestamp: new Date() }
+            ]);
+            setLastAction("WhatsApp message sent");
+          } else {
+            setMessages((prev) => [
+              ...prev,
+              { role: "user", content: resolved, timestamp: new Date() },
+              { role: "assistant", content: `Failed to send WhatsApp message: ${result.error}`, timestamp: new Date() }
+            ]);
+            setLastAction("WhatsApp send failed");
+          }
+        } catch (error) {
+          setMessages((prev) => [
+            ...prev,
+            { role: "user", content: resolved, timestamp: new Date() },
+            { role: "assistant", content: `Error sending WhatsApp message: ${error.message}`, timestamp: new Date() }
+          ]);
+          setLastAction("WhatsApp error");
+        }
         return;
       }
 
@@ -5846,7 +5992,127 @@ Folder: ${result.action.id}`,
       }, 100);
 
     } else if (trimmed.length > 0) {
-      // Extract goals from the conversation
+      // Get chat actions manager
+      const chatActions = getChatActionsManager();
+
+      // Check if this is a response to a pending confirmation
+      if (pendingConfirmation && chatActions.isConfirmationResponse(trimmed)) {
+        setLastAction("Processing confirmation...");
+        setMessages((prev) => [
+          ...prev,
+          { role: "user", content: trimmed, timestamp: new Date() }
+        ]);
+
+        try {
+          const confirmResult = await chatActions.processConfirmationResponse(trimmed);
+          if (confirmResult.handled) {
+            setPendingConfirmation(null);
+            setMessages((prev) => [
+              ...prev,
+              { role: "assistant", content: confirmResult.response, timestamp: new Date() }
+            ]);
+            setLastAction(confirmResult.confirmed ? "Action executed" : "Action cancelled");
+            return;
+          }
+        } catch (error) {
+          setMessages((prev) => [
+            ...prev,
+            { role: "assistant", content: `Error: ${error.message}`, timestamp: new Date() }
+          ]);
+          setPendingConfirmation(null);
+          return;
+        }
+      }
+
+      // Check if this is a response to a priority question
+      if (awaitingPriority) {
+        const priority = chatActions.parsePriorityResponse(trimmed);
+        if (priority !== null) {
+          setMessages((prev) => [
+            ...prev,
+            { role: "user", content: trimmed, timestamp: new Date() }
+          ]);
+
+          // Update the goal priority
+          try {
+            const goalManager = getGoalManager();
+            if (awaitingPriority.goal) {
+              awaitingPriority.goal.priority = priority;
+              await goalManager.setCurrentGoal(awaitingPriority.goal);
+            }
+            setMessages((prev) => [
+              ...prev,
+              { role: "assistant", content: `Got it! I've set this as ${["", "urgent", "high", "medium", "low"][priority]} priority and added it to your goals.`, timestamp: new Date() }
+            ]);
+          } catch (e) {
+            console.error("[Backbone] Failed to update priority:", e.message);
+          }
+
+          setAwaitingPriority(null);
+          setLastAction("Priority set");
+          return;
+        }
+      }
+
+      // Analyze message for actionable requests
+      setLastAction("Analyzing...");
+      try {
+        const actionResult = await chatActions.processUserMessage(trimmed);
+
+        if (actionResult.isActionable) {
+          // Add user message
+          setMessages((prev) => [
+            ...prev,
+            { role: "user", content: trimmed, timestamp: new Date() }
+          ]);
+
+          // Handle different outcomes
+          if (actionResult.needsPriority) {
+            // AI wants to ask about priority
+            setAwaitingPriority({ goal: actionResult.goal, analysis: actionResult.analysis });
+            setMessages((prev) => [
+              ...prev,
+              { role: "assistant", content: actionResult.response, timestamp: new Date() }
+            ]);
+            setLastAction("Waiting for priority");
+            return;
+          }
+
+          if (actionResult.needsConfirmation) {
+            // Action needs user confirmation
+            setPendingConfirmation(actionResult.pendingAction);
+            setMessages((prev) => [
+              ...prev,
+              { role: "assistant", content: actionResult.response, timestamp: new Date() }
+            ]);
+            setLastAction("Awaiting confirmation");
+            return;
+          }
+
+          if (actionResult.executed) {
+            // Action was executed (low/medium risk)
+            setMessages((prev) => [
+              ...prev,
+              { role: "assistant", content: actionResult.response, timestamp: new Date() }
+            ]);
+            setLastAction("Action complete");
+
+            // If there's also a goal, mention it
+            if (actionResult.goal) {
+              setMessages((prev) => [
+                ...prev,
+                { role: "assistant", content: `Added to goals: "${actionResult.goal.title}"`, timestamp: new Date(), isGoalNotice: true }
+              ]);
+            }
+            return;
+          }
+        }
+      } catch (error) {
+        console.error("[Backbone] Chat action processing failed:", error.message);
+        // Fall through to normal AI handling
+      }
+
+      // Extract goals from the conversation (existing behavior)
       const goalResult = processMessageForGoals(trimmed);
       if (goalResult.found && goalResult.added > 0) {
         console.log(`[Backbone] Extracted ${goalResult.added} goals from conversation`);

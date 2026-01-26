@@ -12,38 +12,67 @@ const ensureDataDir = () => {
 };
 
 /**
+ * Get current time in Eastern timezone
+ */
+const getEasternTime = () => {
+  const now = new Date();
+  const options = {
+    timeZone: "America/New_York",
+    hour: 'numeric',
+    minute: 'numeric',
+    hour12: false
+  };
+  const etString = now.toLocaleString('en-US', options);
+  const [time] = etString.split(', ');
+  const [hours, minutes] = time.split(':').map(Number);
+
+  // Get day of week in ET
+  const dayOptions = { timeZone: "America/New_York", weekday: 'short' };
+  const dayOfWeek = now.toLocaleString('en-US', dayOptions);
+
+  return { hours, minutes, dayOfWeek };
+};
+
+/**
  * Check if current time is within trading hours (9:30am - 4:00pm ET, Mon-Fri)
+ * Uses Eastern timezone for all calculations
  */
 export const isMarketOpen = (date = new Date()) => {
-  const day = date.getDay();
-  // Weekend check (0 = Sunday, 6 = Saturday)
-  if (day === 0 || day === 6) return false;
+  const { hours, minutes, dayOfWeek } = getEasternTime();
 
-  const hours = date.getHours();
-  const minutes = date.getMinutes();
+  // Weekend check
+  if (dayOfWeek === 'Sat' || dayOfWeek === 'Sun') return false;
+
   const timeInMinutes = hours * 60 + minutes;
 
-  // 9:30am = 570 minutes, 4:00pm = 960 minutes
-  const marketOpen = 9 * 60 + 30; // 9:30am
-  const marketClose = 16 * 60; // 4:00pm
+  // 9:30am = 570 minutes, 4:00pm = 960 minutes (ET)
+  const marketOpen = 9 * 60 + 30; // 9:30am ET
+  const marketClose = 16 * 60; // 4:00pm ET
 
   return timeInMinutes >= marketOpen && timeInMinutes < marketClose;
 };
 
 /**
- * Get next 10-minute interval
+ * Get next 10-minute interval in Eastern time
  */
 export const getNextInterval = (date = new Date()) => {
-  const minutes = date.getMinutes();
+  const { hours, minutes } = getEasternTime();
   const nextInterval = Math.ceil((minutes + 1) / 10) * 10;
 
-  const next = new Date(date);
+  // Calculate next hour/minute in ET
+  let nextHour = hours;
+  let nextMinute = nextInterval;
+
   if (nextInterval >= 60) {
-    next.setHours(next.getHours() + 1);
-    next.setMinutes(0);
-  } else {
-    next.setMinutes(nextInterval);
+    nextHour = hours + 1;
+    nextMinute = 0;
   }
+
+  // Return a mock date object with the ET time for display
+  // We only use this for formatting, not actual scheduling
+  const next = new Date(date);
+  next.setHours(nextHour);
+  next.setMinutes(nextMinute);
   next.setSeconds(0);
   next.setMilliseconds(0);
 

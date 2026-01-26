@@ -356,104 +356,126 @@ const calculateProjectedValue = (currentEquity, weeklyGrowthRate) => {
 };
 
 /**
+ * Get current time in Eastern timezone
+ */
+const getEasternTime = () => {
+  const now = new Date();
+  const options = {
+    timeZone: "America/New_York",
+    hour: 'numeric',
+    minute: 'numeric',
+    second: 'numeric',
+    hour12: false
+  };
+  const etString = now.toLocaleString('en-US', options);
+  const [time] = etString.split(', ');
+  const [hours, minutes, seconds] = time.split(':').map(Number);
+
+  // Also get the day of week
+  const dayOptions = { timeZone: "America/New_York", weekday: 'short' };
+  const dayOfWeek = now.toLocaleString('en-US', dayOptions);
+
+  return { hours, minutes, seconds, dayOfWeek, date: now };
+};
+
+/**
  * Get next trading times (every 10 minutes during market hours)
+ * Uses Eastern timezone (ET) for all calculations
+ * Market hours: 9:30 AM - 4:00 PM ET
  */
 export const getNextTradingTime = () => {
-  const now = new Date();
-  const marketOpen = new Date(now);
-  marketOpen.setHours(9, 30, 0, 0);
+  const { hours, minutes, dayOfWeek, date } = getEasternTime();
 
-  const marketClose = new Date(now);
-  marketClose.setHours(16, 0, 0, 0);
+  // Market hours in minutes since midnight (ET)
+  const MARKET_OPEN = 9 * 60 + 30;   // 9:30 AM ET
+  const MARKET_CLOSE = 16 * 60;       // 4:00 PM ET
+  const LAST_TRADE = 15 * 60 + 57;    // 3:57 PM ET (last evaluation)
 
-  const lastTrade = new Date(now);
-  lastTrade.setHours(15, 57, 0, 0);
+  const currentMinutes = hours * 60 + minutes;
+  const isWeekday = dayOfWeek !== 'Sat' && dayOfWeek !== 'Sun';
 
-  // Check if market is open today (weekday)
-  const dayOfWeek = now.getDay();
-  const isWeekday = dayOfWeek >= 1 && dayOfWeek <= 5;
-
+  // Check if market is closed (weekend)
   if (!isWeekday) {
-    // Find next Monday
-    const daysUntilMonday = dayOfWeek === 0 ? 1 : (8 - dayOfWeek);
-    const nextMonday = new Date(now);
-    nextMonday.setDate(now.getDate() + daysUntilMonday);
-    nextMonday.setHours(9, 33, 0, 0); // First trade at 9:33
+    const daysUntilMonday = dayOfWeek === 'Sat' ? 2 : 1;
     return {
-      time: nextMonday,
-      formatted: formatTradeTime(nextMonday),
-      isMarketOpen: false
+      formatted: `Mon 9:33 AM ET`,
+      isMarketOpen: false,
+      marketStatus: `Weekend - market closed`,
+      daysUntil: daysUntilMonday
     };
   }
 
   // Before market open
-  if (now < marketOpen) {
-    const firstTrade = new Date(marketOpen);
-    firstTrade.setMinutes(33); // 9:33 AM
+  if (currentMinutes < MARKET_OPEN) {
+    const minutesUntilOpen = MARKET_OPEN - currentMinutes;
+    const hoursUntil = Math.floor(minutesUntilOpen / 60);
+    const minsUntil = minutesUntilOpen % 60;
     return {
-      time: firstTrade,
-      formatted: formatTradeTime(firstTrade),
-      isMarketOpen: false
+      formatted: `9:33 AM ET`,
+      isMarketOpen: false,
+      marketStatus: `Pre-market - opens in ${hoursUntil}h ${minsUntil}m`,
+      minutesUntil: minutesUntilOpen + 3 // First trade at 9:33
     };
   }
 
-  // After last trade time
-  if (now > lastTrade) {
-    // Next trading day
-    let nextDay = new Date(now);
-    nextDay.setDate(now.getDate() + 1);
-
-    // Skip weekend
-    while (nextDay.getDay() === 0 || nextDay.getDay() === 6) {
-      nextDay.setDate(nextDay.getDate() + 1);
-    }
-
-    nextDay.setHours(9, 33, 0, 0);
+  // After last trade time (3:57 PM ET)
+  if (currentMinutes > LAST_TRADE) {
+    // Check if Friday
+    const isFriday = dayOfWeek === 'Fri';
+    const nextDayLabel = isFriday ? 'Mon' : 'Tomorrow';
     return {
-      time: nextDay,
-      formatted: formatTradeTime(nextDay),
-      isMarketOpen: false
+      formatted: `${nextDayLabel} 9:33 AM ET`,
+      isMarketOpen: false,
+      marketStatus: `After hours - market closed`,
+      daysUntil: isFriday ? 3 : 1
     };
   }
 
   // During market hours - find next 10-minute interval
-  // Trading times: 9:33, 9:43, 9:53, 10:03, ... until 15:53, last at 15:57
-  const minutes = now.getMinutes();
-  const currentHour = now.getHours();
+  // Trading evaluations happen at :03, :13, :23, :33, :43, :53 past each hour
+  const evalMinutes = [3, 13, 23, 33, 43, 53];
+  const currentMinute = minutes;
 
-  // Find next trade time
-  let nextTradeMinute;
-  if (minutes < 3) {
-    nextTradeMinute = 3;
-  } else if (minutes < 13) {
-    nextTradeMinute = 13;
-  } else if (minutes < 23) {
-    nextTradeMinute = 23;
-  } else if (minutes < 33) {
-    nextTradeMinute = 33;
-  } else if (minutes < 43) {
-    nextTradeMinute = 43;
-  } else if (minutes < 53) {
-    nextTradeMinute = 53;
-  } else {
-    nextTradeMinute = 3;
+  // Find next evaluation minute
+  let nextMinute = evalMinutes.find(m => m > currentMinute);
+  let nextHour = hours;
+
+  if (!nextMinute) {
+    // Need to go to next hour
+    nextMinute = 3;
+    nextHour = hours + 1;
   }
 
-  const nextTrade = new Date(now);
-  if (nextTradeMinute <= minutes) {
-    nextTrade.setHours(currentHour + 1);
-  }
-  nextTrade.setMinutes(nextTradeMinute, 0, 0);
+  const nextEvalMinutes = nextHour * 60 + nextMinute;
 
   // Check if past last trade
-  if (nextTrade > lastTrade) {
-    nextTrade.setTime(lastTrade.getTime());
+  if (nextEvalMinutes > LAST_TRADE) {
+    const isFriday = dayOfWeek === 'Fri';
+    const nextDayLabel = isFriday ? 'Mon' : 'Tomorrow';
+    return {
+      formatted: `${nextDayLabel} 9:33 AM ET`,
+      isMarketOpen: false,
+      marketStatus: `Last eval done - closes at 4:00 PM`,
+      daysUntil: isFriday ? 3 : 1
+    };
   }
 
+  // Calculate minutes until next eval
+  const minutesUntilEval = nextEvalMinutes - currentMinutes;
+  const minutesUntilClose = MARKET_CLOSE - currentMinutes;
+  const hoursUntilClose = Math.floor(minutesUntilClose / 60);
+  const minsUntilClose = minutesUntilClose % 60;
+
+  // Format next eval time
+  const nextHour12 = nextHour > 12 ? nextHour - 12 : nextHour;
+  const ampm = nextHour >= 12 ? 'PM' : 'AM';
+  const formattedTime = `${nextHour12}:${String(nextMinute).padStart(2, '0')} ${ampm} ET`;
+
   return {
-    time: nextTrade,
-    formatted: formatTradeTime(nextTrade),
-    isMarketOpen: true
+    formatted: formattedTime,
+    isMarketOpen: true,
+    marketStatus: `Market open - closes in ${hoursUntilClose}h ${minsUntilClose}m`,
+    minutesUntil: minutesUntilEval
   };
 };
 

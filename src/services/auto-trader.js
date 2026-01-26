@@ -5,12 +5,22 @@ import { getAlpacaConfig } from "./alpaca.js";
 import { TRADING_CONFIG, TRADING_RULES, isGoodMomentum, isProtectedPosition, getActionFromScore } from "./trading-algorithms.js";
 import { SCORE_THRESHOLDS, getSignalFromScore } from "./score-engine.js";
 
+// Note: Trailing stop manager is imported dynamically to avoid circular dependency
+let trailingStopManager = null;
+const getTrailingStopManager = async () => {
+  if (!trailingStopManager) {
+    trailingStopManager = await import("./trailing-stop-manager.js");
+  }
+  return trailingStopManager;
+};
+
 /**
  * Auto-Trading Service for BACKBONE
  * Based on BackBoneApp production trading system
  *
  * Features:
  * - Market hours enforcement (9:30 AM - 4:00 PM ET)
+ * - Trailing stop loss management (50% of gain, 2% discrete thresholds)
  * - Dynamic buy threshold based on SPY direction (7.1 positive, 8.0 negative)
  * - Momentum protection (don't interrupt +8% gains)
  * - Technical override (sell protected positions if score ≤2.7)
@@ -820,8 +830,49 @@ export const monitorAndTrade = async (tickers, positions = [], marketContext = {
   // Track executed buys for position limit check
   let buyCount = results.executed.filter(t => t.side === "buy").length;
 
+  // STEP 0: Check trailing stop triggers first (highest priority)
+  try {
+    const tsm = await getTrailingStopManager();
+    const triggeredStops = tsm.checkStopTriggers(positions);
+
+    for (const trigger of triggeredStops) {
+      results.sellSignals.push({
+        action: "TRAILING_STOP",
+        symbol: trigger.symbol,
+        price: trigger.currentPrice,
+        stopPrice: trigger.stopPrice,
+        signals: [`TRAILING STOP: ${trigger.reason}`],
+        isTrailingStop: true
+      });
+
+      const sellResult = await executeSell(
+        trigger.symbol,
+        trigger.currentPrice,
+        trigger.qty,
+        `TRAILING STOP: Hit $${trigger.stopPrice.toFixed(2)}, protected ${trigger.protectedGain}% gain`
+      );
+
+      if (sellResult.success) {
+        results.executed.push(sellResult.trade);
+      } else {
+        results.skipped.push({ symbol: trigger.symbol, reason: sellResult.error });
+      }
+    }
+  } catch (error) {
+    // Continue even if trailing stop check fails
+    console.error("Trailing stop check error:", error.message);
+  }
+
   // STEP 1: Evaluate ALL positions for sell signals first
+  // Skip positions already sold via trailing stop
+  const soldViaTrailingStop = new Set(
+    results.executed.filter(t => t.side === "sell").map(t => t.symbol)
+  );
+
   for (const position of positions) {
+    // Skip if already sold via trailing stop
+    if (soldViaTrailingStop.has(position.symbol)) continue;
+
     const ticker = sortedTickers.find(t => t.symbol === position.symbol);
     if (!ticker) continue;
 

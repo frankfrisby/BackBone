@@ -126,6 +126,7 @@ import { loadUserSettings, saveUserSettings, updateSettings as updateUserSetting
 import { hasValidCredentials as hasCodexCredentials } from "./services/codex-oauth.js";
 import { loadFineTuningConfig, saveFineTuningConfig, runFineTuningPipeline, queryFineTunedModel } from "./services/fine-tuning.js";
 import { monitorAndTrade, loadConfig as loadTradingConfig, setTradingEnabled } from "./services/auto-trader.js";
+import { updateAllTrailingStops, checkStopTriggers, shouldUpdateStops } from "./services/trailing-stop-manager.js";
 import { isMarketOpen } from "./services/trading-status.js";
 import { analyzeAllPositions, getPositionContext, explainWhyHeld } from "./services/position-analyzer.js";
 
@@ -3210,6 +3211,21 @@ Execute this task and provide concrete results.`);
         // Skip if trading is disabled
         if (!config.enabled) {
           return;
+        }
+
+        // Update trailing stops (at 9 AM and top of each hour)
+        if (shouldUpdateStops()) {
+          const stopUpdate = updateAllTrailingStops(portfolio.positions);
+          if (stopUpdate.results.updated.length > 0) {
+            setLastAction(`Trailing stops updated: ${stopUpdate.results.updated.map(s => `${s.symbol} @ $${s.newStop?.toFixed(2)}`).join(", ")}`);
+          }
+        }
+
+        // Check if any trailing stops have been triggered
+        const triggeredStops = checkStopTriggers(portfolio.positions);
+        if (triggeredStops.length > 0) {
+          // Stops triggered - these will be handled by monitorAndTrade
+          setLastAction(`Stop triggered: ${triggeredStops.map(s => s.symbol).join(", ")}`);
         }
 
         // Run the auto-trading monitor

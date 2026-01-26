@@ -912,8 +912,50 @@ export const monitorAndTrade = async (tickers, positions = [], marketContext = {
     console.error("Momentum drift check error:", error.message);
   }
 
+  // STEP 0.6: Check for stagnant tickers (<0.25% range over 60min, near-zero change)
+  // These are positions that aren't moving and tying up capital
+  try {
+    const md = await getMomentumDrift();
+
+    for (const position of positions) {
+      // Skip if already sold
+      const alreadySold = results.executed.some(t => t.side === "sell" && t.symbol === position.symbol);
+      if (alreadySold) continue;
+
+      const ticker = sortedTickers.find(t => t.symbol === position.symbol);
+      if (!ticker) continue;
+
+      // Check if stagnant AND score is not strong (< 7.0)
+      // Don't sell stagnant tickers with high scores - they might be consolidating before a move
+      if (md.isStagnantTicker(ticker) && ticker.score < 7.0) {
+        results.sellSignals.push({
+          action: "STAGNANT",
+          symbol: position.symbol,
+          score: ticker.score,
+          signals: ["STAGNANT: <0.25% range over 60min, capital locked"],
+          isStagnant: true
+        });
+
+        const sellResult = await executeSell(
+          position.symbol,
+          ticker.price || position.current_price || position.currentPrice,
+          parseFloat(position.qty || position.shares),
+          `STAGNANT: <0.25% movement, score ${ticker.score?.toFixed(1)} - freeing capital`
+        );
+
+        if (sellResult.success) {
+          results.executed.push(sellResult.trade);
+        } else {
+          results.skipped.push({ symbol: position.symbol, reason: sellResult.error });
+        }
+      }
+    }
+  } catch (error) {
+    console.error("Stagnant ticker check error:", error.message);
+  }
+
   // STEP 1: Evaluate ALL positions for sell signals first
-  // Skip positions already sold via trailing stop or momentum drift
+  // Skip positions already sold via trailing stop, momentum drift, or stagnant
   const soldViaTrailingStop = new Set(
     results.executed.filter(t => t.side === "sell").map(t => t.symbol)
   );

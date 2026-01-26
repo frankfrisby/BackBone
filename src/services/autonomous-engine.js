@@ -1,13 +1,14 @@
 import fs from "fs";
 import path from "path";
 import { EventEmitter } from "events";
-import { getGoalManager } from "./goal-manager.js";
+import { getGoalManager, GOAL_STATE, TASK_STATE, HOLD_REASON } from "./goal-manager.js";
 import { getToolExecutor, TOOL_TYPES } from "./tool-executor.js";
 import { STATE_FOR_ACTIVITY, getStateForActivity } from "./engine-state.js";
 import { getClaudeOrchestrator, EVALUATION_DECISION, ORCHESTRATION_STATE } from "./claude-orchestrator.js";
 import { getClaudeCodeStatus } from "./claude-code-cli.js";
 import { getActionScheduler, ACTION_PRIORITY, ACTION_STATUS } from "./action-scheduler.js";
 import { getProjectManager } from "./project-manager.js";
+import { getWorkerCoordination, WORKER_MODE } from "./worker-coordination.js";
 
 /**
  * Autonomous Engine for BACKBONE
@@ -596,6 +597,9 @@ export class AutonomousEngine extends EventEmitter {
   /**
    * Start the true autonomous loop
    * AUTO-START: Automatically selects highest priority goal and begins work
+   *
+   * WORKER COORDINATION: Only executes if this instance is the worker.
+   * Viewer instances can see state but won't execute actions.
    */
   async startAutonomousLoop() {
     if (this.running) {
@@ -603,6 +607,18 @@ export class AutonomousEngine extends EventEmitter {
       return;
     }
 
+    // Check worker coordination
+    const coordination = getWorkerCoordination();
+    if (coordination.isViewer()) {
+      console.log("[AutonomousEngine] Running in VIEWER mode - observing only");
+      this.viewerMode = true;
+      this.running = true;
+      // In viewer mode, we still track state but don't execute
+      this.emit("started", { mode: WORKER_MODE.VIEWER });
+      return;
+    }
+
+    this.viewerMode = false;
     this.running = true;
 
     // Initialize services
@@ -631,6 +647,21 @@ export class AutonomousEngine extends EventEmitter {
 
     while (this.running) {
       try {
+        // VIEWER MODE: Check if we should execute or just observe
+        if (this.viewerMode) {
+          // In viewer mode, just wait and sync state periodically
+          await new Promise(resolve => setTimeout(resolve, 5000));
+
+          // Check if we've become the worker
+          const coordination = getWorkerCoordination();
+          if (coordination.shouldExecute()) {
+            console.log("[AutonomousEngine] Promoted to WORKER mode");
+            this.viewerMode = false;
+            this.emit("mode-changed", { mode: WORKER_MODE.WORKER });
+          }
+          continue;
+        }
+
         // 0. Check for scheduled actions first
         if (this.actionScheduler) {
           const scheduledAction = this.actionScheduler.getNextAction();
@@ -677,6 +708,49 @@ export class AutonomousEngine extends EventEmitter {
           if (this.narrator) {
             this.narrator.setGoal(this.currentGoal.title);
             this.narrator.observe(`Starting work on: ${this.currentGoal.title}`);
+          }
+        }
+
+        // 1.5. CHECK IF CURRENT GOAL IS ON HOLD OR BLOCKED
+        if (this.shouldSwitchGoal()) {
+          this.setEngineState("reflecting");
+
+          if (this.narrator) {
+            this.narrator.observe("Current goal blocked - checking alternatives...");
+          }
+
+          const newGoal = await this.switchToNextGoal("blocked");
+
+          if (!newGoal) {
+            // All goals blocked - wait and re-check
+            this.setEngineState("idle");
+            await this.wait(10000); // Wait longer before re-checking
+            continue;
+          }
+
+          // Continue with new goal
+          continue;
+        }
+
+        // 1.6. EVALUATE CRITERIA - Check if goal might be complete or should be on hold
+        if (this.goalManager && this.currentGoal) {
+          const contextData = await this.getContext();
+          const evaluation = await this.goalManager.evaluateCriteria(this.currentGoal, contextData);
+
+          if (evaluation.complete) {
+            // Goal criteria met - complete it
+            if (this.narrator) {
+              this.narrator.observe("Goal criteria met - completing goal");
+            }
+            await this.completeCurrentGoal();
+            continue;
+          }
+
+          // Check if partially complete and should notify
+          if (evaluation.completedCount > 0 && evaluation.completedCount < evaluation.totalCount) {
+            if (this.narrator) {
+              this.narrator.observe(`Progress: ${evaluation.completedCount}/${evaluation.totalCount} criteria met`);
+            }
           }
         }
 
@@ -739,20 +813,38 @@ export class AutonomousEngine extends EventEmitter {
 
         } else {
           // ═══════════════════════════════════════════════════════════════
-          // FALLBACK MODE: Use AI Brain + Tool Executor
+          // FALLBACK MODE: Use AI Brain + Tool Executor with Task Management
           // ═══════════════════════════════════════════════════════════════
           this.setEngineState("thinking");
 
           if (this.narrator) {
-            this.narrator.observe(`Claude Code not available, using fallback mode`);
+            this.narrator.observe(`Using task-based execution mode`);
           }
 
-          // Determine next action using AI Brain
-          const nextAction = await this.determineNextAction();
+          // Try to get next task from goal manager first
+          let currentTask = this.getNextTask();
+          let nextAction = null;
+
+          if (currentTask) {
+            // Convert task to action
+            nextAction = await this.taskToAction(currentTask);
+
+            if (this.narrator) {
+              this.narrator.observe(`Working on task: ${currentTask.title}`);
+            }
+          } else {
+            // No structured tasks - fall back to AI Brain action generation
+            nextAction = await this.determineNextAction();
+          }
 
           if (!nextAction) {
-            // No action determined - wait and try again
-            // Don't complete goal just because no action was returned
+            // No action determined - check if we should switch goals
+            if (this.shouldSwitchGoal()) {
+              const newGoal = await this.switchToNextGoal("blocked");
+              if (newGoal) continue;
+            }
+
+            // Wait and try again
             this.setEngineState("reflecting");
             await this.wait(2000);
 
@@ -767,23 +859,72 @@ export class AutonomousEngine extends EventEmitter {
           const toolState = this.getStateForTool(nextAction.action);
           this.setEngineState(toolState);
 
-          const result = await this.executeAction(nextAction);
+          try {
+            const result = await this.executeAction(nextAction);
 
-          // Track history
-          this.actionHistory.push({ action: nextAction, result, timestamp: Date.now() });
-          this.actionCount++;
+            // Track history
+            this.actionHistory.push({ action: nextAction, result, timestamp: Date.now() });
+            this.actionCount++;
 
-          if (this.actionHistory.length > 30) {
-            this.actionHistory = this.actionHistory.slice(-30);
+            if (this.actionHistory.length > 30) {
+              this.actionHistory = this.actionHistory.slice(-30);
+            }
+
+            // Mark task complete if we had one
+            if (currentTask && result.success) {
+              this.goalManager?.completeTask(currentTask.id, result);
+            }
+
+          } catch (error) {
+            // Action failed - check if we should put task on hold
+            if (currentTask) {
+              const shouldHold = this.shouldPutTaskOnHold(error, nextAction);
+              if (shouldHold) {
+                this.putTaskOnHold(
+                  currentTask.id,
+                  shouldHold.reason,
+                  shouldHold.reviewAt,
+                  error.message
+                );
+
+                if (this.narrator) {
+                  this.narrator.observe(`Task paused: ${shouldHold.reason.replace(/_/g, " ")}`);
+                }
+              }
+            }
+
+            // Check if all tasks are now blocked
+            if (this.shouldSwitchGoal()) {
+              const newGoal = await this.switchToNextGoal("blocked");
+              if (newGoal) continue;
+            }
           }
 
           // Brief reflection between actions
           this.setEngineState("reflecting");
           await this.wait(1500); // 1.5s between actions for visual feedback
 
-          // Only complete based on action count (not isGoalComplete which may be too aggressive)
-          if (this.actionCount >= this.maxActionsPerGoal) {
+          // Check criteria for completion
+          if (await this.isGoalComplete()) {
             await this.completeCurrentGoal();
+          } else if (this.actionCount >= this.maxActionsPerGoal) {
+            // Max actions reached - evaluate and either complete or put on hold
+            const contextData = await this.getContext();
+            const evaluation = await this.goalManager?.evaluateCriteria(this.currentGoal, contextData);
+
+            if (evaluation?.complete) {
+              await this.completeCurrentGoal();
+            } else {
+              // Not complete but max actions - put on hold
+              this.goalManager?.putGoalOnHold(
+                this.currentGoal.id,
+                HOLD_REASON.TARGET_NOT_MET,
+                new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+                `Criteria not met after ${this.actionCount} actions`
+              );
+
+              await this.switchToNextGoal("blocked");
+            }
           }
           // Continue loop for next action
         }
@@ -1047,17 +1188,138 @@ export class AutonomousEngine extends EventEmitter {
 
   /**
    * Check if current goal is complete
+   * Uses criteria evaluation with context data
    */
-  isGoalComplete() {
+  async isGoalComplete() {
     if (!this.currentGoal) return true;
 
-    // Check with goal manager
+    // Check with goal manager using context data
     if (this.goalManager) {
-      return this.goalManager.isGoalComplete();
+      // Get current context for criteria evaluation
+      const contextData = await this.getContext();
+
+      // Check criteria (async - evaluates against real data)
+      const isComplete = await this.goalManager.isGoalComplete(contextData);
+      return isComplete;
     }
 
     // Fallback: check action count
     return this.actionCount >= this.maxActionsPerGoal;
+  }
+
+  /**
+   * Check if current goal is on hold
+   */
+  isGoalOnHold() {
+    if (!this.currentGoal || !this.goalManager) return false;
+
+    const status = this.goalManager.getGoalStatus(this.currentGoal.id);
+    return status?.state === GOAL_STATE.ON_HOLD;
+  }
+
+  /**
+   * Get next available task for current goal
+   * Skips blocked and on-hold tasks
+   */
+  getNextTask() {
+    if (!this.goalManager || !this.currentGoal) return null;
+    return this.goalManager.getNextTask(this.currentGoal.id);
+  }
+
+  /**
+   * Put current task on hold and move to next
+   */
+  putTaskOnHold(taskId, reason, reviewAt = null, notes = "") {
+    if (!this.goalManager) return false;
+
+    const success = this.goalManager.putTaskOnHold(taskId, reason, reviewAt, notes);
+
+    if (success && this.narrator) {
+      this.narrator.observe(`Task on hold: ${reason.replace(/_/g, " ")}`);
+    }
+
+    return success;
+  }
+
+  /**
+   * Check if all tasks are blocked/on-hold and we should switch goals
+   */
+  shouldSwitchGoal() {
+    if (!this.goalManager || !this.currentGoal) return false;
+
+    const status = this.goalManager.getGoalStatus(this.currentGoal.id);
+
+    // If goal is on hold, switch
+    if (status?.state === GOAL_STATE.ON_HOLD) return true;
+
+    // If all tasks are blocked/on-hold, switch
+    if (status?.taskStats) {
+      const { total, completed, onHold, blocked, pending, inProgress } = status.taskStats;
+      const remaining = total - completed;
+      const available = pending + inProgress;
+
+      // No available tasks to work on
+      if (remaining > 0 && available === 0) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  /**
+   * Switch to the next available goal when current is blocked
+   */
+  async switchToNextGoal(reason = "blocked") {
+    if (!this.goalManager) return null;
+
+    const currentId = this.currentGoal?.id;
+
+    // Put current goal on hold if switching due to blockage
+    if (currentId && reason === "blocked") {
+      this.goalManager.putGoalOnHold(
+        currentId,
+        HOLD_REASON.WAITING_DEPENDENCY,
+        new Date(Date.now() + 60 * 60 * 1000).toISOString(), // Review in 1 hour
+        "All tasks blocked - switching to next goal"
+      );
+    }
+
+    // Find next goal that's not on hold
+    const activeGoals = this.goalManager.getActiveGoals();
+    const onHoldGoalIds = new Set();
+
+    // Get all on-hold goal IDs
+    const displayData = this.goalManager.getDisplayData();
+    for (const holdInfo of displayData.onHoldGoals || []) {
+      onHoldGoalIds.add(holdInfo.goalId);
+    }
+
+    // Find first goal that's not the current one and not on hold
+    const nextGoal = activeGoals.find(g =>
+      g.id !== currentId && !onHoldGoalIds.has(g.id)
+    );
+
+    if (nextGoal) {
+      await this.goalManager.setCurrentGoal(nextGoal);
+      this.currentGoal = nextGoal;
+      await this.switchToProjectForGoal(nextGoal);
+
+      if (this.narrator) {
+        this.narrator.observe(`Switched to goal: ${nextGoal.title}`);
+        this.narrator.setGoal(nextGoal.title);
+      }
+
+      this.emit("goal-switched", { previousGoal: currentId, newGoal: nextGoal });
+      return nextGoal;
+    }
+
+    // No other goals available - stay with current or go idle
+    if (this.narrator) {
+      this.narrator.observe("No other goals available - waiting");
+    }
+
+    return null;
   }
 
   /**
@@ -1110,6 +1372,86 @@ export class AutonomousEngine extends EventEmitter {
   }
 
   /**
+   * Convert a task to an executable action
+   */
+  async taskToAction(task) {
+    if (!task) return null;
+
+    // Map task category to tool type
+    const categoryToTool = {
+      research: "WebSearch",
+      analyze: "Read",
+      execute: "Bash",
+      validate: "Read"
+    };
+
+    // Determine tool based on task category and data sources
+    let tool = categoryToTool[task.category] || "WebSearch";
+    let target = task.title;
+
+    // If task has specific data sources, use appropriate tool
+    if (task.dataSources?.length > 0) {
+      const dataSource = task.dataSources[0];
+      if (dataSource === "web_search") {
+        tool = "WebSearch";
+        target = task.description || task.title;
+      } else if (dataSource === "portfolio" || dataSource === "health" || dataSource === "calendar") {
+        tool = "Read";
+        target = `data/${dataSource.replace("_", "_")}.json`;
+      }
+    }
+
+    return {
+      action: tool,
+      target,
+      reasoning: task.description || `Working on: ${task.title}`,
+      taskId: task.id
+    };
+  }
+
+  /**
+   * Determine if a task should be put on hold based on error
+   */
+  shouldPutTaskOnHold(error, action) {
+    const errorMsg = error.message?.toLowerCase() || "";
+
+    // External service unavailable
+    if (errorMsg.includes("timeout") || errorMsg.includes("connection") || errorMsg.includes("unavailable")) {
+      return {
+        reason: HOLD_REASON.WAITING_EXTERNAL,
+        reviewAt: new Date(Date.now() + 30 * 60 * 1000).toISOString() // 30 minutes
+      };
+    }
+
+    // Data not available
+    if (errorMsg.includes("not found") || errorMsg.includes("no data") || errorMsg.includes("empty")) {
+      return {
+        reason: HOLD_REASON.WAITING_DATA,
+        reviewAt: new Date(Date.now() + 60 * 60 * 1000).toISOString() // 1 hour
+      };
+    }
+
+    // Rate limiting
+    if (errorMsg.includes("rate limit") || errorMsg.includes("too many")) {
+      return {
+        reason: HOLD_REASON.WAITING_TIME,
+        reviewAt: new Date(Date.now() + 15 * 60 * 1000).toISOString() // 15 minutes
+      };
+    }
+
+    // Permission or authentication issues
+    if (errorMsg.includes("permission") || errorMsg.includes("auth") || errorMsg.includes("unauthorized")) {
+      return {
+        reason: HOLD_REASON.WAITING_APPROVAL,
+        reviewAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() // 24 hours
+      };
+    }
+
+    // Don't put on hold for other errors (might be transient)
+    return null;
+  }
+
+  /**
    * Wait helper
    */
   wait(ms) {
@@ -1128,6 +1470,15 @@ export class AutonomousEngine extends EventEmitter {
    * Get display data for UI
    */
   getDisplayData() {
+    // Get worker coordination status
+    let workerStatus = { mode: WORKER_MODE.WORKER, isViewer: false };
+    try {
+      const coordination = getWorkerCoordination();
+      workerStatus = coordination.getStatus();
+    } catch (e) {
+      // Coordination not initialized
+    }
+
     return {
       running: this.state.running,
       currentAction: this.state.currentAction,
@@ -1139,7 +1490,12 @@ export class AutonomousEngine extends EventEmitter {
       lastCycleAt: this.state.lastCycleAt,
       currentProject: this.currentProject,
       currentGoal: this.currentGoal,
-      schedulerStatus: this.getSchedulerStatus()
+      schedulerStatus: this.getSchedulerStatus(),
+      // Worker coordination
+      viewerMode: this.viewerMode || false,
+      workerMode: workerStatus.mode,
+      isViewer: workerStatus.isViewer,
+      isWorker: !workerStatus.isViewer
     };
   }
 

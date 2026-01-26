@@ -444,6 +444,8 @@ Make sure BACKBONE is running on your computer to receive responses.</Message>
  *
  * When the local BACKBONE app writes an AI response to Firestore,
  * this trigger sends it to the user via Twilio WhatsApp API.
+ *
+ * Twilio credentials are read from Firestore (settings/twilio or user's own credentials)
  */
 exports.sendTwilioResponse = functions.firestore
   .document("users/{userId}/messages/{messageId}")
@@ -461,7 +463,7 @@ exports.sendTwilioResponse = functions.firestore
       return null;
     }
 
-    // Get user's phone number
+    // Get user data including phone number
     const userDoc = await db.collection("users").doc(userId).get();
     const userData = userDoc.data();
 
@@ -470,13 +472,28 @@ exports.sendTwilioResponse = functions.firestore
       return null;
     }
 
-    // Get Twilio credentials from Firebase config
-    const twilioAccountSid = functions.config().twilio?.account_sid;
-    const twilioAuthToken = functions.config().twilio?.auth_token;
-    const twilioWhatsAppNumber = functions.config().twilio?.whatsapp_number;
+    // Get Twilio credentials from Firestore
+    // Priority: 1) User's own credentials, 2) Global settings
+    let twilioAccountSid, twilioAuthToken, twilioWhatsAppNumber;
 
-    if (!twilioAccountSid || !twilioAuthToken || !twilioWhatsAppNumber) {
-      console.error("[Twilio] Missing Twilio credentials in Firebase config");
+    // Check user's own Twilio credentials first
+    if (userData.twilioAccountSid && userData.twilioAuthToken) {
+      twilioAccountSid = userData.twilioAccountSid;
+      twilioAuthToken = userData.twilioAuthToken;
+      twilioWhatsAppNumber = userData.twilioWhatsAppNumber || userData.whatsappPhone;
+    } else {
+      // Fall back to global settings
+      const settingsDoc = await db.collection("settings").doc("twilio").get();
+      if (settingsDoc.exists) {
+        const settings = settingsDoc.data();
+        twilioAccountSid = settings.accountSid;
+        twilioAuthToken = settings.authToken;
+        twilioWhatsAppNumber = settings.whatsappNumber;
+      }
+    }
+
+    if (!twilioAccountSid || !twilioAuthToken) {
+      console.error("[Twilio] No Twilio credentials found in Firestore");
       return null;
     }
 

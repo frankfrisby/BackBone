@@ -460,6 +460,175 @@ export const runClaudeCodePrompt = async (prompt, options = {}) => {
 };
 
 /**
+ * Run Claude Code with streaming output
+ * Returns an EventEmitter that emits 'data', 'tool', 'complete', and 'error' events
+ *
+ * Events:
+ * - 'data': Raw text output
+ * - 'tool': Tool call detected { tool, input, output }
+ * - 'action': Action requiring approval { id, type, description }
+ * - 'complete': Process completed { success, output }
+ * - 'error': Error occurred { error }
+ *
+ * Usage:
+ * const stream = runClaudeCodeStreaming("Analyze this file", { cwd: "/path" });
+ * stream.on('data', text => console.log(text));
+ * stream.on('tool', tool => console.log('Tool called:', tool));
+ * stream.on('complete', result => console.log('Done:', result));
+ *
+ * // To approve an action:
+ * stream.approve(actionId);
+ * // To reject:
+ * stream.reject(actionId);
+ * // To provide input:
+ * stream.respond(text);
+ */
+export const runClaudeCodeStreaming = async (prompt, options = {}) => {
+  const status = await getClaudeCodeStatus();
+  const emitter = new EventEmitter();
+
+  if (!status.ready) {
+    process.nextTick(() => {
+      emitter.emit("error", {
+        error: status.installed
+          ? "Claude Code not logged in"
+          : "Claude Code not installed"
+      });
+    });
+    return emitter;
+  }
+
+  const args = ["-p", prompt];
+
+  // Use JSON output format for easier parsing if requested
+  if (options.json) {
+    args.unshift("--output-format", "json");
+  }
+
+  const proc = spawn("claude", args, {
+    shell: true,
+    cwd: options.cwd || process.cwd(),
+    stdio: ["pipe", "pipe", "pipe"]
+  });
+
+  let fullOutput = "";
+  let currentTool = null;
+  const pendingActions = new Map();
+
+  // Track tool calls and actions from output
+  const parseOutput = (text) => {
+    fullOutput += text;
+
+    // Detect tool calls (format varies, this handles common patterns)
+    const toolPatterns = [
+      /\[TOOL\]\s*(\w+)\((.*?)\)/g,
+      /Running:\s*(\w+)\s*\((.*?)\)/g,
+      /◆\s*(\w+)\((.*?)\)/g,
+      /●\s*(\w+)\((.*?)\)/g
+    ];
+
+    for (const pattern of toolPatterns) {
+      let match;
+      while ((match = pattern.exec(text)) !== null) {
+        const tool = { tool: match[1], input: match[2], timestamp: Date.now() };
+        currentTool = tool;
+        emitter.emit("tool", tool);
+      }
+    }
+
+    // Detect actions requiring approval
+    const actionPatterns = [
+      /\[ACTION\s*(\w+)\]\s*(.*?)(?:\n|$)/g,
+      /Approve\?\s*\(y\/n\):\s*(.*?)(?:\n|$)/gi,
+      /Allow\s+(\w+).*?\?\s*(.*?)(?:\n|$)/gi
+    ];
+
+    for (const pattern of actionPatterns) {
+      let match;
+      while ((match = pattern.exec(text)) !== null) {
+        const actionId = `action_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+        const action = { id: actionId, type: match[1], description: match[2] || match[1] };
+        pendingActions.set(actionId, action);
+        emitter.emit("action", action);
+      }
+    }
+
+    emitter.emit("data", text);
+  };
+
+  proc.stdout.on("data", (data) => {
+    parseOutput(data.toString());
+  });
+
+  proc.stderr.on("data", (data) => {
+    emitter.emit("data", data.toString());
+  });
+
+  proc.on("close", (code) => {
+    emitter.emit("complete", {
+      success: code === 0,
+      output: fullOutput,
+      exitCode: code
+    });
+  });
+
+  proc.on("error", (err) => {
+    emitter.emit("error", { error: err.message });
+  });
+
+  // Timeout handling
+  let timeoutId = null;
+  if (options.timeout) {
+    timeoutId = setTimeout(() => {
+      proc.kill();
+      emitter.emit("error", { error: "Timeout" });
+    }, options.timeout);
+
+    proc.on("close", () => {
+      if (timeoutId) clearTimeout(timeoutId);
+    });
+  }
+
+  // Add methods for interactive control
+  emitter.approve = (actionId) => {
+    if (proc.stdin.writable) {
+      proc.stdin.write("y\n");
+      const action = pendingActions.get(actionId);
+      if (action) {
+        action.approved = true;
+        pendingActions.delete(actionId);
+      }
+    }
+  };
+
+  emitter.reject = (actionId) => {
+    if (proc.stdin.writable) {
+      proc.stdin.write("n\n");
+      const action = pendingActions.get(actionId);
+      if (action) {
+        action.approved = false;
+        pendingActions.delete(actionId);
+      }
+    }
+  };
+
+  emitter.respond = (text) => {
+    if (proc.stdin.writable) {
+      proc.stdin.write(text + "\n");
+    }
+  };
+
+  emitter.abort = () => {
+    proc.kill("SIGTERM");
+  };
+
+  emitter.process = proc;
+  emitter.getPendingActions = () => Array.from(pendingActions.values());
+
+  return emitter;
+};
+
+/**
  * Get installation instructions
  */
 export const getInstallInstructions = () => {
@@ -486,6 +655,7 @@ export default {
   getClaudeCodeStatus,
   spawnClaudeCodeLogin,
   runClaudeCodePrompt,
+  runClaudeCodeStreaming,
   getInstallInstructions,
   getClaudeCodeConfigDir,
 };

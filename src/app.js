@@ -6714,7 +6714,9 @@ Folder: ${result.action.id}`,
         alignItems: "center",
         justifyContent: "center",
         paddingTop: 6,
-        paddingBottom: 6
+        paddingBottom: 6,
+        marginTop: 4,
+        marginBottom: 4
       },
       e(SplashScreen, { message: "Initializing" })
     );

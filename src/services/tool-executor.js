@@ -16,6 +16,7 @@ import path from "path";
 import { EventEmitter } from "events";
 import { spawn, exec } from "child_process";
 import { promisify } from "util";
+import { getPlaywrightService } from "./playwright-service.js";
 
 const execAsync = promisify(exec);
 
@@ -30,7 +31,16 @@ export const TOOL_TYPES = {
   EDIT: "Edit",
   BASH: "Bash",
   GREP: "Grep",
-  GLOB: "Glob"
+  GLOB: "Glob",
+  // Browser/Computer Use tools
+  BROWSER_NAVIGATE: "BrowserNavigate",
+  BROWSER_CLICK: "BrowserClick",
+  BROWSER_TYPE: "BrowserType",
+  BROWSER_SCROLL: "BrowserScroll",
+  BROWSER_SCREENSHOT: "BrowserScreenshot",
+  BROWSER_FILL_FORM: "BrowserFillForm",
+  BROWSER_GET_CONTENT: "BrowserGetContent",
+  BROWSER_CLOSE: "BrowserClose"
 };
 
 /**
@@ -145,6 +155,39 @@ export class ToolExecutor extends EventEmitter {
 
         case TOOL_TYPES.GLOB:
           result = await this.executeGlob(action.target, action.params);
+          break;
+
+        // Browser/Computer Use tools
+        case TOOL_TYPES.BROWSER_NAVIGATE:
+          result = await this.executeBrowserNavigate(action.target, action.params);
+          break;
+
+        case TOOL_TYPES.BROWSER_CLICK:
+          result = await this.executeBrowserClick(action.target, action.params);
+          break;
+
+        case TOOL_TYPES.BROWSER_TYPE:
+          result = await this.executeBrowserType(action.target, action.params);
+          break;
+
+        case TOOL_TYPES.BROWSER_SCROLL:
+          result = await this.executeBrowserScroll(action.target, action.params);
+          break;
+
+        case TOOL_TYPES.BROWSER_SCREENSHOT:
+          result = await this.executeBrowserScreenshot(action.target, action.params);
+          break;
+
+        case TOOL_TYPES.BROWSER_FILL_FORM:
+          result = await this.executeBrowserFillForm(action.target, action.params);
+          break;
+
+        case TOOL_TYPES.BROWSER_GET_CONTENT:
+          result = await this.executeBrowserGetContent(action.target, action.params);
+          break;
+
+        case TOOL_TYPES.BROWSER_CLOSE:
+          result = await this.executeBrowserClose(action.target, action.params);
           break;
 
         default:
@@ -631,6 +674,156 @@ export class ToolExecutor extends EventEmitter {
       .replace(/\?/g, ".");
 
     return new RegExp(`^${regex}$`, "i").test(filename);
+  }
+
+  // ===== BROWSER/COMPUTER USE TOOLS =====
+
+  /**
+   * Execute browser navigate
+   */
+  async executeBrowserNavigate(url, params = {}) {
+    const browser = getPlaywrightService();
+    const result = await browser.navigate(url, params);
+
+    if (!result.success) {
+      throw new Error(`Browser navigate failed: ${result.error}`);
+    }
+
+    return {
+      type: "browser_navigation",
+      url: result.url,
+      title: result.title,
+      status: result.status,
+      screenshot: result.screenshot
+    };
+  }
+
+  /**
+   * Execute browser click
+   */
+  async executeBrowserClick(target, params = {}) {
+    const browser = getPlaywrightService();
+    const result = await browser.click(target, params);
+
+    if (!result.success) {
+      throw new Error(`Browser click failed: ${result.error}`);
+    }
+
+    return {
+      type: "browser_click",
+      target,
+      screenshot: result.screenshot
+    };
+  }
+
+  /**
+   * Execute browser type
+   */
+  async executeBrowserType(text, params = {}) {
+    const browser = getPlaywrightService();
+    const result = await browser.type(text, params);
+
+    if (!result.success) {
+      throw new Error(`Browser type failed: ${result.error}`);
+    }
+
+    return {
+      type: "browser_type",
+      textLength: text.length
+    };
+  }
+
+  /**
+   * Execute browser scroll
+   */
+  async executeBrowserScroll(direction, params = {}) {
+    const browser = getPlaywrightService();
+    const result = await browser.scroll(direction, params.amount || 500);
+
+    if (!result.success) {
+      throw new Error(`Browser scroll failed: ${result.error}`);
+    }
+
+    return {
+      type: "browser_scroll",
+      direction,
+      screenshot: result.screenshot
+    };
+  }
+
+  /**
+   * Execute browser screenshot
+   */
+  async executeBrowserScreenshot(filename, params = {}) {
+    const browser = getPlaywrightService();
+    const result = await browser.takeScreenshot({ filename, ...params });
+
+    if (!result.success) {
+      throw new Error(`Browser screenshot failed: ${result.error}`);
+    }
+
+    return {
+      type: "browser_screenshot",
+      path: result.path,
+      filename: result.filename
+    };
+  }
+
+  /**
+   * Execute browser fill form
+   */
+  async executeBrowserFillForm(fields, params = {}) {
+    const browser = getPlaywrightService();
+
+    // Fields can be passed as target or params
+    const formFields = typeof fields === "object" ? fields : params.fields || {};
+    const result = await browser.fillForm(formFields, params);
+
+    if (!result.success) {
+      throw new Error(`Browser fill form failed: ${result.error}`);
+    }
+
+    return {
+      type: "browser_form_filled",
+      fieldsCount: Object.keys(formFields).length,
+      results: result.results,
+      screenshot: result.screenshot
+    };
+  }
+
+  /**
+   * Execute browser get content
+   */
+  async executeBrowserGetContent(selector, params = {}) {
+    const browser = getPlaywrightService();
+    const result = await browser.getContent({ selector, ...params });
+
+    if (!result.success) {
+      throw new Error(`Browser get content failed: ${result.error}`);
+    }
+
+    return {
+      type: "browser_content",
+      title: result.title,
+      url: result.url,
+      content: result.content
+    };
+  }
+
+  /**
+   * Execute browser close
+   */
+  async executeBrowserClose(target, params = {}) {
+    const browser = getPlaywrightService();
+    const result = await browser.close();
+
+    if (!result.success) {
+      throw new Error(`Browser close failed: ${result.error}`);
+    }
+
+    return {
+      type: "browser_closed"
+    };
   }
 
   /**

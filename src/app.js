@@ -6702,38 +6702,53 @@ Folder: ${result.action.id}`,
   ].filter(Boolean);
 
 
-  // Show splash screen during initialization
-  // Use full layout structure with skeleton placeholder content to ensure proper height calculation
-  // Skeleton placeholders pulse gray like web app skeleton loaders
+  // Show CLEAN splash screen during initialization (no skeletons visible)
   if (isInitializing) {
+    return e(
+      Box,
+      {
+        key: "splash-clean",
+        flexDirection: "column",
+        height: appHeight,
+        width: terminalWidth,
+        alignItems: "center",
+        justifyContent: "center"
+      },
+      e(SplashScreen, { message: "Initializing" })
+    );
+  }
+
+  // Show skeleton placeholders AFTER splash ends but BEFORE data is ready
+  // This provides visual structure while data loads
+  if (!mainViewReady) {
     // Skeleton placeholder colors - pulse between visible and dimmed
     const skeletonColor = pulsingDotVisible ? "#4a5568" : "#2d3748";
     const skeletonDimColor = pulsingDotVisible ? "#374151" : "#1f2937";
 
-    // Skeleton line helper - creates a pulsing gray placeholder line
-    const SkeletonLine = (width, height = 1, indent = 0) => e(
+    // Skeleton line helper - creates a pulsing gray placeholder line (taller)
+    const SkeletonLine = (width, lineHeight = 1, indent = 0) => e(
       Box,
-      { paddingLeft: indent, height },
-      e(Text, { color: skeletonColor }, "░".repeat(Math.min(width, 25)))
+      { paddingLeft: indent, height: lineHeight, marginBottom: 1 },
+      e(Text, { color: skeletonColor }, "░".repeat(Math.min(width, 30)))
     );
 
-    // Skeleton goal - dot + title placeholder
+    // Skeleton goal - dot + title placeholder (taller with more spacing)
     const SkeletonGoal = (titleWidth) => e(
       Box,
-      { flexDirection: "column", marginBottom: 1 },
+      { flexDirection: "column", marginBottom: 2, height: 4 },
       e(Box, { flexDirection: "row", gap: 1 },
         e(Text, { color: skeletonDimColor }, "●"),
         e(Text, { color: skeletonColor }, "░".repeat(titleWidth))
       ),
-      e(Box, { paddingLeft: 3 },
-        e(Text, { color: skeletonDimColor }, "░".repeat(Math.floor(titleWidth * 0.6)))
+      e(Box, { paddingLeft: 3, marginTop: 1 },
+        e(Text, { color: skeletonDimColor }, "░".repeat(Math.floor(titleWidth * 0.7)))
       )
     );
 
-    // Skeleton outcome - green dot + text placeholder
+    // Skeleton outcome - green dot + text placeholder (taller)
     const SkeletonOutcome = (textWidth) => e(
       Box,
-      { flexDirection: "row", gap: 1, marginBottom: 0 },
+      { flexDirection: "row", gap: 1, marginBottom: 1, height: 2 },
       e(Text, { color: pulsingDotVisible ? "#22c55e" : "#166534" }, "●"),
       e(Text, { color: skeletonColor }, "░".repeat(textWidth))
     );
@@ -6741,16 +6756,16 @@ Folder: ${result.action.id}`,
     return e(
       Box,
       {
-        key: "splash-layout",
+        key: "skeleton-layout",
         flexDirection: "column",
         height: appHeight,
         width: terminalWidth,
         overflow: "hidden"
       },
       // Header placeholder (matches TopStatusBar height)
-      e(Box, { height: 2, flexDirection: "row", justifyContent: "space-between", paddingX: 1 },
-        e(Text, { color: skeletonColor }, "░░░░░░░░░░░"),
-        e(Text, { color: skeletonDimColor }, "░░░░░░")
+      e(Box, { height: 3, flexDirection: "row", justifyContent: "space-between", paddingX: 1, alignItems: "center" },
+        e(Text, { color: skeletonColor }, "░░░░░░░░░░░░░"),
+        e(Text, { color: skeletonDimColor }, "░░░░░░░░")
       ),
 
       // Main content area with proper column structure
@@ -6758,29 +6773,42 @@ Folder: ${result.action.id}`,
         Box,
         { flexDirection: "row", height: contentHeight, overflow: "hidden" },
 
-        // Left column (25%) - Progress + Health + Tickers skeleton
+        // Left column (25%) - Progress + Health + Tickers skeleton (taller sections)
         e(Box, { flexDirection: "column", width: "25%", paddingRight: 1, overflow: "hidden" },
-          // Progress section header
-          e(Text, { color: skeletonDimColor }, "Progress"),
-          e(Text, { color: "#1e293b" }, "─".repeat(18)),
-          SkeletonLine(15),
-          SkeletonLine(12),
-          e(Box, { height: 1 }),
-          // Health section
-          e(Text, { color: skeletonDimColor }, "Health"),
-          e(Text, { color: "#1e293b" }, "─".repeat(18)),
-          SkeletonLine(18),
-          SkeletonLine(14),
-          e(Box, { height: 1 }),
-          // Ticker section
-          e(Text, { color: skeletonDimColor }, "Scores"),
-          e(Text, { color: "#1e293b" }, "─".repeat(18)),
-          SkeletonLine(20),
-          SkeletonLine(18),
-          SkeletonLine(16)
+          // Progress section (taller)
+          e(Box, { height: 10, flexDirection: "column", marginBottom: 2 },
+            e(Text, { color: skeletonDimColor }, "Progress"),
+            e(Text, { color: "#1e293b" }, "─".repeat(20)),
+            e(Box, { marginTop: 1 }),
+            SkeletonLine(18),
+            SkeletonLine(15),
+            SkeletonLine(12),
+            SkeletonLine(16)
+          ),
+          // Health section (taller)
+          e(Box, { height: 10, flexDirection: "column", marginBottom: 2 },
+            e(Text, { color: skeletonDimColor }, "Health"),
+            e(Text, { color: "#1e293b" }, "─".repeat(20)),
+            e(Box, { marginTop: 1 }),
+            SkeletonLine(20),
+            SkeletonLine(16),
+            SkeletonLine(18),
+            SkeletonLine(14)
+          ),
+          // Ticker section (taller)
+          e(Box, { height: 12, flexDirection: "column" },
+            e(Text, { color: skeletonDimColor }, "Scores"),
+            e(Text, { color: "#1e293b" }, "─".repeat(20)),
+            e(Box, { marginTop: 1 }),
+            SkeletonLine(22),
+            SkeletonLine(20),
+            SkeletonLine(18),
+            SkeletonLine(16),
+            SkeletonLine(14)
+          )
         ),
 
-        // Center column (50%) - Engine + Chat area
+        // Center column (50%) - Engine + Chat area (taller sections)
         e(
           Box,
           {
@@ -6789,54 +6817,54 @@ Folder: ${result.action.id}`,
             paddingX: 1,
             overflow: "hidden"
           },
-          // Engine section with working on placeholder
-          e(Box, { flexDirection: "column", height: 12 },
+          // Engine section with working on placeholder (taller)
+          e(Box, { flexDirection: "column", height: 20, marginBottom: 2 },
             e(Text, { color: skeletonDimColor, bold: true }, "Engine"),
-            e(Text, { color: "#1e293b" }, "─".repeat(35)),
+            e(Text, { color: "#1e293b" }, "─".repeat(40)),
             e(Box, { marginTop: 1 }),
-            // Working on placeholder
-            e(Box, { flexDirection: "row", gap: 1 },
+            // Working on placeholder (taller)
+            e(Box, { flexDirection: "row", gap: 1, height: 3 },
               e(Text, { color: pulsingDotVisible ? "#f59e0b" : "#92400e" }, "●"),
-              e(Text, { color: skeletonColor }, "░░░░░░░░░░░░░░░░░░░░░░")
+              e(Text, { color: skeletonColor }, "░░░░░░░░░░░░░░░░░░░░░░░░░░")
             ),
-            e(Box, { paddingLeft: 3 },
-              e(Text, { color: skeletonDimColor }, "░░░░░░░░░░░░░░")
+            e(Box, { paddingLeft: 3, marginBottom: 2 },
+              e(Text, { color: skeletonDimColor }, "░░░░░░░░░░░░░░░░░░")
             ),
-            e(Box, { marginTop: 1 }),
-            // 5 Outcome placeholders
+            // 5 Outcome placeholders (with more spacing)
+            SkeletonOutcome(32),
             SkeletonOutcome(28),
-            SkeletonOutcome(24),
+            SkeletonOutcome(30),
             SkeletonOutcome(26),
-            SkeletonOutcome(22),
-            SkeletonOutcome(25)
+            SkeletonOutcome(29)
           ),
-          // Splash screen content centered
-          e(
-            Box,
-            { flexGrow: 1, alignItems: "center", justifyContent: "center" },
-            e(SplashScreen, { message: "Initializing" })
+          // Chat input placeholder area (taller)
+          e(Box, { flexGrow: 1, flexDirection: "column", justifyContent: "flex-end" },
+            e(Box, { height: 5, borderStyle: "round", borderColor: "#1e293b", padding: 1 },
+              e(Text, { color: skeletonDimColor }, "> "),
+              e(Text, { color: skeletonColor }, "░░░░░░░░░░░░░░░░░░░░░░░░░░░░")
+            )
           )
         ),
 
-        // Right column (25%) - 4 Goals skeleton
+        // Right column (25%) - 4 Goals skeleton (taller)
         e(Box, { flexDirection: "column", width: "25%", paddingLeft: 1, overflow: "hidden" },
           e(Text, { color: "#f59e0b", bold: true }, "Goals"),
-          e(Text, { color: "#1e293b" }, "─".repeat(20)),
+          e(Text, { color: "#1e293b" }, "─".repeat(22)),
           e(Box, { marginTop: 1 }),
-          // 4 Goal placeholders
-          SkeletonGoal(18),
-          SkeletonGoal(16),
+          // 4 Goal placeholders (taller with more spacing)
           SkeletonGoal(20),
-          SkeletonGoal(15)
+          SkeletonGoal(18),
+          SkeletonGoal(22),
+          SkeletonGoal(17)
         )
       ),
 
-      // Footer placeholder (matches BottomStatusBar + input height)
-      e(Box, { height: 3, flexDirection: "column" },
-        e(Text, { color: "#1e293b" }, "─".repeat(Math.min(terminalWidth - 2, 80))),
-        e(Box, { flexDirection: "row", paddingX: 1 },
-          e(Text, { color: skeletonDimColor }, "> "),
-          e(Text, { color: skeletonColor }, "░░░░░░░░░░░░░░░░░░░░")
+      // Footer placeholder (taller)
+      e(Box, { height: 4, flexDirection: "column", justifyContent: "center" },
+        e(Text, { color: "#1e293b" }, "─".repeat(Math.min(terminalWidth - 2, 90))),
+        e(Box, { flexDirection: "row", paddingX: 1, marginTop: 1 },
+          e(Text, { color: skeletonDimColor }, "Loading data..."),
+          e(Text, { color: skeletonColor }, " ░░░░░░░░░░░░")
         )
       )
     );

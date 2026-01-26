@@ -3240,10 +3240,71 @@ Execute this task and provide concrete results.`);
         engineState.setStatus("syncing", "Syncing data...");
       } else if (resolved.startsWith("/plan") || resolved.startsWith("/goals")) {
         engineState.setStatus("planning", "Processing goals...");
-      } else if (resolved.startsWith("/insights") || resolved.startsWith("/report") || resolved.startsWith("/dashboard")) {
+      } else if (resolved.startsWith("/insights") || resolved.startsWith("/report") || resolved.startsWith("/dashboard") || resolved.startsWith("/progress")) {
         engineState.setStatus("analyzing", "Generating insights...");
       } else if (resolved.startsWith("/project")) {
         engineState.setStatus("building", "Managing projects...");
+      }
+
+      // /progress - Show overall progress score and goal completion status
+      if (resolved === "/progress") {
+        const tracker = getGoalTracker();
+        const progressResearch = getProgressResearch();
+        const goals = tracker.getActive();
+
+        // Calculate overall progress score
+        let overallProgress = 0;
+        let completedGoals = 0;
+        let totalGoals = goals.length;
+
+        if (totalGoals > 0) {
+          for (const goal of goals) {
+            const progress = tracker.calculateProgress(goal);
+            overallProgress += progress * 100;
+            if (progress >= 1.0) completedGoals++;
+          }
+          overallProgress = Math.round(overallProgress / totalGoals);
+        }
+
+        // Get category breakdown
+        const categories = {};
+        for (const goal of goals) {
+          const cat = goal.category || "general";
+          if (!categories[cat]) {
+            categories[cat] = { count: 0, totalProgress: 0 };
+          }
+          categories[cat].count++;
+          categories[cat].totalProgress += tracker.calculateProgress(goal) * 100;
+        }
+
+        // Build progress display
+        let progressContent = "📊 **Progress Score**\n\n";
+        progressContent += `**Overall Progress:** ${overallProgress}%\n`;
+        progressContent += `**Active Goals:** ${totalGoals}\n`;
+        progressContent += `**Completed:** ${completedGoals}\n\n`;
+
+        progressContent += "**By Category:**\n";
+        for (const [cat, data] of Object.entries(categories)) {
+          const avgProgress = Math.round(data.totalProgress / data.count);
+          const barFilled = Math.round(avgProgress / 10);
+          const bar = "█".repeat(barFilled) + "░".repeat(10 - barFilled);
+          progressContent += `${cat.charAt(0).toUpperCase() + cat.slice(1)}: ${bar} ${avgProgress}%\n`;
+        }
+
+        progressContent += "\n**Goals:**\n";
+        for (const goal of goals) {
+          const progress = Math.round(tracker.calculateProgress(goal) * 100);
+          const status = progress >= 100 ? "✓" : progress > 0 ? "●" : "○";
+          progressContent += `${status} ${goal.title.slice(0, 40)}... ${progress}%\n`;
+        }
+
+        setMessages((prev) => [
+          ...prev,
+          { role: "user", content: "/progress", timestamp: new Date() },
+          { role: "assistant", content: progressContent, timestamp: new Date() }
+        ]);
+        setLastAction("Progress score calculated");
+        return;
       }
 
       if (resolved === "/clear") {

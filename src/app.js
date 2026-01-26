@@ -6513,8 +6513,55 @@ Folder: ${result.action.id}`,
 
 
   // Show splash screen during initialization
+  // Use full layout structure with placeholder content to ensure proper height calculation
   if (isInitializing) {
-    return e(SplashScreen, { message: "Initializing" });
+    return e(
+      Box,
+      {
+        key: "splash-layout",
+        flexDirection: "column",
+        height: appHeight,
+        width: terminalWidth,
+        overflow: "hidden"
+      },
+      // Invisible placeholder header (matches TopStatusBar height)
+      e(Box, { height: 2 }),
+      // Main content area with proper column structure
+      e(
+        Box,
+        { flexDirection: "row", height: contentHeight, overflow: "hidden" },
+        // Left column placeholder (25% for goals)
+        e(Box, { flexDirection: "column", width: "25%", paddingRight: 1, overflow: "hidden" },
+          // 7 goal line placeholders
+          e(Box, { height: 1 }),
+          e(Box, { height: 2 }),
+          e(Box, { height: 2 }),
+          e(Box, { height: 2 }),
+          e(Box, { height: 2 }),
+          e(Box, { height: 2 }),
+          e(Box, { height: 2 }),
+          e(Box, { height: 2 })
+        ),
+        // Center column (50% for engine + chat)
+        e(
+          Box,
+          {
+            flexDirection: "column",
+            width: "50%",
+            paddingX: 1,
+            overflow: "hidden",
+            alignItems: "center",
+            justifyContent: "center"
+          },
+          // Splash screen content centered
+          e(SplashScreen, { message: "Initializing" })
+        ),
+        // Right column placeholder (25%)
+        e(Box, { flexDirection: "column", width: "25%", paddingLeft: 1, overflow: "hidden" })
+      ),
+      // Invisible placeholder footer (matches BottomStatusBar + input height)
+      e(Box, { height: 3 })
+    );
   }
 
   // Show onboarding wizard for first-time users or when requested

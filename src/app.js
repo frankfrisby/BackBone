@@ -708,6 +708,7 @@ const App = ({ updateConsoleTitle }) => {
   const [linkedInProfile, setLinkedInProfile] = useState(null);
   const [linkedInMessages, setLinkedInMessages] = useState([]);
   const [ouraHealth, setOuraHealth] = useState(null);
+  const [plaidData, setPlaidData] = useState(null);
   const [ouraHistory, setOuraHistory] = useState(() => {
     const stored = loadOuraData();
     return stored?.history || [];
@@ -2428,6 +2429,31 @@ Execute this task and provide concrete results.`);
       setOuraHistory(stored.history);
     }
   }, [ouraHealth]);
+
+  // Initialize Plaid/Net Worth data
+  useEffect(() => {
+    const initPlaid = async () => {
+      const plaidService = getPlaidService();
+      await plaidService.initFromFirebase();
+
+      if (plaidService.isConfigured()) {
+        // Load cached data first
+        const displayData = plaidService.getDisplayData();
+        setPlaidData(displayData);
+
+        // Sync if stale
+        if (plaidService.isStale()) {
+          try {
+            await plaidService.sync();
+            setPlaidData(plaidService.getDisplayData());
+          } catch (error) {
+            console.error("Plaid sync failed:", error.message);
+          }
+        }
+      }
+    };
+    initPlaid();
+  }, []);
 
   // Initialize social connections
   useEffect(() => {
@@ -4277,6 +4303,7 @@ Execute this task and provide concrete results.`);
           // Reset all state
           setLinkedInProfile(null);
           setOuraHealth(null);
+          setPlaidData(null);
           setTradingStatus(buildTradingStatusDisplay());
           setMessages([]);
 
@@ -6412,6 +6439,55 @@ Folder: ${result.action.id}`,
               i < 4 && e(Text, { color: "#334155" }, " ")
             );
           })
+        ),
+
+        // NET WORTH SUMMARY - Assets, Liabilities, Total
+        plaidData?.connected && e(
+          Box,
+          { flexDirection: "row", gap: 1, marginTop: 1, height: 1 },
+          e(Text, { color: "#64748b" }, "NET WORTH "),
+          // Total net worth with background (positive = green, negative = red)
+          (() => {
+            const total = plaidData.netWorth?.total || 0;
+            const isPositive = total >= 0;
+            const bg = isPositive ? "#14532d" : "#7f1d1d";
+            const formatted = new Intl.NumberFormat("en-US", {
+              style: "currency",
+              currency: "USD",
+              minimumFractionDigits: 0,
+              maximumFractionDigits: 0
+            }).format(Math.abs(total));
+            return e(Text, { backgroundColor: bg, color: "#ffffff", bold: true }, ` ${isPositive ? "" : "-"}${formatted} `);
+          })(),
+          e(Text, { color: "#334155" }, " | "),
+          // Assets
+          (() => {
+            const assets = plaidData.netWorth?.assets || 0;
+            const formatted = new Intl.NumberFormat("en-US", {
+              style: "currency",
+              currency: "USD",
+              minimumFractionDigits: 0,
+              maximumFractionDigits: 0
+            }).format(assets);
+            return e(Text, { color: "#22c55e" }, `↑ ${formatted}`);
+          })(),
+          e(Text, { color: "#334155" }, " | "),
+          // Liabilities
+          (() => {
+            const liabilities = plaidData.netWorth?.liabilities || 0;
+            const formatted = new Intl.NumberFormat("en-US", {
+              style: "currency",
+              currency: "USD",
+              minimumFractionDigits: 0,
+              maximumFractionDigits: 0
+            }).format(liabilities);
+            return e(Text, { color: "#ef4444" }, `↓ ${formatted}`);
+          })(),
+          // Account count
+          plaidData.accountCount > 0 && [
+            e(Text, { key: "accsep", color: "#334155" }, " | "),
+            e(Text, { key: "acccount", color: "#94a3b8" }, `${plaidData.accountCount} accounts`)
+          ]
         ),
 
         // HEALTH SUMMARY - Readiness, Sleep, Calories, HR with backgrounds and trend arrows

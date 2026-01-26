@@ -22,6 +22,7 @@ import { EventEmitter } from "events";
 import { getGoalTracker, GOAL_STATUS, GOAL_CATEGORY } from "./goal-tracker.js";
 import { loadGoals, extractGoalsFromMessage, processMessageForGoals } from "./goal-extractor.js";
 import { sendMessage, getMultiAIConfig, TASK_TYPES } from "./multi-ai.js";
+import { loadUserSettings } from "./user-settings.js";
 
 const DATA_DIR = path.join(process.cwd(), "data");
 const ACTIVE_GOAL_PATH = path.join(DATA_DIR, "active-goal.json");
@@ -1445,6 +1446,11 @@ Respond in JSON:
       summary
     });
 
+    // Send WhatsApp notification for completed goal
+    this.notifyGoalComplete(completedGoal, summary).catch(err => {
+      console.error("[GoalManager] Failed to send completion notification:", err.message);
+    });
+
     // Auto-select next goal (generates plan with GPT-5.2)
     const nextGoal = this.selectNextGoal();
     if (nextGoal) {
@@ -1581,6 +1587,56 @@ Respond in JSON:
     }
 
     return reasons;
+  }
+
+  /**
+   * Send WhatsApp notification when a goal is completed
+   * @param {Object} goal - The completed goal
+   * @param {string} summary - Summary of completion
+   */
+  async notifyGoalComplete(goal, summary = null) {
+    try {
+      // Dynamically import WhatsApp service to avoid circular dependencies
+      const { getWhatsAppService } = await import("./whatsapp-service.js");
+      const whatsapp = getWhatsAppService();
+
+      // Check if WhatsApp is available and initialized
+      if (!whatsapp || !whatsapp.initialized) {
+        console.log("[GoalManager] WhatsApp not available for notification");
+        return;
+      }
+
+      // Get user's phone number from settings
+      const settings = loadUserSettings();
+      const phoneNumber = settings.phoneNumber;
+
+      if (!phoneNumber) {
+        console.log("[GoalManager] No phone number configured for notifications");
+        return;
+      }
+
+      // Build notification message
+      const appName = settings.appName || "Backbone";
+      const completionMessage = summary ||
+        `Goal completed: ${goal.title}`;
+
+      const message = `🎯 ${appName}: ${completionMessage}
+
+Great work! I've completed this goal for you. What would you like me to focus on next?`;
+
+      // Send WhatsApp notification
+      const result = await whatsapp.sendTextMessage(phoneNumber, message);
+
+      if (result.success) {
+        console.log(`[GoalManager] Sent goal completion notification for: ${goal.title}`);
+        this.emit("notification-sent", { type: "goal-complete", goal, messageId: result.messageId });
+      } else {
+        console.error("[GoalManager] Failed to send notification:", result.error);
+      }
+
+    } catch (error) {
+      console.error("[GoalManager] Error sending notification:", error.message);
+    }
   }
 
   /**

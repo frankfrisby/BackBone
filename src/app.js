@@ -80,6 +80,7 @@ import { loadActionsQueue, getActionsDisplay, queueAction, startNextAction, comp
 import { loadProfileSections, updateFromLinkedIn, updateFromHealth, updateFromPortfolio, getProfileSectionDisplay, getProfileOverview, PROFILE_SECTIONS } from "./services/profile-sections.js";
 import { getGitHubConfig, getGitHubStatus } from "./services/github.js";
 import { openUrl } from "./services/open-url.js";
+import { trackUserQuery, QUERY_SOURCE, getQueryTracker } from "./services/query-tracker.js";
 import { SetupStatus } from "./components/setup-wizard.js";
 import { LifeFeed, LifeChanges } from "./components/life-feed.js";
 import { ProfilePanel } from "./components/profile-panel.js";
@@ -2718,6 +2719,11 @@ Execute this task and provide concrete results.`);
           timestamp: new Date()
         }
       ]);
+
+      // Track user query for goals/insights analysis
+      trackUserQuery(userMessage, QUERY_SOURCE.CLI, {
+        conversationId: Date.now().toString()
+      });
 
       // Add to recent user queries for conversation display
       const queryId = `query-${Date.now()}`;

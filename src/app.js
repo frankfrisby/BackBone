@@ -7015,7 +7015,7 @@ Folder: ${result.action.id}`,
         e(
           Box,
           { flexDirection: "column", flexGrow: 1, marginTop: 1 },
-          e(AgentActivityPanel, { overlayHeader: false, compact: true, scrollOffset: engineScrollOffset })
+          e(AgentActivityPanel, { overlayHeader: false, compact: true, scrollOffset: engineScrollOffset, privateMode })
         ),
 
         // CONVERSATION DISPLAY - Shows recent messages and AI responses (fixed height to preserve header)
@@ -7255,7 +7255,7 @@ Folder: ${result.action.id}`,
           // Format: ● Goal title (can wrap to 2 lines)
           //           Project Name (gray, below)
           // Dots: gray=pending, gray-blink=working, green=complete, red=failed
-          e(SmartGoalsPanel, { autoGenerate: true }),
+          e(SmartGoalsPanel, { autoGenerate: true, privateMode }),
 
           // Current work - shows the current subtask/action being executed
           e(
@@ -7371,7 +7371,7 @@ Folder: ${result.action.id}`,
         Box,
         { flexDirection: "column", width: viewMode === VIEW_MODES.MINIMAL || isMedium ? "75%" : "50%", paddingX: 1, overflow: "hidden" },
         // Engine Status - overlay-rendered when enabled
-        e(AgentActivityPanel, { overlayHeader: overlayEnabled && overlayEngineHeaderEnabled, scrollOffset: engineScrollOffset }),
+        e(AgentActivityPanel, { overlayHeader: overlayEnabled && overlayEngineHeaderEnabled, scrollOffset: engineScrollOffset, privateMode }),
         // Conversation Panel
         e(ConversationPanel, { messages, isLoading: isProcessing, streamingText, actionStreamingText, actionStreamingTitle }),
         // LinkedIn Data Viewer overlay

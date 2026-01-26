@@ -113,12 +113,16 @@ const StatusDot = memo(({ status = "WORKING" }) => {
  *   Waiting on: Stock Research - market closed
  *               Job Finding - waiting for user input
  */
-const StateDisplay = memo(({ state, stateInfo, goal, projectName, hideStateLine = false, waitingReasons = [] }) => {
+const StateDisplay = memo(({ state, stateInfo, goal, projectName, hideStateLine = false, waitingReasons = [], privateMode = false }) => {
   const stateText = stateInfo?.text || state || "Idle";
   // Use STATE_COLORS if available, fallback to stateInfo color
   const stateKey = (state || "IDLE").toUpperCase();
   const color = STATE_COLORS[stateKey] || stateInfo?.color || THEME.warning;
   const isIdle = stateKey === "IDLE";
+
+  // In private mode, mask goal content
+  const displayGoal = privateMode ? "[goal hidden]" : goal;
+  const displayProject = privateMode ? "[project]" : projectName;
 
   // Get background projects to show when idle
   const backgroundProjects = useMemo(() => {
@@ -164,10 +168,10 @@ const StateDisplay = memo(({ state, stateInfo, goal, projectName, hideStateLine 
       Box,
       { paddingLeft: 2, flexDirection: "row", flexWrap: "wrap" },
       e(Text, { color: THEME.muted }, "Goal: "),
-      e(Text, { color: THEME.primary, wrap: "wrap" }, goal),
+      e(Text, { color: privateMode ? THEME.dim : THEME.primary, wrap: "wrap" }, displayGoal),
       projectName && e(Text, { color: THEME.dim }, " · "),
       projectName && e(Text, { color: THEME.dim }, "Project: "),
-      projectName && e(Text, { color: THEME.muted }, projectName)
+      projectName && e(Text, { color: THEME.dim }, displayProject)
     ),
     // When idle, show waiting reasons for top 2 projects
     isIdle && waitingReasons && waitingReasons.length > 0 && e(
@@ -243,7 +247,7 @@ const StateDisplay = memo(({ state, stateInfo, goal, projectName, hideStateLine 
  *               2 + ## AI Engineer - DC Area
  *               3 + Company: TechCorp Inc.
  */
-const ActionLine = memo(({ action, showDetail = true }) => {
+const ActionLine = memo(({ action, showDetail = true, privateMode = false }) => {
   if (!action) {
     return null;
   }
@@ -278,6 +282,10 @@ const ActionLine = memo(({ action, showDetail = true }) => {
       ? e(Text, { color: THEME.error }, "●")  // Red dot for failed
       : e(Text, { color: THEME.gray }, "●");  // Gray dot for in-progress
 
+  // In private mode, mask sensitive data
+  const displayTarget = privateMode ? "••••••••" : target;
+  const displayResults = privateMode ? [] : resultLines;
+
   return e(
     Box,
     { flexDirection: "column", marginBottom: 1 },
@@ -289,42 +297,56 @@ const ActionLine = memo(({ action, showDetail = true }) => {
       e(Text, { color: THEME.muted }, " "),
       e(Text, { color: color, bold: true }, verb),
       e(Text, { color: THEME.muted }, "("),
-      e(Text, { color: THEME.white, wrap: "wrap" }, target),
+      e(Text, { color: privateMode ? THEME.dim : THEME.white, wrap: "wrap" }, displayTarget),
       e(Text, { color: THEME.muted }, ")")
     ),
 
-    // For WebSearch/Fetch: show ↓ arrow and results below
-    (isWebSearch || isWebFetch) && e(
+    // For WebSearch/Fetch: show ↓ arrow and results below (hidden in private mode)
+    !privateMode && (isWebSearch || isWebFetch) && e(
       Box,
       { flexDirection: "column", paddingLeft: 2 },
       // Down arrow to indicate content below
       e(Text, { color: THEME.dim }, "↓"),
       // Show result lines with proper formatting
-      ...resultLines.slice(0, 8).map((line, i) =>
+      ...displayResults.slice(0, 8).map((line, i) =>
         e(
           Box,
           { key: i },
           e(Text, { color: THEME.secondary, wrap: "wrap" }, `  ${line}`)
         )
       ),
-      resultLines.length > 8 && e(
+      displayResults.length > 8 && e(
         Text,
         { color: THEME.dim },
-        `  ... and ${resultLines.length - 8} more results`
+        `  ... and ${displayResults.length - 8} more results`
       ),
       // Show nothing found if no results and done
-      isDone && resultLines.length === 0 && e(
+      isDone && displayResults.length === 0 && e(
         Text,
         { color: THEME.dim },
         "  No results found"
       )
     ),
 
-    // For file operations with diff, show the diff
-    isFileOp && diff && e(DiffView, { diff, isNewFile }),
+    // In private mode, show minimal indicator for web operations
+    privateMode && (isWebSearch || isWebFetch) && isDone && e(
+      Box,
+      { paddingLeft: 2 },
+      e(Text, { color: THEME.dim }, "↓ [results hidden]")
+    ),
+
+    // For file operations with diff, show the diff (hidden in private mode)
+    !privateMode && isFileOp && diff && e(DiffView, { diff, isNewFile }),
+
+    // In private mode, show minimal indicator for file operations
+    privateMode && isFileOp && diff && e(
+      Box,
+      { paddingLeft: 2 },
+      e(Text, { color: THEME.dim }, "↳ [diff hidden]")
+    ),
 
     // For other non-file, non-web operations, show result lines with arrow
-    !isFileOp && !isWebSearch && !isWebFetch && resultLines.length > 0 && e(
+    !privateMode && !isFileOp && !isWebSearch && !isWebFetch && resultLines.length > 0 && e(
       Box,
       { flexDirection: "column", paddingLeft: 2 },
       ...resultLines.slice(0, 10).map((line, i) =>
@@ -354,17 +376,20 @@ const ActionLine = memo(({ action, showDetail = true }) => {
  *
  * Uses white dot (○) with spacing, NOT green arrow
  */
-const ObservationLine = memo(({ observation }) => {
+const ObservationLine = memo(({ observation, privateMode = false }) => {
   if (!observation) return null;
 
   const text = observation.text || observation;
+
+  // In private mode, show that an observation was made but hide the content
+  const displayText = privateMode ? "[observation hidden]" : text;
 
   return e(
     Box,
     { flexDirection: "row", marginBottom: 1 },
     e(Text, { color: THEME.white }, "○"),
     e(Text, { color: THEME.white }, "  "),
-    e(Text, { color: THEME.primary, wrap: "wrap" }, text)
+    e(Text, { color: privateMode ? THEME.dim : THEME.primary, wrap: "wrap" }, displayText)
   );
 });
 
@@ -818,7 +843,7 @@ const ModelStatusBanner = memo(({ status }) => {
  * │   [diff view with green/red lines]                      │
  * └─────────────────────────────────────────────────────────┘
  */
-const AgentActivityPanelBase = ({ overlayHeader = false, compact = false, scrollOffset = 0 }) => {
+const AgentActivityPanelBase = ({ overlayHeader = false, compact = false, scrollOffset = 0, privateMode = false }) => {
   const narrator = getActivityNarrator();
   const autonomousEngine = getAutonomousEngine();
 
@@ -1071,12 +1096,13 @@ const AgentActivityPanelBase = ({ overlayHeader = false, compact = false, scroll
       goal: modelStatus.isPaused ? "Waiting for model connection..." : goal,
       projectName: modelStatus.isPaused ? null : projectName,
       hideStateLine: overlayHeader,
-      waitingReasons: waitingReasons
+      waitingReasons: waitingReasons,
+      privateMode: privateMode
     }),
 
     // Real ACTIONS (bash commands, searches, file operations)
     ...timeline.map((item, i) =>
-      e(ActionLine, { key: item.id || `act${i}`, action: item, showDetail: !compact })
+      e(ActionLine, { key: item.id || `act${i}`, action: item, showDetail: !compact, privateMode: privateMode })
     ),
 
     // OBSERVATIONS - What the AI discovered (white dot with spacing)
@@ -1084,7 +1110,7 @@ const AgentActivityPanelBase = ({ overlayHeader = false, compact = false, scroll
       Box,
       { flexDirection: "column", marginTop: 1 },
       ...discoveries.map((d, i) =>
-        e(ObservationLine, { key: `obs${i}`, observation: d })
+        e(ObservationLine, { key: `obs${i}`, observation: d, privateMode: privateMode })
       )
     ),
 

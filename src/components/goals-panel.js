@@ -87,7 +87,7 @@ const getGoalVisualState = (goal) => {
  *   ● Solid dot - pending, active, completed, failed
  *   ◐ Half circle - on hold/partial (waiting for something)
  */
-const GoalLine = memo(({ goal, isWorking = false, blinkVisible = true, isFirst = false }) => {
+const GoalLine = memo(({ goal, isWorking = false, blinkVisible = true, isFirst = false, privateMode = false }) => {
   const basicStatus = goal.status || "pending";
 
   // Get visual state which considers on-hold and partial completion
@@ -135,6 +135,10 @@ const GoalLine = memo(({ goal, isWorking = false, blinkVisible = true, isFirst =
     }
   }
 
+  // In private mode, mask goal content
+  const displayTitle = privateMode ? "[goal hidden]" : title;
+  const displayProject = privateMode ? "[project]" : (projectName + statusNote);
+
   return e(
     Box,
     { flexDirection: "column", marginBottom: 1 },
@@ -145,13 +149,13 @@ const GoalLine = memo(({ goal, isWorking = false, blinkVisible = true, isFirst =
       // Indicator
       e(Text, { color: indicatorColor }, indicator),
       // Goal title (light gray, can wrap to 2 lines)
-      e(Text, { color: "#94a3b8", wrap: "wrap" }, title)
+      e(Text, { color: privateMode ? "#475569" : "#94a3b8", wrap: "wrap" }, displayTitle)
     ),
     // Project name below in darker gray, indented to align with title after dot
     e(
       Box,
       { paddingLeft: 4 },  // Align with title (dot + gap = ~4 chars)
-      e(Text, { color: "#64748b", dimColor: true, wrap: "wrap" }, projectName + statusNote)
+      e(Text, { color: "#475569", dimColor: true, wrap: "wrap" }, displayProject)
     )
   );
 });
@@ -165,7 +169,8 @@ const GoalsPanelBase = ({
   goals = [],
   currentGoalId = null,
   isGenerating = false,
-  maxGoals = 3  // Max 3 goals as part of total 6 items (goals + working + outcomes)
+  maxGoals = 3,  // Max 3 goals as part of total 6 items (goals + working + outcomes)
+  privateMode = false
 }) => {
   // Blink state for active goal indicator
   const [blinkVisible, setBlinkVisible] = useState(true);
@@ -222,7 +227,8 @@ const GoalsPanelBase = ({
           goal,
           isWorking: goal.id === workingGoalId,
           blinkVisible,
-          isFirst: i === 0
+          isFirst: i === 0,
+          privateMode
         })
       ),
 
@@ -254,7 +260,8 @@ export const GoalsPanel = memo(GoalsPanelBase);
  */
 const SmartGoalsPanelBase = ({
   autoGenerate = true,
-  onGoalsUpdated = null
+  onGoalsUpdated = null,
+  privateMode = false
 }) => {
   const [goals, setGoals] = useState([]);
   const [currentGoalId, setCurrentGoalId] = useState(null);
@@ -435,7 +442,8 @@ const SmartGoalsPanelBase = ({
     goals,
     currentGoalId,
     isGenerating,
-    maxGoals: 7
+    maxGoals: 7,
+    privateMode
   });
 };
 

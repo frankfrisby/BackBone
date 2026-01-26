@@ -17,6 +17,9 @@ import { EventEmitter } from "events";
 import { spawn, exec } from "child_process";
 import { promisify } from "util";
 import { getPlaywrightService } from "./playwright-service.js";
+import { sendWhatsAppMessage } from "./phone-auth.js";
+import { loadUserSettings } from "./user-settings.js";
+import { getCurrentFirebaseUser } from "./firebase-auth.js";
 
 const execAsync = promisify(exec);
 
@@ -32,6 +35,16 @@ export const TOOL_TYPES = {
   BASH: "Bash",
   GREP: "Grep",
   GLOB: "Glob",
+  // Data access tools (for AI chat to interact with projects, memory, data)
+  READ_PROJECT: "ReadProject",
+  LIST_PROJECTS: "ListProjects",
+  READ_MEMORY: "ReadMemory",
+  WRITE_MEMORY: "WriteMemory",
+  READ_DATA: "ReadData",
+  LIST_GOALS: "ListGoals",
+  GET_GOAL: "GetGoal",
+  // Messaging tools
+  SEND_WHATSAPP: "SendWhatsApp",
   // Browser/Computer Use tools
   BROWSER_NAVIGATE: "BrowserNavigate",
   BROWSER_CLICK: "BrowserClick",
@@ -155,6 +168,40 @@ export class ToolExecutor extends EventEmitter {
 
         case TOOL_TYPES.GLOB:
           result = await this.executeGlob(action.target, action.params);
+          break;
+
+        // Data access tools (for AI chat to interact with projects, memory, data)
+        case TOOL_TYPES.READ_PROJECT:
+          result = await this.executeReadProject(action.target, action.params);
+          break;
+
+        case TOOL_TYPES.LIST_PROJECTS:
+          result = await this.executeListProjects(action.target, action.params);
+          break;
+
+        case TOOL_TYPES.READ_MEMORY:
+          result = await this.executeReadMemory(action.target, action.params);
+          break;
+
+        case TOOL_TYPES.WRITE_MEMORY:
+          result = await this.executeWriteMemory(action.target, action.params);
+          break;
+
+        case TOOL_TYPES.READ_DATA:
+          result = await this.executeReadData(action.target, action.params);
+          break;
+
+        case TOOL_TYPES.LIST_GOALS:
+          result = await this.executeListGoals(action.target, action.params);
+          break;
+
+        case TOOL_TYPES.GET_GOAL:
+          result = await this.executeGetGoal(action.target, action.params);
+          break;
+
+        // Messaging tools
+        case TOOL_TYPES.SEND_WHATSAPP:
+          result = await this.executeSendWhatsApp(action.target, action.params);
           break;
 
         // Browser/Computer Use tools
@@ -674,6 +721,359 @@ export class ToolExecutor extends EventEmitter {
       .replace(/\?/g, ".");
 
     return new RegExp(`^${regex}$`, "i").test(filename);
+  }
+
+  // ===== DATA ACCESS TOOLS =====
+  // These tools allow the AI chat to interact with projects, memory, and data
+
+  /**
+   * Read a specific project's data
+   */
+  async executeReadProject(projectId, params = {}) {
+    try {
+      const projectsPath = path.join(process.cwd(), "data", "projects.json");
+
+      if (!fs.existsSync(projectsPath)) {
+        return {
+          type: "project_not_found",
+          error: "No projects file found"
+        };
+      }
+
+      const projects = JSON.parse(fs.readFileSync(projectsPath, "utf-8"));
+
+      // Find by ID or name
+      const project = projects.find(p =>
+        p.id === projectId ||
+        p.name?.toLowerCase() === projectId?.toLowerCase() ||
+        p.title?.toLowerCase() === projectId?.toLowerCase()
+      );
+
+      if (!project) {
+        return {
+          type: "project_not_found",
+          projectId,
+          availableProjects: projects.map(p => ({ id: p.id, name: p.name || p.title }))
+        };
+      }
+
+      return {
+        type: "project_data",
+        project
+      };
+
+    } catch (error) {
+      throw new Error(`ReadProject failed: ${error.message}`);
+    }
+  }
+
+  /**
+   * List all projects
+   */
+  async executeListProjects(filter, params = {}) {
+    try {
+      const projectsPath = path.join(process.cwd(), "data", "projects.json");
+
+      if (!fs.existsSync(projectsPath)) {
+        return {
+          type: "projects_list",
+          projects: [],
+          count: 0
+        };
+      }
+
+      const projects = JSON.parse(fs.readFileSync(projectsPath, "utf-8"));
+
+      // Apply filter if provided
+      let filteredProjects = projects;
+      if (filter) {
+        const lowerFilter = filter.toLowerCase();
+        filteredProjects = projects.filter(p =>
+          p.name?.toLowerCase().includes(lowerFilter) ||
+          p.title?.toLowerCase().includes(lowerFilter) ||
+          p.status?.toLowerCase().includes(lowerFilter)
+        );
+      }
+
+      return {
+        type: "projects_list",
+        projects: filteredProjects.map(p => ({
+          id: p.id,
+          name: p.name || p.title,
+          status: p.status,
+          progress: p.progress,
+          goalId: p.goalId
+        })),
+        count: filteredProjects.length
+      };
+
+    } catch (error) {
+      throw new Error(`ListProjects failed: ${error.message}`);
+    }
+  }
+
+  /**
+   * Read from AI memory (conversation history, context)
+   */
+  async executeReadMemory(memoryKey, params = {}) {
+    try {
+      const memoryDir = path.join(process.cwd(), "data", "memory");
+
+      // If specific key requested
+      if (memoryKey) {
+        const memoryPath = path.join(memoryDir, `${memoryKey}.json`);
+        if (!fs.existsSync(memoryPath)) {
+          return {
+            type: "memory_not_found",
+            key: memoryKey
+          };
+        }
+
+        const data = JSON.parse(fs.readFileSync(memoryPath, "utf-8"));
+        return {
+          type: "memory_data",
+          key: memoryKey,
+          data
+        };
+      }
+
+      // List available memory keys
+      if (!fs.existsSync(memoryDir)) {
+        return {
+          type: "memory_list",
+          keys: [],
+          count: 0
+        };
+      }
+
+      const files = fs.readdirSync(memoryDir)
+        .filter(f => f.endsWith(".json"))
+        .map(f => f.replace(".json", ""));
+
+      return {
+        type: "memory_list",
+        keys: files,
+        count: files.length
+      };
+
+    } catch (error) {
+      throw new Error(`ReadMemory failed: ${error.message}`);
+    }
+  }
+
+  /**
+   * Write to AI memory
+   */
+  async executeWriteMemory(memoryKey, params = {}) {
+    try {
+      if (!memoryKey) {
+        throw new Error("Memory key is required");
+      }
+
+      const memoryDir = path.join(process.cwd(), "data", "memory");
+
+      // Ensure directory exists
+      if (!fs.existsSync(memoryDir)) {
+        fs.mkdirSync(memoryDir, { recursive: true });
+      }
+
+      const memoryPath = path.join(memoryDir, `${memoryKey}.json`);
+      const data = params.data || params.content || {};
+
+      // Read existing data if any
+      let existingData = {};
+      if (fs.existsSync(memoryPath)) {
+        try {
+          existingData = JSON.parse(fs.readFileSync(memoryPath, "utf-8"));
+        } catch (e) {
+          // Start fresh if corrupted
+        }
+      }
+
+      // Merge or replace based on params
+      const newData = params.merge
+        ? { ...existingData, ...data, updatedAt: new Date().toISOString() }
+        : { ...data, updatedAt: new Date().toISOString() };
+
+      fs.writeFileSync(memoryPath, JSON.stringify(newData, null, 2));
+
+      return {
+        type: "memory_written",
+        key: memoryKey,
+        merged: !!params.merge
+      };
+
+    } catch (error) {
+      throw new Error(`WriteMemory failed: ${error.message}`);
+    }
+  }
+
+  /**
+   * Read data from a specific data file
+   */
+  async executeReadData(fileName, params = {}) {
+    try {
+      const dataDir = path.join(process.cwd(), "data");
+
+      if (!fileName) {
+        // List available data files
+        if (!fs.existsSync(dataDir)) {
+          return { type: "data_list", files: [], count: 0 };
+        }
+
+        const files = fs.readdirSync(dataDir)
+          .filter(f => f.endsWith(".json") && !f.includes("settings"));
+
+        return {
+          type: "data_list",
+          files,
+          count: files.length
+        };
+      }
+
+      // Add .json extension if not present
+      const file = fileName.endsWith(".json") ? fileName : `${fileName}.json`;
+      const filePath = path.join(dataDir, file);
+
+      if (!fs.existsSync(filePath)) {
+        return {
+          type: "data_not_found",
+          file: fileName
+        };
+      }
+
+      const data = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+
+      return {
+        type: "data_content",
+        file: fileName,
+        data
+      };
+
+    } catch (error) {
+      throw new Error(`ReadData failed: ${error.message}`);
+    }
+  }
+
+  /**
+   * List all goals
+   */
+  async executeListGoals(filter, params = {}) {
+    try {
+      const goalsPath = path.join(process.cwd(), "data", "goals.json");
+
+      if (!fs.existsSync(goalsPath)) {
+        return {
+          type: "goals_list",
+          goals: [],
+          count: 0
+        };
+      }
+
+      const data = JSON.parse(fs.readFileSync(goalsPath, "utf-8"));
+      const goals = data.goals || data;
+
+      // Apply filter
+      let filteredGoals = Array.isArray(goals) ? goals : [];
+      if (filter) {
+        const lowerFilter = filter.toLowerCase();
+        filteredGoals = filteredGoals.filter(g =>
+          g.title?.toLowerCase().includes(lowerFilter) ||
+          g.status?.toLowerCase().includes(lowerFilter) ||
+          g.category?.toLowerCase().includes(lowerFilter)
+        );
+      }
+
+      return {
+        type: "goals_list",
+        goals: filteredGoals.map(g => ({
+          id: g.id,
+          title: g.title,
+          status: g.status,
+          category: g.category,
+          priority: g.priority,
+          progress: g.progress || g.currentValue
+        })),
+        count: filteredGoals.length
+      };
+
+    } catch (error) {
+      throw new Error(`ListGoals failed: ${error.message}`);
+    }
+  }
+
+  /**
+   * Get a specific goal by ID
+   */
+  async executeGetGoal(goalId, params = {}) {
+    try {
+      const goalsPath = path.join(process.cwd(), "data", "goals.json");
+
+      if (!fs.existsSync(goalsPath)) {
+        return {
+          type: "goal_not_found",
+          goalId
+        };
+      }
+
+      const data = JSON.parse(fs.readFileSync(goalsPath, "utf-8"));
+      const goals = data.goals || data;
+
+      const goal = (Array.isArray(goals) ? goals : []).find(g =>
+        g.id === goalId ||
+        g.title?.toLowerCase() === goalId?.toLowerCase()
+      );
+
+      if (!goal) {
+        return {
+          type: "goal_not_found",
+          goalId,
+          availableGoals: goals.slice(0, 5).map(g => ({ id: g.id, title: g.title }))
+        };
+      }
+
+      return {
+        type: "goal_data",
+        goal
+      };
+
+    } catch (error) {
+      throw new Error(`GetGoal failed: ${error.message}`);
+    }
+  }
+
+  // ===== MESSAGING TOOLS =====
+
+  /**
+   * Execute send WhatsApp message
+   * Sends a message to the current user's verified WhatsApp number
+   */
+  async executeSendWhatsApp(message, params = {}) {
+    try {
+      // Get current user
+      const user = getCurrentFirebaseUser();
+      if (!user?.id) {
+        throw new Error("No user logged in");
+      }
+
+      // Send the message
+      const result = await sendWhatsAppMessage(user.id, message);
+
+      if (!result.success) {
+        throw new Error(result.error || "Failed to send WhatsApp message");
+      }
+
+      return {
+        type: "whatsapp_sent",
+        success: true,
+        message: message,
+        messageId: result.messageId,
+        status: result.status
+      };
+
+    } catch (error) {
+      throw new Error(`SendWhatsApp failed: ${error.message}`);
+    }
   }
 
   // ===== BROWSER/COMPUTER USE TOOLS =====

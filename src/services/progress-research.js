@@ -3,8 +3,9 @@
  *
  * Provides empirically-based progress metrics:
  * - User's actual goal progress from stored data
- * - Research-backed "average person" benchmarks
+ * - Research-backed "average person" benchmarks (age-specific)
  * - Public figure achievements based on user's goals
+ * - Comparison against top 90% (90th percentile)
  */
 
 import fs from "fs";
@@ -14,6 +15,14 @@ import { isOuraConfigured, loadOuraData } from "./oura-service.js";
 import { loadAlpacaConfig } from "./alpaca-setup.js";
 import { isPlaidConfigured } from "./plaid-service.js";
 import { isSignedIn } from "./firebase-auth.js";
+import { getUserAge, getAgeBenchmarks, getSimpleBenchmark } from "./age-benchmarks.js";
+import {
+  getTargetPerson,
+  getTargetPersonWithAI,
+  findBestMatch,
+  initializeAIMatching,
+  isAIMatchingInitialized
+} from "./person-matcher.js";
 
 const DATA_DIR = path.join(process.cwd(), "data");
 const RESEARCH_CACHE_PATH = path.join(DATA_DIR, "progress_research.json");
@@ -290,7 +299,7 @@ class ProgressResearchService {
         return JSON.parse(fs.readFileSync(RESEARCH_CACHE_PATH, "utf-8"));
       }
     } catch (e) {}
-    return { userProgress: {}, lastUpdated: null };
+    return { userProgress: {}, lastUpdated: null, progressHistory: [] };
   }
 
   saveCache() {
@@ -303,6 +312,88 @@ class ProgressResearchService {
     } catch (e) {
       console.error("Failed to save progress research cache:", e.message);
     }
+  }
+
+  /**
+   * Record current progress to history (called periodically)
+   * Tracks score over time to detect trends
+   */
+  recordProgressSnapshot(score) {
+    if (!this.cache.progressHistory) {
+      this.cache.progressHistory = [];
+    }
+
+    const now = new Date();
+    const dateKey = now.toISOString().split("T")[0]; // YYYY-MM-DD
+
+    // Only record once per day
+    const existingToday = this.cache.progressHistory.find(h => h.date === dateKey);
+    if (existingToday) {
+      existingToday.score = score;
+      existingToday.timestamp = now.toISOString();
+    } else {
+      this.cache.progressHistory.push({
+        date: dateKey,
+        score,
+        timestamp: now.toISOString()
+      });
+    }
+
+    // Keep last 90 days of history
+    if (this.cache.progressHistory.length > 90) {
+      this.cache.progressHistory = this.cache.progressHistory.slice(-90);
+    }
+
+    this.saveCache();
+  }
+
+  /**
+   * Get progress trend based on history
+   * Returns: "up", "down", or "stable" with change amount
+   */
+  getProgressTrend() {
+    const history = this.cache.progressHistory || [];
+    if (history.length < 2) {
+      return { trend: "stable", change: 0, previousScore: null };
+    }
+
+    // Compare to yesterday (or most recent previous)
+    const sortedHistory = [...history].sort((a, b) =>
+      new Date(b.timestamp) - new Date(a.timestamp)
+    );
+
+    const current = sortedHistory[0];
+    const previous = sortedHistory[1];
+
+    if (!current || !previous) {
+      return { trend: "stable", change: 0, previousScore: null };
+    }
+
+    const change = current.score - previous.score;
+
+    // Only show trend if change is meaningful (at least 0.5%)
+    if (Math.abs(change) < 0.5) {
+      return { trend: "stable", change: 0, previousScore: previous.score };
+    }
+
+    return {
+      trend: change > 0 ? "up" : "down",
+      change: Math.round(change * 10) / 10,
+      previousScore: previous.score
+    };
+  }
+
+  /**
+   * Get progress history for charts/analysis
+   */
+  getProgressHistory(days = 30) {
+    const history = this.cache.progressHistory || [];
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - days);
+
+    return history
+      .filter(h => new Date(h.timestamp) >= cutoff)
+      .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
   }
 
   /**
@@ -534,6 +625,7 @@ class ProgressResearchService {
 
   /**
    * Get complete progress comparison data
+   * Now includes age-based benchmarks and improved person matching
    */
   getProgressComparison() {
     // Gather connected data from services
@@ -547,28 +639,72 @@ class ProgressResearchService {
       ? goals.sort((a, b) => a.priority - b.priority)[0].category
       : "finance";
 
+    // Get age-based benchmarks (uses new age-benchmarks service)
+    const userAge = getUserAge();
+    const ageBenchmarks = userAge ? getAgeBenchmarks(userAge) : null;
+    const simpleBenchmark = getSimpleBenchmark(primaryCategory, userAge);
+
+    // Get target person from improved person matcher (ONE domain focus)
+    let targetPerson;
+    try {
+      targetPerson = getTargetPerson(connectedData);
+    } catch (e) {
+      // Fallback to old method
+      targetPerson = this.getAspirationFigure(primaryCategory);
+    }
+
+    // Use age-based benchmark score if available, otherwise use category benchmark
     const avgPerson = this.getAveragePersonBenchmark(primaryCategory);
-    const aspirationFigure = this.getAspirationFigure(primaryCategory);
+
+    // Record progress snapshot for trend tracking
+    if (userProgress.score > 0) {
+      this.recordProgressSnapshot(userProgress.score);
+    }
+
+    // Get trend data
+    const trendData = this.getProgressTrend();
 
     return {
       user: {
         score: userProgress.score,
         hasGoals: userProgress.hasGoals,
         breakdown: userProgress.breakdown,
-        goalCount: userProgress.goalCount
+        goalCount: userProgress.goalCount,
+        age: userAge,
+        trend: trendData.trend,
+        trendChange: trendData.change,
+        previousScore: trendData.previousScore
       },
       avgPerson: {
         score: avgPerson.score,
         source: avgPerson.source,
-        note: `Only ${Math.round(EMPIRICAL_BENCHMARKS.goalCompletionRate * 100)}% of people achieve their goals`
+        note: `Only ${Math.round(EMPIRICAL_BENCHMARKS.goalCompletionRate * 100)}% of people achieve their goals`,
+        // Age-specific benchmarks
+        ageBenchmark: ageBenchmarks?.available ? {
+          netWorth: ageBenchmarks.netWorth,
+          income: ageBenchmarks.income,
+          investments: ageBenchmarks.investments,
+          health: ageBenchmarks.health
+        } : null
       },
+      top10Percent: ageBenchmarks?.available ? {
+        netWorth: ageBenchmarks.netWorth.formatted.top10Percent,
+        income: ageBenchmarks.income.formatted.top10Percent,
+        investments: ageBenchmarks.investments.formatted.top10Percent,
+        label: `Top 10% at age ${userAge}`
+      } : null,
       aspiration: {
-        name: aspirationFigure.name,
-        score: aspirationFigure.score,
-        metric: aspirationFigure.metric,
-        achievements: aspirationFigure.achievements
+        name: targetPerson.name,
+        score: targetPerson.score,
+        metric: targetPerson.metric,
+        achievements: targetPerson.achievements,
+        domain: targetPerson.domain,
+        matchReason: targetPerson.matchReason,
+        why_relatable: targetPerson.why_relatable,
+        why_aspirational: targetPerson.why_aspirational
       },
-      analysis: this.generateAnalysis(userProgress.score, avgPerson.score, aspirationFigure.score)
+      simpleBenchmark,
+      analysis: this.generateAnalysis(userProgress.score, avgPerson.score, targetPerson.score)
     };
   }
 
@@ -592,6 +728,91 @@ class ProgressResearchService {
     } else {
       return `${Math.abs(vsAvg)}% to reach average. Focus on one goal at a time.`;
     }
+  }
+
+  /**
+   * Get progress comparison with AI-powered target person matching
+   * Use this for the best possible role model selection
+   */
+  async getProgressComparisonWithAI() {
+    const connectedData = this.gatherConnectedData();
+    const userProgress = this.calculateUserProgress(connectedData);
+    const goalTracker = getGoalTracker();
+    const goals = goalTracker.getActive();
+
+    const primaryCategory = goals.length > 0
+      ? goals.sort((a, b) => a.priority - b.priority)[0].category
+      : "finance";
+
+    const userAge = getUserAge();
+    const ageBenchmarks = userAge ? getAgeBenchmarks(userAge) : null;
+    const simpleBenchmark = getSimpleBenchmark(primaryCategory, userAge);
+
+    // Use AI to find the best target person
+    let targetPerson;
+    try {
+      targetPerson = await getTargetPersonWithAI(connectedData);
+    } catch (e) {
+      console.error("[ProgressResearch] AI matching failed, using algorithm:", e.message);
+      targetPerson = getTargetPerson(connectedData);
+    }
+
+    const avgPerson = this.getAveragePersonBenchmark(primaryCategory);
+
+    return {
+      user: {
+        score: userProgress.score,
+        hasGoals: userProgress.hasGoals,
+        breakdown: userProgress.breakdown,
+        goalCount: userProgress.goalCount,
+        age: userAge
+      },
+      avgPerson: {
+        score: avgPerson.score,
+        source: avgPerson.source,
+        note: `Only ${Math.round(EMPIRICAL_BENCHMARKS.goalCompletionRate * 100)}% of people achieve their goals`,
+        ageBenchmark: ageBenchmarks?.available ? {
+          netWorth: ageBenchmarks.netWorth,
+          income: ageBenchmarks.income,
+          investments: ageBenchmarks.investments,
+          health: ageBenchmarks.health
+        } : null
+      },
+      top10Percent: ageBenchmarks?.available ? {
+        netWorth: ageBenchmarks.netWorth.formatted.top10Percent,
+        income: ageBenchmarks.income.formatted.top10Percent,
+        investments: ageBenchmarks.investments.formatted.top10Percent,
+        label: `Top 10% at age ${userAge}`
+      } : null,
+      aspiration: {
+        name: targetPerson.name,
+        score: targetPerson.score,
+        metric: targetPerson.metric,
+        achievements: targetPerson.achievements,
+        domain: targetPerson.domain,
+        matchReason: targetPerson.matchReason,
+        why_relatable: targetPerson.why_relatable,
+        why_aspirational: targetPerson.why_aspirational,
+        aiSelected: targetPerson.aiSelected
+      },
+      simpleBenchmark,
+      analysis: this.generateAnalysis(userProgress.score, avgPerson.score, targetPerson.score)
+    };
+  }
+
+  /**
+   * Initialize AI-powered matching (call on app startup)
+   */
+  async initializeAIMatching() {
+    const connectedData = this.gatherConnectedData();
+    return await initializeAIMatching(connectedData);
+  }
+
+  /**
+   * Check if AI matching is ready
+   */
+  isAIMatchingReady() {
+    return isAIMatchingInitialized();
   }
 }
 

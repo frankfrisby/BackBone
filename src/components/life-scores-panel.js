@@ -24,9 +24,10 @@ const CATEGORY_ICONS = {
   education: "~"
 };
 
-// Trend indicators
+// Trend indicators with background colors
 const TREND_ICONS = { up: "\u2191", down: "\u2193", stable: "-" };
 const TREND_COLORS = { up: "#22c55e", down: "#ef4444", stable: "#64748b" };
+const TREND_BG_COLORS = { up: "#166534", down: "#991b1b", stable: null }; // Dark green/red backgrounds
 
 /**
  * Standard Score Bar - ████░░░░ style
@@ -118,9 +119,12 @@ export const LifeScoresPanel = ({
     return "#ef4444";
   };
 
-  const trend = data?.trend || "stable";
+  // Get trend from research data (tracks over time)
+  const trend = progressData?.user?.trend || "stable";
+  const trendChange = progressData?.user?.trendChange || 0;
   const trendIcon = TREND_ICONS[trend] || "-";
   const trendColor = TREND_COLORS[trend] || "#64748b";
+  const trendBgColor = TREND_BG_COLORS[trend] || null;
 
   // Display name - use actual name or "You" as last resort
   const displayName = firstName || "You";
@@ -148,18 +152,27 @@ export const LifeScoresPanel = ({
       e(Text, { color: "#64748b" }, "Progress")
     ),
 
-    // User row: Name · Score
+    // User row: Name · Score with trend badge
     e(
       Box,
       { flexDirection: "row", justifyContent: "space-between" },
-      // Left side: User name · score
+      // Left side: User name · score · trend badge
       e(
         Box,
-        { flexDirection: "row" },
+        { flexDirection: "row", gap: 1 },
         e(Text, { color: "#e2e8f0", bold: true }, displayName),
-        e(Text, { color: "#64748b" }, " · "),
+        e(Text, { color: "#64748b" }, "·"),
         e(Text, { color: privateMode ? "#64748b" : getScoreColor(effectiveProgress || 0), bold: true }, progressDisplay),
-        !privateMode && effectiveProgress !== null && e(Text, { color: trendColor }, ` ${trendIcon}`)
+        // Trend badge with colored background (only if not stable and not private)
+        !privateMode && effectiveProgress !== null && trend !== "stable" && e(
+          Text,
+          {
+            color: "#ffffff",
+            backgroundColor: trendBgColor,
+            bold: true
+          },
+          ` ${trendIcon}${Math.abs(trendChange) > 0 ? Math.abs(trendChange) : ""} `
+        )
       ),
       // Right side: Target name · score
       showComparisons && e(

@@ -6749,46 +6749,61 @@ Folder: ${result.action.id}`,
       e(Text, { color: skeletonLight }, "░".repeat(Math.min(width, 30)))
     );
 
-    // Skeleton goal - DOUBLED lines for each goal (multi-line pulsing)
+    // Skeleton goal - 7 lines per goal (multi-line pulsing)
     const SkeletonGoal = (titleWidth) => e(
       Box,
       { flexDirection: "column", marginBottom: 2 },
-      // Title line with dot
+      // Line 1: Title line with dot
       e(Box, { flexDirection: "row", gap: 1 },
         e(Text, { color: pulsingDotVisible ? "#f59e0b" : "#92400e" }, "●"),
         e(Text, { color: skeletonLight }, "░".repeat(titleWidth))
       ),
-      // Second title line (doubled)
+      // Line 2: Second title line
       e(Box, { paddingLeft: 3 },
         e(Text, { color: skeletonMid }, "░".repeat(Math.floor(titleWidth * 0.85)))
       ),
-      // Progress/detail lines (doubled - 4 lines total)
+      // Line 3: Progress detail
       e(Box, { paddingLeft: 3 },
-        e(Text, { color: skeletonDark }, "░".repeat(Math.floor(titleWidth * 0.7)))
+        e(Text, { color: skeletonDark }, "░".repeat(Math.floor(titleWidth * 0.75)))
       ),
+      // Line 4: Status detail
       e(Box, { paddingLeft: 3 },
-        e(Text, { color: skeletonMid }, "░".repeat(Math.floor(titleWidth * 0.6)))
+        e(Text, { color: skeletonMid }, "░".repeat(Math.floor(titleWidth * 0.65)))
       ),
-      // Status line
+      // Line 5: Progress bar placeholder
       e(Box, { paddingLeft: 3 },
-        e(Text, { color: skeletonDark }, "░".repeat(Math.floor(titleWidth * 0.5)))
+        e(Text, { color: skeletonDark }, "░".repeat(Math.floor(titleWidth * 0.55)))
       ),
-      // Extra detail line (doubled)
+      // Line 6: Metric detail
       e(Box, { paddingLeft: 3 },
-        e(Text, { color: skeletonLight }, "░".repeat(Math.floor(titleWidth * 0.4)))
+        e(Text, { color: skeletonLight }, "░".repeat(Math.floor(titleWidth * 0.45)))
+      ),
+      // Line 7: Additional info
+      e(Box, { paddingLeft: 3 },
+        e(Text, { color: skeletonMid }, "░".repeat(Math.floor(titleWidth * 0.35)))
       )
     );
 
-    // Skeleton outcome - multi-line with green dot
+    // Skeleton outcome - 4 lines per outcome with green dot
     const SkeletonOutcome = (textWidth) => e(
       Box,
       { flexDirection: "column", marginBottom: 1 },
+      // Line 1: Main outcome with dot
       e(Box, { flexDirection: "row", gap: 1 },
         e(Text, { color: pulsingDotVisible ? "#22c55e" : "#166534" }, "●"),
         e(Text, { color: skeletonLight }, "░".repeat(textWidth))
       ),
+      // Line 2: Detail line
       e(Box, { paddingLeft: 3 },
-        e(Text, { color: skeletonMid }, "░".repeat(Math.floor(textWidth * 0.7)))
+        e(Text, { color: skeletonMid }, "░".repeat(Math.floor(textWidth * 0.8)))
+      ),
+      // Line 3: Progress/metric
+      e(Box, { paddingLeft: 3 },
+        e(Text, { color: skeletonDark }, "░".repeat(Math.floor(textWidth * 0.65)))
+      ),
+      // Line 4: Additional info
+      e(Box, { paddingLeft: 3 },
+        e(Text, { color: skeletonMid }, "░".repeat(Math.floor(textWidth * 0.5)))
       )
     );
 
@@ -6876,7 +6891,7 @@ Folder: ${result.action.id}`,
                 e(Text, { color: skeletonDark }, "░░░░░░░░░░░░░░░░")
               )
             ),
-            // 5 Outcome placeholders - multi-line each
+            // 5 Outcome placeholders - 4 lines each
             SkeletonOutcome(34),
             SkeletonOutcome(30),
             SkeletonOutcome(32),
@@ -6901,7 +6916,7 @@ Folder: ${result.action.id}`,
           e(Text, { color: "#f59e0b", bold: true }, "Goals"),
           e(Text, { color: "#1e293b" }, "─".repeat(22)),
           e(Box, { marginTop: 1 }),
-          // 4 Goal placeholders - each has 6 lines (doubled)
+          // 4 Goal placeholders - each has 7 lines
           SkeletonGoal(22),
           SkeletonGoal(20),
           SkeletonGoal(24),

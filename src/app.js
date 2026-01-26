@@ -1458,6 +1458,14 @@ const App = ({ updateConsoleTitle }) => {
         }
       });
 
+      // Stream raw Claude Code output to engine section
+      autonomousEngine.on("claude-stream", ({ chunk, type }) => {
+        if (chunk && type === "stdout") {
+          // Append streaming output to action stream for real-time display
+          appendActionStream(chunk);
+        }
+      });
+
       autonomousEngine.on("claude-tool-use", ({ tool, input, actionId }) => {
         if (actionId === currentActionIdRef.current) {
           const inputPreview = typeof input === "string"

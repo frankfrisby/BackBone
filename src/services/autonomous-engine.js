@@ -632,6 +632,26 @@ export class AutonomousEngine extends EventEmitter {
    * Set up event handlers for the Claude Orchestrator
    */
   setupOrchestratorEvents(orchestrator) {
+    // Started event
+    orchestrator.on("started", ({ goal }) => {
+      if (this.narrator) {
+        this.narrator.setClaudeCodeActive(true, "started");
+        this.narrator.observe(`Claude Code starting: ${goal?.title || "goal"}`);
+      }
+      this.emit("claude-start", { goal });
+    });
+
+    // Raw streaming output for real-time display
+    orchestrator.on("output", ({ chunk, type }) => {
+      // Stream raw output to UI
+      this.emit("claude-stream", { chunk, type });
+
+      // Also update narrator with streaming indicator
+      if (this.narrator && chunk.length > 0) {
+        this.narrator.setClaudeCodeActive(true, "streaming");
+      }
+    });
+
     // Tool usage events
     orchestrator.on("tool-use", ({ tool, input }) => {
       if (this.narrator) {
@@ -640,8 +660,9 @@ export class AutonomousEngine extends EventEmitter {
       this.emit("claude-tool-use", { tool, input });
     });
 
-    // Claude text output
+    // Claude text output (parsed from stream)
     orchestrator.on("claude-text", ({ text }) => {
+      this.emit("claude-text", { text });
       this.emit("claude-output", { text });
     });
 

@@ -14,6 +14,15 @@ const getTrailingStopManager = async () => {
   return trailingStopManager;
 };
 
+// Note: Momentum drift is imported dynamically to avoid circular dependency
+let momentumDriftModule = null;
+const getMomentumDrift = async () => {
+  if (!momentumDriftModule) {
+    momentumDriftModule = await import("./momentum-drift.js");
+  }
+  return momentumDriftModule;
+};
+
 /**
  * Auto-Trading Service for BACKBONE
  * Based on BackBoneApp production trading system
@@ -863,8 +872,48 @@ export const monitorAndTrade = async (tickers, positions = [], marketContext = {
     console.error("Trailing stop check error:", error.message);
   }
 
+  // STEP 0.5: Check for momentum drift (avg of timeframes < -0.75%)
+  try {
+    const md = await getMomentumDrift();
+    const driftAnalysis = md.getPositionsWithMomentumDrift(positions, sortedTickers);
+
+    for (const drift of driftAnalysis) {
+      // Skip if already sold via trailing stop
+      const alreadySold = results.executed.some(t => t.side === "sell" && t.symbol === drift.symbol);
+      if (alreadySold) continue;
+
+      const position = positions.find(p => p.symbol === drift.symbol);
+      if (!position) continue;
+
+      results.sellSignals.push({
+        action: "MOMENTUM_DRIFT",
+        symbol: drift.symbol,
+        score: drift.score,
+        avgChange: drift.avgChange,
+        signals: [`MOMENTUM DRIFT: ${drift.reason}`],
+        isMomentumDrift: true
+      });
+
+      const sellResult = await executeSell(
+        drift.symbol,
+        position.current_price || position.currentPrice || position.lastPrice,
+        parseFloat(position.qty || position.shares),
+        `MOMENTUM DRIFT: ${drift.reason}`
+      );
+
+      if (sellResult.success) {
+        results.executed.push(sellResult.trade);
+      } else {
+        results.skipped.push({ symbol: drift.symbol, reason: sellResult.error });
+      }
+    }
+  } catch (error) {
+    // Continue even if momentum drift check fails
+    console.error("Momentum drift check error:", error.message);
+  }
+
   // STEP 1: Evaluate ALL positions for sell signals first
-  // Skip positions already sold via trailing stop
+  // Skip positions already sold via trailing stop or momentum drift
   const soldViaTrailingStop = new Set(
     results.executed.filter(t => t.side === "sell").map(t => t.symbol)
   );

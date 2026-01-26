@@ -127,6 +127,7 @@ import { hasValidCredentials as hasCodexCredentials } from "./services/codex-oau
 import { loadFineTuningConfig, saveFineTuningConfig, runFineTuningPipeline, queryFineTunedModel } from "./services/fine-tuning.js";
 import { monitorAndTrade, loadConfig as loadTradingConfig, setTradingEnabled } from "./services/auto-trader.js";
 import { updateAllTrailingStops, checkStopTriggers, shouldUpdateStops } from "./services/trailing-stop-manager.js";
+import { recordMomentumSnapshot } from "./services/momentum-drift.js";
 import { isMarketOpen } from "./services/trading-status.js";
 import { analyzeAllPositions, getPositionContext, explainWhyHeld } from "./services/position-analyzer.js";
 
@@ -3227,6 +3228,9 @@ Execute this task and provide concrete results.`);
           // Stops triggered - these will be handled by monitorAndTrade
           setLastAction(`Stop triggered: ${triggeredStops.map(s => s.symbol).join(", ")}`);
         }
+
+        // Record momentum snapshot for drift analysis
+        recordMomentumSnapshot(tickers);
 
         // Run the auto-trading monitor
         const result = await monitorAndTrade(tickers, portfolio.positions);

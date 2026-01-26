@@ -913,11 +913,11 @@ export class AutonomousEngine extends EventEmitter {
 
     this.emit("goal-completed", this.currentGoal);
 
-    // Auto-select next goal
+    // Auto-select next goal (generates plan with GPT-5.2)
     if (this.goalManager) {
       const nextGoal = this.goalManager.selectNextGoal();
       if (nextGoal) {
-        this.goalManager.setCurrentGoal(nextGoal);
+        await this.goalManager.setCurrentGoal(nextGoal);
         this.currentGoal = nextGoal;
       }
     }

@@ -17,6 +17,7 @@ import path from "path";
 import { EventEmitter } from "events";
 import { getGoalTracker, GOAL_STATUS, GOAL_CATEGORY } from "./goal-tracker.js";
 import { loadGoals, extractGoalsFromMessage, processMessageForGoals } from "./goal-extractor.js";
+import { sendMessage, getMultiAIConfig, TASK_TYPES } from "./multi-ai.js";
 
 const DATA_DIR = path.join(process.cwd(), "data");
 const ACTIVE_GOAL_PATH = path.join(DATA_DIR, "active-goal.json");
@@ -71,7 +72,7 @@ export class GoalManager extends EventEmitter {
     if (!this.currentGoal) {
       const nextGoal = this.selectNextGoal();
       if (nextGoal) {
-        this.setCurrentGoal(nextGoal);
+        await this.setCurrentGoal(nextGoal);
       }
     }
 
@@ -161,14 +162,33 @@ export class GoalManager extends EventEmitter {
 
   /**
    * Set the current goal to work on
+   * Generates an AI-powered plan using GPT-5.2 if available
    */
-  setCurrentGoal(goal) {
+  async setCurrentGoal(goal) {
     const previousGoal = this.currentGoal;
     this.currentGoal = goal;
     this.actionHistory = [];
 
     // Create initial work plan
     this.currentWorkPlan = this.goalToWorkPlan(goal);
+
+    // Generate detailed plan using GPT-5.2
+    try {
+      this.emit("plan-generating", { goal });
+
+      const aiPlan = await this.generatePlanWithAI(goal);
+      if (aiPlan) {
+        this.currentWorkPlan.aiPlan = aiPlan;
+        this.currentWorkPlan.planSteps = aiPlan.phases;
+        this.currentWorkPlan.summary = aiPlan.summary;
+        this.currentWorkPlan.estimatedActions = aiPlan.estimatedActions;
+
+        this.emit("plan-generated", { goal, plan: aiPlan });
+      }
+    } catch (error) {
+      console.error("[GoalManager] Plan generation failed:", error.message);
+      // Continue without AI plan
+    }
 
     // Save state
     this.saveActiveGoal();
@@ -210,6 +230,126 @@ export class GoalManager extends EventEmitter {
       actions: [],
       startedAt: new Date().toISOString(),
       progress: 0
+    };
+  }
+
+  /**
+   * Generate a detailed plan using GPT-5.2
+   * Called when a goal starts to create a step-by-step execution plan
+   *
+   * @param {Object} goal - Goal object
+   * @returns {Promise<Object>} Generated plan with steps and strategies
+   */
+  async generatePlanWithAI(goal) {
+    if (!goal) return null;
+
+    try {
+      const config = getMultiAIConfig();
+
+      // Prefer GPT-5.2 Thinking for planning
+      if (!config.gptThinking?.ready && !config.gptInstant?.ready) {
+        console.log("[GoalManager] No AI model available for plan generation");
+        return this.generateFallbackPlan(goal);
+      }
+
+      const prompt = `Generate a detailed execution plan for this goal:
+
+GOAL: ${goal.title}
+CATEGORY: ${goal.category || "general"}
+DESCRIPTION: ${goal.description || "No additional details"}
+TARGET: ${goal.targetValue || "Not specified"} ${goal.unit || ""}
+CURRENT: ${goal.currentValue || 0} ${goal.unit || ""}
+
+Create a structured plan with:
+1. RESEARCH PHASE: What information needs to be gathered
+2. ANALYZE PHASE: What data needs to be analyzed
+3. PLAN PHASE: What strategies to consider
+4. EXECUTE PHASE: Specific actions to take
+5. VALIDATE PHASE: How to verify success
+
+For each phase, provide 2-3 specific, actionable steps.
+
+Respond in JSON format:
+{
+  "summary": "1-2 sentence overview",
+  "phases": {
+    "research": ["step1", "step2"],
+    "analyze": ["step1", "step2"],
+    "plan": ["step1", "step2"],
+    "execute": ["step1", "step2", "step3"],
+    "validate": ["step1", "step2"]
+  },
+  "estimatedActions": 10,
+  "keyMetrics": ["metric1", "metric2"]
+}`;
+
+      const response = await sendMessage(prompt, TASK_TYPES.PLANNING);
+
+      if (response && typeof response === "string") {
+        // Try to parse JSON from response
+        const jsonMatch = response.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          const plan = JSON.parse(jsonMatch[0]);
+          return {
+            ...plan,
+            generatedAt: new Date().toISOString(),
+            model: config.gptThinking?.ready ? "gpt-5.2-thinking" : "gpt-5.2"
+          };
+        }
+      }
+
+      return this.generateFallbackPlan(goal);
+    } catch (error) {
+      console.error("[GoalManager] Failed to generate AI plan:", error.message);
+      return this.generateFallbackPlan(goal);
+    }
+  }
+
+  /**
+   * Generate a fallback plan when AI is not available
+   */
+  generateFallbackPlan(goal) {
+    const category = goal.category || "general";
+
+    const categoryPlans = {
+      finance: {
+        research: ["Research current market conditions", "Analyze portfolio performance"],
+        analyze: ["Identify growth opportunities", "Assess risk factors"],
+        plan: ["Define investment strategy", "Set milestone targets"],
+        execute: ["Execute trades", "Monitor positions", "Adjust as needed"],
+        validate: ["Check progress against targets", "Review returns"]
+      },
+      health: {
+        research: ["Review current health metrics", "Research improvement strategies"],
+        analyze: ["Identify patterns in data", "Assess lifestyle factors"],
+        plan: ["Create improvement plan", "Set measurable goals"],
+        execute: ["Implement daily habits", "Track progress", "Adjust routines"],
+        validate: ["Measure against baseline", "Review improvement rate"]
+      },
+      family: {
+        research: ["Assess current time allocation", "Research activities"],
+        analyze: ["Identify schedule conflicts", "Find optimization opportunities"],
+        plan: ["Schedule dedicated time", "Plan activities"],
+        execute: ["Block calendar time", "Engage in activities", "Document memories"],
+        validate: ["Track hours spent", "Evaluate quality of time"]
+      }
+    };
+
+    const phases = categoryPlans[category] || {
+      research: ["Gather relevant information", "Review current state"],
+      analyze: ["Analyze data", "Identify patterns"],
+      plan: ["Create action plan", "Set milestones"],
+      execute: ["Take action", "Monitor progress"],
+      validate: ["Check results", "Adjust approach"]
+    };
+
+    return {
+      summary: `Plan to achieve: ${goal.title}`,
+      phases,
+      estimatedActions: 15,
+      keyMetrics: ["Progress toward target", "Completion rate"],
+      generatedAt: new Date().toISOString(),
+      model: "fallback"
     };
   }
 
@@ -376,7 +516,7 @@ export class GoalManager extends EventEmitter {
   /**
    * Add a new goal and optionally set it as current
    */
-  addGoal(goal, setAsCurrent = true) {
+  async addGoal(goal, setAsCurrent = true) {
     const tracker = getGoalTracker();
 
     // Add to tracker
@@ -391,7 +531,7 @@ export class GoalManager extends EventEmitter {
     });
 
     if (setAsCurrent) {
-      this.setCurrentGoal(createdGoal);
+      await this.setCurrentGoal(createdGoal);
     }
 
     this.emit("goal-added", createdGoal);
@@ -401,7 +541,7 @@ export class GoalManager extends EventEmitter {
   /**
    * Mark the current goal as complete
    */
-  completeCurrentGoal(summary = null) {
+  async completeCurrentGoal(summary = null) {
     if (!this.currentGoal) return null;
 
     const completedGoal = {
@@ -436,10 +576,10 @@ export class GoalManager extends EventEmitter {
       summary
     });
 
-    // Auto-select next goal
+    // Auto-select next goal (generates plan with GPT-5.2)
     const nextGoal = this.selectNextGoal();
     if (nextGoal) {
-      this.setCurrentGoal(nextGoal);
+      await this.setCurrentGoal(nextGoal);
     }
 
     return completedGoal;

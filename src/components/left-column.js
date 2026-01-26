@@ -88,6 +88,7 @@ const LeftColumnBase = ({
       data: lifeScoresData,
       title: "Progress",
       compact: true,
+      viewMode,
       userName: userName,
       userGoals: Array.isArray(goalsData) ? goalsData : [],
       privateMode,
@@ -98,6 +99,7 @@ const LeftColumnBase = ({
       data: ouraHealth,
       history: ouraHistory,
       aiResponse: aiHealthResponse,
+      viewMode,
       privateMode,
     }),
 
@@ -105,6 +107,7 @@ const LeftColumnBase = ({
     e(GoalProgressPanel, {
       goals: Array.isArray(goalsData) ? goalsData.slice(0, 2) : [],
       title: "Goals",
+      viewMode,
     }),
 
     // Ticker Scores Panel

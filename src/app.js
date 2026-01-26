@@ -6807,6 +6807,56 @@ Folder: ${result.action.id}`,
       )
     );
 
+    // For narrow terminals (< 80), show compact skeleton
+    if (isNarrow) {
+      return e(
+        Box,
+        {
+          key: "skeleton-narrow",
+          flexDirection: "column",
+          height: appHeight,
+          width: terminalWidth,
+          overflow: "hidden"
+        },
+        // Compact header
+        e(Box, { height: 2, flexDirection: "row", justifyContent: "space-between", paddingX: 1 },
+          e(Text, { color: skeletonLight }, "░░░░░░░░░░"),
+          e(Text, { color: skeletonMid }, "░░░░░")
+        ),
+        // Compact content - just engine and chat
+        e(Box, { flexDirection: "column", flexGrow: 1, paddingX: 1, overflow: "hidden" },
+          // Engine header
+          e(Text, { color: skeletonDimColor, bold: true }, "Engine"),
+          e(Text, { color: "#1e293b" }, "─".repeat(Math.min(terminalWidth - 4, 30))),
+          e(Box, { marginTop: 1 }),
+          // Working on
+          e(Box, { flexDirection: "column", marginBottom: 2 },
+            e(Box, { flexDirection: "row", gap: 1 },
+              e(Text, { color: pulsingDotVisible ? "#f59e0b" : "#92400e" }, "●"),
+              e(Text, { color: skeletonLight }, "░░░░░░░░░░░░░░░░░░░░")
+            ),
+            e(Box, { paddingLeft: 3 },
+              e(Text, { color: skeletonMid }, "░░░░░░░░░░░░░░")
+            )
+          ),
+          // 3 compact outcomes - 4 lines each
+          SkeletonOutcome(20),
+          SkeletonOutcome(18),
+          SkeletonOutcome(22),
+          // Chat input placeholder
+          e(Box, { flexGrow: 1, justifyContent: "flex-end" },
+            e(Box, { height: 4, borderStyle: "round", borderColor: "#1e293b", padding: 1 },
+              e(Box, { flexDirection: "row" },
+                e(Text, { color: skeletonDimColor }, "> "),
+                e(Text, { color: skeletonLight }, "░░░░░░░░░░░░░░░░░░░░")
+              ),
+              e(Text, { color: skeletonMid }, "  ░░░░░░░░░░░░░░░░")
+            )
+          )
+        )
+      );
+    }
+
     return e(
       Box,
       {
@@ -6828,13 +6878,13 @@ Folder: ${result.action.id}`,
         )
       ),
 
-      // Main content area with proper column structure
+      // Main content area with proper column structure - respects view mode
       e(
         Box,
         { flexDirection: "row", height: contentHeight, overflow: "hidden" },
 
-        // Left column (25%) - Progress + Health + Tickers with multi-line blocks
-        e(Box, { flexDirection: "column", width: "25%", paddingRight: 1, overflow: "hidden" },
+        // Left column (25%) - Progress + Health + Tickers - HIDDEN in MINIMAL/medium views
+        viewMode !== VIEW_MODES.MINIMAL && !isMedium && e(Box, { flexDirection: "column", width: "25%", paddingRight: 1, overflow: "hidden" },
           // Progress section - multi-line pulsing
           e(Box, { height: 12, flexDirection: "column", marginBottom: 2 },
             e(Text, { color: skeletonDimColor }, "Progress"),
@@ -6864,19 +6914,20 @@ Folder: ${result.action.id}`,
           )
         ),
 
-        // Center column (50%) - Engine + Chat area with multi-line blocks
+        // Center column - Engine + Chat area with multi-line blocks
+        // Width: 75% in MINIMAL/medium, 50% otherwise
         e(
           Box,
           {
             flexDirection: "column",
-            width: "50%",
+            width: viewMode === VIEW_MODES.MINIMAL || isMedium ? "75%" : "50%",
             paddingX: 1,
             overflow: "hidden"
           },
           // Engine section with working on - multi-line pulsing
           e(Box, { flexDirection: "column", height: 24, marginBottom: 2 },
             e(Text, { color: skeletonDimColor, bold: true }, "Engine"),
-            e(Text, { color: "#1e293b" }, "─".repeat(40)),
+            e(Text, { color: "#1e293b" }, "─".repeat(viewMode === VIEW_MODES.MINIMAL || isMedium ? 50 : 40)),
             e(Box, { marginTop: 1 }),
             // Working on placeholder - multi-line
             e(Box, { flexDirection: "column", marginBottom: 2 },
@@ -6911,8 +6962,8 @@ Folder: ${result.action.id}`,
           )
         ),
 
-        // Right column (25%) - 4 Goals skeleton with DOUBLED lines per goal
-        e(Box, { flexDirection: "column", width: "25%", paddingLeft: 1, overflow: "hidden" },
+        // Right column (25%) - 4 Goals skeleton - HIDDEN in MINIMAL view
+        viewMode !== VIEW_MODES.MINIMAL && e(Box, { flexDirection: "column", width: "25%", paddingLeft: 1, overflow: "hidden" },
           e(Text, { color: "#f59e0b", bold: true }, "Goals"),
           e(Text, { color: "#1e293b" }, "─".repeat(22)),
           e(Box, { marginTop: 1 }),

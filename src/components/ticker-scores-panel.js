@@ -485,24 +485,82 @@ const Top3DisplayBase = ({ tickers = [], spyPositive = null }) => {
 };
 
 /**
- * Ticker Summary Line
+ * Status indicator dot with blinking support
+ */
+const StatusDot = ({ status, label, blinking = false }) => {
+  const [visible, setVisible] = React.useState(true);
+
+  React.useEffect(() => {
+    if (blinking) {
+      const interval = setInterval(() => setVisible(v => !v), 400);
+      return () => clearInterval(interval);
+    }
+    setVisible(true);
+  }, [blinking]);
+
+  // Status colors: green=done, orange=working, red=not done
+  const color = status === "done" ? "#22c55e" :
+                status === "working" ? "#f97316" :
+                "#ef4444";
+
+  return e(
+    Box,
+    { flexDirection: "row", gap: 1 },
+    e(Text, { color: visible ? color : "#1e293b" }, "●"),
+    label && e(Text, { color: "#64748b" }, label)
+  );
+};
+
+/**
+ * Ticker Summary Line with status indicators
  * @param {Array} tickers - All tickers
  * @param {boolean|null} spyPositive - SPY direction for dynamic threshold
+ * @param {Object} scanStatus - Status of 800 ticker scan { done: bool, count: num, working: bool }
+ * @param {Object} refreshStatus - Status of refresh { done: bool, working: bool, lastRefresh: Date }
  */
-const TickerSummaryLineBase = ({ tickers = [], spyPositive = null }) => {
+const TickerSummaryLineBase = ({
+  tickers = [],
+  spyPositive = null,
+  scanStatus = null,
+  refreshStatus = null,
+  showStatusDots = true
+}) => {
   const threshold = getDynamicThreshold(spyPositive);
   const sorted = [...tickers]
     .filter(t => t && t.symbol && typeof t.score === "number")
     .sort((a, b) => (b.score || 0) - (a.score || 0))
-    .slice(0, 3);
+    .slice(0, 5);  // Show 5 tickers now
+
+  // Calculate scan status
+  const scanStatusValue = scanStatus?.working ? "working" :
+                          (scanStatus?.count >= 800 || scanStatus?.done) ? "done" : "pending";
+  const scanLabel = scanStatus?.count ? `${scanStatus.count}+` : null;
+
+  // Calculate refresh status
+  const now = Date.now();
+  const lastRefreshAge = refreshStatus?.lastRefresh ?
+    (now - new Date(refreshStatus.lastRefresh).getTime()) : Infinity;
+  const refreshStatusValue = refreshStatus?.working ? "working" :
+                             lastRefreshAge < 10 * 60 * 1000 ? "done" : "pending"; // 10 min
 
   if (sorted.length === 0) {
-    return e(Text, { color: "#475569" }, "No ticker data");
+    return e(
+      Box,
+      { flexDirection: "row", gap: 2 },
+      e(Text, { color: "#475569" }, "No ticker data"),
+      showStatusDots && e(
+        Box,
+        { flexDirection: "row", gap: 1 },
+        e(StatusDot, { status: scanStatusValue, label: scanLabel, blinking: scanStatusValue === "working" }),
+        e(StatusDot, { status: refreshStatusValue, label: "Refresh", blinking: refreshStatusValue === "working" })
+      )
+    );
   }
 
   return e(
     Box,
     { flexDirection: "row", gap: 2 },
+    // Show 5 tickers
     ...sorted.map((ticker, i) => {
       const color = getSignalColor(ticker.score);
       const isQualified = ticker.score >= threshold;
@@ -519,7 +577,14 @@ const TickerSummaryLineBase = ({ tickers = [], spyPositive = null }) => {
         e(Text, { color: isQualified ? "#f8fafc" : color, bold: isQualified }, ticker.symbol),
         e(Text, { color }, ticker.score.toFixed(1))
       );
-    })
+    }),
+    // Status dots section (to right of tickers)
+    showStatusDots && e(
+      Box,
+      { flexDirection: "row", gap: 1, marginLeft: 1 },
+      e(StatusDot, { status: scanStatusValue, label: scanLabel, blinking: scanStatusValue === "working" }),
+      e(StatusDot, { status: refreshStatusValue, label: "Refresh", blinking: refreshStatusValue === "working" })
+    )
   );
 };
 

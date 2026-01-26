@@ -382,10 +382,38 @@ const buildMeaningfulOutcome = (action, userName = "there") => {
 /**
  * Check if an outcome is a real goal/project completion (not small tasks)
  * Only show major achievements like completed goals or projects
+ * Filters out "no other goals available" and similar useless messages
  */
 const isRealGoalOrProject = (summary) => {
   if (!summary) return false;
   const lower = summary.toLowerCase();
+
+  // FIRST: Filter out all useless/empty state messages
+  const uselessPatterns = [
+    /no other goals/i,
+    /no goals available/i,
+    /no outcomes/i,
+    /no active goals/i,
+    /no pending goals/i,
+    /goals? (is|are) empty/i,
+    /nothing to (do|show|display)/i,
+    /^completed:/i,
+    /^analyzed?\s/i,
+    /^processed?\s/i,
+    /^checked?\s/i,
+    /^reviewed?\s/i,
+    /initializ/i,
+    /autonomous agent/i,
+    /help.*manage/i,
+    /waiting for/i,
+    /idle/i,
+    /standby/i
+  ];
+
+  // If it matches any useless pattern, reject it immediately
+  if (uselessPatterns.some(pattern => pattern.test(lower))) {
+    return false;
+  }
 
   // Must contain goal/project completion keywords
   const goalPatterns = [
@@ -400,22 +428,7 @@ const isRealGoalOrProject = (summary) => {
   ];
 
   // Check if it matches goal/project patterns
-  const isGoalOrProject = goalPatterns.some(pattern => pattern.test(lower));
-  if (!isGoalOrProject) return false;
-
-  // Filter out generic/vague outcomes even if they mention goals
-  const uselessPatterns = [
-    /^completed:/i,
-    /^analyzed?\s/i,
-    /^processed?\s/i,
-    /^checked?\s/i,
-    /^reviewed?\s/i,
-    /initializ/i,
-    /autonomous agent/i,
-    /help.*manage/i
-  ];
-
-  return !uselessPatterns.some(pattern => pattern.test(lower));
+  return goalPatterns.some(pattern => pattern.test(lower));
 };
 
 /**
@@ -874,7 +887,9 @@ const AgentActivityPanelBase = ({ overlayHeader = false, compact = false, scroll
   const userName = data.userName || process.env.USER_NAME || "there";
 
   // Build outcomes from completed actions with meaningful summaries
+  // Deduplicate and limit to only show unique, real outcomes (max 1 to avoid clutter)
   const outcomes = useMemo(() => {
+    const seen = new Set();
     return recentCompleted
       .filter(a => a.status === "completed")
       .map(a => {
@@ -883,7 +898,15 @@ const AgentActivityPanelBase = ({ overlayHeader = false, compact = false, scroll
         return meaningful ? { summary: meaningful, timestamp: a.completedAt } : null;
       })
       .filter(Boolean) // Remove null entries
-      .slice(0, 2);
+      .filter(o => {
+        // Deduplicate by normalized summary text
+        const normalized = o.summary.toLowerCase().replace(/[^a-z0-9]/g, "");
+        if (seen.has(normalized)) return false;
+        seen.add(normalized);
+        // Also filter out useless outcomes here
+        return isRealGoalOrProject(o.summary);
+      })
+      .slice(0, 1); // Max 1 outcome to avoid clutter
   }, [recentCompleted, userName]);
 
   return e(

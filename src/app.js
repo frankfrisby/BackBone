@@ -4903,6 +4903,183 @@ Folder: ${result.action.id}`,
         return;
       }
 
+      // /goals clear - Clear goals and archive projects
+      if (resolved === "/goals clear") {
+        setIsProcessing(true);
+        engineState.setStatus("working");
+        setLastAction("Clearing goals...");
+
+        try {
+          const goalManager = getGoalManager();
+          const tracker = getGoalTracker();
+
+          // Archive all current projects
+          const allGoals = tracker.getAllGoals();
+          let archivedCount = 0;
+          for (const goal of allGoals) {
+            if (goal.status !== "completed" && goal.status !== "archived") {
+              tracker.updateStatus(goal.id, "archived");
+              archivedCount++;
+            }
+          }
+
+          // Clear active goal
+          if (goalManager.currentGoal) {
+            goalManager.currentGoal = null;
+            goalManager.currentWorkPlan = null;
+            goalManager.saveActiveGoal();
+          }
+
+          setMessages((prev) => [...prev, {
+            role: "assistant",
+            content: `Goals cleared!\n\nArchived ${archivedCount} goals/projects.\n\nTell me what you'd like to focus on next, and I'll create new goals for you.\n\nOr type /goals reset to have me analyze your data and suggest goals.`,
+            timestamp: new Date()
+          }]);
+          setLastAction(`Cleared ${archivedCount} goals`);
+        } catch (error) {
+          setMessages((prev) => [...prev, {
+            role: "assistant",
+            content: `Error clearing goals: ${error.message}`,
+            timestamp: new Date()
+          }]);
+        }
+
+        setIsProcessing(false);
+        engineState.setStatus("idle");
+        return;
+      }
+
+      // /goals reset - Delete projects and regenerate goals based on user data
+      if (resolved === "/goals reset") {
+        setIsProcessing(true);
+        engineState.setStatus("working");
+        setLastAction("Resetting goals...");
+
+        try {
+          const goalManager = getGoalManager();
+          const tracker = getGoalTracker();
+          const { generateGoalsFromContext } = await import("./services/goal-generator.js");
+
+          // Delete all current goals (not just archive)
+          const allGoals = tracker.getAllGoals();
+          let deletedCount = 0;
+          for (const goal of allGoals) {
+            tracker.deleteGoal(goal.id);
+            deletedCount++;
+          }
+
+          // Clear active goal
+          goalManager.currentGoal = null;
+          goalManager.currentWorkPlan = null;
+          goalManager.saveActiveGoal();
+
+          // Generate new goals from user context
+          const newGoals = await generateGoalsFromContext({
+            portfolio: portfolioData,
+            health: ouraHealth,
+            profile: linkedInProfile
+          });
+
+          let content = "";
+          if (newGoals && newGoals.length > 0) {
+            // Save new goals
+            for (const goal of newGoals) {
+              tracker.addGoal(goal);
+            }
+            content = `Goals reset!\n\nDeleted ${deletedCount} old goals.\nCreated ${newGoals.length} new goals based on your data:\n\n`;
+            newGoals.forEach((g, i) => {
+              content += `${i + 1}. ${g.title}\n`;
+            });
+          } else {
+            content = `Goals reset!\n\nDeleted ${deletedCount} old goals.\n\n─────────────────────\n\n💡 Help me help you\n\nTell me what you need and I'll do the work.\n\n─────────────────────`;
+          }
+
+          setMessages((prev) => [...prev, {
+            role: "assistant",
+            content,
+            timestamp: new Date()
+          }]);
+          setLastAction(`Reset: ${deletedCount} deleted, ${newGoals?.length || 0} created`);
+        } catch (error) {
+          setMessages((prev) => [...prev, {
+            role: "assistant",
+            content: `Error resetting goals: ${error.message}`,
+            timestamp: new Date()
+          }]);
+        }
+
+        setIsProcessing(false);
+        engineState.setStatus("idle");
+        return;
+      }
+
+      // /goals update - Re-evaluate and update goals based on recent conversation
+      if (resolved === "/goals update") {
+        setIsProcessing(true);
+        engineState.setStatus("working");
+        setLastAction("Updating goals...");
+
+        try {
+          const goalManager = getGoalManager();
+          const tracker = getGoalTracker();
+          const aiBrain = getAIBrain();
+          const { generateGoalsFromInput } = await import("./services/goal-generator.js");
+
+          // Get recent conversation context
+          const recentMessages = messages.slice(-10);
+          const conversationContext = recentMessages
+            .map(m => `${m.role === "user" ? "User" : "AI"}: ${m.content?.slice(0, 200)}`)
+            .join("\n");
+
+          // Generate goals from recent conversation
+          const result = await generateGoalsFromInput(conversationContext);
+
+          if (result.success && result.goals && result.goals.length > 0) {
+            // Archive old goals first
+            const allGoals = tracker.getAllGoals();
+            for (const goal of allGoals) {
+              if (goal.status === "active" || goal.status === "pending") {
+                tracker.updateStatus(goal.id, "archived");
+              }
+            }
+
+            // Add new goals
+            for (const goal of result.goals) {
+              tracker.addGoal(goal);
+            }
+
+            let content = `Goals updated based on our conversation!\n\n`;
+            content += `Created ${result.goals.length} new goals:\n\n`;
+            result.goals.forEach((g, i) => {
+              content += `${i + 1}. ${g.title}\n   ${g.rationale || ""}\n\n`;
+            });
+
+            setMessages((prev) => [...prev, {
+              role: "assistant",
+              content,
+              timestamp: new Date()
+            }]);
+            setLastAction(`Updated to ${result.goals.length} new goals`);
+          } else {
+            setMessages((prev) => [...prev, {
+              role: "assistant",
+              content: "I couldn't identify specific goals from our recent conversation. Try telling me what you'd like to achieve, and I'll create goals for you.\n\nExample: \"I want to improve my fitness and grow my investment portfolio\"",
+              timestamp: new Date()
+            }]);
+          }
+        } catch (error) {
+          setMessages((prev) => [...prev, {
+            role: "assistant",
+            content: `Error updating goals: ${error.message}`,
+            timestamp: new Date()
+          }]);
+        }
+
+        setIsProcessing(false);
+        engineState.setStatus("idle");
+        return;
+      }
+
       // /data - Data scheduler commands
       if (resolved === "/data" || resolved === "/data status") {
         const report = getFreshnessReport();

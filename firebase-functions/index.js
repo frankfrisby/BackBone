@@ -329,15 +329,17 @@ exports.registerWhatsApp = functions.https.onCall(async (data, context) => {
 
 /**
  * Twilio WhatsApp Webhook
- * Configure this URL in Twilio Console > Messaging > Settings > WhatsApp Sandbox
- * URL: https://us-central1-YOUR_PROJECT.cloudfunctions.net/twilioWhatsAppWebhook
+ * Routes incoming WhatsApp messages to the user's local BACKBONE instance.
  *
- * This processes incoming WhatsApp messages and responds with AI
+ * Flow:
+ * 1. User sends WhatsApp message → Twilio → This webhook
+ * 2. Webhook saves message to Firestore under user's messages collection
+ * 3. User's local BACKBONE app polls Firestore, picks up message
+ * 4. Local app processes with user's own API keys
+ * 5. Local app saves response to Firestore
+ * 6. sendTwilioResponse trigger sends response back to WhatsApp
  *
- * Private Mode:
- * - Start message with "private:" or "/private " to hide from app conversation
- * - Private messages are processed but not shown in the main app UI
- * - User can toggle global private mode in settings
+ * No API keys needed in Firebase - all AI processing happens locally.
  */
 exports.twilioWhatsAppWebhook = functions.https.onRequest(async (req, res) => {
   if (req.method !== "POST") {
@@ -356,13 +358,9 @@ exports.twilioWhatsAppWebhook = functions.https.onRequest(async (req, res) => {
       // Empty message - send help
       const response = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Message>Hi! I'm BACKBONE, your AI assistant. Send me a message and I'll help you with:
-- Goals and productivity
-- Health insights
-- Trading analysis
-- Any questions you have
+  <Message>Hi! I'm BACKBONE. Send me a message and your local BACKBONE app will respond.
 
-Tip: Start with "private:" to keep messages hidden from the app.</Message>
+Make sure BACKBONE is running on your computer to receive responses.</Message>
 </Response>`;
       res.set("Content-Type", "text/xml");
       return res.status(200).send(response);
@@ -404,8 +402,8 @@ Tip: Start with "private:" to keep messages hidden from the app.</Message>
     // Combine message-level and user-level private mode
     const hideFromApp = isPrivate || userPrivateMode;
 
-    // Store the incoming message
-    const userMessageRef = await db.collection("users").doc(userId).collection("messages").add({
+    // Store the incoming message - local BACKBONE will pick this up
+    await db.collection("users").doc(userId).collection("messages").add({
       content: messageBody,
       type: "user",
       channel: "twilio_whatsapp",
@@ -414,41 +412,16 @@ Tip: Start with "private:" to keep messages hidden from the app.</Message>
       status: "pending",
       private: hideFromApp,
       showInApp: !hideFromApp,
+      needsResponse: true,  // Flag for local app to process
       createdAt: admin.firestore.FieldValue.serverTimestamp()
     });
 
-    // Generate AI response with context
-    let aiResponse = await generateAIResponse(userId, messageBody);
+    console.log(`[Twilio] Message saved for user ${userId}, awaiting local BACKBONE response`);
 
-    // Store AI response
-    await db.collection("users").doc(userId).collection("messages").add({
-      content: aiResponse,
-      type: "ai",
-      channel: "twilio_whatsapp",
-      to: from,
-      replyTo: userMessageRef.id,
-      private: hideFromApp,
-      showInApp: !hideFromApp,
-      createdAt: admin.firestore.FieldValue.serverTimestamp()
-    });
-
-    // Add privacy indicator if message was private
-    if (hideFromApp) {
-      aiResponse = "🔒 " + aiResponse;
-    }
-
-    // Escape XML characters
-    aiResponse = aiResponse
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;")
-      .replace(/'/g, "&apos;");
-
-    // Return TwiML response
+    // Return acknowledgment - actual response comes async via sendTwilioResponse
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Message>${aiResponse}</Message>
+  <Message>✓ Message received. Processing...</Message>
 </Response>`;
 
     res.set("Content-Type", "text/xml");
@@ -457,7 +430,6 @@ Tip: Start with "private:" to keep messages hidden from the app.</Message>
   } catch (error) {
     console.error("[Twilio] Webhook error:", error);
 
-    // Return error message
     const errorResponse = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Message>Sorry, I encountered an error. Please try again.</Message>
@@ -466,6 +438,94 @@ Tip: Start with "private:" to keep messages hidden from the app.</Message>
     return res.status(200).send(errorResponse);
   }
 });
+
+/**
+ * Firestore Trigger: Send Twilio WhatsApp response when local BACKBONE responds
+ *
+ * When the local BACKBONE app writes an AI response to Firestore,
+ * this trigger sends it to the user via Twilio WhatsApp API.
+ */
+exports.sendTwilioResponse = functions.firestore
+  .document("users/{userId}/messages/{messageId}")
+  .onCreate(async (snap, context) => {
+    const message = snap.data();
+    const userId = context.params.userId;
+
+    // Only process AI responses from local BACKBONE for WhatsApp
+    if (message.type !== "ai") {
+      return null;
+    }
+
+    // Check if this is a response that needs to go to WhatsApp
+    if (!message.sendToWhatsApp && message.channel !== "twilio_whatsapp_response") {
+      return null;
+    }
+
+    // Get user's phone number
+    const userDoc = await db.collection("users").doc(userId).get();
+    const userData = userDoc.data();
+
+    if (!userData?.whatsappPhone) {
+      console.log(`[Twilio] No WhatsApp phone for user ${userId}`);
+      return null;
+    }
+
+    // Get Twilio credentials from Firebase config
+    const twilioAccountSid = functions.config().twilio?.account_sid;
+    const twilioAuthToken = functions.config().twilio?.auth_token;
+    const twilioWhatsAppNumber = functions.config().twilio?.whatsapp_number;
+
+    if (!twilioAccountSid || !twilioAuthToken || !twilioWhatsAppNumber) {
+      console.error("[Twilio] Missing Twilio credentials in Firebase config");
+      return null;
+    }
+
+    try {
+      // Send via Twilio REST API
+      const auth = Buffer.from(`${twilioAccountSid}:${twilioAuthToken}`).toString("base64");
+
+      const response = await fetch(
+        `https://api.twilio.com/2010-04-01/Accounts/${twilioAccountSid}/Messages.json`,
+        {
+          method: "POST",
+          headers: {
+            "Authorization": `Basic ${auth}`,
+            "Content-Type": "application/x-www-form-urlencoded"
+          },
+          body: new URLSearchParams({
+            From: `whatsapp:${twilioWhatsAppNumber}`,
+            To: `whatsapp:${userData.whatsappPhone}`,
+            Body: message.content
+          })
+        }
+      );
+
+      const result = await response.json();
+
+      if (response.ok) {
+        // Mark as sent
+        await snap.ref.update({
+          twilioSent: true,
+          twilioMessageSid: result.sid,
+          sentAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+        console.log(`[Twilio] Response sent to ${userData.whatsappPhone}`);
+      } else {
+        console.error("[Twilio] Send failed:", result);
+        await snap.ref.update({
+          twilioError: result.message || "Failed to send"
+        });
+      }
+
+    } catch (error) {
+      console.error("[Twilio] Error sending response:", error);
+      await snap.ref.update({
+        twilioError: error.message
+      });
+    }
+
+    return null;
+  });
 
 /**
  * HTTP Function: Toggle private mode for user
@@ -485,165 +545,6 @@ exports.togglePrivateMode = functions.https.onCall(async (data, context) => {
 
   return { success: true, privateMode: enabled === true };
 });
-
-/**
- * Get user context from Firestore for better AI responses
- */
-async function getUserContext(userId) {
-  const context = {
-    profile: null,
-    goals: [],
-    recentMessages: []
-  };
-
-  try {
-    // Get user profile
-    const userDoc = await db.collection("users").doc(userId).get();
-    if (userDoc.exists) {
-      const data = userDoc.data();
-      context.profile = {
-        name: data.name || data.displayName || null,
-        preferences: data.preferences || {},
-        privateMode: data.privateMode || false
-      };
-    }
-
-    // Get user's goals (if stored in Firestore)
-    const goalsSnapshot = await db.collection("users").doc(userId)
-      .collection("goals")
-      .where("status", "==", "active")
-      .limit(5)
-      .get();
-
-    context.goals = goalsSnapshot.docs.map(doc => ({
-      title: doc.data().title,
-      category: doc.data().category
-    }));
-
-    // Get recent conversation history for context
-    const messagesSnapshot = await db.collection("users").doc(userId)
-      .collection("messages")
-      .orderBy("createdAt", "desc")
-      .limit(10)
-      .get();
-
-    context.recentMessages = messagesSnapshot.docs
-      .map(doc => ({
-        role: doc.data().type === "user" ? "user" : "assistant",
-        content: doc.data().content
-      }))
-      .reverse();
-
-  } catch (error) {
-    console.error("[Context] Error fetching user context:", error);
-  }
-
-  return context;
-}
-
-/**
- * Build system prompt with user context
- */
-function buildSystemPrompt(userContext) {
-  let prompt = `You are BACKBONE, a helpful AI life assistant. Keep responses concise (under 300 chars) for WhatsApp. Be friendly and actionable.`;
-
-  if (userContext.profile?.name) {
-    prompt += `\n\nUser's name: ${userContext.profile.name}`;
-  }
-
-  if (userContext.goals.length > 0) {
-    const goalsList = userContext.goals.map(g => `- ${g.title}`).join("\n");
-    prompt += `\n\nUser's active goals:\n${goalsList}`;
-  }
-
-  prompt += `\n\nProvide helpful, personalized responses based on the user's context. If they ask about their goals or progress, reference their specific goals.`;
-
-  return prompt;
-}
-
-/**
- * Generate AI response for WhatsApp message
- * Uses OpenAI or Claude API with user context
- */
-async function generateAIResponse(userId, message) {
-  // Get user context for personalized responses
-  const userContext = await getUserContext(userId);
-
-  // Get API keys from Firebase config
-  const openaiKey = functions.config().openai?.api_key;
-  const claudeKey = functions.config().anthropic?.api_key;
-
-  // Build system prompt with context
-  const systemPrompt = buildSystemPrompt(userContext);
-
-  // Build messages array with recent conversation history
-  const messages = [];
-
-  // Add recent conversation history (last 6 messages for context)
-  if (userContext.recentMessages.length > 0) {
-    const recentHistory = userContext.recentMessages.slice(-6);
-    messages.push(...recentHistory);
-  }
-
-  // Add current message
-  messages.push({ role: "user", content: message });
-
-  if (openaiKey) {
-    try {
-      const response = await fetch("https://api.openai.com/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${openaiKey}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          model: "gpt-4o-mini",
-          messages: [
-            { role: "system", content: systemPrompt },
-            ...messages
-          ],
-          max_tokens: 200
-        })
-      });
-
-      const data = await response.json();
-      if (data.choices?.[0]?.message?.content) {
-        return data.choices[0].message.content;
-      }
-    } catch (error) {
-      console.error("[AI] OpenAI error:", error);
-    }
-  }
-
-  if (claudeKey) {
-    try {
-      const response = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: {
-          "x-api-key": claudeKey,
-          "Content-Type": "application/json",
-          "anthropic-version": "2023-06-01"
-        },
-        body: JSON.stringify({
-          model: "claude-3-haiku-20240307",
-          max_tokens: 200,
-          system: systemPrompt,
-          messages: messages
-        })
-      });
-
-      const data = await response.json();
-      if (data.content?.[0]?.text) {
-        return data.content[0].text;
-      }
-    } catch (error) {
-      console.error("[AI] Claude error:", error);
-    }
-  }
-
-  // Fallback response if no AI configured
-  return `I received your message: "${message.slice(0, 50)}..."\n\nTo enable AI responses, configure OpenAI or Claude API keys in Firebase.`;
-}
 
 /**
  * Scheduled Function: Clean up old messages (optional)

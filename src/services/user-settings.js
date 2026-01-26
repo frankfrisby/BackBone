@@ -11,6 +11,9 @@ const SETTINGS_PATH = path.join(DATA_DIR, "user-settings.json");
 
 // Default settings
 const DEFAULT_SETTINGS = {
+  // App Identity
+  appName: "Backbone",  // Configurable name used throughout the app
+
   // Onboarding
   onboardingComplete: false,
   onboardingStep: null,
@@ -27,6 +30,17 @@ const DEFAULT_SETTINGS = {
     plaid: false
   },
   phoneNumber: null,
+
+  // User Profile (for benchmarks & role model matching)
+  userProfile: {
+    birthYear: null,        // e.g., 1985
+    age: null,              // Calculated or manually set
+    primaryDomain: null,    // 'finance', 'tech', 'health', 'career', 'creative', etc.
+    currentNetWorth: null,  // For financial benchmarks
+    annualIncome: null,     // For savings rate calculations
+    occupation: null,       // Current job/role
+    aspirations: []         // What they want to become/achieve
+  },
 
   // Display
   privateMode: false,
@@ -126,6 +140,15 @@ export const updateSettings = (updates) => {
 export const getSetting = (key) => {
   const settings = loadUserSettings();
   return settings[key];
+};
+
+/**
+ * Get the app name (defaults to "Backbone" if not set)
+ * This is the configurable name used throughout the app
+ */
+export const getAppName = () => {
+  const settings = loadUserSettings();
+  return settings.appName || "Backbone";
 };
 
 /**

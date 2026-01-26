@@ -1,11 +1,12 @@
 import React, { memo, useMemo, useState, useEffect, useRef } from "react";
 import { Box, Text } from "ink";
-import { getActivityNarrator, AGENT_STATES, ACTION_TOOLS } from "../services/activity-narrator.js";
+import { getActivityNarrator, AGENT_STATES, ACTION_TOOLS, ACTION_COLORS, ACTION_ICONS, STATE_COLORS } from "../services/activity-narrator.js";
 import { getAutonomousEngine } from "../services/autonomous-engine.js";
 import { useCoordinatedUpdates } from "../hooks/useCoordinatedUpdates.js";
 import { getAIStatus, getMultiAIConfig, getCurrentModel } from "../services/multi-ai.js";
 import { BILLING_URLS } from "../services/api-quota-monitor.js";
 import { isClaudeCodeLoggedIn } from "../services/claude-code-cli.js";
+import { getGoalManager } from "../services/goal-manager.js";
 
 const e = React.createElement;
 
@@ -71,20 +72,21 @@ const THEME = {
   diffRemoveFg: "#fca5a5",
 };
 
-// Status dot states
+// Status dot states - using ACTION_COLORS for consistency
 const STATUS_DOT = {
-  WORKING: { color: THEME.gray, blink: true },
-  DONE: { color: THEME.success, blink: false },
-  FAILED: { color: THEME.error, blink: false },
-  OBSERVATION: { color: THEME.white, blink: false },
+  WORKING: { color: ACTION_COLORS.WORKING, icon: ACTION_ICONS.WORKING, blink: true },
+  DONE: { color: ACTION_COLORS.DONE, icon: ACTION_ICONS.DONE, blink: false },
+  FAILED: { color: ACTION_COLORS.FAILED, icon: ACTION_ICONS.FAILED, blink: false },
+  OBSERVATION: { color: ACTION_COLORS.OBSERVATION, icon: ACTION_ICONS.OBSERVATION, blink: false },
 };
 
 /**
  * Status dot component - color indicates status
+ * Uses icons from ACTION_ICONS: ● for working, ✓ for done, ✗ for failed, ○ for observation
  */
 const StatusDot = memo(({ status = "WORKING" }) => {
   const dotInfo = STATUS_DOT[status] || STATUS_DOT.WORKING;
-  return e(Text, { color: dotInfo.color }, "●");
+  return e(Text, { color: dotInfo.color }, dotInfo.icon || "●");
 });
 
 /**
@@ -105,18 +107,31 @@ const StatusDot = memo(({ status = "WORKING" }) => {
  *   Building...
  *   Goal: Researching the best stocks to buy for Jan 26th week
  *         · Project: Stock Analysis Q1
+ *
+ *   Idle...
+ *   Waiting on: Stock Research - market closed
+ *               Job Finding - waiting for user input
  */
-const StateDisplay = memo(({ state, stateInfo, goal, projectName, hideStateLine = false }) => {
+const StateDisplay = memo(({ state, stateInfo, goal, projectName, hideStateLine = false, waitingReasons = [] }) => {
   const stateText = stateInfo?.text || state || "Idle";
-  const color = stateInfo?.color || THEME.warning;
+  // Use STATE_COLORS if available, fallback to stateInfo color
+  const stateKey = (state || "IDLE").toUpperCase();
+  const color = STATE_COLORS[stateKey] || stateInfo?.color || THEME.warning;
+  const isIdle = stateKey === "IDLE";
 
   return e(
     Box,
     { flexDirection: "column", marginBottom: 1 },
-    // State with ellipsis - pulsing effect to show system is running
-    !hideStateLine && e(FlashlightText, { text: `${stateText}...`, baseColor: color, bold: true }),
-    // Goal with project name
-    goal && e(
+    // State with ellipsis - shimmer effect shows system is running
+    // Format: * Researching...  (Esc to interrupt · 5m 33s · ↓ 11.4k tokens · thinking)
+    !hideStateLine && e(
+      Box,
+      { flexDirection: "row" },
+      e(Text, { color }, "* "),
+      e(FlashlightText, { text: `${stateText}...`, baseColor: color, bold: true })
+    ),
+    // Goal with project name (only when not idle)
+    !isIdle && goal && e(
       Box,
       { paddingLeft: 2, flexDirection: "row", flexWrap: "wrap" },
       e(Text, { color: THEME.muted }, "Goal: "),
@@ -124,6 +139,29 @@ const StateDisplay = memo(({ state, stateInfo, goal, projectName, hideStateLine 
       projectName && e(Text, { color: THEME.dim }, " · "),
       projectName && e(Text, { color: THEME.dim }, "Project: "),
       projectName && e(Text, { color: THEME.muted }, projectName)
+    ),
+    // When idle, show waiting reasons for top 2 projects
+    isIdle && waitingReasons && waitingReasons.length > 0 && e(
+      Box,
+      { flexDirection: "column", paddingLeft: 2 },
+      e(Text, { color: THEME.muted }, "Waiting on:"),
+      ...waitingReasons.slice(0, 2).map((reason, i) =>
+        e(
+          Box,
+          { key: i, flexDirection: "row", paddingLeft: 2 },
+          e(Text, { color: THEME.dim }, "• "),
+          e(Text, { color: THEME.secondary, wrap: "wrap" },
+            `${reason.project || reason.goal || "Project"} - ${reason.reason || "waiting"}`
+          )
+        )
+      )
+    ),
+    // When idle with no reasons, show generic message
+    isIdle && (!waitingReasons || waitingReasons.length === 0) && goal && e(
+      Box,
+      { paddingLeft: 2, flexDirection: "row", flexWrap: "wrap" },
+      e(Text, { color: THEME.muted }, "Status: "),
+      e(Text, { color: THEME.secondary, wrap: "wrap" }, goal)
     )
   );
 });
@@ -182,26 +220,26 @@ const ActionLine = memo(({ action, showDetail = true }) => {
     resultLines = result.split("\n").filter(line => line.trim());
   }
 
-  // Status indicator: gray dot = working, green checkmark = done, red X = failed
+  // Status indicator: green dot = done, red dot = failed, gray dot = working
   const isFailed = status === "FAILED" || status === "failed" || status === "error";
   const statusIcon = isDone
-    ? e(Text, { color: THEME.success, bold: true }, "✓")  // Green checkmark for completed
+    ? e(Text, { color: THEME.success }, "●")  // Green dot for completed
     : isFailed
-      ? e(Text, { color: THEME.error, bold: true }, "✗")  // Red X for failed
+      ? e(Text, { color: THEME.error }, "●")  // Red dot for failed
       : e(Text, { color: THEME.gray }, "●");  // Gray dot for in-progress
 
   return e(
     Box,
     { flexDirection: "column", marginBottom: 1 },
-    // Main action line: ✓/●/✗ Verb(target in white)
+    // Main action line: ● Verb(target) - only dot changes color, text stays normal
     e(
       Box,
       { flexDirection: "row" },
       statusIcon,
       e(Text, { color: THEME.muted }, " "),
-      e(Text, { color: isDone ? THEME.success : isFailed ? THEME.error : color, bold: true }, verb),
+      e(Text, { color: color, bold: true }, verb),
       e(Text, { color: THEME.muted }, "("),
-      e(Text, { color: isDone ? THEME.success : THEME.white, wrap: "wrap" }, target),
+      e(Text, { color: THEME.white, wrap: "wrap" }, target),
       e(Text, { color: THEME.muted }, ")")
     ),
 
@@ -383,6 +421,7 @@ const isRealGoalOrProject = (summary) => {
 /**
  * Outcome line - Only for completed GOALS or PROJECTS
  * Shows green dot with white/gray text
+ * Does NOT show "no other goals available" or empty outcomes
  */
 const OutcomeLine = memo(({ outcome }) => {
   if (!outcome) return null;
@@ -391,6 +430,14 @@ const OutcomeLine = memo(({ outcome }) => {
 
   // Only show real goal/project completions
   if (!isRealGoalOrProject(summary)) return null;
+
+  // Filter out "no other goals available" and similar messages
+  const lowerSummary = summary.toLowerCase();
+  if (lowerSummary.includes("no other goals") ||
+      lowerSummary.includes("no goals available") ||
+      lowerSummary.includes("no outcomes")) {
+    return null;
+  }
 
   return e(
     Box,
@@ -520,6 +567,60 @@ const StatsLine = memo(({ stats }) => {
     e(Text, { color: THEME.dim }, `⟨ ${tokens.toLocaleString()} tokens`),
     e(Text, { color: THEME.dim }, `│ ${formatRuntime(runtime)}`),
     e(Text, { color: THEME.dim }, "⟩")
+  );
+});
+
+/**
+ * Engine Status Line - Bottom status with shimmer, time, tokens, substatus
+ *
+ * Format: * Researching...  (Esc to interrupt · 5m 33s · ↓ 11.4k tokens · thinking)
+ */
+const EngineStatusLine = memo(({ state, stateInfo, time, tokens, substatus = "working" }) => {
+  const stateKey = (state || "IDLE").toUpperCase();
+  const stateColor = STATE_COLORS[stateKey] || stateInfo?.color || THEME.warning;
+  const stateText = stateInfo?.text || state || "Idle";
+
+  const formatTime = (ms) => {
+    if (!ms) return "0s";
+    const secs = Math.floor(ms / 1000);
+    const mins = Math.floor(secs / 60);
+    if (mins > 0) return `${mins}m ${secs % 60}s`;
+    return `${secs}s`;
+  };
+
+  const formatTokens = (count) => {
+    if (!count) return "0";
+    if (count >= 1000) {
+      return `${(count / 1000).toFixed(1)}k`;
+    }
+    return count.toString();
+  };
+
+  return e(
+    Box,
+    { flexDirection: "row", marginTop: 1 },
+    // State indicator with shimmer
+    e(Text, { color: stateColor }, "* "),
+    e(FlashlightText, {
+      text: `${stateText}...`,
+      baseColor: stateColor
+    }),
+
+    // Controls hint
+    e(Text, { color: THEME.dim }, "  (Esc to interrupt · "),
+
+    // Time
+    e(Text, { color: THEME.muted }, formatTime(time)),
+
+    // Tokens
+    e(Text, { color: THEME.dim }, " · ↓ "),
+    e(Text, { color: THEME.muted }, `${formatTokens(tokens)} tokens`),
+
+    // Substatus
+    e(Text, { color: THEME.dim }, " · "),
+    e(Text, { color: THEME.muted }, substatus),
+
+    e(Text, { color: THEME.dim }, ")")
   );
 });
 
@@ -654,7 +755,7 @@ const ModelStatusBanner = memo(({ status }) => {
  * │   [diff view with green/red lines]                      │
  * └─────────────────────────────────────────────────────────┘
  */
-const AgentActivityPanelBase = ({ overlayHeader = false, compact = false }) => {
+const AgentActivityPanelBase = ({ overlayHeader = false, compact = false, scrollOffset = 0 }) => {
   const narrator = getActivityNarrator();
   const autonomousEngine = getAutonomousEngine();
 
@@ -719,7 +820,26 @@ const AgentActivityPanelBase = ({ overlayHeader = false, compact = false }) => {
   const taskProgress = data.taskProgress;
   const metricsLine = data.metricsLine || "";
 
-  // Build timeline from real actions
+  // Claude Code CLI status - shows orange when active
+  const claudeCode = data.claudeCode || { active: false, status: "inactive" };
+  const isClaudeCodeActive = claudeCode.active;
+  const claudeCodeColor = "#f97316"; // Orange
+
+  // Get waiting reasons for idle state display
+  const waitingReasons = useMemo(() => {
+    const stateKey = (state || "IDLE").toUpperCase();
+    if (stateKey === "IDLE" || modelStatus.isPaused) {
+      try {
+        const goalManager = getGoalManager();
+        return goalManager.getWaitingReasons();
+      } catch {
+        return [];
+      }
+    }
+    return [];
+  }, [state, modelStatus.isPaused]);
+
+  // Build timeline from real actions (supports scrolling via scrollOffset)
   const timeline = useMemo(() => {
     const items = [
       ...actions.map(a => ({ ...a, itemType: "action" }))
@@ -731,8 +851,10 @@ const AgentActivityPanelBase = ({ overlayHeader = false, compact = false }) => {
       return items.filter(item => item.status === "DONE" || item.status === "completed").slice(0, 3);
     }
 
-    return items.slice(0, 4);
-  }, [actions, modelStatus.isPaused]);
+    // Apply scroll offset for keyboard navigation (up/down arrows)
+    const start = Math.min(scrollOffset, Math.max(0, items.length - 4));
+    return items.slice(start, start + 4);
+  }, [actions, modelStatus.isPaused, scrollOffset]);
 
   // Build discoveries from observations (filter out advice-like text)
   const discoveries = useMemo(() => {
@@ -798,9 +920,10 @@ const AgentActivityPanelBase = ({ overlayHeader = false, compact = false }) => {
         }
       }
 
-      // Check Claude Code CLI status
+      // Check Claude Code CLI status - use active state from narrator
       const claudeCodeStatus = isClaudeCodeLoggedIn();
-      const claudeCodeRunning = claudeCodeStatus.loggedIn;
+      const claudeCodeAvailable = claudeCodeStatus.loggedIn;
+      // isClaudeCodeActive comes from narrator data - true when Claude CLI is actually running
 
       if (compact) {
         return e(
@@ -811,10 +934,16 @@ const AgentActivityPanelBase = ({ overlayHeader = false, compact = false }) => {
             // Blinking gray dot to show engine is alive
             e(Text, { color: dotVisible ? THEME.gray : THEME.dim }, " ● "),
             e(Text, { color: modelColor, bold: true }, modelName),
-            // Show Claude Code CLI status if connected
-            claudeCodeRunning && e(Text, { color: THEME.dim }, " · "),
-            claudeCodeRunning && e(Text, { color: THEME.success }, "Claude CLI "),
-            claudeCodeRunning && e(Text, { color: THEME.gray }, "(Background)")
+            // Show Claude Code CLI status - ORANGE BACKGROUND when actively running
+            isClaudeCodeActive && e(Text, { color: THEME.dim }, " · "),
+            isClaudeCodeActive && e(Text, { color: claudeCodeColor, backgroundColor: "#7c2d12", bold: true }, " Claude Code ACTIVE "),
+            // Show metrics when Claude Code is active
+            isClaudeCodeActive && claudeCode.toolCallCount > 0 && e(Text, { color: THEME.dim }, " · "),
+            isClaudeCodeActive && claudeCode.toolCallCount > 0 && e(Text, { color: THEME.gray }, `${claudeCode.toolCallCount} tools`),
+            isClaudeCodeActive && claudeCode.tokensUsed > 0 && e(Text, { color: THEME.dim }, " · "),
+            isClaudeCodeActive && claudeCode.tokensUsed > 0 && e(Text, { color: THEME.gray }, `${Math.round(claudeCode.tokensUsed / 1000)}k tokens`),
+            !isClaudeCodeActive && claudeCodeAvailable && e(Text, { color: THEME.dim }, " · "),
+            !isClaudeCodeActive && claudeCodeAvailable && e(Text, { color: THEME.gray }, "Claude CLI Ready")
           ),
           e(Text, { color: "#1e293b" }, "─".repeat(50))
         );
@@ -840,10 +969,16 @@ const AgentActivityPanelBase = ({ overlayHeader = false, compact = false }) => {
             // Blinking gray dot to show engine is alive
             e(Text, { color: dotVisible ? THEME.gray : THEME.dim }, " ● "),
             e(Text, { color: modelColor, bold: true }, modelName),
-            // Show Claude Code CLI status if connected
-            claudeCodeRunning && e(Text, { color: THEME.dim }, " · "),
-            claudeCodeRunning && e(Text, { color: THEME.success }, "Claude CLI Running "),
-            claudeCodeRunning && e(Text, { color: THEME.gray }, "(Background)")
+            // Show Claude Code CLI status - ORANGE BACKGROUND when actively running
+            isClaudeCodeActive && e(Text, { color: THEME.dim }, " · "),
+            isClaudeCodeActive && e(Text, { color: claudeCodeColor, backgroundColor: "#7c2d12", bold: true }, " Claude Code ACTIVE "),
+            // Show metrics when Claude Code is active
+            isClaudeCodeActive && claudeCode.toolCallCount > 0 && e(Text, { color: THEME.dim }, " · "),
+            isClaudeCodeActive && claudeCode.toolCallCount > 0 && e(Text, { color: THEME.gray }, `${claudeCode.toolCallCount} tools`),
+            isClaudeCodeActive && claudeCode.tokensUsed > 0 && e(Text, { color: THEME.dim }, " · "),
+            isClaudeCodeActive && claudeCode.tokensUsed > 0 && e(Text, { color: THEME.gray }, `${Math.round(claudeCode.tokensUsed / 1000)}k tokens`),
+            !isClaudeCodeActive && claudeCodeAvailable && e(Text, { color: THEME.dim }, " · "),
+            !isClaudeCodeActive && claudeCodeAvailable && e(Text, { color: THEME.gray }, "Claude CLI Ready")
           ),
           metricsLine
             ? e(Text, { color: THEME.dim }, metricsLine)
@@ -862,7 +997,8 @@ const AgentActivityPanelBase = ({ overlayHeader = false, compact = false }) => {
       stateInfo: modelStatus.isPaused ? AGENT_STATES.IDLE : stateInfo,
       goal: modelStatus.isPaused ? "Waiting for model connection..." : goal,
       projectName: modelStatus.isPaused ? null : projectName,
-      hideStateLine: overlayHeader
+      hideStateLine: overlayHeader,
+      waitingReasons: waitingReasons
     }),
 
     // Real ACTIONS (bash commands, searches, file operations)

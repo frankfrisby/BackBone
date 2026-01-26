@@ -22,17 +22,30 @@ import { Box, Text } from "ink";
 import { getGoalTracker, GOAL_STATUS } from "../services/goal-tracker.js";
 import { generateGoalsFromData } from "../services/goal-generator.js";
 import { getProjectManager } from "../services/project-manager.js";
-import { getGoalManager } from "../services/goal-manager.js";
+import { getGoalManager, GOAL_STATE } from "../services/goal-manager.js";
 
 const e = React.createElement;
 
-// Status colors - simple gray/green/red scheme
+// Status colors - gray/green/red/yellow scheme
 const STATUS_COLORS = {
   pending: "#64748b",     // Gray - waiting
   active: "#64748b",      // Gray (blinking when working) - currently active
   completed: "#22c55e",   // Green - done
   failed: "#ef4444",      // Red - failed
-  blocked: "#ef4444"      // Red - blocked
+  blocked: "#ef4444",     // Red - blocked
+  on_hold: "#f59e0b",     // Amber/yellow - on hold, waiting for something
+  partial: "#22c55e"      // Green (for partial fill indicator)
+};
+
+// Visual indicators for different states
+const STATUS_INDICATORS = {
+  pending: "●",           // Solid dot - waiting
+  active: "●",            // Solid dot (blinks) - working
+  completed: "●",         // Solid green dot - done
+  failed: "●",            // Solid red dot - failed
+  blocked: "●",           // Solid red dot - blocked
+  on_hold: "◐",           // Half-filled circle - on hold/partial (left half filled)
+  partial: "◐"            // Half-filled circle - partially complete, waiting
 };
 
 /**
@@ -46,21 +59,55 @@ const truncateToLines = (text, maxLines, charsPerLine = 30) => {
 };
 
 /**
+ * Get the visual state for a goal from the goal manager
+ * Returns: "active", "on_hold", "partial", "completed", "failed", "blocked", "pending"
+ */
+const getGoalVisualState = (goal) => {
+  try {
+    const goalManager = getGoalManager();
+    const status = goalManager.getGoalStatus(goal.id);
+    if (status && status.visualState) {
+      return status.visualState;
+    }
+  } catch (e) {
+    // Goal manager not available, fall back to basic status
+  }
+
+  // Fall back to goal's basic status
+  return goal.status || "pending";
+};
+
+/**
  * Single Goal Display
  * Format:
  *   ● Goal title (max 2 lines)
  *     Project Name (max 2 lines)
+ *
+ * Indicators:
+ *   ● Solid dot - pending, active, completed, failed
+ *   ◐ Half circle - on hold/partial (waiting for something)
  */
 const GoalLine = memo(({ goal, isWorking = false, blinkVisible = true, isFirst = false }) => {
-  const status = goal.status || "pending";
-  const dotColor = STATUS_COLORS[status] || STATUS_COLORS.pending;
+  const basicStatus = goal.status || "pending";
 
-  // Always use dot (●) - color indicates status
-  // Green dot = completed, Red dot = failed, Gray dot = pending/active
-  const indicator = "●";
+  // Get visual state which considers on-hold and partial completion
+  const visualState = getGoalVisualState(goal);
+
+  // Determine color based on visual state
+  let dotColor;
+  if (visualState === "on_hold" || visualState === "partial") {
+    // On-hold uses amber for the filled part
+    dotColor = STATUS_COLORS.on_hold;
+  } else {
+    dotColor = STATUS_COLORS[basicStatus] || STATUS_COLORS.pending;
+  }
+
+  // Get the appropriate indicator based on visual state
+  // Half-circle (◐) for on_hold/partial, solid dot (●) for others
+  const indicator = STATUS_INDICATORS[visualState] || STATUS_INDICATORS.pending;
 
   // For the first active goal (being worked on), blink the dot
-  const shouldBlink = isWorking && (status === "active" || status === "pending");
+  const shouldBlink = isWorking && (basicStatus === "active" || basicStatus === "pending") && visualState !== "on_hold";
   const showIndicator = shouldBlink ? blinkVisible : true;
   const indicatorColor = showIndicator ? dotColor : "#1e293b";
 
@@ -72,36 +119,53 @@ const GoalLine = memo(({ goal, isWorking = false, blinkVisible = true, isFirst =
   const rawProject = goal.project || goal.projectName || goal.category || "General";
   const projectName = truncateToLines(rawProject, 2);
 
+  // Add on-hold reason if available
+  let statusNote = "";
+  if (visualState === "on_hold" || visualState === "partial") {
+    try {
+      const goalManager = getGoalManager();
+      const status = goalManager.getGoalStatus(goal.id);
+      if (status && status.holdInfo?.reason) {
+        statusNote = ` (${status.holdInfo.reason.replace(/_/g, " ")})`;
+      } else if (visualState === "partial") {
+        statusNote = " (partial)";
+      }
+    } catch (e) {
+      // Ignore
+    }
+  }
+
   return e(
     Box,
     { flexDirection: "column", marginBottom: 1 },
     // Goal line with indicator and title
     e(
       Box,
-      { flexDirection: "row" },
-      // Indicator dot with space padding (● + space)
-      e(Text, { color: indicatorColor }, indicator + " "),
+      { flexDirection: "row", gap: 2 },
+      // Indicator
+      e(Text, { color: indicatorColor }, indicator),
       // Goal title (light gray, can wrap to 2 lines)
       e(Text, { color: "#94a3b8", wrap: "wrap" }, title)
     ),
     // Project name below in darker gray, indented to align with title after dot
     e(
       Box,
-      { paddingLeft: 3 },  // Align with title (dot + space = 2, add 1 more)
-      e(Text, { color: "#64748b", dimColor: true, wrap: "wrap" }, projectName)
+      { paddingLeft: 4 },  // Align with title (dot + gap = ~4 chars)
+      e(Text, { color: "#64748b", dimColor: true, wrap: "wrap" }, projectName + statusNote)
     )
   );
 });
 
 /**
  * Goals Panel
- * Shows 5-7 specific goals with project names
+ * Shows max 3 goals (min 2 if available) as part of the 6-item total limit
+ * Combined with "working on" and outcomes, total should be max 6 items
  */
 const GoalsPanelBase = ({
   goals = [],
   currentGoalId = null,
   isGenerating = false,
-  maxGoals = 7
+  maxGoals = 3  // Max 3 goals as part of total 6 items (goals + working + outcomes)
 }) => {
   // Blink state for active goal indicator
   const [blinkVisible, setBlinkVisible] = useState(true);
@@ -140,13 +204,13 @@ const GoalsPanelBase = ({
         { flexDirection: "column" },
         e(
           Box,
-          { flexDirection: "row" },
-          e(Text, { color: blinkVisible ? "#64748b" : "#1e293b" }, "● "),
+          { flexDirection: "row", gap: 1 },
+          e(Text, { color: blinkVisible ? "#64748b" : "#1e293b" }, "●"),
           e(Text, { color: "#64748b", italic: true }, "Analyzing data...")
         ),
         e(
           Box,
-          { paddingLeft: 2 },
+          { paddingLeft: 3 },
           e(Text, { color: "#64748b", dimColor: true }, "Generating goals")
         )
       ),
@@ -168,13 +232,13 @@ const GoalsPanelBase = ({
         { flexDirection: "column" },
         e(
           Box,
-          { flexDirection: "row" },
-          e(Text, { color: "#64748b" }, "○ "),
+          { flexDirection: "row", gap: 1 },
+          e(Text, { color: "#64748b" }, "○"),
           e(Text, { color: "#64748b" }, "No goals set")
         ),
         e(
           Box,
-          { paddingLeft: 2 },
+          { paddingLeft: 3 },
           e(Text, { color: "#64748b", dimColor: true }, "Run /goals to create")
         )
       )
@@ -350,11 +414,17 @@ const SmartGoalsPanelBase = ({
       goalManager.on("goal-changed", handleGoalChanged);
       goalManager.on("goal-completed", loadGoals);
       goalManager.on("goal-added", loadGoals);
+      goalManager.on("goal-on-hold", loadGoals);        // Listen for on-hold status changes
+      goalManager.on("task-on-hold", loadGoals);        // Listen for task on-hold changes
+      goalManager.on("criteria-evaluated", loadGoals);  // Listen for criteria evaluation
 
       return () => {
         goalManager.off("goal-changed", handleGoalChanged);
         goalManager.off("goal-completed", loadGoals);
         goalManager.off("goal-added", loadGoals);
+        goalManager.off("goal-on-hold", loadGoals);
+        goalManager.off("task-on-hold", loadGoals);
+        goalManager.off("criteria-evaluated", loadGoals);
       };
     } catch (e) {
       // Goal manager not available

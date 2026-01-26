@@ -122,7 +122,7 @@ import { TradingHistoryPanel } from "./components/trading-history-panel.js";
 import { TestRunnerPanel } from "./components/test-runner-panel.js";
 import { SettingsPanel } from "./components/settings-panel.js";
 import { LinkedInDataViewer } from "./components/linkedin-data-viewer.js";
-import { loadUserSettings, saveUserSettings, updateSettings as updateUserSettings, updateSetting, getModelConfig, isProviderConfigured } from "./services/user-settings.js";
+import { loadUserSettings, saveUserSettings, updateSettings as updateUserSettings, updateSetting, getModelConfig, isProviderConfigured, getAppName } from "./services/user-settings.js";
 import { hasValidCredentials as hasCodexCredentials } from "./services/codex-oauth.js";
 import { loadFineTuningConfig, saveFineTuningConfig, runFineTuningPipeline, queryFineTunedModel } from "./services/fine-tuning.js";
 import { monitorAndTrade, loadConfig as loadTradingConfig, setTradingEnabled } from "./services/auto-trader.js";
@@ -6718,7 +6718,7 @@ Folder: ${result.action.id}`,
             return e(
               Box,
               { key: `msg-${i}-${msg.timestamp}`, flexDirection: "row" },
-              e(Text, { color: isUser ? "#f59e0b" : "#22c55e", bold: true }, isUser ? "You: " : "AI: "),
+              e(Text, { color: isUser ? "#f59e0b" : "#22c55e", bold: true }, isUser ? "You: " : `${getAppName()}: `),
               e(Text, { color: isUser ? "#94a3b8" : "#e2e8f0" }, truncated)
             );
           }),
@@ -6726,14 +6726,14 @@ Folder: ${result.action.id}`,
           isProcessing && streamingText && e(
             Box,
             { flexDirection: "row" },
-            e(Text, { color: "#22c55e", bold: true }, "AI: "),
+            e(Text, { color: "#22c55e", bold: true }, `${getAppName()}: `),
             e(Text, { color: "#a3e635" }, streamingText.slice(-80) || "Thinking...")
           ),
           // Show loading indicator if processing but no streaming text yet
           isProcessing && !streamingText && e(
             Box,
             { flexDirection: "row", gap: 1 },
-            e(Text, { color: "#22c55e", bold: true }, "AI:"),
+            e(Text, { color: "#22c55e", bold: true }, `${getAppName()}: `),
             e(Text, { color: "#64748b" }, "Thinking...")
           )
         ),

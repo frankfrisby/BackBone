@@ -56,7 +56,7 @@ import {
 } from "../services/plaid-service.js";
 import { loadUserSettings, updateSetting, updateSettings } from "../services/user-settings.js";
 import { openUrl } from "../services/open-url.js";
-import { requestPhoneCode, verifyPhoneCode, getPhoneRecord } from "../services/phone-auth.js";
+import { requestPhoneCode, verifyPhoneCode, getPhoneRecord, sendWhatsAppMessage } from "../services/phone-auth.js";
 import { getMobileService } from "../services/mobile.js";
 import { startOAuthFlow as startClaudeOAuth, hasValidCredentials as hasClaudeCredentials } from "../services/claude-oauth.js";
 import { startOAuthFlow as startCodexOAuth, hasValidCredentials as hasCodexCredentials } from "../services/codex-oauth.js";
@@ -161,9 +161,9 @@ const ONBOARDING_STEPS = [
   { id: "google", label: "Google Account", required: true, description: "Sign in with Google" },
   {
     id: "phone",
-    label: "Phone & Messaging",
+    label: "WhatsApp Verification",
     required: true,
-    description: "Add a phone number for alerts and SMS jobs"
+    description: "Required for notifications and AI messaging"
   },
   { id: "model", label: "AI Model", required: true, description: "Choose your AI assistant" },
   { id: "alpaca", label: "Trading (Alpaca)", required: false, description: "Auto-trading" },
@@ -489,167 +489,344 @@ const GoogleLoginStep = ({ onComplete, onError, onLogout }) => {
 
 /**
  * Phone Verification Step
- * Captures a phone number to receive SMS updates and alerts
+ * Captures a phone number and verifies via WhatsApp OTP
+ * Required step - user must verify phone to receive notifications
  */
 const PhoneVerificationStep = ({ onComplete, onError }) => {
   const user = getCurrentFirebaseUser();
   const userId = user?.id;
-  const [phase, setPhase] = useState(userId ? "phoneEntry" : "waiting");
-  const [phoneEntry, setPhoneEntry] = useState("");
+  // Phases: waiting (need login), ready (can start), phoneEntry, codeEntry, success
+  const [phase, setPhase] = useState(userId ? "checking" : "waiting");
+  const [phoneEntry, setPhoneEntry] = useState("+1 ");
   const [codeInput, setCodeInput] = useState("");
   const [status, setStatus] = useState(userId ? "ready" : "pending");
-  const [message, setMessage] = useState(
-    userId ? "Enter your phone number to receive verification codes." : "Sign in with Google first to add your phone."
-  );
-    const completedRef = useRef(false);
-    const mobileService = useMemo(() => getMobileService(), []);
+  const [attemptsRemaining, setAttemptsRemaining] = useState(3);
+  const [existingPhone, setExistingPhone] = useState(null);
+  const [message, setMessage] = useState("");
+  const [testCode, setTestCode] = useState(null);
+  const completedRef = useRef(false);
 
   useEffect(() => {
     if (!userId) {
       setPhase("waiting");
       setStatus("pending");
-      setMessage("Sign in with Google first to add your phone.");
+      setMessage("Sign in with Google first.");
       return;
     }
 
     const record = getPhoneRecord(userId);
-    if (record?.verification?.verifiedAt && !completedRef.current) {
-      completedRef.current = true;
-      setPhoneEntry(record.phoneNumber || "");
-      setStatus("success");
-      setPhase("success");
-      setMessage("Phone already verified.");
-      setTimeout(() => onComplete({ existing: true, phone: record.phoneNumber }), 800);
+    if (record?.verification?.verifiedAt) {
+      // Already verified
+      setExistingPhone(record.phoneNumber);
+      setPhase("ready");
+      setStatus("verified");
+      setMessage(`Verified: ${record.phoneNumber}`);
       return;
     }
 
-    if (!completedRef.current) {
-      setPhase("phoneEntry");
-      setStatus("ready");
-      setMessage("Enter your phone number to receive SMS updates.");
+    // Not verified - ready to start
+    setPhase("ready");
+    setStatus("ready");
+    setMessage("Verify your phone for WhatsApp notifications.");
+  }, [userId]);
+
+  // Validate phone number format (+1 required)
+  const validatePhone = (phone) => {
+    const cleaned = phone.replace(/[^0-9+]/g, "");
+    if (!cleaned.startsWith("+1")) {
+      return { valid: false, error: "Phone must start with +1 (US number)" };
     }
-  }, [userId, onComplete]);
+    if (cleaned.length < 12) { // +1 + 10 digits
+      return { valid: false, error: "Enter full 10-digit number after +1" };
+    }
+    if (cleaned.length > 12) {
+      return { valid: false, error: "Too many digits" };
+    }
+    return { valid: true, normalized: cleaned };
+  };
+
+  // Handle phone input change - auto-format
+  const handlePhoneChange = (value) => {
+    // Ensure +1 prefix stays
+    if (!value.startsWith("+1")) {
+      if (value.startsWith("+")) {
+        value = "+1" + value.slice(1).replace(/[^0-9]/g, "");
+      } else if (value.startsWith("1")) {
+        value = "+1" + value.slice(1).replace(/[^0-9]/g, "");
+      } else {
+        value = "+1 " + value.replace(/[^0-9]/g, "");
+      }
+    }
+    setPhoneEntry(value);
+  };
 
   const sendCode = useCallback(
     async (value) => {
       if (!userId) {
-        setPhase("waiting");
-        setStatus("pending");
         setMessage("Sign in with Google first.");
         return;
       }
 
-      const normalized = value.replace(/[^0-9+]/g, "");
-      if (normalized.length < 10) {
+      const validation = validatePhone(value);
+      if (!validation.valid) {
         setStatus("error");
-        setMessage("Enter at least 10 digits so we can reach you.");
+        setMessage(validation.error);
         return;
       }
+
+      setStatus("sending");
+      setMessage("Sending code to WhatsApp...");
 
       try {
-        const code = requestPhoneCode(userId, normalized);
-        setPhoneEntry(normalized);
+        const result = await requestPhoneCode(userId, validation.normalized);
+
+        if (!result.success) {
+          setStatus("error");
+          setMessage(result.error || "Failed to send code.");
+          if (onError) onError(result.error);
+          return;
+        }
+
+        setPhoneEntry(validation.normalized);
         setCodeInput("");
         setPhase("codeEntry");
         setStatus("codeSent");
-        const smsResult = await mobileService.sendSMS(
-          `Your BACKBONE verification code is ${code}`,
-          normalized
-        );
-        const smsNote = smsResult.success
-          ? "Check your phone for the SMS."
-          : `SMS not sent: ${smsResult.error || "Twilio not configured"}`;
-        setMessage(`Verification code stored locally (code: ${code}). ${smsNote}`);
+        setAttemptsRemaining(result.attemptsRemaining || 3);
+
+        if (result.testMode) {
+          setTestCode(result.code);
+          setMessage(`Test mode - Code: ${result.code}`);
+        } else {
+          setTestCode(null);
+          setMessage("Check your WhatsApp for the 6-digit code.");
+        }
       } catch (error) {
         setStatus("error");
-        setMessage(error?.message || "Failed to generate verification code.");
-        if (onError) onError(error?.message || "Phone code error");
+        setMessage(error?.message || "Failed to send code.");
+        if (onError) onError(error?.message);
       }
     },
-    [userId, onError, mobileService]
+    [userId, onError]
   );
 
-  const verifyCode = useCallback(
-    (value) => {
-      if (!userId) {
-        setMessage("Sign in with Google first.");
-        setPhase("waiting");
-        setStatus("pending");
-        return;
-      }
-
-      if (!phoneEntry) {
-        setMessage("Send a code first so we know which number to verify.");
-        setPhase("phoneEntry");
-        return;
-      }
+  const handleVerifyCode = useCallback(
+    async (value) => {
+      if (!userId || !phoneEntry) return;
 
       setStatus("verifying");
-      const valid = verifyPhoneCode(userId, value.trim());
+      const result = verifyPhoneCode(userId, value.trim());
 
-      if (valid) {
+      if (result.success) {
         setStatus("success");
         setPhase("success");
-        setMessage("Phone verified! Ready for SMS updates.");
+        setMessage("Phone verified!");
+        setTestCode(null);
+
+        // Send welcome message via WhatsApp
+        const welcomeMessage = `Hey! 👋 You're all set up with Backbone.
+
+If you need me to do anything, just let me know. Help me help you!
+
+Some things I can help with:
+(a) 💰 Help you save money and invest more
+(b) 📈 Help with your career growth
+(c) 🏠 Improve your home life
+
+Just reply with a, b, or c - or tell me what's on your mind!`;
+
+        try {
+          await sendWhatsAppMessage(userId, welcomeMessage);
+        } catch (e) {
+          // Don't block onboarding if welcome message fails
+          console.error("[Onboarding] Failed to send welcome message:", e.message);
+        }
+
         if (!completedRef.current) {
           completedRef.current = true;
-          setTimeout(() => onComplete({ phone: phoneEntry }), 600);
+          setTimeout(() => onComplete({ phone: result.phoneNumber || phoneEntry }), 600);
+        }
+      } else {
+        setAttemptsRemaining(result.attemptsRemaining ?? 0);
+        if (result.attemptsRemaining === 0) {
+          setStatus("failed");
+          setMessage("Too many attempts. Press Enter to retry.");
+        } else {
+          setStatus("codeSent");
+          setMessage(`Wrong code. ${result.attemptsRemaining} attempts left.`);
         }
         setCodeInput("");
-      } else {
-        setStatus("codeSent");
-        setPhase("codeEntry");
-        setMessage("Code invalid or expired. Try again.");
       }
     },
     [userId, phoneEntry, onComplete]
   );
 
-  if (!userId) {
+  const enterPhoneEntry = useCallback(() => {
+    completedRef.current = false;
+    setPhase("phoneEntry");
+    setPhoneEntry("+1 ");
+    setCodeInput("");
+    setTestCode(null);
+    setAttemptsRemaining(3);
+    setStatus("ready");
+    setMessage("Enter your US phone number (+1)");
+  }, []);
+
+  const handleContinue = useCallback(() => {
+    if (existingPhone && !completedRef.current) {
+      completedRef.current = true;
+      onComplete({ existing: true, phone: existingPhone });
+    }
+  }, [existingPhone, onComplete]);
+
+  // Keyboard handler
+  useInput((input, key) => {
+    // Waiting for login - no actions
+    if (phase === "waiting") return;
+
+    // Ready phase - Enter or Right arrow to start verification
+    if (phase === "ready") {
+      if (key.return || key.rightArrow) {
+        if (status === "verified" && existingPhone) {
+          // Already verified - Enter continues, Right re-verifies
+          if (key.return) {
+            handleContinue();
+          } else {
+            enterPhoneEntry();
+          }
+        } else {
+          enterPhoneEntry();
+        }
+        return;
+      }
+    }
+
+    // Phone entry phase - Escape to go back
+    if (phase === "phoneEntry" && key.escape) {
+      setPhase("ready");
+      setMessage(existingPhone ? `Verified: ${existingPhone}` : "Verify your phone for WhatsApp notifications.");
+      setStatus(existingPhone ? "verified" : "ready");
+      return;
+    }
+
+    // Code entry phase - Escape to go back to phone entry
+    if (phase === "codeEntry" && key.escape) {
+      enterPhoneEntry();
+      return;
+    }
+
+    // Failed - Enter to retry
+    if (status === "failed" && key.return) {
+      enterPhoneEntry();
+      return;
+    }
+  });
+
+  // Waiting for Google login
+  if (!userId || phase === "waiting") {
     return e(
       Box,
       { flexDirection: "column", paddingX: 1 },
-      e(Text, { color: "#e2e8f0", bold: true }, "Phone Verification"),
-      e(Text, { color: "#64748b" }, "Sign in with Google first to continue."),
-      e(Text, { color: "#94a3b8" }, "We'll prompt for your phone number after you authorize.")
+      e(Text, { color: "#e2e8f0", bold: true }, "WhatsApp Verification"),
+      e(Text, { color: "#64748b" }, "Sign in with Google first."),
+      e(Text, { color: "#64748b", dimColor: true, marginTop: 1 }, "↑↓ navigate steps")
     );
   }
 
+  // Ready phase - show prompt to enter verification
+  if (phase === "ready") {
+    const isVerified = status === "verified" && existingPhone;
+    return e(
+      Box,
+      { flexDirection: "column", paddingX: 1 },
+      e(Text, { color: "#e2e8f0", bold: true }, "WhatsApp Verification"),
+      isVerified
+        ? e(Text, { color: "#22c55e", marginTop: 1 }, `✓ ${existingPhone}`)
+        : e(Box, { flexDirection: "column" },
+            e(Text, { color: "#64748b" }, "Verify your phone for notifications."),
+            e(Text, { color: "#f59e0b", dimColor: true, marginTop: 1 }, "First, text +1 415 523 8886:"),
+            e(Text, { color: "#f97316", bold: true }, "join check-whose")
+          ),
+      e(Box, { marginTop: 1 },
+        isVerified
+          ? e(Text, { color: "#64748b" }, "[Enter] Continue  [→] Re-verify")
+          : e(Text, { color: "#f97316" }, "[Enter or →] Start verification")
+      ),
+      e(Text, { color: "#64748b", dimColor: true }, "↑↓ navigate steps")
+    );
+  }
+
+  // Phone entry phase
+  if (phase === "phoneEntry") {
+    return e(
+      Box,
+      { flexDirection: "column", paddingX: 1 },
+      e(Text, { color: "#e2e8f0", bold: true }, "Enter Phone Number"),
+      e(Text, { color: "#64748b" }, "US numbers only (+1)"),
+      // Sandbox join instructions
+      e(Box, { marginTop: 1, flexDirection: "column" },
+        e(Text, { color: "#f59e0b", dimColor: true }, "First, text +1 415 523 8886 on WhatsApp:"),
+        e(Text, { color: "#f97316", bold: true }, "join check-whose")
+      ),
+      message && e(
+        Text,
+        { color: status === "error" ? "#ef4444" : "#94a3b8", marginTop: 1 },
+        message
+      ),
+      e(Box, { marginTop: 1 },
+        e(TextInput, {
+          value: phoneEntry,
+          onChange: handlePhoneChange,
+          placeholder: "+1 555 123 4567",
+          onSubmit: sendCode
+        })
+      ),
+      e(Text, { color: "#64748b", dimColor: true }, "[Enter] Send code  [Esc] Back")
+    );
+  }
+
+  // Code entry phase
+  if (phase === "codeEntry") {
+    return e(
+      Box,
+      { flexDirection: "column", paddingX: 1 },
+      e(Text, { color: "#e2e8f0", bold: true }, "Enter Verification Code"),
+      e(Text, { color: "#64748b" }, `Sent to: ${phoneEntry}`),
+      message && e(
+        Text,
+        { color: status === "error" || status === "failed" ? "#ef4444" : "#94a3b8", marginTop: 1 },
+        message
+      ),
+      e(Box, { marginTop: 1 },
+        e(TextInput, {
+          value: codeInput,
+          onChange: setCodeInput,
+          placeholder: "123456",
+          onSubmit: handleVerifyCode
+        })
+      ),
+      e(Text, { color: "#f59e0b", dimColor: true }, `${attemptsRemaining} attempts remaining`),
+      testCode && e(Text, { color: "#f97316" }, `Test code: ${testCode}`),
+      e(Text, { color: "#64748b", dimColor: true }, "[Enter] Verify  [Esc] Back")
+    );
+  }
+
+  // Success phase
+  if (phase === "success") {
+    return e(
+      Box,
+      { flexDirection: "column", paddingX: 1 },
+      e(Text, { color: "#e2e8f0", bold: true }, "WhatsApp Verification"),
+      e(Text, { color: "#22c55e", marginTop: 1 }, "✓ Phone verified!"),
+      e(Text, { color: "#64748b" }, "You'll receive WhatsApp notifications.")
+    );
+  }
+
+  // Default fallback
   return e(
     Box,
     { flexDirection: "column", paddingX: 1 },
-    e(Text, { color: "#e2e8f0", bold: true }, "Phone Verification"),
-    e(Text, { color: "#64748b" }, "Add a phone number so BACKBONE can send updates and alerts."),
-    message && e(Text, { color: status === "error" ? "#ef4444" : "#94a3b8" }, message),
-    phase === "phoneEntry" && e(
-      Box,
-      { flexDirection: "column", marginTop: 1 },
-      e(Text, { color: "#64748b" }, "Phone:"),
-      e(TextInput, {
-        value: phoneEntry,
-        onChange: setPhoneEntry,
-        placeholder: "+1 (555) 555-5555",
-        onSubmit: sendCode
-      }),
-      e(Text, { color: "#64748b", dimColor: true }, "Press Enter to send a verification code")
-    ),
-    phase === "codeEntry" && e(
-      Box,
-      { flexDirection: "column", marginTop: 1 },
-      e(Text, { color: "#64748b" }, `Number: ${phoneEntry}`),
-      e(TextInput, {
-        value: codeInput,
-        onChange: setCodeInput,
-        placeholder: "123456",
-        mask: "*",
-        onSubmit: (value) => {
-          setCodeInput(value);
-          verifyCode(value);
-        }
-      }),
-      e(Text, { color: "#64748b", dimColor: true }, "Enter the 6-digit code and press Enter")
-    ),
-    status === "success" && e(Text, { color: "#22c55e", marginTop: 1 }, "\u2713 Phone verified")
+    e(Text, { color: "#e2e8f0", bold: true }, "WhatsApp Verification"),
+    e(Text, { color: "#64748b" }, message || "Loading...")
   );
 };
 
@@ -2103,22 +2280,19 @@ export const OnboardingPanel = ({ onComplete, userDisplay = "" }) => {
     // Arrow Up - navigate to previous step (unless current step handles arrows)
     if (key.upArrow && !currentStepNeedsArrows) {
       setUserNavigating(true);
-      setCurrentStepIndex((prev) => {
-        const newIndex = prev > 0 ? prev - 1 : ONBOARDING_STEPS.length - 1;
-        return newIndex;
-      });
+      setCurrentStepIndex(prev => (prev > 0 ? prev - 1 : ONBOARDING_STEPS.length - 1));
       return;
     }
 
     // Arrow Down - navigate to next step (unless current step handles arrows)
     if (key.downArrow && !currentStepNeedsArrows) {
       setUserNavigating(true);
-      setCurrentStepIndex((prev) => {
-        const newIndex = prev < ONBOARDING_STEPS.length - 1 ? prev + 1 : 0;
-        return newIndex;
-      });
+      setCurrentStepIndex(prev => (prev < ONBOARDING_STEPS.length - 1 ? prev + 1 : 0));
       return;
     }
+
+    // Right arrow on phone step (when verified) - trigger re-verify
+    // This is handled by the phone step component itself
 
     // Ctrl+M or 'x' to go to main (only if required steps done)
     if ((key.ctrl && input === "m") || input.toLowerCase() === "x") {
@@ -2128,8 +2302,8 @@ export const OnboardingPanel = ({ onComplete, userDisplay = "" }) => {
       return;
     }
 
-    // Escape or 'q' to quit the program
-    if (key.escape || input.toLowerCase() === "q") {
+    // 'q' to quit the program (Escape is handled by individual steps)
+    if (input.toLowerCase() === "q") {
       exit();
     }
   });

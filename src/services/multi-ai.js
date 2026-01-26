@@ -3,6 +3,37 @@ import { getAPIQuotaMonitor } from "./api-quota-monitor.js";
 import { hasValidCredentials as hasCodexCredentials } from "./codex-oauth.js";
 
 /**
+ * Parse OpenAI API error response and return a clean message
+ */
+const parseOpenAIError = (errorText) => {
+  try {
+    const parsed = JSON.parse(errorText);
+    if (parsed.error) {
+      const err = parsed.error;
+      // Common error types with friendly messages
+      if (err.code === "insufficient_quota") {
+        return "OpenAI quota exceeded. Please check your billing at platform.openai.com";
+      }
+      if (err.code === "invalid_api_key") {
+        return "Invalid OpenAI API key. Please check your key in /models";
+      }
+      if (err.code === "rate_limit_exceeded") {
+        return "Rate limit exceeded. Please wait a moment and try again.";
+      }
+      if (err.code === "model_not_found") {
+        return `Model not available: ${err.message || "unknown model"}`;
+      }
+      // Return the error message if available
+      return err.message || err.code || "Unknown OpenAI error";
+    }
+  } catch {
+    // Not JSON, return truncated text
+  }
+  // Fallback: truncate raw error
+  return errorText.length > 100 ? errorText.slice(0, 100) + "..." : errorText;
+};
+
+/**
  * Multi-Model AI Service for BACKBONE
  *
  * Model Routing:
@@ -342,7 +373,7 @@ const sendToOpenAI = async (message, context = {}, modelConfig, taskType) => {
 
     if (quotaCheck.isQuotaError) {
       // Create a special error that can be identified by callers
-      const quotaError = new Error(`OpenAI API error: ${errorText}`);
+      const quotaError = new Error(parseOpenAIError(errorText));
       quotaError.isQuotaExceeded = true;
       quotaError.provider = "openai";
       quotaError.billingUrl = quotaCheck.billingUrl;
@@ -370,7 +401,7 @@ const sendToOpenAI = async (message, context = {}, modelConfig, taskType) => {
         })
       });
     } else {
-      throw new Error(`OpenAI API error: ${errorText}`);
+      throw new Error(parseOpenAIError(errorText));
     }
   }
 
@@ -383,7 +414,7 @@ const sendToOpenAI = async (message, context = {}, modelConfig, taskType) => {
 
     if (quotaCheck.isQuotaError) {
       // Create a special error that can be identified by callers
-      const quotaError = new Error(`OpenAI API error: ${error}`);
+      const quotaError = new Error(parseOpenAIError(error));
       quotaError.isQuotaExceeded = true;
       quotaError.provider = "openai";
       quotaError.billingUrl = quotaCheck.billingUrl;
@@ -391,7 +422,7 @@ const sendToOpenAI = async (message, context = {}, modelConfig, taskType) => {
       throw quotaError;
     }
 
-    throw new Error(`OpenAI API error: ${error}`);
+    throw new Error(parseOpenAIError(error));
   }
 
   // Clear quota exceeded status on successful request

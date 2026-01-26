@@ -71,6 +71,7 @@ import { getWealthConfig, buildWealthSummary } from "./services/wealth.js";
 import { fetchTickers as fetchYahooTickers, startServer as startYahooServer, isServerRunning } from "./services/yahoo-client.js";
 import { extractLinkedInProfile, saveLinkedInProfile, loadLinkedInProfile, isProfileIncomplete, refreshAndGenerateLinkedInMarkdown, generateLinkedInMarkdown } from "./services/linkedin-scraper.js";
 import { getDataFreshnessChecker } from "./services/data-freshness-checker.js";
+import { getCronManager } from "./services/cron-manager.js";
 import { getGoalsStatus, launchGoalsVoiceApp } from "./services/goals-voice.js";
 import { loadTradingStatus, saveTradingStatus, buildTradingStatusDisplay, recordTradeAttempt, resetTradingStatus } from "./services/trading-status.js";
 import { deleteAllData, getResetSummary, RESET_STEPS } from "./services/reset.js";
@@ -270,8 +271,28 @@ const chunkSymbols = (symbols, size) => {
 
 const YAHOO_FINANCE_REFRESH_MS = 180000; // 3 minutes
 
+// Placeholder goals shown while real data loads
+const PLACEHOLDER_GOALS = [
+  { id: "loading-1", title: "Loading your personalized goals and objectives from your connected accounts and preferences to display your current priorities and track progress", project: "Goal Loading", category: "personal", status: "pending", progress: 0 },
+  { id: "loading-2", title: "Syncing with your calendar, task manager, and project tools to gather all relevant deadlines and milestones for comprehensive goal tracking", project: "Data Sync", category: "work", status: "pending", progress: 0 },
+  { id: "loading-3", title: "Analyzing your recent activity patterns and achievements to provide intelligent recommendations and insights for goal completion", project: "Activity Analysis", category: "health", status: "pending", progress: 0 },
+  { id: "loading-4", title: "Connecting to your linked services including health tracking, financial accounts, and productivity tools to gather real-time data for comprehensive insights", project: "Service Connections", category: "system", status: "pending", progress: 0 }
+];
+
+// Placeholder observations shown while real data loads (4 during load, then 2 after)
+const PLACEHOLDER_OBSERVATIONS = [
+  { text: "Initializing your personal AI assistant and loading all configuration settings, preferences, and historical context to provide personalized assistance tailored to your needs", timestamp: Date.now(), status: "observation" },
+  { text: "Loading your recent activity and progress history including completed tasks, ongoing projects, and performance metrics to give you a comprehensive overview of your achievements", timestamp: Date.now(), status: "observation" },
+  { text: "Preparing today's insights and recommendations by analyzing your goals, schedule, and priorities to suggest the most impactful actions you can take right now", timestamp: Date.now(), status: "observation" },
+  { text: "Connecting to cloud services for real-time sync ensuring all your data is backed up, accessible across devices, and protected with enterprise-grade security measures", timestamp: Date.now(), status: "observation" }
+];
+
 const App = ({ updateConsoleTitle }) => {
+  // Pre-render phase: render main view first (invisible) to set terminal rows, then show splash
+  const [preRenderPhase, setPreRenderPhase] = useState(true);
   const [isInitializing, setIsInitializing] = useState(true);
+  // Track how many outcomes to show (4 during loading, 2 after)
+  const [maxOutcomesToShow, setMaxOutcomesToShow] = useState(4);
   const [lifeEngineCoverage, setLifeEngineCoverage] = useState(0);
   const [lifeEngineReady, setLifeEngineReady] = useState(false);
   // Pulsing dot for connection status (toggles every 500ms)
@@ -391,19 +412,30 @@ const App = ({ updateConsoleTitle }) => {
         // Silent fail - AI matching will fall back to algorithm
       }
 
-      // Wait minimum 1 second for splash screen (reduced for faster startup)
+      // Phase 1: Pre-render main view (invisible) to set terminal rows based on content
+      // Emit resize event immediately to capture terminal size
+      if (process.stdout.emit) {
+        process.stdout.emit("resize");
+      }
+      // After 150ms, switch to splash screen (gives time for layout calculation)
       setTimeout(() => {
-        // Clear screen before transitioning from splash to main view
-        process.stdout.write("\x1b[2J\x1b[1;1H");
-        setIsInitializing(false);
-        // Don't resize terminal - run in current terminal size
-        // Emit resize event to ensure layout calculates correctly
+        process.stdout.write("\x1b[2J\x1b[1;1H"); // Clear pre-render
+        setPreRenderPhase(false);
+        // Phase 2: Show splash screen for 1 second
         setTimeout(() => {
-          if (process.stdout.emit) {
-            process.stdout.emit("resize");
-          }
-        }, 50);
-      }, 1000);
+          // Clear screen before transitioning from splash to main view
+          process.stdout.write("\x1b[2J\x1b[1;1H");
+          setIsInitializing(false);
+          // Reduce outcomes to 2 after loading
+          setMaxOutcomesToShow(2);
+          // Emit resize event to ensure layout calculates correctly
+          setTimeout(() => {
+            if (process.stdout.emit) {
+              process.stdout.emit("resize");
+            }
+          }, 50);
+        }, 1000);
+      }, 150);
     };
     init();
   }, [nudgeStdoutSize]);
@@ -6702,6 +6734,73 @@ Folder: ${result.action.id}`,
   ].filter(Boolean);
 
 
+  // Pre-render phase: render main view structure to set terminal rows
+  // This ensures the layout is calculated based on actual content before showing splash
+  // Content flashes briefly then gets cleared, so user sees splash next
+  if (preRenderPhase) {
+    // Render actual main view structure with placeholders to set correct terminal size
+    // Text is black (#000000) so invisible on dark background
+    // The screen will be cleared immediately after, so this is not visible to user
+    return e(
+      Box,
+      {
+        key: "pre-render",
+        flexDirection: "column",
+        height: 70,
+        width: terminalWidth,
+        overflow: "hidden"
+      },
+      // Header placeholder
+      e(Box, { height: 3 },
+        e(Text, { color: "#000000" }, "Loading BACKBONE Engine...")
+      ),
+      // Main content area with goals and outcomes structure
+      e(Box, { flexDirection: "row", height: 55, overflow: "hidden" },
+        // Left column placeholder (25%)
+        e(Box, { flexDirection: "column", width: "25%", paddingRight: 1 },
+          e(Text, { color: "#000000" }, "Progress Section Loading..."),
+          e(Box, { height: 15 },
+            e(Text, { color: "#000000" }, "Loading health metrics and daily progress data from connected services...")
+          ),
+          e(Box, { height: 15 },
+            e(Text, { color: "#000000" }, "Loading financial portfolio data and market analysis...")
+          )
+        ),
+        // Center column placeholder (50%)
+        e(Box, { flexDirection: "column", width: "50%", paddingX: 1 },
+          // Engine area
+          e(Box, { flexDirection: "column", height: 25 },
+            e(Text, { color: "#000000" }, "Engine Status Loading..."),
+            e(Text, { color: "#000000" }, "Initializing AI engine and loading your current task context and priorities...")
+          ),
+          // Outcomes area - taller with more content
+          e(Box, { flexDirection: "column", height: 25 },
+            e(Text, { color: "#000000" }, "Outcomes Loading..."),
+            ...PLACEHOLDER_OBSERVATIONS.map((obs, i) =>
+              e(Box, { key: `obs-${i}`, marginBottom: 2 },
+                e(Text, { color: "#000000" }, obs.text)
+              )
+            )
+          )
+        ),
+        // Right column placeholder (25%) - Goals - taller
+        e(Box, { flexDirection: "column", width: "25%", paddingLeft: 1 },
+          e(Text, { color: "#000000" }, "Goals Loading..."),
+          ...PLACEHOLDER_GOALS.map((goal, i) =>
+            e(Box, { key: `goal-${i}`, flexDirection: "column", marginBottom: 3 },
+              e(Text, { color: "#000000" }, goal.title),
+              e(Text, { color: "#000000" }, goal.project)
+            )
+          )
+        )
+      ),
+      // Footer placeholder - taller
+      e(Box, { height: 12 },
+        e(Text, { color: "#000000" }, "Loading chat interface and command palette...")
+      )
+    );
+  }
+
   // Show CLEAN splash screen during initialization (no skeletons visible)
   if (isInitializing) {
     return e(
@@ -6829,20 +6928,11 @@ Folder: ${result.action.id}`,
           e(Text, { color: skeletonDimColor, bold: true }, "Engine"),
           e(Text, { color: "#1e293b" }, "─".repeat(Math.min(terminalWidth - 4, 30))),
           e(Box, { marginTop: 1 }),
-          // Working on
-          e(Box, { flexDirection: "column", marginBottom: 2 },
-            e(Box, { flexDirection: "row", gap: 1 },
-              e(Text, { color: pulsingDotVisible ? "#f59e0b" : "#92400e" }, "●"),
-              e(Text, { color: skeletonLight }, "░░░░░░░░░░░░░░░░░░░░")
-            ),
-            e(Box, { paddingLeft: 3 },
-              e(Text, { color: skeletonMid }, "░░░░░░░░░░░░░░")
-            )
-          ),
-          // 3 compact outcomes - 4 lines each
+          // 4 compact outcomes - 4 lines each
           SkeletonOutcome(20),
           SkeletonOutcome(18),
           SkeletonOutcome(22),
+          SkeletonOutcome(19),
           // Chat input placeholder
           e(Box, { flexGrow: 1, justifyContent: "flex-end" },
             e(Box, { height: 4, borderStyle: "round", borderColor: "#1e293b", padding: 1 },
@@ -6929,25 +7019,11 @@ Folder: ${result.action.id}`,
             e(Text, { color: skeletonDimColor, bold: true }, "Engine"),
             e(Text, { color: "#1e293b" }, "─".repeat(viewMode === VIEW_MODES.MINIMAL || isMedium ? 50 : 40)),
             e(Box, { marginTop: 1 }),
-            // Working on placeholder - multi-line
-            e(Box, { flexDirection: "column", marginBottom: 2 },
-              e(Box, { flexDirection: "row", gap: 1 },
-                e(Text, { color: pulsingDotVisible ? "#f59e0b" : "#92400e" }, "●"),
-                e(Text, { color: skeletonLight }, "░░░░░░░░░░░░░░░░░░░░░░░░░░░░")
-              ),
-              e(Box, { paddingLeft: 3 },
-                e(Text, { color: skeletonMid }, "░░░░░░░░░░░░░░░░░░░░░░")
-              ),
-              e(Box, { paddingLeft: 3 },
-                e(Text, { color: skeletonDark }, "░░░░░░░░░░░░░░░░")
-              )
-            ),
-            // 5 Outcome placeholders - 4 lines each
+            // 4 Outcome placeholders - 4 lines each
             SkeletonOutcome(34),
             SkeletonOutcome(30),
             SkeletonOutcome(32),
-            SkeletonOutcome(28),
-            SkeletonOutcome(31)
+            SkeletonOutcome(28)
           ),
           // Chat input placeholder area - multi-line
           e(Box, { flexGrow: 1, flexDirection: "column", justifyContent: "flex-end" },
@@ -7416,29 +7492,6 @@ Folder: ${result.action.id}`,
           // Dots: gray=pending, gray-blink=working, green=complete, red=failed
           e(SmartGoalsPanel, { autoGenerate: true, privateMode }),
 
-          // Current work - shows the current subtask/action being executed
-          e(
-            Box,
-            { flexDirection: "column", marginTop: 1 },
-            e(Text, { color: "#64748b" }, "Working on:"),
-            e(
-              Box,
-              { flexDirection: "row", marginTop: 0 },
-              e(Text, { color: "#f59e0b" }, "●  "),  // Extra space between dot and text
-              e(Text, { color: "#94a3b8", wrap: "wrap" },
-                (() => {
-                  const data = activityNarrator.getDisplayData();
-                  // Show current action first, then fall back to goal
-                  const currentAction = data.actions?.[0];
-                  if (currentAction && currentAction.status === "WORKING") {
-                    return `${currentAction.verb || currentAction.type}(${(currentAction.target || "").slice(0, 25)}...)`;
-                  }
-                  return data.workDescription || data.goal || "Initializing...";
-                })()
-              )
-            )
-          ),
-
           // Outcomes (from narrator) - 10-15 word descriptions, up to 2 lines each
           e(
             Box,
@@ -7450,7 +7503,7 @@ Folder: ${result.action.id}`,
               if (observations.length === 0) {
                 return [e(Text, { key: "no-obs", color: "#475569", dimColor: true }, "  No outcomes yet")];
               }
-              return observations.slice(0, 3).map((obs, i) => {
+              return observations.slice(0, maxOutcomesToShow).map((obs, i) => {
                 const text = obs.text?.toLowerCase() || (typeof obs === "string" ? obs.toLowerCase() : "");
                 const isCompleted = text.includes("completed") || text.includes("done") || text.includes("success");
                 const isAbandoned = text.includes("abandoned") || text.includes("cancelled") || text.includes("stopped");
@@ -7499,12 +7552,20 @@ Folder: ${result.action.id}`,
           e(Text, { color: "#334155" }, "|"),
           e(Text, { color: "#f59e0b" }, "/portfolio")
         ),
-        // Right: Expand hint
+        // Right: Cron jobs info
         e(
           Box,
           { flexDirection: "row", gap: 1 },
-          e(Text, { color: "#475569" }, "Expand terminal for full view"),
-          e(Text, { color: "#64748b" }, `${terminalWidth}x${terminalHeight}`)
+          (() => {
+            const cronData = getCronManager().getDisplayData();
+            const nextJob = cronData.nextJob;
+            return [
+              e(Text, { key: "clock", color: "#64748b" }, "⏰"),
+              e(Text, { key: "count", color: "#94a3b8" }, `${cronData.todayCount} today`),
+              nextJob && e(Text, { key: "sep", color: "#334155" }, "|"),
+              nextJob && e(Text, { key: "next", color: "#f59e0b" }, `${nextJob.shortName}`)
+            ].filter(Boolean);
+          })()
         )
       )
     );

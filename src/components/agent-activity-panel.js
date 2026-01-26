@@ -981,7 +981,7 @@ const AgentActivityPanelBase = ({ overlayHeader = false, compact = false, scroll
         // Also filter out useless outcomes here
         return isRealGoalOrProject(o.summary);
       })
-      .slice(0, 1); // Max 1 outcome to avoid clutter
+      .slice(0, 2); // Max 2 outcomes
   }, [recentCompleted, userName]);
 
   return e(

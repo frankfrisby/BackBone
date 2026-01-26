@@ -1723,9 +1723,31 @@ const App = ({ updateConsoleTitle }) => {
         if (action._activityId) {
           activityTracker.complete(action._activityId);
         }
-        // Build title from action type and target if title is missing
-        const actionTitle = action.title || `${action.action || action.type || "Task"}(${(action.target || "").slice(0, 30)})`;
-        activityTracker.addObservation(`Completed: ${actionTitle}`);
+        // Build descriptive outcome (10-15 words) from action details
+        const actionType = action.action || action.type || "Task";
+        const target = action.target || "";
+        const result = action.result || action.output || "";
+
+        // Generate a descriptive outcome based on action type
+        let outcomeText = "";
+        if (actionType === "WebSearch" || actionType === "WEB_SEARCH") {
+          outcomeText = `Successfully searched for "${target.slice(0, 30)}" and retrieved relevant results for analysis`;
+        } else if (actionType === "Fetch" || actionType === "WEB_FETCH") {
+          outcomeText = `Downloaded and processed content from ${target.slice(0, 40)} for further analysis`;
+        } else if (actionType === "Read" || actionType === "READ") {
+          outcomeText = `Read and analyzed file ${target.split(/[/\\]/).pop()?.slice(0, 25) || target.slice(0, 25)} successfully`;
+        } else if (actionType === "Write" || actionType === "WRITE") {
+          outcomeText = `Created or updated file ${target.split(/[/\\]/).pop()?.slice(0, 25) || target.slice(0, 25)} with new content`;
+        } else if (actionType === "Bash" || actionType === "BASH") {
+          outcomeText = `Executed command successfully and processed the output for next steps`;
+        } else {
+          outcomeText = `Completed ${actionType} operation on ${target.slice(0, 30) || "target"} successfully`;
+        }
+
+        // Use activityNarrator for outcomes (not activityTracker)
+        const narrator = getActivityNarrator();
+        narrator.observe(outcomeText);
+
         activityTracker.setAgentState("OBSERVING");
         activityTracker.setGoal(null);
       });
@@ -1734,8 +1756,16 @@ const App = ({ updateConsoleTitle }) => {
         if (action._activityId) {
           activityTracker.error(action._activityId, action.error);
         }
-        const failedTitle = action.title || `${action.action || action.type || "Task"}(${(action.target || "").slice(0, 30)})`;
-        activityTracker.addObservation(`Failed: ${failedTitle} - ${action.error?.slice(0, 30) || "unknown error"}`);
+        const actionType = action.action || action.type || "Task";
+        const target = action.target || "";
+        const errorMsg = action.error?.slice(0, 40) || "unknown error";
+
+        // Generate descriptive failure outcome
+        const failureText = `Failed to complete ${actionType} on ${target.slice(0, 25) || "target"}: ${errorMsg}`;
+
+        // Use activityNarrator for outcomes
+        const narrator = getActivityNarrator();
+        narrator.observe(failureText);
         activityTracker.setAgentState("REFLECTING");
       });
 
@@ -6416,7 +6446,7 @@ Folder: ${result.action.id}`,
           // Dots: gray=pending, gray-blink=working, green=complete, red=failed
           e(SmartGoalsPanel, { autoGenerate: true }),
 
-          // Current work (from narrator - has goal info)
+          // Current work - shows the current subtask/action being executed
           e(
             Box,
             { flexDirection: "column", marginTop: 1 },
@@ -6424,26 +6454,31 @@ Folder: ${result.action.id}`,
             e(
               Box,
               { flexDirection: "row", marginTop: 0 },
-              e(Text, { color: "#f59e0b" }, "● "),
+              e(Text, { color: "#f59e0b" }, "●  "),  // Extra space between dot and text
               e(Text, { color: "#94a3b8", wrap: "wrap" },
                 (() => {
                   const data = activityNarrator.getDisplayData();
-                  return data.goal || data.workDescription || "Initializing...";
+                  // Show current action first, then fall back to goal
+                  const currentAction = data.actions?.[0];
+                  if (currentAction && currentAction.status === "WORKING") {
+                    return `${currentAction.verb || currentAction.type}(${(currentAction.target || "").slice(0, 25)}...)`;
+                  }
+                  return data.workDescription || data.goal || "Initializing...";
                 })()
               )
             )
           ),
 
-          // Observations (from narrator)
+          // Outcomes (from narrator) - 10-15 word descriptions, up to 2 lines each
           e(
             Box,
             { flexDirection: "column", marginTop: 1, flexGrow: 1 },
-            e(Text, { color: "#64748b" }, "Observations:"),
+            e(Text, { color: "#64748b" }, "Outcomes:"),
             ...(() => {
               const data = activityNarrator.getDisplayData();
               const observations = data.observations || [];
               if (observations.length === 0) {
-                return [e(Text, { key: "no-obs", color: "#475569", dimColor: true }, "  No observations yet")];
+                return [e(Text, { key: "no-obs", color: "#475569", dimColor: true }, "  No outcomes yet")];
               }
               return observations.slice(0, 3).map((obs, i) => {
                 const text = obs.text?.toLowerCase() || (typeof obs === "string" ? obs.toLowerCase() : "");
@@ -6454,9 +6489,13 @@ Folder: ${result.action.id}`,
                 const textColor = isCompleted ? "#22c55e" : isAbandoned ? "#64748b" : isFailed ? "#64748b" : "#94a3b8";
                 return e(
                   Box,
-                  { key: `obs-${i}`, flexDirection: "row", marginTop: 0 },
-                  e(Text, { color: dotColor }, "● "),
-                  e(Text, { color: textColor, wrap: "truncate-end" }, (obs.text || obs).slice(0, 28))
+                  { key: `obs-${i}`, flexDirection: "column", marginBottom: 1 },
+                  e(
+                    Box,
+                    { flexDirection: "row" },
+                    e(Text, { color: dotColor }, "●  "),
+                    e(Text, { color: textColor, wrap: "wrap" }, (obs.text || obs).slice(0, 80))
+                  )
                 );
               });
             })()

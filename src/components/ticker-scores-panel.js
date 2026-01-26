@@ -285,8 +285,11 @@ const TickerScoresPanelBase = ({
     );
   }
 
-  // Minimal/compact view
+  // Minimal/compact view - show 5 tickers with full run & update status
   if (viewMode === "minimal" || compact) {
+    // Override to show 5 tickers in mini view
+    const miniTickers = sortedTickers.slice(0, 5);
+
     // Calculate market status for indicator
     const getMarketStatus = () => {
       if (!tickerStatus) return "pending";
@@ -296,6 +299,69 @@ const TickerScoresPanelBase = ({
       return "pending";
     };
     const marketStatus = getMarketStatus();
+
+    // Check if full scan ran today
+    const getFullScanStatus = () => {
+      if (!tickerStatus?.lastFullScan) return { ran: false, time: null };
+      const lastScan = new Date(tickerStatus.lastFullScan);
+      const today = new Date();
+      const isToday = lastScan.toDateString() === today.toDateString();
+      return {
+        ran: isToday,
+        time: isToday ? lastScan.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }) : null
+      };
+    };
+    const fullScanStatus = getFullScanStatus();
+
+    // Check market hours update frequency (9am-4pm ET)
+    const getUpdateFrequencyStatus = () => {
+      if (!tickerStatus?.updateHistory || tickerStatus.updateHistory.length === 0) {
+        return { healthy: false, gaps: 0 };
+      }
+
+      const now = new Date();
+      const today = new Date();
+      today.setHours(9, 0, 0, 0); // 9am today
+      const marketClose = new Date();
+      marketClose.setHours(16, 0, 0, 0); // 4pm today
+
+      // Only check if we're in market hours
+      const isMarketHours = now >= today && now <= marketClose;
+      if (!isMarketHours) {
+        return { healthy: true, gaps: 0, afterHours: true };
+      }
+
+      // Get today's updates
+      const todayUpdates = tickerStatus.updateHistory
+        .filter(u => {
+          const updateTime = new Date(u);
+          return updateTime.toDateString() === now.toDateString() &&
+                 updateTime >= today &&
+                 updateTime <= marketClose;
+        })
+        .sort((a, b) => new Date(a) - new Date(b));
+
+      if (todayUpdates.length === 0) {
+        return { healthy: false, gaps: 999 };
+      }
+
+      // Check for gaps > 2 hours
+      let gaps = 0;
+      for (let i = 1; i < todayUpdates.length; i++) {
+        const prev = new Date(todayUpdates[i - 1]);
+        const curr = new Date(todayUpdates[i]);
+        const diffHours = (curr - prev) / (1000 * 60 * 60);
+        if (diffHours > 2) gaps++;
+      }
+
+      // Check gap from last update to now
+      const lastUpdate = new Date(todayUpdates[todayUpdates.length - 1]);
+      const hoursSinceUpdate = (now - lastUpdate) / (1000 * 60 * 60);
+      if (hoursSinceUpdate > 2) gaps++;
+
+      return { healthy: gaps === 0, gaps, updateCount: todayUpdates.length };
+    };
+    const updateStatus = getUpdateFrequencyStatus();
 
     return e(
       Box,
@@ -325,7 +391,8 @@ const TickerScoresPanelBase = ({
           })
         )
       ),
-      ...sortedTickers.map((ticker, i) => {
+      // Top 5 tickers
+      ...miniTickers.map((ticker, i) => {
         const isTop3 = top3Symbols.has(ticker.symbol);
         const color = getSignalColor(ticker.score);
 
@@ -346,7 +413,25 @@ const TickerScoresPanelBase = ({
           e(Text, { color, width: 7 },
             ` ${getSignalLabel(ticker.score, isTop3)}`)
         );
-      })
+      }),
+      // Data quality status line
+      e(
+        Box,
+        { flexDirection: "row", gap: 1, marginTop: 1, borderTop: true, borderColor: "#334155", paddingTop: 1 },
+        // Full scan status
+        e(Text, { color: fullScanStatus.ran ? "#22c55e" : "#ef4444" },
+          fullScanStatus.ran ? "●" : "○"),
+        e(Text, { color: fullScanStatus.ran ? "#94a3b8" : "#64748b" },
+          fullScanStatus.ran ? `Full scan ${fullScanStatus.time}` : "No full scan today"),
+        e(Text, { color: "#334155" }, "│"),
+        // Update frequency status
+        e(Text, { color: updateStatus.afterHours ? "#64748b" : updateStatus.healthy ? "#22c55e" : "#f59e0b" },
+          updateStatus.afterHours ? "○" : updateStatus.healthy ? "●" : "◐"),
+        e(Text, { color: updateStatus.afterHours ? "#64748b" : updateStatus.healthy ? "#94a3b8" : "#f59e0b" },
+          updateStatus.afterHours ? "After hours" :
+          updateStatus.healthy ? `Updates OK (${updateStatus.updateCount || 0})` :
+          `${updateStatus.gaps} gap${updateStatus.gaps !== 1 ? "s" : ""} >2h`)
+      )
     );
   }
 

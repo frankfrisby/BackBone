@@ -724,6 +724,8 @@ const App = ({ updateConsoleTitle }) => {
     error: null,
     scanCount: 0,
     scanDone: false,
+    lastFullScan: null,      // Last full 800+ ticker scan timestamp
+    updateHistory: [],       // Array of update timestamps for today (for 2hr gap check)
   });
   const [portfolio, setPortfolio] = useState(() => {
     if (useMockData) return buildMockPortfolio();
@@ -3367,12 +3369,33 @@ Execute this task and provide concrete results.`);
             }
           }
           // Update status: done refreshing, record count and time
-          setTickerStatus({
-            refreshing: false,
-            lastRefresh: new Date().toISOString(),
-            error: null,
-            scanCount: result.tickers.length,
-            scanDone: result.tickers.length >= 50,
+          setTickerStatus(prev => {
+            const now = new Date();
+            const nowISO = now.toISOString();
+            const today = now.toDateString();
+
+            // Track if this was a full scan (800+ tickers)
+            const isFullScan = result.tickers.length >= 800;
+            const lastFullScan = isFullScan ? nowISO : prev.lastFullScan;
+
+            // Track update history (keep only today's entries for gap checking)
+            const updateHistory = [
+              ...(prev.updateHistory || []).filter(ts => {
+                const tsDate = new Date(ts).toDateString();
+                return tsDate === today;
+              }),
+              nowISO
+            ].slice(-50); // Keep last 50 updates max
+
+            return {
+              refreshing: false,
+              lastRefresh: nowISO,
+              error: null,
+              scanCount: result.tickers.length,
+              scanDone: result.tickers.length >= 50,
+              lastFullScan,
+              updateHistory,
+            };
           });
         } else {
           // No data or unsuccessful - mark as pending

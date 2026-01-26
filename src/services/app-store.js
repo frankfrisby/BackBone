@@ -91,6 +91,8 @@ class AppStore extends EventEmitter {
           error: null,
           scanCount: 0,
           scanDone: false,
+          lastFullScan: null,      // Last full 800+ ticker scan timestamp
+          updateHistory: [],       // Array of update timestamps for today (for 2hr gap check)
         },
       },
       [STATE_SLICES.CHAT]: {

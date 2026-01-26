@@ -1,11 +1,22 @@
 import fs from "fs";
 import path from "path";
 import { EventEmitter } from "events";
+import { getGoalManager } from "./goal-manager.js";
+import { getToolExecutor, TOOL_TYPES } from "./tool-executor.js";
+import { STATE_FOR_ACTIVITY, getStateForActivity } from "./engine-state.js";
+import { getClaudeOrchestrator, EVALUATION_DECISION, ORCHESTRATION_STATE } from "./claude-orchestrator.js";
+import { getClaudeCodeStatus } from "./claude-code-cli.js";
 
 /**
  * Autonomous Engine for BACKBONE
  * Core brain that generates AI-driven actions and executes them
  * Manages goals, proposes actions, and runs the autonomous loop
+ *
+ * KEY FEATURES:
+ * - AUTO-START: Automatically picks highest priority goal on launch
+ * - TOOL CHAINING: AI decides next action after each completes
+ * - STATE DISPLAY: Shows proper states (Researching, Analyzing, Building, etc.)
+ * - AUTONOMOUS: No user approval needed for tool execution
  */
 
 const DATA_DIR = path.join(process.cwd(), "data");
@@ -136,6 +147,70 @@ export class AutonomousEngine extends EventEmitter {
     this.loopInterval = null;
     this.contextProviders = {};
     this.executors = {};
+
+    // New autonomous loop properties
+    this.running = false;
+    this.currentGoal = null;
+    this.actionHistory = [];
+    this.goalManager = null;
+    this.toolExecutor = null;
+    this.aiBrain = null;
+    this.narrator = null;
+
+    // Auto-chain settings
+    this.autoChain = true;
+    this.maxActionsPerGoal = 50;
+    this.actionCount = 0;
+  }
+
+  /**
+   * Set the goal manager instance
+   */
+  setGoalManager(manager) {
+    this.goalManager = manager;
+  }
+
+  /**
+   * Set the AI brain instance
+   */
+  setAIBrain(brain) {
+    this.aiBrain = brain;
+  }
+
+  /**
+   * Set the activity narrator instance
+   */
+  setNarrator(narrator) {
+    this.narrator = narrator;
+  }
+
+  /**
+   * Set the tool executor instance
+   */
+  setToolExecutor(executor) {
+    this.toolExecutor = executor;
+  }
+
+  /**
+   * Set the current goal directly
+   */
+  setCurrentGoal(goal) {
+    this.currentGoal = goal;
+    this.actionHistory = [];
+    this.actionCount = 0;
+
+    if (this.narrator) {
+      this.narrator.setGoal(goal?.title || null);
+    }
+
+    this.emit("goal-set", goal);
+  }
+
+  /**
+   * Get the state for a tool/activity type
+   */
+  getStateForTool(toolType) {
+    return STATE_FOR_ACTIVITY[toolType] || "working";
   }
 
   /**
@@ -336,12 +411,13 @@ export class AutonomousEngine extends EventEmitter {
   }
 
   /**
-   * Start the autonomous loop
+   * Start the autonomous loop (legacy)
    */
   start(generateFn) {
     if (this.state.running) return;
 
     this.state.running = true;
+    this.running = true;
     saveEngineState(this.state);
 
     this.emit("started");
@@ -359,9 +435,10 @@ export class AutonomousEngine extends EventEmitter {
    * Stop the autonomous loop
    */
   stop() {
-    if (!this.state.running) return;
+    if (!this.state.running && !this.running) return;
 
     this.state.running = false;
+    this.running = false;
     saveEngineState(this.state);
 
     if (this.loopInterval) {
@@ -370,6 +447,474 @@ export class AutonomousEngine extends EventEmitter {
     }
 
     this.emit("stopped");
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // NEW AUTONOMOUS LOOP - AUTO-START, TOOL CHAINING, NO USER APPROVAL
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Start the true autonomous loop
+   * AUTO-START: Automatically selects highest priority goal and begins work
+   */
+  async startAutonomousLoop() {
+    if (this.running) {
+      console.log("[AutonomousEngine] Already running");
+      return;
+    }
+
+    this.running = true;
+    this.emit("autonomous-started");
+
+    // Run the autonomous loop
+    await this.runAutonomousLoop();
+  }
+
+  /**
+   * Run the autonomous loop
+   * Uses Claude Code CLI with GPT-5.2 supervision for goal execution
+   */
+  async runAutonomousLoop() {
+    // Initialize Claude Orchestrator
+    const orchestrator = getClaudeOrchestrator({
+      maxTurns: 30,
+      evaluationInterval: 5000,
+      timeout: 600000
+    });
+
+    // Set up orchestrator event handlers
+    this.setupOrchestratorEvents(orchestrator);
+
+    while (this.running) {
+      try {
+        // 1. AUTO-START: Check for current goal, auto-select if none
+        if (!this.currentGoal) {
+          this.setEngineState("thinking");
+
+          if (this.goalManager) {
+            await this.goalManager.initialize();
+            this.currentGoal = this.goalManager.getCurrentGoal();
+          }
+
+          if (!this.currentGoal) {
+            // No goals available - wait and check again
+            this.setEngineState("idle");
+            await this.wait(5000);
+            continue;
+          }
+
+          // Log goal selection
+          if (this.narrator) {
+            this.narrator.setGoal(this.currentGoal.title);
+            this.narrator.observe(`Starting work on: ${this.currentGoal.title}`);
+          }
+        }
+
+        // 2. Check if Claude Code is available
+        const claudeStatus = await getClaudeCodeStatus();
+
+        if (claudeStatus.ready) {
+          // ═══════════════════════════════════════════════════════════════
+          // CLAUDE CODE MODE: Run goal through Claude CLI with GPT-5.2 supervision
+          // ═══════════════════════════════════════════════════════════════
+          this.setEngineState("executing");
+
+          if (this.narrator) {
+            this.narrator.observe(`Executing via Claude Code CLI...`);
+          }
+
+          // Execute goal with Claude Orchestrator
+          const result = await orchestrator.executeGoal(this.currentGoal, {
+            workDir: process.cwd()
+          });
+
+          // Process result
+          if (result.success) {
+            if (this.narrator) {
+              this.narrator.observe(`Progress: ${result.output?.slice(0, 100)}...`);
+            }
+
+            // Record in goal manager
+            if (this.goalManager) {
+              for (const toolCall of (result.toolCalls || [])) {
+                this.goalManager.recordAction({
+                  action: toolCall.tool,
+                  target: JSON.stringify(toolCall.input).slice(0, 100)
+                }, { success: true });
+                this.actionCount++;
+              }
+            }
+
+            // Check if goal is truly complete (based on action count and goal manager)
+            if (this.actionCount >= this.maxActionsPerGoal || (this.goalManager && this.goalManager.isGoalComplete())) {
+              await this.completeCurrentGoal();
+            }
+            // Otherwise continue the loop - Claude Code will handle chaining
+          } else {
+            // Goal failed or incomplete
+            if (this.narrator) {
+              this.narrator.observe(`Working on issue: ${result.error || 'retrying'}`);
+            }
+
+            // Increment failure count but keep trying
+            this.actionCount++;
+
+            // Only give up after many failures (not just 3)
+            if (this.actionCount >= 20) {
+              // Too many failures, move to next goal
+              await this.completeCurrentGoal();
+            }
+            // Otherwise loop continues and tries again
+          }
+
+        } else {
+          // ═══════════════════════════════════════════════════════════════
+          // FALLBACK MODE: Use AI Brain + Tool Executor
+          // ═══════════════════════════════════════════════════════════════
+          this.setEngineState("thinking");
+
+          if (this.narrator) {
+            this.narrator.observe(`Claude Code not available, using fallback mode`);
+          }
+
+          // Determine next action using AI Brain
+          const nextAction = await this.determineNextAction();
+
+          if (!nextAction) {
+            // No action determined - wait and try again
+            // Don't complete goal just because no action was returned
+            this.setEngineState("reflecting");
+            await this.wait(2000);
+
+            // Only complete if we've exceeded action limit
+            if (this.actionCount >= this.maxActionsPerGoal) {
+              await this.completeCurrentGoal();
+            }
+            continue;
+          }
+
+          // Execute with Tool Executor
+          const toolState = this.getStateForTool(nextAction.action);
+          this.setEngineState(toolState);
+
+          const result = await this.executeAction(nextAction);
+
+          // Track history
+          this.actionHistory.push({ action: nextAction, result, timestamp: Date.now() });
+          this.actionCount++;
+
+          if (this.actionHistory.length > 30) {
+            this.actionHistory = this.actionHistory.slice(-30);
+          }
+
+          // Brief reflection between actions
+          this.setEngineState("reflecting");
+          await this.wait(1500); // 1.5s between actions for visual feedback
+
+          // Only complete based on action count (not isGoalComplete which may be too aggressive)
+          if (this.actionCount >= this.maxActionsPerGoal) {
+            await this.completeCurrentGoal();
+          }
+          // Continue loop for next action
+        }
+
+      } catch (error) {
+        console.error("[AutonomousEngine] Loop error:", error.message);
+        this.emit("loop-error", error);
+
+        // Wait before retrying
+        await this.wait(5000);
+      }
+    }
+  }
+
+  /**
+   * Set up event handlers for the Claude Orchestrator
+   */
+  setupOrchestratorEvents(orchestrator) {
+    // Tool usage events
+    orchestrator.on("tool-use", ({ tool, input }) => {
+      if (this.narrator) {
+        this.narrator.action(tool.toUpperCase(), JSON.stringify(input).slice(0, 80), null, "WORKING");
+      }
+      this.emit("claude-tool-use", { tool, input });
+    });
+
+    // Claude text output
+    orchestrator.on("claude-text", ({ text }) => {
+      this.emit("claude-output", { text });
+    });
+
+    // GPT-5.2 decisions
+    orchestrator.on("decision", (decision) => {
+      if (this.narrator) {
+        this.narrator.observe(`GPT-5.2: ${decision.decision} (${decision.reasoning})`);
+      }
+      this.emit("evaluation-decision", decision);
+    });
+
+    // Completion signals
+    orchestrator.on("completion-signal", ({ text }) => {
+      if (this.narrator) {
+        this.narrator.observe(`Completion signal detected`);
+      }
+    });
+
+    // Errors
+    orchestrator.on("error", ({ error }) => {
+      if (this.narrator) {
+        this.narrator.observe(`Claude error: ${error}`);
+      }
+      this.emit("claude-error", { error });
+    });
+
+    // Escalation
+    orchestrator.on("escalate", ({ decision }) => {
+      if (this.narrator) {
+        this.narrator.observe(`ESCALATION: ${decision.reasoning}`);
+      }
+      this.emit("needs-human", { reason: decision.reasoning });
+    });
+  }
+
+  /**
+   * Determine the next action to take based on goal and context
+   */
+  async determineNextAction() {
+    if (!this.currentGoal) {
+      return null;
+    }
+
+    try {
+      // Try AI brain first
+      if (this.aiBrain) {
+        const result = await this.aiBrain.determineNextAction(
+          this.currentGoal,
+          this.actionHistory
+        );
+
+        if (result) {
+          return result;
+        }
+      }
+
+      // Fallback: Generate simple actions based on goal category and history
+      return this.generateFallbackAction();
+    } catch (error) {
+      console.error("[AutonomousEngine] Failed to determine next action:", error.message);
+      // Return fallback action on error
+      return this.generateFallbackAction();
+    }
+  }
+
+  /**
+   * Generate a simple fallback action when AI is not available
+   */
+  generateFallbackAction() {
+    if (!this.currentGoal) return null;
+
+    const actionsCount = this.actionHistory.length;
+    const category = this.currentGoal.category || "growth";
+    const title = this.currentGoal.title || "";
+
+    // Simple action sequence based on category
+    // Use action names that match TOOL_TYPES in tool-executor.js
+    // The narrator will be called separately with proper type mapping
+    const actionSequences = {
+      finance: [
+        { action: "WebSearch", narratorType: "WEB_SEARCH", target: "stock market analysis today opportunities", reasoning: "Research current market conditions" },
+        { action: "WebSearch", narratorType: "WEB_SEARCH", target: "best investment strategies 2026", reasoning: "Research investment strategies" },
+        { action: "Read", narratorType: "READ", target: "data/portfolio.json", reasoning: "Review current portfolio" },
+        { action: "WebSearch", narratorType: "WEB_SEARCH", target: "high growth stocks 2026", reasoning: "Find growth opportunities" }
+      ],
+      health: [
+        { action: "Read", narratorType: "READ", target: "data/oura_data.json", reasoning: "Review current health metrics" },
+        { action: "WebSearch", narratorType: "WEB_SEARCH", target: "improve sleep quality tips", reasoning: "Research sleep improvement" },
+        { action: "WebSearch", narratorType: "WEB_SEARCH", target: "Oura ring sleep optimization", reasoning: "Find optimization strategies" },
+        { action: "Read", narratorType: "READ", target: "data/user_profile.json", reasoning: "Review personal health goals" }
+      ],
+      family: [
+        { action: "WebSearch", narratorType: "WEB_SEARCH", target: "quality family time activities", reasoning: "Research family activities" },
+        { action: "WebSearch", narratorType: "WEB_SEARCH", target: "work life balance tips", reasoning: "Find balance strategies" },
+        { action: "Read", narratorType: "READ", target: "data/user_profile.json", reasoning: "Review family information" }
+      ],
+      career: [
+        { action: "WebSearch", narratorType: "WEB_SEARCH", target: "job opportunities " + title.slice(0, 50), reasoning: "Search for opportunities" },
+        { action: "Read", narratorType: "READ", target: "data/linkedin_profile.json", reasoning: "Review career profile" },
+        { action: "WebSearch", narratorType: "WEB_SEARCH", target: "career advancement strategies", reasoning: "Research career growth" }
+      ],
+      growth: [
+        { action: "WebSearch", narratorType: "WEB_SEARCH", target: title.slice(0, 50) + " strategies", reasoning: "Research goal strategies" },
+        { action: "Read", narratorType: "READ", target: "data/user_profile.json", reasoning: "Review user context" },
+        { action: "WebSearch", narratorType: "WEB_SEARCH", target: "personal development tips 2026", reasoning: "Find growth strategies" }
+      ]
+    };
+
+    const sequence = actionSequences[category] || actionSequences.growth;
+    const actionIndex = actionsCount % sequence.length;
+
+    // Keep cycling through actions until maxActionsPerGoal is reached
+    // The main loop will handle goal completion based on actionCount
+    // Don't return null here as it would trigger premature goal completion
+    return sequence[actionIndex];
+  }
+
+  /**
+   * Execute an action with proper state display
+   */
+  async executeAction(action) {
+    const executor = this.toolExecutor || getToolExecutor();
+
+    // Emit action start for UI
+    this.emit("action-started", {
+      type: action.action,
+      target: action.target,
+      status: "WORKING"
+    });
+
+    // Log action to narrator (use narratorType if available, otherwise map action name)
+    if (this.narrator) {
+      // Map tool executor names to narrator ACTION_TOOLS keys
+      const narratorTypeMap = {
+        "WebSearch": "WEB_SEARCH",
+        "Fetch": "WEB_FETCH",
+        "Read": "READ",
+        "Write": "WRITE",
+        "Edit": "EDIT",
+        "Bash": "BASH",
+        "Grep": "GREP",
+        "Glob": "GLOB"
+      };
+      const narratorType = action.narratorType || narratorTypeMap[action.action] || action.action;
+
+      this.narrator.action(
+        narratorType,
+        action.target,
+        action.reasoning || null,
+        "WORKING"
+      );
+    }
+
+    try {
+      const result = await executor.execute(action);
+
+      // Emit success
+      this.emit("action-completed", {
+        ...action,
+        status: "DONE",
+        result
+      });
+
+      // Update narrator
+      if (this.narrator && result.success) {
+        const actionId = this.narrator.actions[0]?.id;
+        if (actionId) {
+          this.narrator.completeAction(actionId);
+          if (result.output || result.content) {
+            this.narrator.setActionResult(actionId, result.output || result.content);
+          }
+        }
+      }
+
+      // Record in goal manager
+      if (this.goalManager) {
+        this.goalManager.recordAction(action, result);
+      }
+
+      return result;
+
+    } catch (error) {
+      // Emit failure
+      this.emit("action-failed", {
+        ...action,
+        status: "FAILED",
+        error: error.message
+      });
+
+      // Update narrator
+      if (this.narrator) {
+        const actionId = this.narrator.actions[0]?.id;
+        if (actionId) {
+          this.narrator.failAction(actionId);
+        }
+      }
+
+      throw error;
+    }
+  }
+
+  /**
+   * Set engine state and notify narrator
+   */
+  setEngineState(state) {
+    if (this.narrator) {
+      const stateUpper = state.toUpperCase();
+      this.narrator.setState(stateUpper);
+    }
+    this.emit("state-changed", state);
+  }
+
+  /**
+   * Check if current goal is complete
+   */
+  isGoalComplete() {
+    if (!this.currentGoal) return true;
+
+    // Check with goal manager
+    if (this.goalManager) {
+      return this.goalManager.isGoalComplete();
+    }
+
+    // Fallback: check action count
+    return this.actionCount >= this.maxActionsPerGoal;
+  }
+
+  /**
+   * Complete the current goal and move to next
+   */
+  async completeCurrentGoal() {
+    if (!this.currentGoal) return;
+
+    // Notify narrator
+    if (this.narrator) {
+      this.narrator.observe(`Completed goal: ${this.currentGoal.title}`);
+    }
+
+    // Complete in goal manager
+    if (this.goalManager) {
+      this.goalManager.completeCurrentGoal();
+    }
+
+    // Reset for next goal
+    this.currentGoal = null;
+    this.actionHistory = [];
+    this.actionCount = 0;
+
+    this.emit("goal-completed", this.currentGoal);
+
+    // Auto-select next goal
+    if (this.goalManager) {
+      const nextGoal = this.goalManager.selectNextGoal();
+      if (nextGoal) {
+        this.goalManager.setCurrentGoal(nextGoal);
+        this.currentGoal = nextGoal;
+      }
+    }
+  }
+
+  /**
+   * Wait helper
+   */
+  wait(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Stop the autonomous loop
+   */
+  stopAutonomousLoop() {
+    this.running = false;
+    this.emit("autonomous-stopped");
   }
 
   /**

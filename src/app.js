@@ -69,7 +69,7 @@ import { getCloudSyncConfig, syncBackboneState, checkPhoneInput } from "./servic
 import { saveAllMemory } from "./services/memory.js";
 import { getEmailConfig, buildEmailSummary } from "./services/email.js";
 import { getWealthConfig, buildWealthSummary } from "./services/wealth.js";
-import { fetchTickers as fetchYahooTickers, startServer as startYahooServer, isServerRunning, triggerFullScan } from "./services/yahoo-client.js";
+import { fetchTickers as fetchYahooTickers, startServer as startYahooServer, isServerRunning, triggerFullScan, refreshTickers } from "./services/yahoo-client.js";
 import { extractLinkedInProfile, saveLinkedInProfile, loadLinkedInProfile, isProfileIncomplete, refreshAndGenerateLinkedInMarkdown, generateLinkedInMarkdown } from "./services/linkedin-scraper.js";
 import { getDataFreshnessChecker } from "./services/data-freshness-checker.js";
 import { getCronManager } from "./services/cron-manager.js";
@@ -1698,6 +1698,8 @@ const App = ({ updateConsoleTitle }) => {
       // Stream raw Claude Code output to engine section
       autonomousEngine.on("claude-stream", ({ chunk, type }) => {
         if (chunk && type === "stdout") {
+          // Ensure cliStreaming is true when we receive data
+          setCliStreaming(true);
           // Append streaming output to action stream for real-time display
           appendActionStream(chunk);
         }
@@ -1739,16 +1741,21 @@ const App = ({ updateConsoleTitle }) => {
         }
       });
 
-      autonomousEngine.on("claude-start", ({ action }) => {
-        workLog.logAction(LOG_SOURCE.CLAUDE_CODE, `Starting: ${action.title}`, action.executionPlan?.prompt?.slice(0, 50) || "", LOG_STATUS.PENDING);
+      autonomousEngine.on("claude-start", (data) => {
+        const title = data?.goal?.title || data?.action?.title || "Goal execution";
+        const prompt = data?.action?.executionPlan?.prompt?.slice(0, 50) || "";
+        workLog.logAction(LOG_SOURCE.CLAUDE_CODE, `Starting: ${title}`, prompt, LOG_STATUS.PENDING);
         setCliStreaming(true);
+        setActionStreamingText("Starting Claude Code CLI...");
       });
 
-      autonomousEngine.on("claude-end", ({ success, actionId }) => {
-        if (success) {
+      autonomousEngine.on("claude-end", (data) => {
+        if (data?.success) {
           workLog.logResult(LOG_SOURCE.CLAUDE_CODE, "Task completed", "", LOG_STATUS.SUCCESS);
         }
         setCliStreaming(false);
+        setActionStreamingText("");
+        setActionStreamingTitle("");
       });
 
       autonomousEngine.on("claude-error", ({ error }) => {
@@ -3013,14 +3020,18 @@ Execute this task and provide concrete results.`);
           agenticPrompt,
           process.cwd(),
           (event) => {
-            if (event.type === "stdout" || event.type === "stderr") {
+            if (event.type === "stdout") {
               extractToolEvents(event.text, "claude-code");
-              // Show last 500 chars of output
-              const displayText = event.output.slice(-500);
-              setActionStreamingText(displayText);
+              const displayText = (event.output || "").slice(-500);
+              setActionStreamingText(displayText || "Processing...");
+            } else if (event.type === "stderr") {
+              extractToolEvents(event.text, "claude-code");
+              const displayText = (event.error || "").slice(-500);
+              if (displayText) setActionStreamingText(displayText);
             } else if (event.type === "done") {
-              setActionStreamingText("");
-              setActionStreamingTitle("");
+              // Don't clear streaming text here — let the result handler below
+              // add the final message, which will naturally replace the streaming display.
+              // Just clean up tool events.
               setToolEvents((prev) => prev.map((entry) => (
                 entry.status === "working"
                   ? { ...entry, status: "done", endedAt: Date.now() }
@@ -3056,6 +3067,8 @@ Execute this task and provide concrete results.`);
             category: conversationTracker.categorizeMessage(userMessage)
           });
 
+          setActionStreamingText("");
+          setActionStreamingTitle("");
           setIsProcessing(false);
           setCliStreaming(false);
           engineState.setStatus("idle");
@@ -3080,6 +3093,9 @@ Execute this task and provide concrete results.`);
         }
 
         // Fall through to API fallback
+        setActionStreamingText("");
+        setActionStreamingTitle("");
+        setCliStreaming(false);
       }
 
       // Fallback: Claude Code CLI not available - use API
@@ -5487,6 +5503,118 @@ Folder: ${result.action.id}`,
           ]);
         }
         setLastAction("Actions shown");
+        return;
+      }
+
+      // /sweep - Full 800+ ticker sweep
+      if (resolved === "/sweep") {
+        setMessages((prev) => [
+          ...prev,
+          { role: "assistant", content: "Starting full stock sweep (800+ tickers)...", timestamp: new Date() }
+        ]);
+        try {
+          const result = await triggerFullScan();
+          if (result.success !== false) {
+            setMessages((prev) => [
+              ...prev,
+              { role: "assistant", content: "Full sweep started. Evaluating 800+ tickers in background.", timestamp: new Date() }
+            ]);
+            setTickerStatus(prev => ({ ...prev, fullScanRunning: true }));
+          } else {
+            setMessages((prev) => [
+              ...prev,
+              { role: "assistant", content: `Sweep failed: ${result.error || "Unknown error"}`, timestamp: new Date() }
+            ]);
+          }
+        } catch (error) {
+          setMessages((prev) => [
+            ...prev,
+            { role: "assistant", content: `Sweep error: ${error.message}`, timestamp: new Date() }
+          ]);
+        }
+        setLastAction("Full sweep triggered");
+        return;
+      }
+
+      // /refresh - Refresh core tickers
+      if (resolved === "/refresh") {
+        setMessages((prev) => [
+          ...prev,
+          { role: "assistant", content: "Refreshing stock tickers...", timestamp: new Date() }
+        ]);
+        try {
+          await refreshTickers();
+          const result = await fetchYahooTickers();
+          if (result.success && result.tickers.length > 0) {
+            setTickers(result.tickers);
+            setMessages((prev) => [
+              ...prev,
+              { role: "assistant", content: `Refreshed ${result.tickers.length} tickers.`, timestamp: new Date() }
+            ]);
+            setTickerStatus(prev => ({
+              ...prev,
+              refreshing: false,
+              lastRefresh: new Date().toISOString(),
+              scanCount: result.tickers.length,
+            }));
+          } else {
+            setMessages((prev) => [
+              ...prev,
+              { role: "assistant", content: "Refresh completed but no ticker data returned.", timestamp: new Date() }
+            ]);
+          }
+        } catch (error) {
+          setMessages((prev) => [
+            ...prev,
+            { role: "assistant", content: `Refresh error: ${error.message}`, timestamp: new Date() }
+          ]);
+        }
+        setLastAction("Tickers refreshed");
+        return;
+      }
+
+      // /tickers - Display top scored tickers
+      if (resolved === "/tickers") {
+        try {
+          const result = await fetchYahooTickers();
+          if (result.success && result.tickers.length > 0) {
+            setTickers(result.tickers);
+            const sorted = [...result.tickers].sort((a, b) => (b.score || 0) - (a.score || 0));
+            const top = sorted.slice(0, 20);
+            let content = "TOP TICKERS BY SCORE\n\n";
+            content += "Symbol     Score  Change%  MACD\n";
+            content += "─────────────────────────────────\n";
+            top.forEach(t => {
+              const sym = (t.symbol || "").padEnd(10);
+              const score = ((t.score || 0).toFixed(1)).padStart(5);
+              const change = ((t.changePercent || 0).toFixed(2) + "%").padStart(8);
+              const macd = t.macdTrend || t.macd || "—";
+              content += `${sym} ${score} ${change}  ${macd}\n`;
+            });
+            content += `\nTotal: ${result.tickers.length} tickers`;
+            if (result.lastFullScan) {
+              content += ` | Last scan: ${new Date(result.lastFullScan).toLocaleString()}`;
+            }
+            if (result.fullScanRunning) {
+              content += " | Full scan running...";
+            }
+            setMessages((prev) => [
+              ...prev,
+              { role: "assistant", content, timestamp: new Date() }
+            ]);
+          } else {
+            setMessages((prev) => [
+              ...prev,
+              { role: "assistant", content: "No ticker data available. Run /refresh or /sweep first.", timestamp: new Date() }
+            ]);
+          }
+        } catch (error) {
+          setMessages((prev) => [
+            ...prev,
+            { role: "assistant", content: `Tickers error: ${error.message}`, timestamp: new Date() }
+          ]);
+        }
+        setLastAction("Tickers displayed");
         return;
       }
 

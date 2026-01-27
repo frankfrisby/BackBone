@@ -778,6 +778,9 @@ export class AutonomousEngine extends EventEmitter {
             workDir: process.cwd()
           });
 
+          // Signal Claude Code CLI has finished
+          this.emit("claude-end", { success: result.success, goal: this.currentGoal });
+
           // Process result
           if (result.success) {
             if (this.narrator) {

@@ -79,6 +79,7 @@ These are detailed instruction files in `skills/`. Read the relevant file when h
 - **claude-code-cli**: Claude Code CLI — terminal commands, file operations, system tasks
 - **data-analysis**: Data Analysis — analyze datasets, statistics, visualizations
 - **database-operations**: Database Operations — SQL, NoSQL, data modeling, queries
+- **disaster-assessment**: Disaster & Crisis Assessment — market crashes, credit crises, bond/housing markets, geopolitical threats, job market, food/energy crises, climate, space/cosmic risks, societal issues
 - **economic-policy**: Economic Policy Research — economic analysis, policy evaluation
 - **elevenlabs-voice**: ElevenLabs Voice AI — text-to-speech, voice cloning, audio generation
 - **email-automation**: Email Automation — compose, send, manage email workflows

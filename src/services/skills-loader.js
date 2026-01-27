@@ -233,3 +233,48 @@ class SkillsLoader extends EventEmitter {
 let instance = null;
 export const getSkillsLoader = () => { if (!instance) instance = new SkillsLoader(); return instance; };
 export default getSkillsLoader;
+
+// --- Lightweight catalog functions for AI context injection ---
+
+let cachedCatalog = null;
+
+/**
+ * Returns a compact skills catalog string for AI context.
+ * One line per skill: "- name: description". Cached after first call.
+ */
+export function getSkillsCatalog() {
+  if (cachedCatalog) return cachedCatalog;
+  try {
+    if (!fs.existsSync(SKILLS_DIR)) return null;
+    const files = fs.readdirSync(SKILLS_DIR).filter(f => f.endsWith(".md")).sort();
+    if (files.length === 0) return null;
+    const lines = files.map(f => {
+      const name = f.replace(/\.md$/, "");
+      try {
+        const content = fs.readFileSync(path.join(SKILLS_DIR, f), "utf-8");
+        const firstLine = content.split("\n").find(l => l.startsWith("# "));
+        const desc = firstLine ? firstLine.replace(/^#\s*/, "").replace(/\s*Skill\s*$/, "") : name;
+        return `- ${name}: ${desc}`;
+      } catch {
+        return `- ${name}`;
+      }
+    });
+    cachedCatalog = lines.join("\n");
+    return cachedCatalog;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Returns the full markdown content of a specific skill file.
+ */
+export function getSkillContent(skillName) {
+  try {
+    const filePath = path.join(SKILLS_DIR, `${skillName}.md`);
+    if (!fs.existsSync(filePath)) return null;
+    return fs.readFileSync(filePath, "utf-8");
+  } catch {
+    return null;
+  }
+}

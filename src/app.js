@@ -16,7 +16,8 @@ import {
   enrichTickerEngine,
   formatPercent,
   formatSignal,
-  getTickerIcon
+  getTickerIcon,
+  validateTickerUniverse
 } from "./data/tickers.js";
 import { buildDefaultWeights, buildScoringEngine, normalizeWeights } from "./data/scoring.js";
 import { buildMockPortfolio, buildPortfolioFromAlpaca, buildEmptyPortfolio } from "./data/portfolio.js";
@@ -68,7 +69,7 @@ import { getCloudSyncConfig, syncBackboneState, checkPhoneInput } from "./servic
 import { saveAllMemory } from "./services/memory.js";
 import { getEmailConfig, buildEmailSummary } from "./services/email.js";
 import { getWealthConfig, buildWealthSummary } from "./services/wealth.js";
-import { fetchTickers as fetchYahooTickers, startServer as startYahooServer, isServerRunning } from "./services/yahoo-client.js";
+import { fetchTickers as fetchYahooTickers, startServer as startYahooServer, isServerRunning, triggerFullScan } from "./services/yahoo-client.js";
 import { extractLinkedInProfile, saveLinkedInProfile, loadLinkedInProfile, isProfileIncomplete, refreshAndGenerateLinkedInMarkdown, generateLinkedInMarkdown } from "./services/linkedin-scraper.js";
 import { getDataFreshnessChecker } from "./services/data-freshness-checker.js";
 import { getCronManager } from "./services/cron-manager.js";
@@ -78,6 +79,7 @@ import { deleteAllData, getResetSummary, RESET_STEPS } from "./services/reset.js
 import { sendMessage as sendMultiAI, getAIStatus, getMultiAIConfig, getCurrentModel, MODELS, TASK_TYPES, isAgenticTask, executeAgenticTask, getAgenticCapabilities } from "./services/multi-ai.js";
 import { formatToolsList, getToolsSummary, enableServer, disableServer } from "./services/mcp-tools.js";
 import { loadActionsQueue, getActionsDisplay, queueAction, startNextAction, completeAction, initializeDefaultActions, ACTION_TYPES } from "./services/actions-engine.js";
+import { getSkillsCatalog } from "./services/skills-loader.js";
 import { loadProfileSections, updateFromLinkedIn, updateFromHealth, updateFromPortfolio, getProfileSectionDisplay, getProfileOverview, PROFILE_SECTIONS } from "./services/profile-sections.js";
 import { getGitHubConfig, getGitHubStatus } from "./services/github.js";
 import { openUrl } from "./services/open-url.js";
@@ -194,6 +196,9 @@ import { getPolymarketService } from "./services/polymarket-service.js";
 import { getConversationTracker } from "./services/conversation-tracker.js";
 import { getProactiveEngine } from "./services/proactive-engine.js";
 import { getFirebaseMessaging } from "./services/firebase-messaging.js";
+import { getRealtimeMessaging } from "./services/realtime-messaging.js";
+import { getUnifiedMessageLog, MESSAGE_CHANNEL } from "./services/unified-message-log.js";
+import { getWhatsAppNotifications } from "./services/whatsapp-notifications.js";
 
 // Engine state and new panels
 import { getEngineStateManager, ENGINE_STATUS } from "./services/engine-state.js";
@@ -314,6 +319,8 @@ const App = ({ updateConsoleTitle }) => {
   const pauseUpdatesRef = useRef(false); // Use ref to avoid re-renders in intervals
   const [mainViewReady, setMainViewReady] = useState(false);
   const [layoutReady, setLayoutReady] = useState(false);
+  const [showConversation, setShowConversation] = useState(false);
+  const [conversationScrollOffset, setConversationScrollOffset] = useState(0);
   const [forceRenderKey, setForceRenderKey] = useState(0); // Force re-render after layout adjusts
   const readinessTimerRef = useRef(null);
   const layoutKickTimerRef = useRef(null);
@@ -344,8 +351,8 @@ const App = ({ updateConsoleTitle }) => {
     if (!modelInfo) return null;
     const sourceLabel = getOpenAIModelSource(modelInfo);
     const suffix = sourceLabel ? ` (${sourceLabel})` : "";
-    const nameBase = modelInfo.name || modelInfo.shortName || "GPT-5.2";
-    const shortNameBase = modelInfo.shortName || modelInfo.name || "GPT-5.2";
+    const nameBase = modelInfo.name || modelInfo.shortName || "Claude Code";
+    const shortNameBase = modelInfo.shortName || modelInfo.name || "Claude Code";
 
     return {
       ...modelInfo,
@@ -428,6 +435,8 @@ const App = ({ updateConsoleTitle }) => {
           setIsInitializing(false);
           // Reduce outcomes to 2 after loading
           setMaxOutcomesToShow(2);
+          // Restore terminal title after splash (ensure "Backbone · [User]" shows)
+          restoreBaseTitle();
           // Emit resize event to ensure layout calculates correctly
           setTimeout(() => {
             if (process.stdout.emit) {
@@ -647,13 +656,26 @@ const App = ({ updateConsoleTitle }) => {
       setShowOnboarding(true);
       setLastAction("Setup wizard opened");
     }
-    // Arrow keys: Scroll engine section when not typing
+    // Escape: hide conversation overlay
+    if (key.escape && showConversation) {
+      setShowConversation(false);
+      return;
+    }
+    // Arrow keys: Scroll conversation overlay or engine section
     if (key.upArrow) {
-      setEngineScrollOffset(prev => Math.max(0, prev - 1));
+      if (showConversation) {
+        setConversationScrollOffset(prev => Math.max(0, prev - 1));
+      } else {
+        setEngineScrollOffset(prev => Math.max(0, prev - 1));
+      }
       return;
     }
     if (key.downArrow) {
-      setEngineScrollOffset(prev => Math.min(maxEngineScroll, prev + 1));
+      if (showConversation) {
+        setConversationScrollOffset(prev => prev + 1);
+      } else {
+        setEngineScrollOffset(prev => Math.min(maxEngineScroll, prev + 1));
+      }
       return;
     }
 
@@ -668,6 +690,8 @@ const App = ({ updateConsoleTitle }) => {
           process.stdout.write("\x1b[2J\x1b[1;1H");
           setShowOnboarding(false);
           setLastAction("Returned to main");
+          // Restore terminal title (Backbone · [User])
+          restoreBaseTitle();
           // Force layout recalculation
           setTimeout(() => {
             if (process.stdout.emit) {
@@ -724,7 +748,8 @@ const App = ({ updateConsoleTitle }) => {
     error: null,
     scanCount: 0,
     scanDone: false,
-    lastFullScan: null,      // Last full 800+ ticker scan timestamp
+    lastFullScan: null,      // Last full scan timestamp
+    fullScanRunning: false,  // Whether full scan is currently running
     updateHistory: [],       // Array of update timestamps for today (for 2hr gap check)
   });
   const [portfolio, setPortfolio] = useState(() => {
@@ -753,6 +778,13 @@ const App = ({ updateConsoleTitle }) => {
         setAlpacaStatus("Live");
         setAlpacaMode(config.mode === "live" ? "Live" : "Paper");
         isLiveRef.current = true;
+
+        // Validate ticker universe against Alpaca (runs in background, cached daily)
+        validateTickerUniverse(config).then((result) => {
+          if (result.removed.length > 0) {
+            process.stderr.write(`[Ticker Validation] Removed ${result.removed.length} invalid tickers: ${result.removed.join(", ")}\n`);
+          }
+        }).catch(() => {});
       } catch (err) {
         process.stderr.write(`[Alpaca Init Error] ${err.message}\n`);
       }
@@ -785,10 +817,16 @@ const App = ({ updateConsoleTitle }) => {
   }, [firebaseUserName, linkedInProfile]);
 
   // Set terminal title to "Backbone · [username]" across all views
+  // This should persist unless temporarily changed by notifications (WhatsApp, trades)
   useEffect(() => {
     const firstName = firebaseUserName?.split(" ")[0] || null;
     setBaseTitle(firstName);
   }, [firebaseUserName]);
+
+  // Restore base title when view mode changes (ensure title persists across mini/main views)
+  useEffect(() => {
+    restoreBaseTitle();
+  }, [viewMode]);
 
   const userDisplayName = useMemo(() => {
     return linkedInProfile?.name || profile?.name || process.env.USER_NAME || "Frank";
@@ -834,6 +872,13 @@ const App = ({ updateConsoleTitle }) => {
   const conversationTracker = useMemo(() => getConversationTracker(), []);
   const proactiveEngine = useMemo(() => getProactiveEngine(), []);
   const firebaseMessaging = useMemo(() => getFirebaseMessaging(), []);
+  const realtimeMessaging = useMemo(() => getRealtimeMessaging(), []);
+  const unifiedMessageLog = useMemo(() => getUnifiedMessageLog(), []);
+  const whatsappNotifications = useMemo(() => getWhatsAppNotifications(), []);
+
+  // WhatsApp poll countdown state
+  const [whatsappPollCountdown, setWhatsappPollCountdown] = useState(null);
+  const [whatsappPollingMode, setWhatsappPollingMode] = useState("idle");
 
   // ===== AI BRAIN - Real AI-driven decision engine =====
   const aiBrain = useMemo(() => getAIBrain(), []);
@@ -892,6 +937,102 @@ const App = ({ updateConsoleTitle }) => {
     const timer = setTimeout(initializeAutonomousEngine, 3000);
     return () => clearTimeout(timer);
   }, [showOnboarding, autonomousEngine, goalManager, aiBrain, toolExecutor]);
+
+  // ===== WHATSAPP / REALTIME MESSAGING =====
+  // Initialize realtime messaging and poll countdown
+  const realtimeMessagingInitRef = useRef(false);
+
+  useEffect(() => {
+    if (realtimeMessagingInitRef.current) return;
+    if (!firebaseUser?.uid) return;
+    if (showOnboarding) return;
+
+    const initMessaging = async () => {
+      try {
+        // Initialize realtime messaging with user ID
+        await realtimeMessaging.initialize(firebaseUser.uid);
+
+        // Initialize WhatsApp notifications
+        await whatsappNotifications.initialize(firebaseUser.uid);
+
+        // Set up message handler - process WhatsApp messages like chat
+        realtimeMessaging.setMessageHandler(async (message) => {
+          // Log to unified message log
+          unifiedMessageLog.addUserMessage(message.content, MESSAGE_CHANNEL.WHATSAPP, {
+            from: message.from,
+            messageId: message.id
+          });
+
+          // Add to conversation (so it shows in chat panel)
+          setMessages(prev => [...prev, {
+            role: "user",
+            content: message.content,
+            timestamp: new Date(message.createdAt || Date.now()),
+            channel: "whatsapp"
+          }]);
+
+          // Process with AI brain (same as chat)
+          try {
+            const response = await aiBrain.chat(message.content, {
+              userId: firebaseUser.uid,
+              channel: "whatsapp"
+            });
+
+            // Log AI response
+            unifiedMessageLog.addAssistantMessage(response.content, MESSAGE_CHANNEL.WHATSAPP);
+
+            // Add to conversation
+            setMessages(prev => [...prev, {
+              role: "assistant",
+              content: response.content,
+              timestamp: new Date(),
+              channel: "whatsapp",
+              modelInfo: response.modelInfo
+            }]);
+
+            // Send response back via WhatsApp
+            await whatsappNotifications.sendAIResponse(response.content, MESSAGE_CHANNEL.WHATSAPP);
+
+            return { content: response.content, type: "ai" };
+          } catch (err) {
+            console.error("[App] WhatsApp message handler error:", err.message);
+            return { content: "Sorry, I encountered an error.", type: "system" };
+          }
+        });
+
+        // Start listening for messages
+        await realtimeMessaging.startListening();
+
+        realtimeMessagingInitRef.current = true;
+        console.log("[App] Realtime messaging initialized");
+      } catch (err) {
+        console.error("[App] Failed to init realtime messaging:", err.message);
+      }
+    };
+
+    // Delay to let other systems start
+    const timer = setTimeout(initMessaging, 2000);
+    return () => clearTimeout(timer);
+  }, [firebaseUser?.uid, showOnboarding, realtimeMessaging, whatsappNotifications, unifiedMessageLog, aiBrain]);
+
+  // Update poll countdown every second
+  useEffect(() => {
+    if (!realtimeMessaging.listening) return;
+
+    const updateCountdown = () => {
+      const countdown = realtimeMessaging.getPollCountdown();
+      const status = realtimeMessaging.getStatus();
+      setWhatsappPollCountdown(countdown);
+      setWhatsappPollingMode(status.pollingMode);
+    };
+
+    // Initial update
+    updateCountdown();
+
+    // Update every second
+    const interval = setInterval(updateCountdown, 1000);
+    return () => clearInterval(interval);
+  }, [realtimeMessaging.listening]);
 
   // ===== API QUOTA MONITOR =====
   const quotaMonitor = useMemo(() => getAPIQuotaMonitor(), []);
@@ -999,6 +1140,7 @@ const App = ({ updateConsoleTitle }) => {
   const [streamingText, setStreamingText] = useState("");
   const [actionStreamingText, setActionStreamingText] = useState("");
   const [actionStreamingTitle, setActionStreamingTitle] = useState("");
+  const [cliStreaming, setCliStreaming] = useState(false); // true when Claude Code CLI is actively executing (chat or autonomous)
   const actionStreamBufferRef = useRef("");
   const actionStreamTimerRef = useRef(null);
   const currentActionIdRef = useRef(null);
@@ -1386,7 +1528,7 @@ const App = ({ updateConsoleTitle }) => {
       if (cliStatus.ready) {
         // Fully ready - installed and logged in
         workLog.logConnection(LOG_SOURCE.CLAUDE_CODE, "Claude Code Ready",
-          `${backend.version || "CLI"} | ${cliStatus.model || "Opus 4.5"}`, LOG_STATUS.SUCCESS);
+          `${backend.version || "CLI"} | ${cliStatus.model || "Claude Code"}`, LOG_STATUS.SUCCESS);
       } else if (backend.installed && !cliStatus.loggedIn) {
         // Installed but not logged in
         workLog.logConnection(LOG_SOURCE.CLAUDE_CODE, "Claude Code - Login Required",
@@ -1547,8 +1689,8 @@ const App = ({ updateConsoleTitle }) => {
       });
 
       // Forward Claude Code events for real-time display
-      autonomousEngine.on("claude-text", ({ text, actionId }) => {
-        if (text && actionId === currentActionIdRef.current) {
+      autonomousEngine.on("claude-text", ({ text }) => {
+        if (text) {
           appendActionStream(text);
         }
       });
@@ -1599,16 +1741,19 @@ const App = ({ updateConsoleTitle }) => {
 
       autonomousEngine.on("claude-start", ({ action }) => {
         workLog.logAction(LOG_SOURCE.CLAUDE_CODE, `Starting: ${action.title}`, action.executionPlan?.prompt?.slice(0, 50) || "", LOG_STATUS.PENDING);
+        setCliStreaming(true);
       });
 
       autonomousEngine.on("claude-end", ({ success, actionId }) => {
         if (success) {
           workLog.logResult(LOG_SOURCE.CLAUDE_CODE, "Task completed", "", LOG_STATUS.SUCCESS);
         }
+        setCliStreaming(false);
       });
 
       autonomousEngine.on("claude-error", ({ error }) => {
         workLog.logError(LOG_SOURCE.CLAUDE_CODE, "Error", error);
+        setCliStreaming(false);
       });
 
       // Register executor for API fallback
@@ -1645,6 +1790,7 @@ const App = ({ updateConsoleTitle }) => {
         const actionTitle = action.title || `${action.action || action.type || "Task"}(${(action.target || "").slice(0, 30)})`;
         workLog.logAction(LOG_SOURCE.AUTONOMOUS, `Started: ${actionTitle}`, action.type || action.action, LOG_STATUS.PENDING);
         currentActionIdRef.current = action.id;
+        setCliStreaming(true);
         resetActionStream(actionTitle);
         resetToolEvents();
         refreshAutonomousState();
@@ -1654,6 +1800,7 @@ const App = ({ updateConsoleTitle }) => {
         const actionTitle = action.title || `${action.action || action.type || "Task"}(${(action.target || "").slice(0, 30)})`;
         workLog.logResult(LOG_SOURCE.AUTONOMOUS, `Completed: ${actionTitle}`, "", LOG_STATUS.SUCCESS);
         currentActionIdRef.current = null;
+        setCliStreaming(false);
         resetActionStream("");
         setToolEvents((prev) => prev.map((entry) => (
           entry.status === "working"
@@ -1682,6 +1829,7 @@ const App = ({ updateConsoleTitle }) => {
         const actionTitle = action.title || `${action.action || action.type || "Task"}(${(action.target || "").slice(0, 30)})`;
         workLog.logError(LOG_SOURCE.AUTONOMOUS, `Failed: ${actionTitle}`, action.error);
         currentActionIdRef.current = null;
+        setCliStreaming(false);
         resetActionStream("");
         setToolEvents((prev) => prev.map((entry) => (
           entry.status === "working"
@@ -2239,11 +2387,11 @@ Execute this task and provide concrete results.`);
       });
 
       // NOTE: OLD loop removed - using NEW autonomous loop (startAutonomousLoop)
-      // which uses Claude Code CLI with GPT-5.2 supervision, or AI Brain fallback
+      // which uses Claude Code CLI as the primary engine, or AI Brain fallback
       // The NEW loop was already started in the initialization useEffect above
       activityTracker.setRunning(true);
       activityTracker.setAgentState("THINKING");
-      workLog.logSystem("Autonomous Engine", "AI Brain initialized - using Claude Code CLI or AI Brain fallback");
+      workLog.logSystem("Autonomous Engine", "AI Brain initialized - powered by Claude Code CLI");
 
       // Initialize Life Management Engine services (but DON'T start its rule-based cycle)
       // The AI Brain now handles intelligent decision-making
@@ -2757,7 +2905,7 @@ Execute this task and provide concrete results.`);
         return;
       }
 
-      // Add user message
+      // Add user message and show conversation immediately
       setMessages((prev) => [
         ...prev,
         {
@@ -2766,6 +2914,8 @@ Execute this task and provide concrete results.`);
           timestamp: new Date()
         }
       ]);
+      setShowConversation(true);
+      setConversationScrollOffset(0);
 
       // Track user query for goals/insights analysis
       trackUserQuery(userMessage, QUERY_SOURCE.CLI, {
@@ -2799,52 +2949,97 @@ Execute this task and provide concrete results.`);
         // Silently fail context extraction
       }
 
-      // Check if this is an agentic task that requires code execution
-      const needsAgentic = isAgenticTask(userMessage);
+      // Claude Code CLI is the default for ALL queries
+      // Only fall back to API if CLI not available
+      const agenticCaps = await getAgenticCapabilities();
 
-      if (needsAgentic) {
-        // Check if agentic tools are available
-        const agenticCaps = await getAgenticCapabilities();
+      if (agenticCaps.claudeCode) {
+        // Use Claude Code CLI as the default handler for all queries
+        setIsProcessing(true);
+        setCliStreaming(true);
+        setShowConversation(true);
+        setConversationScrollOffset(0);
+        engineState.setStatus("executing", "Claude Code CLI");
+        resetActionStream("Claude Code CLI");
+        resetToolEvents();
+        setActionStreamingText("Processing...");
 
-        if (agenticCaps.available) {
-          setIsProcessing(true);
-          engineState.setStatus("working", "Running agentic task...");
-          const agenticTitle = agenticCaps.claudeCode ? "Claude Code" : "Codex";
-          resetActionStream(agenticTitle);
-          resetToolEvents();
-          setActionStreamingText("Starting task...");
+        // Build context for Claude Code CLI (same as API path)
+        const savedUserContext = buildContextForAI();
+        const fileContext = await loadUserContextFiles();
 
-          // Execute agentic task with streaming output
-          const agenticPrompt = withToolGuide(userMessage);
-          const result = await executeAgenticTask(
-            agenticPrompt,
-            process.cwd(),
-            (event) => {
-              if (event.type === "stdout" || event.type === "stderr") {
-                extractToolEvents(event.text, agenticCaps.claudeCode ? "claude-code" : "codex");
-                // Show last 500 chars of output
-                const displayText = event.output.slice(-500);
-                setActionStreamingText(displayText);
-              } else if (event.type === "done") {
-                setActionStreamingText("");
-                setActionStreamingTitle("");
-                setToolEvents((prev) => prev.map((entry) => (
-                  entry.status === "working"
-                    ? { ...entry, status: "done", endedAt: Date.now() }
-                    : entry
-                )));
-                toolEventActionMapRef.current.forEach((actionId) => {
-                  activityNarrator.completeAction(actionId);
-                });
-              }
+        // Build conversation history from recent messages
+        const recentMsgs = messages.slice(-10).map(m =>
+          `${m.role === "user" ? "User" : "Assistant"}: ${m.content.slice(0, 500)}`
+        ).join("\n\n");
+
+        // Build context prompt
+        const contextParts = [];
+
+        // Add user identity
+        if (fileContext.linkedIn?.summary) {
+          contextParts.push(`## User Profile\n${fileContext.linkedIn.summary.slice(0, 500)}`);
+        }
+
+        // Add goals
+        if (fileContext.goals?.length > 0) {
+          const goalsText = fileContext.goals.slice(0, 5).map(g => `- ${g.description || g.text || g}`).join("\n");
+          contextParts.push(`## Current Goals\n${goalsText}`);
+        }
+
+        // Add skills catalog
+        const skillsList = getSkillsCatalog();
+        if (skillsList) {
+          contextParts.push(`## Available Skills\n${skillsList}`);
+        }
+
+        // Add saved user context
+        if (savedUserContext) {
+          contextParts.push(savedUserContext.slice(0, 800));
+        }
+
+        // Add conversation history
+        if (recentMsgs) {
+          contextParts.push(`## Recent Conversation\n${recentMsgs}`);
+        }
+
+        // Build full prompt with context
+        const contextSection = contextParts.length > 0
+          ? `# Context\n${contextParts.join("\n\n")}\n\n# Current Request\n`
+          : "";
+
+        const agenticPrompt = withToolGuide(`${contextSection}${userMessage}`);
+        const result = await executeAgenticTask(
+          agenticPrompt,
+          process.cwd(),
+          (event) => {
+            if (event.type === "stdout" || event.type === "stderr") {
+              extractToolEvents(event.text, "claude-code");
+              // Show last 500 chars of output
+              const displayText = event.output.slice(-500);
+              setActionStreamingText(displayText);
+            } else if (event.type === "done") {
+              setActionStreamingText("");
+              setActionStreamingTitle("");
+              setToolEvents((prev) => prev.map((entry) => (
+                entry.status === "working"
+                  ? { ...entry, status: "done", endedAt: Date.now() }
+                  : entry
+              )));
+              toolEventActionMapRef.current.forEach((actionId) => {
+                activityNarrator.completeAction(actionId);
+              });
             }
-          );
+          }
+        );
 
-          // Add result as assistant message
-          const resultMessage = result.success
-            ? `Task completed successfully.\n\n${result.output.slice(-1000)}`
-            : `Task failed: ${result.error}\n\n${result.output.slice(-500)}`;
+        // Add result as assistant message
+        const outputText = (result.output || "").trim();
+        const errorText = (result.error || "").trim();
 
+        // Check if we got a meaningful response
+        if (result.success && outputText) {
+          const resultMessage = outputText.slice(-2000);
           setMessages((prev) => [
             ...prev,
             {
@@ -2852,22 +3047,49 @@ Execute this task and provide concrete results.`);
               content: resultMessage,
               timestamp: new Date(),
               isAgentic: true,
-              tool: result.tool
+              tool: "claude-code"
             }
           ]);
 
+          // Track conversation for learning
+          conversationTracker.record(userMessage, resultMessage, {
+            category: conversationTracker.categorizeMessage(userMessage)
+          });
+
           setIsProcessing(false);
+          setCliStreaming(false);
           engineState.setStatus("idle");
           return;
         }
-        // If no agentic tools, fall through to regular AI response
+
+        // Claude Code CLI returned empty or failed - fall through to API
+        // This can happen for simple conversational queries
+        if (!outputText && !errorText) {
+          // Silent fallback to API for conversational queries
+          // Continue to API section below
+        } else if (!result.success) {
+          // Show error but also try API fallback
+          setMessages((prev) => [
+            ...prev,
+            {
+              role: "system",
+              content: `Claude CLI: ${errorText || "No response"}. Trying API...`,
+              timestamp: new Date()
+            }
+          ]);
+        }
+
+        // Fall through to API fallback
       }
 
+      // Fallback: Claude Code CLI not available - use API
       setIsProcessing(true);
+      setShowConversation(true);
+      setConversationScrollOffset(0);
       setStreamingText("");
 
       // Set engine state to thinking
-      engineState.setStatus("thinking", "Processing your message...");
+      engineState.setStatus("thinking", "Processing your message (API fallback)...");
 
       // Build context from current state AND from data files (LinkedIn, projects, etc.)
       const savedUserContext = buildContextForAI(); // Include previously extracted user context
@@ -2913,12 +3135,19 @@ Execute this task and provide concrete results.`);
                 fullText += chunk.text;
                 setStreamingText(fullText);
               } else if (chunk.type === "done") {
+                // Anthropic API uses Claude models - include model info
+                const claudeModelInfo = {
+                  name: chunk.model || "claude-3-opus",
+                  displayName: chunk.model?.includes("opus") ? "Opus 4.5" :
+                               chunk.model?.includes("sonnet") ? "Sonnet" : "Claude Code"
+                };
                 setMessages((prev) => [
                   ...prev,
                   {
                     role: "assistant",
                     content: fullText,
-                    timestamp: new Date()
+                    timestamp: new Date(),
+                    modelInfo: claudeModelInfo
                   }
                 ]);
                 setStreamingText("");
@@ -2959,7 +3188,7 @@ Execute this task and provide concrete results.`);
           engineState.setStatus("idle");
         }
       } else {
-        // Use OpenAI via multi-ai service (GPT-5.2)
+        // Use OpenAI via multi-ai service (API fallback)
         try {
           const result = await sendMultiAI(userMessage, context, "auto");
           // Update model info for display
@@ -3374,8 +3603,8 @@ Execute this task and provide concrete results.`);
             const nowISO = now.toISOString();
             const today = now.toDateString();
 
-            // Track if this was a full scan (800+ tickers)
-            const isFullScan = result.tickers.length >= 800;
+            // Track if this was a full scan (500+ tickers from 800+ real universe)
+            const isFullScan = result.tickers.length >= 500;
             const lastFullScan = isFullScan ? nowISO : prev.lastFullScan;
 
             // Track update history (keep only today's entries for gap checking)
@@ -3393,7 +3622,8 @@ Execute this task and provide concrete results.`);
               error: null,
               scanCount: result.tickers.length,
               scanDone: result.tickers.length >= 50,
-              lastFullScan,
+              lastFullScan: result.lastFullScan || lastFullScan,
+              fullScanRunning: result.fullScanRunning || false,
               updateHistory,
             };
           });
@@ -3419,6 +3649,7 @@ Execute this task and provide concrete results.`);
     initYahooFinance();
 
     // Initial fetch after delay for server startup
+    // Note: The server auto-triggers full scan on startup if not done today
     setTimeout(fetchFromYahoo, 3000);
 
     // Check if we're in pre-market or market hours (5:30 AM - 4:00 PM ET)
@@ -5012,7 +5243,7 @@ Folder: ${result.action.id}`,
           const tracker = getGoalTracker();
 
           // Archive all current projects
-          const allGoals = tracker.getAllGoals();
+          const allGoals = tracker.getAll();
           let archivedCount = 0;
           for (const goal of allGoals) {
             if (goal.status !== "completed" && goal.status !== "archived") {
@@ -5059,7 +5290,7 @@ Folder: ${result.action.id}`,
           const { generateGoalsFromContext } = await import("./services/goal-generator.js");
 
           // Delete all current goals (not just archive)
-          const allGoals = tracker.getAllGoals();
+          const allGoals = tracker.getAll();
           let deletedCount = 0;
           for (const goal of allGoals) {
             tracker.deleteGoal(goal.id);
@@ -5134,7 +5365,7 @@ Folder: ${result.action.id}`,
 
           if (result.success && result.goals && result.goals.length > 0) {
             // Archive old goals first
-            const allGoals = tracker.getAllGoals();
+            const allGoals = tracker.getAll();
             for (const goal of allGoals) {
               if (goal.status === "active" || goal.status === "pending") {
                 tracker.updateStatus(goal.id, "archived");
@@ -6678,7 +6909,7 @@ Folder: ${result.action.id}`,
       const stats = data.stats || { tokens: 0, runtime: 0 };
       const metrics = data.metricsLine || `✧ ${stats.tokens.toLocaleString()} tokens | ${formatRuntime(stats.runtime)}`;
 
-      const headerLeft = [{ text: "ENGINE", color: "#64748b" }];
+      const headerLeft = [{ text: "ENGINE", color: "#64748b" }, { text: " · Claude Code CLI", color: "#f59e0b" }];
       const headerRight = [{ text: metrics, color: "#475569" }];
       const headerSpace = innerWidth - segmentLength(headerLeft) - segmentLength(headerRight);
       lines.push([
@@ -6757,7 +6988,7 @@ Folder: ${result.action.id}`,
     // Use the NEW autonomous loop with Claude Code CLI or AI Brain fallback
     autonomousEngine.startAutonomousLoop();
     refreshAutonomousState();
-    workLog.logSystem("Autonomous Mode Started", "Using Claude Code CLI with GPT-5.2 supervision");
+    workLog.logSystem("Autonomous Mode Started", "Powered by Claude Code CLI");
   }, [autonomousEngine, workLog]);
 
   const handleStopAutonomous = useCallback(() => {
@@ -6874,6 +7105,35 @@ Folder: ${result.action.id}`,
     );
   }
 
+  // Show onboarding wizard for first-time users or when requested (Ctrl+S)
+  // Fullscreen centered - nothing else visible - must check BEFORE skeleton
+  if (showOnboarding) {
+    return e(
+      Box,
+      {
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        width: terminalWidth,
+        height: terminalHeight
+      },
+      e(OnboardingPanel, {
+        userDisplay: firebaseUserDisplay,
+        onComplete: () => {
+          // Clear screen and transition to main view
+          process.stdout.write("\x1b[2J\x1b[1;1H");
+          updateSetting("onboardingComplete", true);
+          setShowOnboarding(false);
+          pauseUpdatesRef.current = false;
+          setPauseUpdates(false);
+          setLastAction("Setup complete!");
+          // Restore terminal title (Backbone · [User])
+          restoreBaseTitle();
+        }
+      })
+    );
+  }
+
   // Show skeleton placeholders AFTER splash ends but BEFORE data is ready
   // This provides visual structure while data loads
   if (!mainViewReady) {
@@ -6901,7 +7161,7 @@ Folder: ${result.action.id}`,
       e(Text, { color: skeletonLight }, "░".repeat(Math.min(width, 30)))
     );
 
-    // Skeleton goal - 7 lines per goal (multi-line pulsing)
+    // Skeleton goal - 4 lines per goal (spacious layout)
     const SkeletonGoal = (titleWidth) => e(
       Box,
       { flexDirection: "column", marginBottom: 2 },
@@ -6910,29 +7170,17 @@ Folder: ${result.action.id}`,
         e(Text, { color: pulsingDotVisible ? "#f59e0b" : "#92400e" }, "●"),
         e(Text, { color: skeletonLight }, "░".repeat(titleWidth))
       ),
-      // Line 2: Second title line
+      // Line 2: Progress detail
       e(Box, { paddingLeft: 3 },
-        e(Text, { color: skeletonMid }, "░".repeat(Math.floor(titleWidth * 0.85)))
+        e(Text, { color: skeletonMid }, "░".repeat(Math.floor(titleWidth * 0.8)))
       ),
-      // Line 3: Progress detail
+      // Line 3: Status detail
       e(Box, { paddingLeft: 3 },
-        e(Text, { color: skeletonDark }, "░".repeat(Math.floor(titleWidth * 0.75)))
+        e(Text, { color: skeletonDark }, "░".repeat(Math.floor(titleWidth * 0.65)))
       ),
-      // Line 4: Status detail
+      // Line 4: Metric
       e(Box, { paddingLeft: 3 },
-        e(Text, { color: skeletonMid }, "░".repeat(Math.floor(titleWidth * 0.65)))
-      ),
-      // Line 5: Progress bar placeholder
-      e(Box, { paddingLeft: 3 },
-        e(Text, { color: skeletonDark }, "░".repeat(Math.floor(titleWidth * 0.55)))
-      ),
-      // Line 6: Metric detail
-      e(Box, { paddingLeft: 3 },
-        e(Text, { color: skeletonLight }, "░".repeat(Math.floor(titleWidth * 0.45)))
-      ),
-      // Line 7: Additional info
-      e(Box, { paddingLeft: 3 },
-        e(Text, { color: skeletonMid }, "░".repeat(Math.floor(titleWidth * 0.35)))
+        e(Text, { color: skeletonMid }, "░".repeat(Math.floor(titleWidth * 0.5)))
       )
     );
 
@@ -7096,7 +7344,7 @@ Folder: ${result.action.id}`,
           e(Text, { color: "#f59e0b", bold: true }, "Goals"),
           e(Text, { color: "#1e293b" }, "─".repeat(22)),
           e(Box, { marginTop: 1 }),
-          // 4 Goal placeholders - each has 7 lines
+          // 4 Goal placeholders - each has 4 lines
           SkeletonGoal(22),
           SkeletonGoal(20),
           SkeletonGoal(24),
@@ -7118,34 +7366,7 @@ Folder: ${result.action.id}`,
     );
   }
 
-  // Show onboarding wizard for first-time users or when requested
-  // Fullscreen centered - nothing else visible
-  if (showOnboarding) {
-    return e(
-      Box,
-      {
-        flexDirection: "column",
-        alignItems: "center",
-        justifyContent: "center",
-        width: terminalWidth,
-        height: terminalHeight
-      },
-      e(OnboardingPanel, {
-        userDisplay: firebaseUserDisplay,
-        onComplete: () => {
-          // Clear screen and transition to main view
-          process.stdout.write("\x1b[2J\x1b[1;1H");
-          updateSetting("onboardingComplete", true);
-          setShowOnboarding(false);
-          pauseUpdatesRef.current = false;
-          setPauseUpdates(false);
-          setLastAction("Setup complete!");
-        }
-      })
-    );
-  }
-
-  if (!showOnboarding && !mainViewReady) {
+  if (!mainViewReady) {
     // Use same structure as main view so Ink calculates correct layout
     return e(
       Box,
@@ -7299,44 +7520,18 @@ Folder: ${result.action.id}`,
           );
         })(),
 
-        // ENGINE PANEL - Primary focus (takes most space, no header in compact)
+        // ENGINE PANEL — always visible, shows live CLI streaming when active
         e(
           Box,
           { flexDirection: "column", flexGrow: 1, marginTop: 1 },
-          e(AgentActivityPanel, { overlayHeader: false, compact: true, scrollOffset: engineScrollOffset, privateMode })
-        ),
-
-        // CONVERSATION DISPLAY - Shows recent messages and AI responses (fixed height to preserve header)
-        (messages.length > 0 || isProcessing) && e(
-          Box,
-          { flexDirection: "column", marginTop: 1, paddingX: 1, borderStyle: "round", borderColor: "#0f172a", height: 6, overflow: "hidden" },
-          e(Text, { color: "#475569", dimColor: true }, "Chat:"),
-          // Show last 2 messages - truncate to prevent overflow
-          ...messages.slice(-2).map((msg, i) => {
-            const isUser = msg.role === "user";
-            // Truncate messages to ~100 chars to fit in fixed height
-            const truncated = msg.content.length > 100 ? msg.content.slice(0, 97) + "..." : msg.content;
-            return e(
-              Box,
-              { key: `msg-${i}-${msg.timestamp}`, flexDirection: "row" },
-              e(Text, { color: isUser ? "#f59e0b" : "#22c55e", bold: true }, isUser ? "You: " : `${getAppName()}: `),
-              e(Text, { color: isUser ? "#94a3b8" : "#e2e8f0" }, truncated)
-            );
-          }),
-          // Show streaming response if processing (truncated)
-          isProcessing && streamingText && e(
-            Box,
-            { flexDirection: "row" },
-            e(Text, { color: "#22c55e", bold: true }, `${getAppName()}: `),
-            e(Text, { color: "#a3e635" }, streamingText.slice(-80) || "Thinking...")
-          ),
-          // Show loading indicator if processing but no streaming text yet
-          isProcessing && !streamingText && e(
-            Box,
-            { flexDirection: "row", gap: 1 },
-            e(Text, { color: "#22c55e", bold: true }, `${getAppName()}: `),
-            e(Text, { color: "#64748b" }, "Thinking...")
-          )
+          e(AgentActivityPanel, {
+            overlayHeader: false,
+            compact: true,
+            scrollOffset: engineScrollOffset,
+            privateMode,
+            actionStreamingText,
+            isProcessing
+          })
         ),
 
         // PORTFOLIO SUMMARY - One line with equity, day %, top 2 positions
@@ -7376,12 +7571,12 @@ Folder: ${result.action.id}`,
           })
         ),
 
-        // TOP 5 TICKERS - Compact inline display with decimals, green if > 8
+        // TOP 4 TICKERS - Compact inline display with decimals, green if > 8, plus Full/Refresh status
         topTickers.length > 0 && e(
           Box,
           { flexDirection: "row", gap: 1, marginTop: 1, height: 1 },
           e(Text, { color: "#64748b" }, "TOP "),
-          ...topTickers.slice(0, 5).map((t, i) => {
+          ...topTickers.slice(0, 4).map((t, i) => {
             const score = t.score || 0;
             const isHigh = score > 8;
             const isTop3 = i < 3;
@@ -7390,9 +7585,19 @@ Folder: ${result.action.id}`,
               { key: t.symbol, flexDirection: "row", gap: 0, backgroundColor: isTop3 && isHigh ? "#14532d" : undefined },
               e(Text, { color: isTop3 && isHigh ? "#22c55e" : "#f59e0b", backgroundColor: isTop3 && isHigh ? "#14532d" : undefined }, ` ${t.symbol} `),
               e(Text, { color: isHigh ? "#22c55e" : "#94a3b8", backgroundColor: isTop3 && isHigh ? "#14532d" : undefined, bold: isHigh }, score.toFixed(1)),
-              i < 4 && e(Text, { color: "#334155" }, " ")
+              i < 3 && e(Text, { color: "#334155" }, " ")
             );
-          })
+          }),
+          // Full scan status indicator (800+ tickers) - runs at 5:30am
+          e(Text, { color: "#334155" }, " │ "),
+          e(Text, { color: tickerStatus?.lastFullScan && new Date(tickerStatus.lastFullScan).toDateString() === new Date().toDateString() ? "#22c55e" : "#ef4444" },
+            tickerStatus?.fullScanRunning ? "◐" : "●"),
+          e(Text, { color: "#64748b" }, " Analysis · 5:30am"),
+          // Refresh status indicator (top 150 tickers refreshed in last 4 hours)
+          e(Text, { color: "#334155" }, " │ "),
+          e(Text, { color: tickerStatus?.refreshing ? "#f59e0b" : (tickerStatus?.lastRefresh && (Date.now() - new Date(tickerStatus.lastRefresh).getTime()) < 4 * 60 * 60 * 1000 ? "#22c55e" : "#ef4444") },
+            tickerStatus?.refreshing ? "◐" : "●"),
+          e(Text, { color: "#64748b" }, " Refresh")
         ),
 
         // NET WORTH SUMMARY - Assets, Liabilities, Total
@@ -7644,9 +7849,17 @@ Folder: ${result.action.id}`,
         Box,
         { flexDirection: "column", width: viewMode === VIEW_MODES.MINIMAL || isMedium ? "75%" : "50%", paddingX: 1, overflow: "hidden" },
         // Engine Status - overlay-rendered when enabled
-        e(AgentActivityPanel, { overlayHeader: overlayEnabled && overlayEngineHeaderEnabled, scrollOffset: engineScrollOffset, privateMode }),
+        e(AgentActivityPanel, { overlayHeader: overlayEnabled && overlayEngineHeaderEnabled, scrollOffset: engineScrollOffset, privateMode, actionStreamingText, cliStreaming }),
         // Conversation Panel
-        e(ConversationPanel, { messages, isLoading: isProcessing, streamingText, actionStreamingText, actionStreamingTitle }),
+        e(ConversationPanel, {
+          messages,
+          isLoading: isProcessing,
+          streamingText,
+          actionStreamingText,
+          actionStreamingTitle,
+          whatsappPollCountdown,
+          whatsappPollingMode
+        }),
         // LinkedIn Data Viewer overlay
         showLinkedInViewer && e(LinkedInDataViewer, {
           data: linkedInViewerData,

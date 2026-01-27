@@ -255,10 +255,11 @@ export class ClaudeCodeBackend extends EventEmitter {
     this.emit("task-started", taskRecord);
 
     try {
-      // Build command args for streaming
+      // Build command args for streaming — use stdin for prompt (not -p) to get real-time output
       const args = [
-        "-p",                         // Print mode (non-interactive)
-        "--output-format", "stream-json"  // Real-time streaming JSON
+        "--output-format", "stream-json",  // Real-time streaming JSON
+        "--verbose",
+        "--dangerously-skip-permissions"
       ];
 
       // Session management
@@ -280,10 +281,7 @@ export class ClaudeCodeBackend extends EventEmitter {
         args.push("--max-turns", String(task.maxTurns));
       }
 
-      // Add the prompt at the end
-      args.push(task.prompt);
-
-      // Execute with streaming
+      // Execute with streaming — prompt sent via stdin
       const result = await this._runStreamingCommand(
         this.backend.command,
         args,
@@ -291,7 +289,8 @@ export class ClaudeCodeBackend extends EventEmitter {
           cwd: task.workDir || process.cwd(),
           timeout: task.timeout || 300000, // 5 min default
           taskId,
-          taskRecord
+          taskRecord,
+          stdinPrompt: task.prompt  // Send prompt via stdin for real streaming
         }
       );
 
@@ -348,13 +347,27 @@ export class ClaudeCodeBackend extends EventEmitter {
     const timeout = options.timeout || 300000;
     const taskId = options.taskId;
     const taskRecord = options.taskRecord;
+    const stdinPrompt = options.stdinPrompt;
 
     return new Promise((resolve) => {
-      const proc = spawn(command, args, {
-        shell: true,
+      // Use direct node execution on Windows to avoid cmd.exe stdout buffering
+      const claudeCliPath = path.join(process.env.APPDATA || "", "npm", "node_modules", "@anthropic-ai", "claude-code", "cli.js");
+      const useDirectNode = process.platform === "win32" && fs.existsSync(claudeCliPath);
+
+      const spawnCmd = useDirectNode ? process.execPath : command;
+      const spawnArgs = useDirectNode ? [claudeCliPath, ...args] : args;
+
+      const proc = spawn(spawnCmd, spawnArgs, {
+        stdio: ["pipe", "pipe", "pipe"],
         cwd: options.cwd || process.cwd(),
-        env: { ...process.env, FORCE_COLOR: "0" } // Disable color codes
+        env: { ...process.env, FORCE_COLOR: "0" }
       });
+
+      // Send prompt via stdin for real-time streaming (avoids -p buffering issue)
+      if (stdinPrompt) {
+        proc.stdin.write(stdinPrompt);
+        proc.stdin.end();
+      }
 
       this.activeProcess = proc;
 

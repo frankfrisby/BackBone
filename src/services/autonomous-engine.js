@@ -1323,9 +1323,29 @@ export class AutonomousEngine extends EventEmitter {
       return nextGoal;
     }
 
-    // No other goals available - stay with current or go idle
+    // No non-held goals available — release the highest-priority on-hold goal
+    // so the engine always has something to work toward
+    if (onHoldGoalIds.size > 0) {
+      const heldGoal = activeGoals.find(g => onHoldGoalIds.has(g.id));
+      if (heldGoal) {
+        this.goalManager.releaseGoalFromHold(heldGoal.id);
+        await this.goalManager.setCurrentGoal(heldGoal);
+        this.currentGoal = heldGoal;
+        await this.switchToProjectForGoal(heldGoal);
+
+        if (this.narrator) {
+          this.narrator.observe(`Resuming held goal: ${heldGoal.title}`);
+          this.narrator.setGoal(heldGoal.title);
+        }
+
+        this.emit("goal-switched", { previousGoal: currentId, newGoal: heldGoal });
+        return heldGoal;
+      }
+    }
+
+    // Truly no goals at all
     if (this.narrator) {
-      this.narrator.observe("No other goals available - waiting");
+      this.narrator.observe("No goals available - waiting for new goals");
     }
 
     return null;

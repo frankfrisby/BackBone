@@ -67,6 +67,7 @@ export class TwilioWhatsAppService extends EventEmitter {
       accountSid: null,
       authToken: null,
       whatsappNumber: "+14155238886", // Sandbox default
+      sandboxJoinWords: null, // e.g., "join funny-elephant" - fetched from Firebase
       webhookUrl: null,
       registeredUsers: {} // phone -> userId mapping
     };
@@ -108,6 +109,7 @@ export class TwilioWhatsAppService extends EventEmitter {
         this.config.accountSid = firebaseConfig.accountSid || this.config.accountSid;
         this.config.authToken = firebaseConfig.authToken || this.config.authToken;
         this.config.whatsappNumber = firebaseConfig.whatsappNumber || this.config.whatsappNumber;
+        this.config.sandboxJoinWords = firebaseConfig.sandboxJoinWords || this.config.sandboxJoinWords;
       }
     } catch (err) {
       console.warn("[TwilioWhatsApp] Could not fetch from Firebase:", err.message);
@@ -399,6 +401,9 @@ export class TwilioWhatsAppService extends EventEmitter {
    * Get setup instructions
    */
   getSetupInstructions() {
+    const joinWords = this.config.sandboxJoinWords || "join <your-sandbox-word>";
+    const whatsappNumber = this.config.whatsappNumber || "+14155238886";
+
     return `
 TWILIO WHATSAPP SETUP (5 minutes)
 =================================
@@ -411,12 +416,13 @@ TWILIO WHATSAPP SETUP (5 minutes)
 2. ACTIVATE WHATSAPP SANDBOX
    Go to: Console > Messaging > Try it out > Send a WhatsApp message
    - Follow instructions to join sandbox
-   - Send "join <your-sandbox-word>" to +1 415 523 8886
+   - Send "${joinWords}" to ${whatsappNumber}
 
 3. GET YOUR CREDENTIALS
    Go to: Console Dashboard (twilio.com/console)
    - Copy "Account SID" (starts with AC...)
    - Copy "Auth Token" (click to reveal)
+   - Note your sandbox join words (e.g., "join funny-elephant")
 
 4. ADD CREDENTIALS TO FIREBASE FIRESTORE
    Go to: Firebase Console > Firestore Database
@@ -429,12 +435,13 @@ TWILIO WHATSAPP SETUP (5 minutes)
      accountSid: "ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
      authToken: "your_auth_token_here"
      whatsappNumber: "+14155238886"
+     sandboxJoinWords: "join your-sandbox-words"
 
 5. INSTALL TWILIO PACKAGE (if not already)
    npm install twilio
 
 SANDBOX LIMITATIONS:
-- Users must first send "join <word>" to opt-in
+- Users must first send "${joinWords}" to opt-in
 - Messages expire after 72 hours of inactivity
 - For production, apply for WhatsApp Business API access
 
@@ -452,6 +459,7 @@ COST:
       initialized: this.initialized,
       hasCredentials: !!(this.config.accountSid && this.config.authToken),
       whatsappNumber: this.config.whatsappNumber,
+      sandboxJoinWords: this.config.sandboxJoinWords,
       registeredUsers: Object.keys(this.config.registeredUsers).length
     };
   }
@@ -465,6 +473,7 @@ COST:
       status: this.initialized ? "Active" : "Not configured",
       provider: "Twilio",
       whatsappNumber: this.initialized ? this.config.whatsappNumber : null,
+      sandboxJoinWords: this.config.sandboxJoinWords,
       registeredUsers: Object.keys(this.config.registeredUsers).length,
       setupRequired: !this.initialized ? this.getSetupInstructions() : null
     };

@@ -35,6 +35,112 @@ export const ENGINE_STATUS = {
   SYNCING: { id: "syncing", label: "Syncing", icon: "🔄", color: "#06b6d4" }
 };
 
+/**
+ * State transitions based on tool/activity type
+ * Maps tool actions to engine states for proper display
+ */
+export const STATE_FOR_ACTIVITY = {
+  // Research tools
+  web_search: "researching",
+  WebSearch: "researching",
+  WEB_SEARCH: "researching",
+  read_file: "researching",
+  Read: "researching",
+  READ: "researching",
+  Fetch: "researching",
+  WEB_FETCH: "researching",
+
+  // Analysis tools
+  grep: "analyzing",
+  Grep: "analyzing",
+  GREP: "analyzing",
+  analyze: "analyzing",
+  glob: "analyzing",
+  Glob: "analyzing",
+  GLOB: "analyzing",
+
+  // Building/Writing tools
+  write_file: "building",
+  Write: "building",
+  WRITE: "building",
+  create: "building",
+
+  // Working/Editing tools
+  edit_file: "working",
+  Edit: "working",
+  EDIT: "working",
+  Update: "working",
+  UPDATE: "working",
+
+  // Execution tools
+  bash_command: "executing",
+  Bash: "executing",
+  BASH: "executing",
+
+  // Connection tools
+  api_call: "connecting",
+  API: "connecting",
+  API_CALL: "connecting",
+
+  // Thinking/Planning
+  think: "thinking",
+  plan: "planning",
+  reflect: "reflecting"
+};
+
+/**
+ * Get the appropriate engine status for an activity
+ */
+export const getStateForActivity = (activity) => {
+  const stateId = STATE_FOR_ACTIVITY[activity];
+  if (stateId) {
+    return ENGINE_STATUS[stateId.toUpperCase()] || ENGINE_STATUS.WORKING;
+  }
+  return ENGINE_STATUS.WORKING;
+};
+
+/**
+ * Autonomous state flow for goal work
+ * Defines valid state transitions for the autonomous engine
+ */
+export const STATE_FLOW = {
+  idle: ["thinking", "researching"],
+  thinking: ["planning", "researching", "idle"],
+  planning: ["researching", "executing", "building"],
+  researching: ["analyzing", "thinking", "building"],
+  analyzing: ["planning", "building", "working"],
+  building: ["executing", "reflecting", "working"],
+  working: ["building", "reflecting", "executing"],
+  executing: ["reflecting", "building", "working"],
+  reflecting: ["idle", "researching", "planning"],
+  connecting: ["researching", "executing", "idle"],
+  learning: ["reflecting", "planning", "idle"]
+};
+
+/**
+ * Check if a state transition is valid
+ */
+export const isValidTransition = (fromState, toState) => {
+  const from = fromState.toLowerCase();
+  const to = toState.toLowerCase();
+
+  // Always allow transition to self
+  if (from === to) return true;
+
+  // Check if transition is in the flow
+  const validNext = STATE_FLOW[from];
+  if (validNext && validNext.includes(to)) {
+    return true;
+  }
+
+  // Allow any transition to/from idle
+  if (from === "idle" || to === "idle") {
+    return true;
+  }
+
+  return false;
+};
+
 // Project domains/categories
 export const PROJECT_DOMAINS = {
   HEALTH: { id: "health", label: "Health", icon: "❤️", color: "#22c55e" },
@@ -52,6 +158,7 @@ export const PROJECT_DOMAINS = {
 const getDefaultState = () => ({
   status: ENGINE_STATUS.IDLE.id,
   statusDetail: null,
+  engineProvider: "Claude Code CLI",
   currentPlan: null,
   currentWork: null,
   activeProject: null,
@@ -400,6 +507,7 @@ export class EngineStateManager extends EventEmitter {
 
     return {
       status: statusDisplay,
+      engineProvider: this.state.engineProvider || "Claude Code CLI",
       activeProject: this.state.activeProject,
       projects: projects.slice(0, 10),
       metrics: this.state.metrics,

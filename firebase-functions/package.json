@@ -3,7 +3,7 @@
   "description": "Firebase Functions for BACKBONE messaging",
   "version": "1.0.0",
   "engines": {
-    "node": "18"
+    "node": "20"
   },
   "main": "index.js",
   "dependencies": {

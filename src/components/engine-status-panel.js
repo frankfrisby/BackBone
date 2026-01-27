@@ -165,6 +165,7 @@ const STATUS_LABELS = {
  */
 const EngineStatusPanelBase = ({
   status = {},
+  engineProvider = "Claude Code CLI",
   currentPlan = null,
   currentWork = null,
   projects = [],
@@ -229,7 +230,7 @@ const EngineStatusPanelBase = ({
       e(
         Box,
         { flexDirection: "row", gap: 1, alignItems: "center" },
-        e(Text, { color: "#64748b" }, "Engine Status"),
+        e(Text, { color: "#64748b" }, `Engine · ${engineProvider}`),
         isActive && e(Text, { color: statusColor }, "·"),
         isActive && e(Text, { color: TASK_STATE.OBSERVATION }, "...")
       ),

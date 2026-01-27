@@ -155,7 +155,7 @@ const SplashScreenBase = ({ message = "Initializing", showCredits = true }) => {
   const versionString = `v${version}.${commitHash}`;
 
   // Get terminal dimensions for true centering
-  const termHeight = process.stdout.rows || 24;
+  const termHeight = process.stdout.rows || 90;
   const termWidth = process.stdout.columns || 80;
 
   return e(
@@ -190,7 +190,11 @@ const SplashScreenBase = ({ message = "Initializing", showCredits = true }) => {
 
       // Version
       e(Box, { marginTop: 2 }),
-      e(Text, { color: "#475569", dimColor: true }, versionString)
+      e(Text, { color: "#475569", dimColor: true }, versionString),
+
+      // Credits
+      e(Box, { marginTop: 1 }),
+      e(Text, { color: "#475569", dimColor: true }, "Created by Frank Frisby")
     )
   );
 };

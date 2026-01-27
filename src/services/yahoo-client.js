@@ -145,6 +145,26 @@ export const refreshTickers = async () => {
 };
 
 /**
+ * Trigger a full scan of all CORE_TICKERS on the server
+ */
+export const triggerFullScan = async () => {
+  try {
+    if (!(await isServerRunning())) {
+      await startServer();
+    }
+
+    const response = await fetch(`${SERVER_URL}/api/full-scan`, { method: "POST" });
+    if (response.ok) {
+      const data = await response.json();
+      return data;
+    }
+    return { success: false, error: "Server error" };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+};
+
+/**
  * Get server status
  */
 export const getServerStatus = async () => {

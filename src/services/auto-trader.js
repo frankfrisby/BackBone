@@ -685,6 +685,25 @@ export const executeSell = async (symbol, price, quantity, reason) => {
 export const sendTradeNotification = async (trade) => {
   // Try multiple notification methods
 
+  // 0. WhatsApp (if configured) - highest priority
+  try {
+    const { getWhatsAppNotifications } = await import("./whatsapp-notifications.js");
+    const whatsappNotifier = getWhatsAppNotifications();
+    if (whatsappNotifier.enabled) {
+      await whatsappNotifier.notifyTrade({
+        symbol: trade.symbol,
+        action: trade.side,
+        quantity: trade.quantity,
+        price: trade.price,
+        total: trade.quantity * trade.price,
+        reason: trade.reason
+      });
+    }
+  } catch (err) {
+    // WhatsApp notification is optional - don't fail the whole function
+    console.error("[AutoTrader] WhatsApp notification failed:", err.message);
+  }
+
   // 1. Pushover (if configured)
   if (process.env.PUSHOVER_USER_KEY && process.env.PUSHOVER_APP_TOKEN) {
     try {

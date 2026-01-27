@@ -17,7 +17,16 @@
     "goals:voice": "node scripts/goals-voice.js",
     "icon": "node scripts/create-icon.js",
     "shortcut": "powershell -ExecutionPolicy Bypass -File scripts/create-shortcut.ps1",
-    "mcp:projects": "node src/mcp/projects-server.js"
+    "mcp:projects": "node src/mcp/projects-server.js",
+    "build": "pkg . --targets node20-win-x64 --output dist/BackBone.exe",
+    "build:all": "pkg . --targets node20-win-x64,node20-macos-x64,node20-linux-x64 --out-path dist/",
+    "installer": "npm run build && iscc installer/backbone-setup.iss"
+  },
+  "pkg": {
+    "scripts": ["src/**/*.js", "bin/**/*.js", "scripts/**/*.js"],
+    "assets": ["skills/**/*", "data/**/*"],
+    "targets": ["node20-win-x64"],
+    "outputPath": "dist"
   },
   "keywords": [
     "cli",
@@ -45,10 +54,12 @@
     "node-fetch": "^3.3.2",
     "personal-capital-sdk": "^1.0.0",
     "playwright": "^1.49.2",
+    "twilio": "^5.12.0",
     "ws": "^8.18.0",
     "zod": "^4.3.5"
   },
   "devDependencies": {
+    "@yao-pkg/pkg": "^6.12.0",
     "zig": "^0.3.0"
   }
 }

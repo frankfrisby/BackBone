@@ -299,29 +299,9 @@ export class GoalManager extends EventEmitter {
         this.emit("plan-generated", { goal, plan: aiPlan });
       }
 
-      // Check if goal should immediately go on hold (criteria not achievable yet)
-      if (criteria) {
-        const evaluation = await this.evaluateCriteria(goal);
-        if (!evaluation.complete && evaluation.completedCount === 0) {
-          // No criteria met yet - check if it's because we're waiting on something
-          const unmetCriteria = criteria.criteria.filter(c => !c.isComplete);
-          const waitingOnExternal = unmetCriteria.some(c =>
-            c.dataSource === "portfolio" ||
-            c.dataSource === "plaid_service" ||
-            c.dataSource === "oura_health"
-          );
-
-          if (waitingOnExternal) {
-            // Put on hold - waiting for criteria to be achievable
-            this.putGoalOnHold(
-              goal.id,
-              HOLD_REASON.TARGET_NOT_MET,
-              new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
-              `Waiting for criteria to be met: ${unmetCriteria.map(c => c.description).join(", ")}`
-            );
-          }
-        }
-      }
+      // NOTE: Do NOT put goals on hold just because external criteria aren't met yet.
+      // The engine should still work toward goals (research, plan, take preparatory actions).
+      // Completion is checked separately in the autonomous loop via evaluateCriteria().
 
     } catch (error) {
       console.error("[GoalManager] Plan/criteria generation failed:", error.message);
@@ -1084,6 +1064,27 @@ Respond in JSON:
   }
 
   /**
+   * Release a goal from hold, making it active again
+   */
+  releaseGoalFromHold(goalId) {
+    if (!this.onHoldGoals.has(goalId)) return false;
+
+    this.onHoldGoals.delete(goalId);
+
+    const goal = goalId === this.currentGoal?.id
+      ? this.currentGoal
+      : this.getActiveGoals().find(g => g.id === goalId);
+
+    if (goal && goal.state === GOAL_STATE.ON_HOLD) {
+      goal.state = GOAL_STATE.ACTIVE;
+    }
+
+    this.emit("goal-released", { goalId });
+    this.saveActiveGoal();
+    return true;
+  }
+
+  /**
    * Complete a task
    */
   completeTask(goalId, taskId, results = {}) {
@@ -1525,7 +1526,7 @@ Respond in JSON:
   getWaitingReasons() {
     const reasons = [];
     const tracker = getGoalTracker();
-    const allGoals = tracker.getAllGoals();
+    const allGoals = tracker.getAll();
 
     // Check on-hold goals first
     for (const [goalId, holdInfo] of this.onHoldGoals.entries()) {

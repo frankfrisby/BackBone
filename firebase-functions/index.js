@@ -354,11 +354,27 @@ exports.twilioWhatsAppWebhook = functions.https.onRequest(async (req, res) => {
 
     console.log(`[Twilio] Message from ${from}: ${messageBody}`);
 
+    // Fetch Twilio config from Firestore (includes join words)
+    let twilioConfig = {};
+    try {
+      const configDoc = await db.collection("config").doc("config_twilio").get();
+      if (configDoc.exists) {
+        twilioConfig = configDoc.data();
+      }
+    } catch (err) {
+      console.warn("[Twilio] Could not fetch config:", err.message);
+    }
+
+    const sandboxJoinWords = twilioConfig.sandboxJoinWords || "join <your-sandbox-word>";
+    const whatsappNumber = twilioConfig.whatsappNumber || "+14155238886";
+
     if (!messageBody.trim()) {
-      // Empty message - send help
+      // Empty message - send help with join instructions
       const response = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Message>Hi! I'm BACKBONE. Send me a message and your local BACKBONE app will respond.
+
+To join: Send "${sandboxJoinWords}" to ${whatsappNumber}
 
 Make sure BACKBONE is running on your computer to receive responses.</Message>
 </Response>`;
@@ -418,10 +434,40 @@ Make sure BACKBONE is running on your computer to receive responses.</Message>
 
     console.log(`[Twilio] Message saved for user ${userId}, awaiting local BACKBONE response`);
 
-    // Return acknowledgment - actual response comes async via sendTwilioResponse
+    // Check if the local BACKBONE app is online (active within last 5 minutes)
+    let appIsOnline = false;
+    try {
+      const presenceDoc = await db.collection("users").doc(userId)
+        .collection("presence").doc("status").get();
+
+      if (presenceDoc.exists) {
+        const presence = presenceDoc.data();
+        const lastSeen = presence.lastSeen ? new Date(presence.lastSeen).getTime() : 0;
+        const fiveMinutesAgo = Date.now() - (5 * 60 * 1000);
+
+        // App is online if status is "online" or "busy" AND seen recently
+        if ((presence.status === "online" || presence.status === "busy") && lastSeen > fiveMinutesAgo) {
+          appIsOnline = true;
+        }
+      }
+    } catch (err) {
+      console.warn("[Twilio] Could not check presence:", err.message);
+    }
+
+    // Only send "working on it" message if app is offline
+    // If app is online, it will respond quickly so no need for acknowledgment
+    if (appIsOnline) {
+      console.log(`[Twilio] App is online, skipping acknowledgment`);
+      // Return empty response - AI will respond directly
+      res.set("Content-Type", "text/xml");
+      return res.status(200).send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
+    }
+
+    // App is offline - send acknowledgment so user knows message was received
+    console.log(`[Twilio] App is offline, sending acknowledgment`);
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Message>✓ Message received. Processing...</Message>
+  <Message>BACKBONE is working on it... I'll get back to you soon!</Message>
 </Response>`;
 
     res.set("Content-Type", "text/xml");

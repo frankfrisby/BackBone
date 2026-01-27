@@ -2,6 +2,7 @@ import express from "express";
 import fetch from "node-fetch";
 import fs from "fs";
 import path from "path";
+import { fileURLToPath } from "url";
 
 /**
  * Yahoo Finance Background Server
@@ -16,20 +17,18 @@ const PORT = process.env.YAHOO_SERVER_PORT || 3001;
 let tickerCache = {
   tickers: [],
   lastUpdate: null,
-  updating: false
+  updating: false,
+  fullScanRunning: false,
+  lastFullScan: null
 };
 
 const YAHOO_FINANCE_BASE = "https://query1.finance.yahoo.com/v8/finance";
 const YAHOO_CHART_BASE = "https://query1.finance.yahoo.com/v8/finance/chart";
 const REFRESH_INTERVAL = 180000; // 3 minutes
 
-// Default tickers to track
-const DEFAULT_TICKERS = [
-  "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "BRK-B",
-  "JPM", "V", "UNH", "XOM", "MA", "HD", "PG", "JNJ", "COST", "ABBV",
-  "MRK", "CVX", "AMD", "NFLX", "CRM", "PEP", "KO", "ORCL", "WMT", "DIS",
-  "ADBE", "INTC", "CSCO", "VZ", "NKE", "MCD", "IBM", "QCOM", "TXN", "AVGO"
-];
+// Import ticker lists from shared data
+// CORE_TICKERS (150) = regular refresh, TICKER_UNIVERSE (800+) = full scan
+import { CORE_TICKERS, TICKER_UNIVERSE } from "../data/tickers.js";
 
 /**
  * Fetch quote for a single ticker
@@ -76,8 +75,84 @@ const fetchQuote = async (symbol) => {
 };
 
 /**
- * Fetch quote using chart API (more reliable)
+ * Load Alpaca config for fallback data fetching
  */
+let alpacaConfig = null;
+const loadAlpacaConfig = () => {
+  if (alpacaConfig !== null) return alpacaConfig;
+  try {
+    const configPath = path.join(process.cwd(), "data", "alpaca-config.json");
+    if (fs.existsSync(configPath)) {
+      const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+      const key = config.apiKey && !config.apiKey.includes("PASTE") ? config.apiKey : null;
+      const secret = config.apiSecret && !config.apiSecret.includes("PASTE") ? config.apiSecret : null;
+      if (key && secret) {
+        alpacaConfig = { key, secret };
+        return alpacaConfig;
+      }
+    }
+  } catch { /* ignore */ }
+  alpacaConfig = false; // Mark as checked but unavailable
+  return false;
+};
+
+/**
+ * Fetch quote from Alpaca bars API (fallback when Yahoo fails)
+ */
+const fetchQuoteFromAlpaca = async (symbol) => {
+  const config = loadAlpacaConfig();
+  if (!config) return null;
+
+  try {
+    const url = `https://data.alpaca.markets/v2/stocks/${symbol}/bars?timeframe=1Day&limit=22&feed=iex`;
+    const response = await fetch(url, {
+      headers: {
+        "APCA-API-KEY-ID": config.key,
+        "APCA-API-SECRET-KEY": config.secret
+      }
+    });
+
+    if (!response.ok) return null;
+
+    const data = await response.json();
+    const bars = data.bars;
+    if (!bars || bars.length === 0) return null;
+
+    const closes = bars.map(b => b.c);
+    const volumes = bars.map(b => b.v);
+    const lastBar = bars[bars.length - 1];
+    const prevClose = bars.length > 1 ? bars[bars.length - 2].c : lastBar.o;
+    const change = lastBar.c - prevClose;
+    const changePercent = (change / prevClose) * 100;
+
+    console.log(`[Alpaca fallback] ${symbol}: $${lastBar.c.toFixed(2)} (${changePercent >= 0 ? "+" : ""}${changePercent.toFixed(2)}%)`);
+
+    return {
+      symbol,
+      shortName: symbol,
+      longName: symbol,
+      regularMarketPrice: lastBar.c,
+      regularMarketPreviousClose: prevClose,
+      regularMarketChange: change,
+      regularMarketChangePercent: changePercent,
+      regularMarketVolume: lastBar.v,
+      regularMarketDayHigh: lastBar.h,
+      regularMarketDayLow: lastBar.l,
+      averageDailyVolume10Day: volumes.length > 0
+        ? volumes.slice(-10).reduce((a, b) => a + b, 0) / Math.min(10, volumes.length)
+        : null,
+      marketCap: null,
+      fiftyTwoWeekHigh: null,
+      fiftyTwoWeekLow: null,
+      historicalCloses: closes,
+      historicalVolumes: volumes
+    };
+  } catch (error) {
+    console.error(`[Alpaca fallback] Error fetching ${symbol}:`, error.message);
+    return null;
+  }
+};
+
 const fetchQuoteFromChart = async (symbol) => {
   try {
     const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=1mo`;
@@ -88,11 +163,16 @@ const fetchQuoteFromChart = async (symbol) => {
       }
     });
 
-    if (!response.ok) return null;
+    if (!response.ok) {
+      // Yahoo failed — try Alpaca fallback
+      return await fetchQuoteFromAlpaca(symbol);
+    }
 
     const data = await response.json();
     const result = data.chart?.result?.[0];
-    if (!result) return null;
+    if (!result) {
+      return await fetchQuoteFromAlpaca(symbol);
+    }
 
     const meta = result.meta;
     const quotes = result.indicators?.quote?.[0] || {};
@@ -127,8 +207,9 @@ const fetchQuoteFromChart = async (symbol) => {
       historicalVolumes: volumes
     };
   } catch (error) {
-    console.error(`Error fetching ${symbol}:`, error.message);
-    return null;
+    console.error(`Error fetching ${symbol} from Yahoo:`, error.message);
+    // Yahoo threw — try Alpaca fallback
+    return await fetchQuoteFromAlpaca(symbol);
   }
 };
 
@@ -446,16 +527,17 @@ const buildTickerAnalysis = async (symbol, quote) => {
 };
 
 /**
- * Update all tickers
+ * Update core tickers (top 150 — quick refresh every 3 minutes)
+ * Merges into existing cache so full-scan tickers aren't lost
  */
 const updateTickers = async () => {
   if (tickerCache.updating) return;
   tickerCache.updating = true;
 
-  console.log(`[${new Date().toISOString()}] Updating tickers...`);
+  console.log(`[${new Date().toISOString()}] Refreshing ${CORE_TICKERS.length} core tickers...`);
 
   try {
-    const quotes = await fetchQuotes(DEFAULT_TICKERS);
+    const quotes = await fetchQuotes(CORE_TICKERS);
 
     if (quotes.length === 0) {
       console.log("No quotes received from Yahoo Finance");
@@ -463,29 +545,37 @@ const updateTickers = async () => {
       return;
     }
 
-    const analyses = [];
+    const nowISO = new Date().toISOString();
 
-    // Process in batches of 5 to avoid rate limiting
+    // Build map of existing tickers so we merge, not replace
+    const existingMap = new Map();
+    for (const t of tickerCache.tickers) {
+      existingMap.set(t.symbol, t);
+    }
+
+    // Process quotes into analyses
     for (let i = 0; i < quotes.length; i += 5) {
       const batch = quotes.slice(i, i + 5);
       const batchResults = await Promise.all(
         batch.map(quote => buildTickerAnalysis(quote.symbol, quote))
       );
-      analyses.push(...batchResults);
+      for (const analysis of batchResults) {
+        analysis.lastEvaluated = nowISO;
+        existingMap.set(analysis.symbol, analysis);
+      }
 
-      // Small delay between batches
       if (i + 5 < quotes.length) {
         await new Promise(r => setTimeout(r, 200));
       }
     }
 
-    // Sort by score
-    const sorted = analyses.sort((a, b) => b.score - a.score);
+    // Rebuild sorted list
+    const sorted = Array.from(existingMap.values()).sort((a, b) => b.score - a.score);
 
     tickerCache.tickers = sorted;
-    tickerCache.lastUpdate = new Date().toISOString();
+    tickerCache.lastUpdate = nowISO;
 
-    console.log(`[${new Date().toISOString()}] Updated ${sorted.length} tickers. Top: ${sorted[0]?.symbol} (${sorted[0]?.score})`);
+    console.log(`[${new Date().toISOString()}] Refreshed ${quotes.length} core tickers (${sorted.length} total in cache). Top: ${sorted[0]?.symbol} (${sorted[0]?.score})`);
 
     // Save to file for persistence
     const dataDir = path.join(process.cwd(), "data");
@@ -511,7 +601,9 @@ app.get("/api/tickers", (req, res) => {
     success: true,
     tickers: tickerCache.tickers,
     lastUpdate: tickerCache.lastUpdate,
-    count: tickerCache.tickers.length
+    count: tickerCache.tickers.length,
+    fullScanRunning: tickerCache.fullScanRunning,
+    lastFullScan: tickerCache.lastFullScan
   });
 });
 
@@ -531,12 +623,24 @@ app.post("/api/refresh", async (req, res) => {
   res.json({ success: true, message: "Refresh started" });
 });
 
+// Full scan - scans ALL TICKER_UNIVERSE (800+ real symbols, returns immediately, runs in background)
+app.post("/api/full-scan", (req, res) => {
+  if (tickerCache.fullScanRunning) {
+    return res.json({ success: true, message: "Full scan already running" });
+  }
+
+  res.json({ success: true, message: `Full scan started for ${TICKER_UNIVERSE.length} tickers` });
+  runFullScan();
+});
+
 // Health check
 app.get("/health", (req, res) => {
   res.json({
     status: "ok",
     lastUpdate: tickerCache.lastUpdate,
-    tickerCount: tickerCache.tickers.length
+    tickerCount: tickerCache.tickers.length,
+    fullScanRunning: tickerCache.fullScanRunning,
+    lastFullScan: tickerCache.lastFullScan
   });
 });
 
@@ -546,11 +650,105 @@ const loadCache = () => {
     const cachePath = path.join(process.cwd(), "data", "tickers-cache.json");
     if (fs.existsSync(cachePath)) {
       const data = JSON.parse(fs.readFileSync(cachePath, "utf-8"));
-      tickerCache = data;
-      console.log(`Loaded ${data.tickers.length} cached tickers from ${data.lastUpdate}`);
+      // Restore data but reset runtime flags (may be stale from killed process)
+      tickerCache.tickers = data.tickers || [];
+      tickerCache.lastUpdate = data.lastUpdate || null;
+      tickerCache.lastFullScan = data.lastFullScan || null;
+      tickerCache.updating = false;
+      tickerCache.fullScanRunning = false;
+      console.log(`Loaded ${tickerCache.tickers.length} cached tickers from ${tickerCache.lastUpdate} (lastFullScan: ${tickerCache.lastFullScan || "never"})`);
     }
   } catch (error) {
     console.log("No cache found, starting fresh");
+  }
+};
+
+/**
+ * Run full scan of entire TICKER_UNIVERSE (800+ real tickers)
+ * Stores per-ticker lastEvaluated timestamps so restarts pick up where they left off
+ */
+const runFullScan = async () => {
+  if (tickerCache.fullScanRunning) {
+    console.log("Full scan already running, skipping");
+    return;
+  }
+
+  tickerCache.fullScanRunning = true;
+  const totalCount = TICKER_UNIVERSE.length;
+  console.log(`[${new Date().toISOString()}] FULL SCAN started — ${totalCount} real tickers...`);
+
+  try {
+    // Build map of existing tickers for merging
+    const existingMap = new Map();
+    for (const t of tickerCache.tickers) {
+      existingMap.set(t.symbol, t);
+    }
+
+    // Figure out which tickers need evaluation (not evaluated today)
+    const today = new Date().toDateString();
+    const needsEval = TICKER_UNIVERSE.filter(sym => {
+      const existing = existingMap.get(sym);
+      if (!existing || !existing.lastEvaluated) return true;
+      return new Date(existing.lastEvaluated).toDateString() !== today;
+    });
+
+    console.log(`[${new Date().toISOString()}] ${needsEval.length} tickers need evaluation (${totalCount - needsEval.length} already done today)`);
+
+    if (needsEval.length === 0) {
+      console.log("All tickers already evaluated today — full scan complete");
+      tickerCache.lastFullScan = new Date().toISOString();
+      tickerCache.fullScanRunning = false;
+      return;
+    }
+
+    // Fetch in batches of 5
+    let evaluated = 0;
+    for (let i = 0; i < needsEval.length; i += 5) {
+      const batch = needsEval.slice(i, i + 5);
+      const batchQuotes = await Promise.all(batch.map(fetchQuoteFromChart));
+
+      for (const quote of batchQuotes) {
+        if (!quote) continue;
+        try {
+          const analysis = await buildTickerAnalysis(quote.symbol, quote);
+          analysis.lastEvaluated = new Date().toISOString();
+          existingMap.set(analysis.symbol, analysis);
+          evaluated++;
+        } catch (err) {
+          console.error(`Error analyzing ${quote.symbol}:`, err.message);
+        }
+      }
+
+      // Log progress every 50 tickers
+      if (evaluated > 0 && evaluated % 50 < 5) {
+        console.log(`[Full scan] ${evaluated}/${needsEval.length} evaluated...`);
+      }
+
+      // Small delay between batches to avoid rate limits
+      if (i + 5 < needsEval.length) {
+        await new Promise(r => setTimeout(r, 300));
+      }
+    }
+
+    // Rebuild sorted list from all tickers
+    const allTickers = Array.from(existingMap.values()).sort((a, b) => b.score - a.score);
+    tickerCache.tickers = allTickers;
+    tickerCache.lastUpdate = new Date().toISOString();
+    tickerCache.lastFullScan = new Date().toISOString();
+
+    console.log(`[${new Date().toISOString()}] FULL SCAN complete — ${allTickers.length} total tickers (${evaluated} newly evaluated). Top: ${allTickers[0]?.symbol} (${allTickers[0]?.score})`);
+
+    // Persist
+    const dataDir = path.join(process.cwd(), "data");
+    if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dataDir, "tickers-cache.json"),
+      JSON.stringify(tickerCache, null, 2)
+    );
+  } catch (error) {
+    console.error("Full scan error:", error.message);
+  } finally {
+    tickerCache.fullScanRunning = false;
   }
 };
 
@@ -560,17 +758,28 @@ const startServer = () => {
 
   app.listen(PORT, () => {
     console.log(`Yahoo Finance Server running on http://localhost:${PORT}`);
+    console.log(`Ticker universe: ${TICKER_UNIVERSE.length} real symbols`);
     console.log(`Endpoints:`);
     console.log(`  GET  /api/tickers - Get all tickers`);
     console.log(`  GET  /api/ticker/:symbol - Get single ticker`);
-    console.log(`  POST /api/refresh - Force refresh`);
+    console.log(`  POST /api/refresh - Force refresh (top ${CORE_TICKERS.length})`);
+    console.log(`  POST /api/full-scan - Full scan all ${TICKER_UNIVERSE.length} tickers`);
     console.log(`  GET  /health - Health check`);
   });
 
-  // Initial update
-  updateTickers();
+  // Check if full scan was done today
+  const lastScanToday = tickerCache.lastFullScan &&
+    new Date(tickerCache.lastFullScan).toDateString() === new Date().toDateString();
 
-  // Schedule updates every 3 minutes
+  if (lastScanToday) {
+    console.log(`Full scan already done today (${tickerCache.lastFullScan}) — running core refresh only`);
+    updateTickers();
+  } else {
+    console.log("Full scan NOT done today — starting full scan automatically");
+    runFullScan();
+  }
+
+  // Schedule core ticker refresh every 3 minutes (top 150, fast)
   setInterval(updateTickers, REFRESH_INTERVAL);
 };
 

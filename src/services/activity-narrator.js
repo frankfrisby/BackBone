@@ -334,6 +334,78 @@ export const ACTION_STATUS = {
 };
 
 /**
+ * ACTION COLORS - Visual display colors for action states
+ * These colors match the reference image exactly
+ */
+export const ACTION_COLORS = {
+  // In-progress states
+  WORKING: "#64748b",      // Gray - currently executing
+  WORKING_BLINK: true,     // Gray blinking for active action
+
+  // Completion states
+  DONE: "#22c55e",         // Green - successfully completed
+  FAILED: "#ef4444",       // Red - failed with error
+
+  // Information states
+  OBSERVATION: "#ffffff",  // White - AI observation/discovery
+  THINKING: "#a78bfa",     // Purple - AI thinking (not shown as action)
+};
+
+/**
+ * ACTION ICONS - Visual indicators for action status
+ */
+export const ACTION_ICONS = {
+  WORKING: "●",            // Solid gray dot (blinking)
+  DONE: "✓",               // Green checkmark
+  FAILED: "✗",             // Red X
+  OBSERVATION: "○",        // White hollow dot
+};
+
+/**
+ * STATE COLORS - Colors for engine states
+ * Each state has a distinctive color for clear visual feedback
+ */
+export const STATE_COLORS = {
+  RESEARCHING: "#38bdf8",  // Cyan/blue
+  ANALYZING: "#14b8a6",    // Teal
+  THINKING: "#a78bfa",     // Purple
+  PLANNING: "#60a5fa",     // Blue
+  BUILDING: "#22c55e",     // Green
+  WORKING: "#f97316",      // Orange
+  EXECUTING: "#22c55e",    // Green
+  REFLECTING: "#ec4899",   // Pink
+  CONNECTING: "#06b6d4",   // Cyan
+  LEARNING: "#f472b6",     // Light pink
+  IDLE: "#94a3b8",         // Gray
+  WAITING: "#94a3b8",      // Gray
+  OBSERVING: "#94a3b8",    // Gray
+  ERROR: "#ef4444",        // Red
+  RECOVERING: "#f97316",   // Orange
+  TESTING: "#f59e0b",      // Amber
+  // Claude Code specific states
+  CLAUDE_CODE_ACTIVE: "#f97316",  // Orange - Claude Code is running
+};
+
+/**
+ * Claude Code execution status tracking
+ * When Claude Code CLI is active, show orange background in model section
+ */
+export const CLAUDE_CODE_STATUS = {
+  INACTIVE: "inactive",
+  STARTING: "starting",
+  RUNNING: "running",
+  EVALUATING: "evaluating",
+  RESPONDING: "responding",
+  COMPLETE: "complete",
+  ERROR: "error"
+};
+
+/**
+ * Claude Code display color
+ */
+export const CLAUDE_CODE_COLOR = "#f97316"; // Orange
+
+/**
  * Get list of all available tools by category
  */
 export function getToolsByCategory() {
@@ -462,6 +534,114 @@ class ActivityNarrator extends EventEmitter {
       compactMode: false,
       showMetrics: true
     };
+
+    // Claude Code CLI tracking
+    // When active, shows orange background in model section
+    this.claudeCode = {
+      active: false,
+      status: "inactive",        // inactive, starting, running, evaluating, complete, error
+      sessionId: null,
+      tokensUsed: 0,
+      toolCalls: [],             // { tool, input, timestamp, result }
+      currentTool: null,         // Currently executing tool
+      startTime: null,
+      decisions: []              // GPT-5.2 evaluation decisions
+    };
+  }
+
+  /**
+   * Set Claude Code CLI as active (shows orange background)
+   */
+  setClaudeCodeActive(active, status = "running") {
+    this.claudeCode.active = active;
+    this.claudeCode.status = status;
+    if (active && !this.claudeCode.startTime) {
+      this.claudeCode.startTime = Date.now();
+    }
+    if (!active) {
+      this.claudeCode.startTime = null;
+    }
+    this._markDataChanged();
+    this.emit("claude-code-status", { active, status });
+  }
+
+  /**
+   * Record a Claude Code tool call
+   */
+  recordClaudeCodeTool(tool, input, result = null) {
+    const toolCall = {
+      tool,
+      input,
+      timestamp: Date.now(),
+      result
+    };
+    this.claudeCode.toolCalls.unshift(toolCall);
+    this.claudeCode.currentTool = { tool, input };
+
+    // Also add as a visible action
+    this.action(tool.toUpperCase(), typeof input === "string" ? input : JSON.stringify(input).slice(0, 80));
+
+    // Keep last 50 tool calls
+    if (this.claudeCode.toolCalls.length > 50) {
+      this.claudeCode.toolCalls = this.claudeCode.toolCalls.slice(0, 50);
+    }
+    this._markDataChanged();
+  }
+
+  /**
+   * Record GPT-5.2 evaluation decision
+   */
+  recordEvaluationDecision(decision) {
+    this.claudeCode.decisions.unshift({
+      ...decision,
+      timestamp: Date.now()
+    });
+    if (this.claudeCode.decisions.length > 20) {
+      this.claudeCode.decisions = this.claudeCode.decisions.slice(0, 20);
+    }
+    this._markDataChanged();
+  }
+
+  /**
+   * Update Claude Code tokens
+   */
+  updateClaudeCodeTokens(tokens) {
+    this.claudeCode.tokensUsed += tokens;
+    this._markDataChanged();
+  }
+
+  /**
+   * Get Claude Code display data
+   */
+  getClaudeCodeData() {
+    return {
+      active: this.claudeCode.active,
+      status: this.claudeCode.status,
+      sessionId: this.claudeCode.sessionId,
+      tokensUsed: this.claudeCode.tokensUsed,
+      toolCallCount: this.claudeCode.toolCalls.length,
+      recentTools: this.claudeCode.toolCalls.slice(0, 5),
+      currentTool: this.claudeCode.currentTool,
+      runtime: this.claudeCode.startTime ? Date.now() - this.claudeCode.startTime : 0,
+      lastDecision: this.claudeCode.decisions[0] || null
+    };
+  }
+
+  /**
+   * Reset Claude Code tracking (when goal changes)
+   */
+  resetClaudeCode() {
+    this.claudeCode = {
+      active: false,
+      status: "inactive",
+      sessionId: null,
+      tokensUsed: 0,
+      toolCalls: [],
+      currentTool: null,
+      startTime: null,
+      decisions: []
+    };
+    this._markDataChanged();
   }
 
   /**
@@ -1575,7 +1755,7 @@ class ActivityNarrator extends EventEmitter {
       project: this.currentProject,
       actions: this.actions.slice(0, 5),
       subActions: this.subActions.slice(0, 2),
-      observations: this.observations.slice(0, 3),
+      observations: this.observations.slice(0, 4),
       diffs: this.diffs.slice(0, 2),
       stats: { ...this.stats },
       dailyStats: this.getDailyStatsSummary(),
@@ -1585,7 +1765,9 @@ class ActivityNarrator extends EventEmitter {
       health: this.getHealthSummary(),
       metricsLine: this.getFormattedMetrics(),
       toolsUsedThisSession: this.currentSessionTools.slice(),
-      toolUsageSummary: this.getToolUsageSummary().slice(0, 5)
+      toolUsageSummary: this.getToolUsageSummary().slice(0, 5),
+      // Claude Code CLI tracking - shows orange when active
+      claudeCode: this.getClaudeCodeData()
     };
 
     return this._cachedDisplayData;

@@ -369,6 +369,287 @@ Only suggest actions that are genuinely useful based on the data. If there's not
     return this.think(question);
   }
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // GOAL-DRIVEN ACTION GENERATION - For autonomous engine
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Determine the next action to take for a goal
+   * Used by the autonomous engine for tool chaining
+   *
+   * @param {Object} goal - The current goal being worked on
+   * @param {Array} actionHistory - Previous actions taken for context
+   * @returns {Object|null} Next action to take or null if done
+   */
+  async determineNextAction(goal, actionHistory = []) {
+    if (this.isThinking) {
+      return null;
+    }
+
+    this.isThinking = true;
+    this.emit("thinking-start");
+
+    try {
+      const context = await this.gatherContext();
+
+      // Build progress summary from action history
+      const progressSummary = actionHistory.length > 0
+        ? actionHistory.slice(-5).map(h => `- ${h.action.action}(${h.action.target}): ${h.result?.success ? "Success" : "Failed"}`).join("\n")
+        : "Just started - no actions taken yet";
+
+      const prompt = `You are working on this goal: "${goal.title}"
+${goal.description ? `Description: ${goal.description}` : ""}
+
+Current context:
+${JSON.stringify(context, null, 2)}
+
+Progress so far:
+${progressSummary}
+
+Actions taken: ${actionHistory.length}
+
+Determine the SINGLE most important next action to take.
+You have these tools available:
+- WebSearch(query) - Search the web for information
+- Fetch(url) - Fetch webpage content from a URL
+- Read(path) - Read a local file
+- Write(path, content) - Write content to a file
+- Edit(path, oldString, newString) - Edit a file by replacing text
+- Bash(command) - Run a shell command
+- Grep(pattern, path) - Search file contents with regex
+- Glob(pattern) - Find files by pattern
+- SendWhatsApp(message) - Send a WhatsApp message to the user
+
+IMPORTANT:
+- Be specific with your targets (real queries, URLs, file paths, commands)
+- Each action should make measurable progress toward the goal
+- If the goal seems complete, return {"action": null, "reasoning": "Goal complete"}
+
+Return JSON only (no markdown):
+{
+  "action": "tool_name",
+  "target": "the target (query/url/path/command)",
+  "params": {},
+  "reasoning": "why this action helps achieve the goal"
+}`;
+
+      this.addToThread("user", prompt);
+
+      // Get AI response
+      const config = getMultiAIConfig();
+      let aiResponse = null;
+
+      try {
+        const result = await sendMessage(prompt, {
+          systemPrompt: this.buildSystemPrompt(context),
+          ...context
+        }, TASK_TYPES.COMPLEX);
+        aiResponse = result.response;
+      } catch (openaiError) {
+        if (config.claude.ready) {
+          aiResponse = await sendToClaude(
+            `${this.buildSystemPrompt(context)}\n\n${prompt}`,
+            context
+          );
+        } else {
+          throw openaiError;
+        }
+      }
+
+      this.addToThread("assistant", aiResponse);
+
+      // Parse the response
+      try {
+        let jsonStr = aiResponse;
+        // Handle markdown code blocks
+        const jsonMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
+        if (jsonMatch) {
+          jsonStr = jsonMatch[1].trim();
+        }
+
+        const parsed = JSON.parse(jsonStr);
+
+        // Check if goal is complete
+        if (!parsed.action || parsed.action === "null" || parsed.action === null) {
+          return null;
+        }
+
+        return {
+          action: parsed.action,
+          target: parsed.target || "",
+          params: parsed.params || {},
+          reasoning: parsed.reasoning || ""
+        };
+
+      } catch (parseError) {
+        console.error("[AIBrain] Failed to parse action response:", parseError.message);
+        return null;
+      }
+
+    } catch (error) {
+      this.emit("thinking-error", error);
+      return null;
+    } finally {
+      this.isThinking = false;
+      this.emit("thinking-end");
+    }
+  }
+
+  /**
+   * Evaluate the result of an action and decide if more work is needed
+   *
+   * @param {Object} result - The result of the last action
+   * @param {Object} goal - The current goal
+   * @returns {boolean} True if more work needed, false if goal is complete
+   */
+  async evaluateAndDecideNext(result, goal) {
+    if (this.isThinking) {
+      return true; // Continue by default if already thinking
+    }
+
+    this.isThinking = true;
+
+    try {
+      const context = await this.gatherContext();
+
+      const prompt = `Evaluate if this goal is complete: "${goal.title}"
+
+Last action result:
+${JSON.stringify(result, null, 2)}
+
+Current context:
+${JSON.stringify(context, null, 2)}
+
+Is the goal complete? Answer with JSON only:
+{
+  "complete": true/false,
+  "reasoning": "why you think this",
+  "nextStep": "if not complete, what should be done next"
+}`;
+
+      const config = getMultiAIConfig();
+      let aiResponse = null;
+
+      try {
+        const apiResult = await sendMessage(prompt, {
+          systemPrompt: this.buildSystemPrompt(context),
+          ...context
+        }, TASK_TYPES.QUICK);
+        aiResponse = apiResult.response;
+      } catch (error) {
+        if (config.claude.ready) {
+          aiResponse = await sendToClaude(prompt, context);
+        } else {
+          return true; // Continue if we can't evaluate
+        }
+      }
+
+      // Parse response
+      try {
+        let jsonStr = aiResponse;
+        const jsonMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
+        if (jsonMatch) {
+          jsonStr = jsonMatch[1].trim();
+        }
+
+        const parsed = JSON.parse(jsonStr);
+        return !parsed.complete; // Return true if MORE work needed
+
+      } catch (parseError) {
+        return true; // Continue if we can't parse
+      }
+
+    } catch (error) {
+      console.error("[AIBrain] Evaluation error:", error.message);
+      return true; // Continue on error
+    } finally {
+      this.isThinking = false;
+    }
+  }
+
+  /**
+   * Generate goals from user context (portfolio, health, profile)
+   * Used when no goals exist and engine auto-starts
+   *
+   * @returns {Array} Array of suggested goals
+   */
+  async generateGoalsFromContext() {
+    if (this.isThinking) {
+      return [];
+    }
+
+    this.isThinking = true;
+    this.emit("thinking-start");
+
+    try {
+      const context = await this.gatherContext();
+
+      const prompt = `Analyze the user's data and suggest 2-3 specific, actionable goals.
+
+User Context:
+${JSON.stringify(context, null, 2)}
+
+Generate goals that:
+1. Are specific and measurable
+2. Can be worked on autonomously
+3. Align with the user's current situation
+4. Are achievable with the available tools (WebSearch, Read, Write, Bash, SendWhatsApp)
+
+Return JSON only:
+{
+  "goals": [
+    {
+      "title": "Specific goal title (20+ words)",
+      "description": "Detailed description",
+      "category": "finance|health|career|family|education|growth",
+      "priority": 1-5,
+      "urgency": "high|medium|low"
+    }
+  ]
+}`;
+
+      const config = getMultiAIConfig();
+      let aiResponse = null;
+
+      try {
+        const result = await sendMessage(prompt, {
+          systemPrompt: this.buildSystemPrompt(context),
+          ...context
+        }, TASK_TYPES.COMPLEX);
+        aiResponse = result.response;
+      } catch (error) {
+        if (config.claude.ready) {
+          aiResponse = await sendToClaude(prompt, context);
+        } else {
+          return [];
+        }
+      }
+
+      // Parse response
+      try {
+        let jsonStr = aiResponse;
+        const jsonMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
+        if (jsonMatch) {
+          jsonStr = jsonMatch[1].trim();
+        }
+
+        const parsed = JSON.parse(jsonStr);
+        return parsed.goals || [];
+
+      } catch (parseError) {
+        console.error("[AIBrain] Failed to parse goals:", parseError.message);
+        return [];
+      }
+
+    } catch (error) {
+      console.error("[AIBrain] Goal generation error:", error.message);
+      return [];
+    } finally {
+      this.isThinking = false;
+      this.emit("thinking-end");
+    }
+  }
+
   /**
    * Get the current state for display
    */

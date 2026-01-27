@@ -843,7 +843,7 @@ const ModelStatusBanner = memo(({ status }) => {
  * │   [diff view with green/red lines]                      │
  * └─────────────────────────────────────────────────────────┘
  */
-const AgentActivityPanelBase = ({ overlayHeader = false, compact = false, scrollOffset = 0, privateMode = false }) => {
+const AgentActivityPanelBase = ({ overlayHeader = false, compact = false, scrollOffset = 0, privateMode = false, actionStreamingText = "", cliStreaming = false }) => {
   const narrator = getActivityNarrator();
   const autonomousEngine = getAutonomousEngine();
 
@@ -861,10 +861,11 @@ const AgentActivityPanelBase = ({ overlayHeader = false, compact = false, scroll
     const config = getMultiAIConfig();
     const aiStatus = getAIStatus();
 
-    // Check if any model is available
+    // Check if any model is available (Claude Code CLI counts as a model)
     const hasOpenAI = config.gptInstant?.ready || config.gptThinking?.ready;
     const hasClaude = config.claude?.ready;
-    const hasModel = hasOpenAI || hasClaude;
+    const hasClaudeCode = config.claudeCode?.ready;
+    const hasModel = hasOpenAI || hasClaude || hasClaudeCode;
 
     // Check if tokens exceeded
     const openaiExceeded = aiStatus.gptInstant?.quotaExceeded || aiStatus.gptThinking?.quotaExceeded;
@@ -993,16 +994,22 @@ const AgentActivityPanelBase = ({ overlayHeader = false, compact = false, scroll
       const config = getMultiAIConfig();
       const { model: currentModelInfo } = getCurrentModel();
 
+      // Check Claude Code CLI status first - it's the primary engine
+      const claudeCodeStatus = isClaudeCodeLoggedIn();
+      const claudeCodeAvailable = claudeCodeStatus.loggedIn;
+
       // Determine what model is actually available/connected
+      // Claude Code CLI is the primary engine
       let modelName = "No Model";
       let modelColor = THEME.error;
 
-      if (config.gptInstant?.ready || config.gptThinking?.ready) {
-        // OpenAI is connected - show the current model being used
+      if (claudeCodeAvailable) {
+        modelName = "Claude Code CLI";
+        modelColor = "#f59e0b";
+      } else if (config.gptInstant?.ready || config.gptThinking?.ready) {
         modelName = currentModelInfo?.shortName || "GPT-5.2";
         modelColor = currentModelInfo?.color || "#10a37f";
       } else if (config.claude?.ready) {
-        // Claude is connected
         modelName = "Claude";
         modelColor = "#d97706";
       }
@@ -1017,10 +1024,6 @@ const AgentActivityPanelBase = ({ overlayHeader = false, compact = false, scroll
           modelColor = THEME.error;
         }
       }
-
-      // Check Claude Code CLI status - use active state from narrator
-      const claudeCodeStatus = isClaudeCodeLoggedIn();
-      const claudeCodeAvailable = claudeCodeStatus.loggedIn;
       // isClaudeCodeActive comes from narrator data - true when Claude CLI is actually running
 
       if (compact) {
@@ -1086,51 +1089,80 @@ const AgentActivityPanelBase = ({ overlayHeader = false, compact = false, scroll
       );
     })(),
 
-    // Model Status Banner (show when no model or tokens exceeded)
-    modelStatus.isPaused && e(ModelStatusBanner, { status: modelStatus }),
-
-    // Current STATE with goal and project - ALWAYS SHOW with flashlight effect
-    e(StateDisplay, {
-      state: modelStatus.isPaused ? "IDLE" : state,
-      stateInfo: modelStatus.isPaused ? AGENT_STATES.IDLE : stateInfo,
-      goal: modelStatus.isPaused ? "Waiting for model connection..." : goal,
-      projectName: modelStatus.isPaused ? null : projectName,
-      hideStateLine: overlayHeader,
-      waitingReasons: waitingReasons,
-      privateMode: privateMode
-    }),
-
-    // Real ACTIONS (bash commands, searches, file operations)
-    ...timeline.map((item, i) =>
-      e(ActionLine, { key: item.id || `act${i}`, action: item, showDetail: !compact, privateMode: privateMode })
-    ),
-
-    // OBSERVATIONS - What the AI discovered (white dot with spacing)
-    !compact && discoveries.length > 0 && e(
-      Box,
-      { flexDirection: "column", marginTop: 1 },
-      ...discoveries.map((d, i) =>
-        e(ObservationLine, { key: `obs${i}`, observation: d, privateMode: privateMode })
+    // When Claude Code CLI is actively streaming, take over the entire engine body
+    // Otherwise show normal BACKBONE actions/goals/observations
+    ...(cliStreaming && actionStreamingText ? [
+      // CLAUDE CODE CLI STREAMING — supersedes all BACKBONE actions
+      e(
+        Box,
+        { key: "cli-stream", flexDirection: "column", marginTop: 0 },
+        e(
+          Box,
+          { flexDirection: "row", gap: 1 },
+          e(Text, { color: "#f59e0b" }, "▶"),
+          e(Text, { color: "#f59e0b", bold: true }, "Running")
+        ),
+        e(
+          Box,
+          { marginLeft: 2, marginTop: 0, flexDirection: "column" },
+          e(Text, { color: "#cbd5e1", wrap: "wrap" }, actionStreamingText.slice(-600))
+        )
       )
-    ),
-
-    // OUTCOMES - Only show completed goals/projects (no label, just green dot + white text)
-    outcomes.length > 0 && e(
-      Box,
-      { flexDirection: "column", marginTop: compact ? 0 : 1 },
-      ...outcomes.map((o, i) =>
-        e(OutcomeLine, { key: `out${i}`, outcome: o })
+    ] : cliStreaming && !actionStreamingText ? [
+      // CLI is processing but no output yet — show waiting state
+      e(
+        Box,
+        { key: "cli-waiting", flexDirection: "row", gap: 1, marginTop: 0 },
+        e(Text, { color: "#f59e0b" }, "▶"),
+        e(Text, { color: "#f59e0b", bold: true }, "Claude Code CLI"),
+        e(Text, { color: "#64748b" }, " Processing...")
       )
-    ),
+    ] : [
+      // NORMAL BACKBONE ENGINE — actions, goals, observations
+      // Model Status Banner (show when no model or tokens exceeded)
+      modelStatus.isPaused && e(ModelStatusBanner, { status: modelStatus }),
 
-    // Note: Empty state is handled by StateDisplay which shows the current state with flashlight effect
+      // Current STATE with goal and project - ALWAYS SHOW with flashlight effect
+      e(StateDisplay, {
+        state: modelStatus.isPaused ? "IDLE" : state,
+        stateInfo: modelStatus.isPaused ? AGENT_STATES.IDLE : stateInfo,
+        goal: modelStatus.isPaused ? "Waiting for model connection..." : goal,
+        projectName: modelStatus.isPaused ? null : projectName,
+        hideStateLine: overlayHeader,
+        waitingReasons: waitingReasons,
+        privateMode: privateMode
+      }),
 
-    // Task progress (only if not paused and not compact)
-    !compact && !modelStatus.isPaused && taskProgress && e(
-      Box,
-      { marginTop: 1 },
-      e(TaskProgress, { ...taskProgress })
-    )
+      // Real ACTIONS (bash commands, searches, file operations)
+      ...timeline.map((item, i) =>
+        e(ActionLine, { key: item.id || `act${i}`, action: item, showDetail: !compact, privateMode: privateMode })
+      ),
+
+      // OBSERVATIONS - What the AI discovered (white dot with spacing)
+      !compact && discoveries.length > 0 && e(
+        Box,
+        { flexDirection: "column", marginTop: 1 },
+        ...discoveries.map((d, i) =>
+          e(ObservationLine, { key: `obs${i}`, observation: d, privateMode: privateMode })
+        )
+      ),
+
+      // OUTCOMES - Only show completed goals/projects (no label, just green dot + white text)
+      outcomes.length > 0 && e(
+        Box,
+        { flexDirection: "column", marginTop: compact ? 0 : 1 },
+        ...outcomes.map((o, i) =>
+          e(OutcomeLine, { key: `out${i}`, outcome: o })
+        )
+      ),
+
+      // Task progress (only if not paused and not compact)
+      !compact && !modelStatus.isPaused && taskProgress && e(
+        Box,
+        { marginTop: 1 },
+        e(TaskProgress, { ...taskProgress })
+      )
+    ].filter(Boolean))
   );
 };
 

@@ -513,6 +513,226 @@ class ProjectManager extends EventEmitter {
   switchProject(name) {
     return this.loadProject(name);
   }
+
+  /**
+   * Create a project for a goal
+   * This creates the project directory and generates an initial plan
+   * @param {Object} goal - Goal object from goal tracker
+   * @returns {Object} Project info
+   */
+  async createProjectForGoal(goal) {
+    if (!goal || !goal.title) {
+      throw new Error("Goal must have a title");
+    }
+
+    // Generate project name from goal (max 5 words)
+    const projectName = this.generateProjectNameFromGoal(goal);
+
+    // Create or load the project
+    const project = this.findOrCreate(projectName, goal.title);
+
+    // Generate initial plan structure in the PROJECT.md
+    await this.generateInitialPlan(project, goal);
+
+    return project;
+  }
+
+  /**
+   * Generate a short project name from a goal
+   * @param {Object} goal - Goal object
+   * @returns {string} Short project name (max 5 words)
+   */
+  generateProjectNameFromGoal(goal) {
+    // If goal already has a project name, use it
+    if (goal.project && typeof goal.project === "string" && goal.project !== goal.category) {
+      return goal.project;
+    }
+
+    // Generate from title - take first 5 meaningful words
+    const title = goal.title || "Untitled Goal";
+    const words = title
+      .replace(/[^\w\s]/g, " ")
+      .split(/\s+/)
+      .filter(w => w.length > 2 && !["the", "and", "for", "with", "from", "into"].includes(w.toLowerCase()))
+      .slice(0, 5);
+
+    if (words.length === 0) {
+      return goal.category || "project";
+    }
+
+    return words.join(" ");
+  }
+
+  /**
+   * Generate initial plan in PROJECT.md
+   * @param {Object} project - Project info
+   * @param {Object} goal - Goal object
+   */
+  async generateInitialPlan(project, goal) {
+    if (!fs.existsSync(project.mdPath)) {
+      return;
+    }
+
+    let content = fs.readFileSync(project.mdPath, "utf-8");
+
+    // Check if plan section already exists
+    if (content.includes("## Plan")) {
+      return; // Already has a plan
+    }
+
+    // Generate plan section based on goal type
+    const planSection = this.generatePlanSection(goal);
+
+    // Insert plan section after Goal section
+    const goalSectionEnd = content.indexOf("## Updates");
+    if (goalSectionEnd !== -1) {
+      content = content.slice(0, goalSectionEnd) + planSection + "\n" + content.slice(goalSectionEnd);
+      fs.writeFileSync(project.mdPath, content, "utf-8");
+    }
+
+    this.addUpdate("plan", "Initial plan generated");
+  }
+
+  /**
+   * Generate plan section content based on goal
+   * @param {Object} goal - Goal object
+   * @returns {string} Plan section markdown
+   */
+  generatePlanSection(goal) {
+    const category = goal.category || "general";
+
+    let plan = "## Plan\n\n";
+    plan += `**Target:** ${goal.targetValue || "Not specified"} ${goal.unit || ""}\n`;
+    plan += `**Current:** ${goal.currentValue || 0} ${goal.unit || ""}\n`;
+    plan += `**Priority:** ${goal.priority || 5}\n\n`;
+
+    // Generate category-specific phases
+    const phases = this.getPhasesForCategory(category);
+
+    plan += "### Phases\n\n";
+    phases.forEach((phase, i) => {
+      plan += `${i + 1}. **${phase.name}** - ${phase.description}\n`;
+      plan += `   - Status: Pending\n`;
+      plan += `   - Tasks: ${phase.tasks.join(", ")}\n\n`;
+    });
+
+    plan += "### Next Actions\n\n";
+    plan += "- [ ] Research current state and opportunities\n";
+    plan += "- [ ] Identify key milestones\n";
+    plan += "- [ ] Create detailed action items\n\n";
+
+    return plan;
+  }
+
+  /**
+   * Get phases for a goal category
+   * @param {string} category - Goal category
+   * @returns {Array} Phases with tasks
+   */
+  getPhasesForCategory(category) {
+    const categoryPhases = {
+      finance: [
+        { name: "Research", description: "Analyze opportunities and risks", tasks: ["Market analysis", "Risk assessment", "Strategy review"] },
+        { name: "Planning", description: "Create detailed financial plan", tasks: ["Set milestones", "Define metrics", "Create timeline"] },
+        { name: "Execution", description: "Implement strategy", tasks: ["Start small", "Track progress", "Adjust as needed"] },
+        { name: "Optimization", description: "Improve returns", tasks: ["Analyze performance", "Reduce losses", "Scale winners"] }
+      ],
+      health: [
+        { name: "Assessment", description: "Evaluate current health state", tasks: ["Baseline metrics", "Identify issues", "Set targets"] },
+        { name: "Planning", description: "Create health improvement plan", tasks: ["Nutrition plan", "Exercise routine", "Sleep optimization"] },
+        { name: "Implementation", description: "Execute health changes", tasks: ["Daily habits", "Track metrics", "Regular reviews"] },
+        { name: "Maintenance", description: "Sustain improvements", tasks: ["Habit solidification", "Progress tracking", "Continuous improvement"] }
+      ],
+      family: [
+        { name: "Understanding", description: "Assess current family dynamics", tasks: ["Identify needs", "Find opportunities", "Set intentions"] },
+        { name: "Planning", description: "Plan quality time activities", tasks: ["Schedule activities", "Plan outings", "Create traditions"] },
+        { name: "Engagement", description: "Active participation", tasks: ["Regular check-ins", "Shared activities", "Present moments"] },
+        { name: "Reflection", description: "Review and improve", tasks: ["Family feedback", "Adjust approach", "Celebrate wins"] }
+      ],
+      career: [
+        { name: "Discovery", description: "Identify career opportunities", tasks: ["Market research", "Skill assessment", "Network mapping"] },
+        { name: "Preparation", description: "Build required skills", tasks: ["Learning plan", "Portfolio building", "Resume updates"] },
+        { name: "Action", description: "Pursue opportunities", tasks: ["Applications", "Networking", "Interviews"] },
+        { name: "Growth", description: "Advance in role", tasks: ["Performance", "Visibility", "Development"] }
+      ],
+      growth: [
+        { name: "Exploration", description: "Identify growth areas", tasks: ["Self-assessment", "Goal setting", "Resource gathering"] },
+        { name: "Learning", description: "Acquire new knowledge", tasks: ["Study plan", "Practice", "Feedback"] },
+        { name: "Application", description: "Apply learnings", tasks: ["Projects", "Real-world use", "Teaching others"] },
+        { name: "Mastery", description: "Achieve expertise", tasks: ["Deep practice", "Refinement", "Innovation"] }
+      ],
+      education: [
+        { name: "Planning", description: "Define learning objectives", tasks: ["Course selection", "Schedule", "Resources"] },
+        { name: "Study", description: "Active learning", tasks: ["Reading", "Notes", "Practice"] },
+        { name: "Application", description: "Use knowledge", tasks: ["Projects", "Problems", "Teaching"] },
+        { name: "Assessment", description: "Evaluate progress", tasks: ["Tests", "Reviews", "Certifications"] }
+      ]
+    };
+
+    return categoryPhases[category] || categoryPhases.growth;
+  }
+
+  /**
+   * Update project status
+   * @param {string} projectName - Project name
+   * @param {string} status - New status (active, paused, completed, blocked)
+   */
+  updateProjectStatus(projectName, status) {
+    const project = this.loadProject(projectName);
+    if (!project || !fs.existsSync(project.mdPath)) {
+      return null;
+    }
+
+    let content = fs.readFileSync(project.mdPath, "utf-8");
+    content = content.replace(/\*\*Status:\*\* [^\n]+/, `**Status:** ${status}`);
+    fs.writeFileSync(project.mdPath, content, "utf-8");
+
+    this.addUpdate("status", `Status changed to ${status}`);
+    return project;
+  }
+
+  /**
+   * Add a task completion to the project
+   * @param {string} task - Task description that was completed
+   */
+  completeTask(task) {
+    if (!this.currentProject || !fs.existsSync(this.currentProject.mdPath)) {
+      return;
+    }
+
+    let content = fs.readFileSync(this.currentProject.mdPath, "utf-8");
+
+    // Find and check off the task if it exists
+    const taskPattern = new RegExp(`- \\[ \\] ${task.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "i");
+    if (taskPattern.test(content)) {
+      content = content.replace(taskPattern, `- [x] ${task}`);
+      fs.writeFileSync(this.currentProject.mdPath, content, "utf-8");
+    }
+
+    this.addUpdate("task", `Completed: ${task}`);
+  }
+
+  /**
+   * Add a task to the project's Next Actions
+   * @param {string} task - Task description to add
+   */
+  addTask(task) {
+    if (!this.currentProject || !fs.existsSync(this.currentProject.mdPath)) {
+      return;
+    }
+
+    let content = fs.readFileSync(this.currentProject.mdPath, "utf-8");
+
+    // Find Next Actions section and add task
+    const nextActionsIndex = content.indexOf("### Next Actions");
+    if (nextActionsIndex !== -1) {
+      const insertIndex = content.indexOf("\n", nextActionsIndex) + 1;
+      const newContent = content.slice(0, insertIndex) + `\n- [ ] ${task}` + content.slice(insertIndex);
+      fs.writeFileSync(this.currentProject.mdPath, newContent, "utf-8");
+    }
+
+    this.addUpdate("task", `Added: ${task}`);
+  }
 }
 
 // Singleton instance

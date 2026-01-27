@@ -147,6 +147,9 @@ export class RealtimeMessaging extends EventEmitter {
     this.authToken = null;
     this.listening = false;
     this.pollInterval = null;
+    this.pollTimeout = null;
+    this.pollingMode = "idle";          // "idle" or "active"
+    this.lastActivityTime = null;       // Last time a message was received
     this.lastMessageTime = null;
     this.messageHandler = null;
     this.presence = PRESENCE_STATUS.OFFLINE;
@@ -220,11 +223,26 @@ export class RealtimeMessaging extends EventEmitter {
   }
 
   /**
-   * Start listening for incoming messages
-   * Uses polling since Node.js doesn't have native Firestore SDK real-time
-   * For true real-time, use Firebase Admin SDK with listeners
+   * Smart Polling Configuration
+   * - Idle mode: Poll every 3 minutes (cost efficient when no activity)
+   * - Active mode: Poll every 10 seconds (responsive when chatting)
+   * - Returns to idle after 10 minutes of no activity
    */
-  async startListening(pollIntervalMs = 3000) {
+  static POLL_CONFIG = {
+    IDLE_INTERVAL: 3 * 60 * 1000,      // 3 minutes
+    ACTIVE_INTERVAL: 10 * 1000,         // 10 seconds
+    ACTIVE_TIMEOUT: 10 * 60 * 1000      // 10 minutes until back to idle
+  };
+
+  // Track next poll time for countdown display
+  nextPollTime = null;
+  lastPollTime = null;
+
+  /**
+   * Start listening for incoming messages
+   * Uses smart polling: slow when idle, fast when active
+   */
+  async startListening(options = {}) {
     if (this.listening) {
       return { success: true, message: "Already listening" };
     }
@@ -234,18 +252,94 @@ export class RealtimeMessaging extends EventEmitter {
     }
 
     this.listening = true;
+    this.pollingMode = "idle";
+    this.lastActivityTime = null;
     this.emit("listening-started");
 
-    // Poll for new messages
-    this.pollInterval = setInterval(async () => {
-      await this.checkForNewMessages();
-    }, pollIntervalMs);
+    // Start in idle mode (poll every 3 minutes)
+    this.schedulePoll();
 
     // Initial check
     await this.checkForNewMessages();
 
-    console.log(`[RealtimeMessaging] Listening for messages (user: ${this.userId})`);
+    console.log(`[RealtimeMessaging] Smart polling started (idle: 3min, active: 10sec)`);
     return { success: true };
+  }
+
+  /**
+   * Schedule the next poll based on current mode
+   */
+  schedulePoll() {
+    if (!this.listening) return;
+
+    // Clear existing timer
+    if (this.pollTimeout) {
+      clearTimeout(this.pollTimeout);
+      this.pollTimeout = null;
+    }
+
+    // Check if we should switch back to idle mode
+    if (this.pollingMode === "active" && this.lastActivityTime) {
+      const timeSinceActivity = Date.now() - this.lastActivityTime;
+      if (timeSinceActivity > RealtimeMessaging.POLL_CONFIG.ACTIVE_TIMEOUT) {
+        this.pollingMode = "idle";
+        console.log("[RealtimeMessaging] Switching to idle mode (no activity for 10 min)");
+        this.emit("polling-mode-changed", { mode: "idle" });
+      }
+    }
+
+    // Determine interval based on mode
+    const interval = this.pollingMode === "active"
+      ? RealtimeMessaging.POLL_CONFIG.ACTIVE_INTERVAL
+      : RealtimeMessaging.POLL_CONFIG.IDLE_INTERVAL;
+
+    // Track next poll time for countdown display
+    this.nextPollTime = Date.now() + interval;
+    this.emit("poll-scheduled", { nextPollTime: this.nextPollTime, interval });
+
+    // Schedule next poll
+    this.pollTimeout = setTimeout(async () => {
+      if (this.listening) {
+        this.lastPollTime = Date.now();
+        await this.checkForNewMessages();
+        this.schedulePoll(); // Schedule the next one
+      }
+    }, interval);
+  }
+
+  /**
+   * Get time until next poll in seconds
+   */
+  getSecondsUntilNextPoll() {
+    if (!this.nextPollTime || !this.listening) return null;
+    const remaining = Math.max(0, this.nextPollTime - Date.now());
+    return Math.ceil(remaining / 1000);
+  }
+
+  /**
+   * Get formatted countdown string (e.g., "2:35")
+   */
+  getPollCountdown() {
+    const seconds = this.getSecondsUntilNextPoll();
+    if (seconds === null) return null;
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}:${secs.toString().padStart(2, "0")}`;
+  }
+
+  /**
+   * Switch to active polling mode (called when message received)
+   */
+  activatePolling() {
+    if (this.pollingMode !== "active") {
+      this.pollingMode = "active";
+      console.log("[RealtimeMessaging] Switching to active mode (10 sec polling)");
+      this.emit("polling-mode-changed", { mode: "active" });
+
+      // Reschedule with shorter interval
+      this.schedulePoll();
+    }
+    this.lastActivityTime = Date.now();
   }
 
   /**
@@ -253,6 +347,11 @@ export class RealtimeMessaging extends EventEmitter {
    */
   async stopListening() {
     this.listening = false;
+
+    if (this.pollTimeout) {
+      clearTimeout(this.pollTimeout);
+      this.pollTimeout = null;
+    }
 
     if (this.pollInterval) {
       clearInterval(this.pollInterval);
@@ -323,6 +422,9 @@ export class RealtimeMessaging extends EventEmitter {
             message.status === MESSAGE_STATUS.PROCESSING) {
           continue;
         }
+
+        // Found a new message - switch to active polling mode
+        this.activatePolling();
 
         // Process this message
         await this.processMessage(messageId, message);
@@ -631,12 +733,24 @@ export class RealtimeMessaging extends EventEmitter {
    * Get status
    */
   getStatus() {
+    const timeSinceActivity = this.lastActivityTime
+      ? Math.round((Date.now() - this.lastActivityTime) / 1000)
+      : null;
+
     return {
       initialized: !!this.userId,
       userId: this.userId,
       listening: this.listening,
       presence: this.presence,
-      processedCount: this.processedMessageIds.size
+      pollingMode: this.pollingMode,
+      pollInterval: this.pollingMode === "active"
+        ? RealtimeMessaging.POLL_CONFIG.ACTIVE_INTERVAL / 1000 + "s"
+        : RealtimeMessaging.POLL_CONFIG.IDLE_INTERVAL / 1000 + "s",
+      lastActivitySecondsAgo: timeSinceActivity,
+      processedCount: this.processedMessageIds.size,
+      nextPollCountdown: this.getPollCountdown(),
+      nextPollSeconds: this.getSecondsUntilNextPoll(),
+      lastPollTime: this.lastPollTime
     };
   }
 
@@ -650,6 +764,96 @@ export class RealtimeMessaging extends EventEmitter {
     this.lastMessageTime = null;
     this.saveState();
     return { success: true };
+  }
+
+  /**
+   * Register user's WhatsApp phone number in Firestore
+   * This creates/updates the user document so the webhook can route messages correctly
+   *
+   * @param {string} phoneNumber - Verified phone number in E.164 format (e.g., +15551234567)
+   * @param {Object} userData - Optional additional user data (name, email, etc.)
+   * @returns {Promise<Object>} Result with success status
+   */
+  async registerUserPhone(phoneNumber, userData = {}) {
+    if (!this.userId) {
+      return { success: false, error: "Not initialized. Call initialize() first." };
+    }
+
+    if (!phoneNumber) {
+      return { success: false, error: "Phone number is required" };
+    }
+
+    // Normalize phone number (remove spaces, ensure + prefix)
+    let normalized = phoneNumber.replace(/[^\d+]/g, "");
+    if (!normalized.startsWith("+")) {
+      if (normalized.length === 10) {
+        normalized = "+1" + normalized;
+      } else if (normalized.length === 11 && normalized.startsWith("1")) {
+        normalized = "+" + normalized;
+      }
+    }
+
+    try {
+      // Create/update user document with whatsappPhone field
+      const url = `${FIRESTORE_BASE_URL}/users/${this.userId}?key=${FIREBASE_CONFIG.apiKey}`;
+
+      const userFields = {
+        whatsappPhone: normalized,
+        updatedAt: new Date().toISOString(),
+        source: "backbone-cli",
+        ...userData
+      };
+
+      const response = await this.fetchWithAuth(url, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fields: toFirestoreFields(userFields)
+        })
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Failed to register phone: ${response.status} - ${errorText}`);
+      }
+
+      console.log(`[RealtimeMessaging] User phone registered in Firestore: ${normalized}`);
+      this.emit("phone-registered", { userId: this.userId, phoneNumber: normalized });
+
+      return {
+        success: true,
+        userId: this.userId,
+        phoneNumber: normalized
+      };
+
+    } catch (error) {
+      console.error("[RealtimeMessaging] Error registering phone:", error.message);
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * Get user document from Firestore
+   */
+  async getUserDocument() {
+    if (!this.userId) return null;
+
+    try {
+      const url = `${FIRESTORE_BASE_URL}/users/${this.userId}?key=${FIREBASE_CONFIG.apiKey}`;
+      const response = await this.fetchWithAuth(url);
+
+      if (!response.ok) {
+        if (response.status === 404) return null;
+        throw new Error(`Failed to get user: ${response.status}`);
+      }
+
+      const data = await response.json();
+      return parseFirestoreFields(data.fields);
+
+    } catch (error) {
+      console.error("[RealtimeMessaging] Error getting user:", error.message);
+      return null;
+    }
   }
 }
 

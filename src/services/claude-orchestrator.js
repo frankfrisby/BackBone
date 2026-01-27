@@ -20,9 +20,20 @@
 import { spawn } from "child_process";
 import { EventEmitter } from "events";
 import path from "path";
+import fs from "fs";
 import { getClaudeCodeStatus } from "./claude-code-cli.js";
+
+// Debug log for diagnosing streaming issues
+const DEBUG_LOG = path.join(process.cwd(), "data", "claude-debug.log");
+const debugLog = (msg) => {
+  try {
+    const ts = new Date().toISOString().slice(11, 23);
+    fs.appendFileSync(DEBUG_LOG, `[${ts}] ${msg}\n`);
+  } catch {}
+};
 import { sendMessage, getMultiAIConfig, TASK_TYPES } from "./multi-ai.js";
 import { getActivityNarrator, ACTION_STATUS } from "./activity-narrator.js";
+import { getGoalManager, TASK_STATE } from "./goal-manager.js";
 
 /**
  * Orchestration states
@@ -96,9 +107,19 @@ export class ClaudeOrchestrator extends EventEmitter {
    * @returns {Promise<Object>} Execution result
    */
   async executeGoal(goal, options = {}) {
+    debugLog(`executeGoal called: "${goal?.title}" (state=${this.state})`);
+
+    // Prevent re-entry if already running
+    if (this.state === ORCHESTRATION_STATE.RUNNING || this.state === ORCHESTRATION_STATE.STARTING) {
+      debugLog(`Already running — skipping`);
+      return { success: false, error: "Already executing a goal" };
+    }
+
     // Check Claude Code is ready
     const status = await getClaudeCodeStatus();
+    debugLog(`Claude status: installed=${status.installed} loggedIn=${status.loggedIn} ready=${status.ready}`);
     if (!status.ready) {
+      debugLog(`Claude NOT ready — aborting`);
       return {
         success: false,
         error: status.installed
@@ -205,6 +226,7 @@ SECURITY RULES:
 
   /**
    * Build the initial prompt for Claude Code
+   * Includes full goal context: criteria, tasks, and data sources
    */
   buildClaudePrompt(goal) {
     const title = goal.title || goal;
@@ -212,22 +234,119 @@ SECURITY RULES:
     const context = goal.context || "";
     const directoryContext = this.buildDirectoryContext();
 
+    // Get goal manager for criteria and tasks
+    const goalManager = getGoalManager();
+    const goalId = goal.id || goal.goalId;
+
+    // Get completion criteria
+    const criteria = goalId ? goalManager.getCriteria(goalId) : [];
+    const criteriaSection = this.buildCriteriaSection(criteria);
+
+    // Get tasks/plan
+    const tasks = goalId ? goalManager.getTasks(goalId) : [];
+    const tasksSection = this.buildTasksSection(tasks);
+
+    // Get data sources if available
+    const dataSources = goal.dataSources || goal.data_sources || [];
+    const dataSourcesSection = this.buildDataSourcesSection(dataSources);
+
     return `You are working on this goal: "${title}"
 
-${description ? `Details: ${description}\n` : ""}
-${context ? `Context: ${context}\n` : ""}
+${description ? `DESCRIPTION:\n${description}\n` : ""}
+${context ? `CONTEXT:\n${context}\n` : ""}
+${criteriaSection}
+${tasksSection}
+${dataSourcesSection}
 ${directoryContext}
 
 IMPORTANT INSTRUCTIONS:
 1. Work autonomously to achieve this goal
 2. Use available tools: Read, Write, Edit, Bash, WebSearch, Fetch, Grep, Glob
 3. RESPECT DIRECTORY RESTRICTIONS - only access allowed directories
-4. Be thorough - research, plan, then execute
-5. Report progress clearly so I can track what you're doing
-6. If you need clarification, ask specific questions
-7. When the goal is complete, clearly state "GOAL COMPLETE" with a summary
+4. Follow the EXECUTION PLAN if provided, checking off tasks as you complete them
+5. VERIFY each completion criterion is met before declaring the goal complete
+6. Report progress clearly - state which task you're working on
+7. If you need clarification, ask specific questions
+8. When the goal is complete, clearly state "GOAL COMPLETE" with a summary of:
+   - Which criteria were met
+   - Which tasks were completed
+   - Any files created or modified
 
 Begin working on this goal now.`;
+  }
+
+  /**
+   * Build completion criteria section for the prompt
+   */
+  buildCriteriaSection(criteria) {
+    if (!criteria || criteria.length === 0) {
+      return "";
+    }
+
+    const criteriaList = criteria.map((c, i) => {
+      const status = c.met ? "✓" : "○";
+      const description = c.description || c.criterion || c;
+      const verification = c.verificationMethod ? ` (Verify: ${c.verificationMethod})` : "";
+      return `  ${status} ${i + 1}. ${description}${verification}`;
+    }).join("\n");
+
+    return `COMPLETION CRITERIA (All must be met):
+${criteriaList}
+
+You must verify each criterion is satisfied before marking the goal complete.
+`;
+  }
+
+  /**
+   * Build tasks/plan section for the prompt
+   */
+  buildTasksSection(tasks) {
+    if (!tasks || tasks.length === 0) {
+      return "";
+    }
+
+    const taskList = tasks.map((task, i) => {
+      // Determine status indicator
+      let statusIcon = "○"; // pending
+      if (task.state === TASK_STATE.COMPLETED) statusIcon = "✓";
+      else if (task.state === TASK_STATE.IN_PROGRESS) statusIcon = "▶";
+      else if (task.state === TASK_STATE.ON_HOLD) statusIcon = "◐";
+      else if (task.state === TASK_STATE.BLOCKED) statusIcon = "✗";
+      else if (task.state === TASK_STATE.SKIPPED) statusIcon = "⊘";
+
+      const title = task.title || task.name || `Task ${i + 1}`;
+      const description = task.description ? `\n      ${task.description}` : "";
+      const dependencies = task.dependencies?.length ? `\n      Dependencies: ${task.dependencies.join(", ")}` : "";
+
+      return `  ${statusIcon} ${i + 1}. ${title}${description}${dependencies}`;
+    }).join("\n");
+
+    return `EXECUTION PLAN (Work through in order):
+${taskList}
+
+Work through these tasks sequentially. Skip completed tasks. Report which task you're working on.
+`;
+  }
+
+  /**
+   * Build data sources section for the prompt
+   */
+  buildDataSourcesSection(dataSources) {
+    if (!dataSources || dataSources.length === 0) {
+      return "";
+    }
+
+    const sourcesList = dataSources.map((source, i) => {
+      const name = source.name || source.title || `Source ${i + 1}`;
+      const type = source.type || "unknown";
+      const location = source.path || source.url || source.location || "";
+      return `  ${i + 1}. [${type}] ${name}${location ? `: ${location}` : ""}`;
+    }).join("\n");
+
+    return `DATA SOURCES (Reference these for information):
+${sourcesList}
+
+`;
   }
 
   /**
@@ -237,10 +356,11 @@ Begin working on this goal now.`;
     return new Promise((resolve) => {
       this.state = ORCHESTRATION_STATE.RUNNING;
 
-      // Build Claude Code args - flags first, then -p with prompt at the end
+      // Build Claude Code args — use stdin for prompt (not -p) to get real-time streaming
       const args = [
         "--output-format", "stream-json",
-        "--allowedTools", "Read,Write,Edit,Bash,WebSearch,Fetch,Grep,Glob",
+        "--verbose",
+        "--dangerously-skip-permissions",
         "--max-turns", String(this.maxTurns)
       ];
 
@@ -249,23 +369,36 @@ Begin working on this goal now.`;
         args.push("--resume", this.sessionId);
       }
 
-      // -p flag must come with prompt at the very end
-      args.push("-p", prompt);
+      // Resolve the Claude CLI path for direct node execution (avoids Windows cmd.exe buffering)
+      const claudeCliPath = path.join(process.env.APPDATA || "", "npm", "node_modules", "@anthropic-ai", "claude-code", "cli.js");
+      const useDirectNode = fs.existsSync(claudeCliPath);
 
-      console.log("[ClaudeOrchestrator] Spawning claude with args:", args.slice(0, -1).join(" "), "-p <prompt>");
-
-      // Spawn Claude Code
-      this.claudeProcess = spawn("claude", args, {
-        shell: true,
+      const spawnCmd = useDirectNode ? process.execPath : "claude";
+      const spawnArgs = useDirectNode ? [claudeCliPath, ...args] : args;
+      const spawnOpts = {
+        stdio: ["pipe", "pipe", "pipe"],
         cwd: options.workDir || this.workDir,
         env: { ...process.env, FORCE_COLOR: "0" }
-      });
+      };
+
+      debugLog(`Spawning: ${spawnCmd} ${spawnArgs.join(" ").slice(0, 200)}`);
+      debugLog(`CWD: ${spawnOpts.cwd}`);
+
+      // Spawn Claude Code
+      this.claudeProcess = spawn(spawnCmd, spawnArgs, spawnOpts);
+
+      // Send prompt via stdin for real-time stream-json output
+      this.claudeProcess.stdin.write(prompt);
+      this.claudeProcess.stdin.end();
+      debugLog(`Prompt sent via stdin (${prompt.length} chars)`);
 
       let lineBuffer = "";
       let lastOutput = "";
       let evaluationTimer = null;
       let timeoutTimer = null;
       let stdinOpen = true;
+      let stdoutBytes = 0;
+      let stderrBytes = 0;
 
       // Timeout handler
       timeoutTimer = setTimeout(() => {
@@ -399,6 +532,10 @@ Begin working on this goal now.`;
       // Handle stdout
       this.claudeProcess.stdout.on("data", (data) => {
         const chunk = data.toString();
+        stdoutBytes += data.length;
+        if (stdoutBytes <= data.length) {
+          debugLog(`First stdout data: ${stdoutBytes} bytes, preview: ${chunk.slice(0, 120)}`);
+        }
 
         // Parse line by line
         lineBuffer += chunk;
@@ -418,6 +555,8 @@ Begin working on this goal now.`;
       // Handle stderr
       this.claudeProcess.stderr.on("data", (data) => {
         const chunk = data.toString();
+        stderrBytes += data.length;
+        debugLog(`stderr (${stderrBytes} total): ${chunk.slice(0, 200)}`);
         this.emit("output", { chunk, type: "stderr" });
       });
 
@@ -428,6 +567,7 @@ Begin working on this goal now.`;
 
       // Handle process close
       this.claudeProcess.on("close", (code) => {
+        debugLog(`Process closed: code=${code}, stdout=${stdoutBytes}b, stderr=${stderrBytes}b`);
         if (evaluationTimer) clearTimeout(evaluationTimer);
         if (timeoutTimer) clearTimeout(timeoutTimer);
 
@@ -453,6 +593,7 @@ Begin working on this goal now.`;
 
       // Handle errors
       this.claudeProcess.on("error", (error) => {
+        debugLog(`Process error: ${error.message}`);
         if (evaluationTimer) clearTimeout(evaluationTimer);
         if (timeoutTimer) clearTimeout(timeoutTimer);
 
@@ -478,6 +619,9 @@ Begin working on this goal now.`;
     this.state = ORCHESTRATION_STATE.EVALUATING;
     this.emit("evaluating");
 
+    // First, update progress tracking based on recent output
+    await this.updateProgress(this.outputBuffer);
+
     try {
       const config = getMultiAIConfig();
       if (!config.gptInstant?.ready && !config.gptThinking?.ready) {
@@ -485,10 +629,16 @@ Begin working on this goal now.`;
         return { decision: EVALUATION_DECISION.CONTINUE };
       }
 
-      // Build evaluation prompt
+      // Get progress summary
+      const progressSummary = this.getProgressSummary();
+
+      // Build evaluation prompt with full context
       const evaluationPrompt = `You are supervising an AI agent (Claude) working on a goal.
 
 GOAL: "${this.currentGoal?.title || this.currentGoal}"
+${this.currentGoal?.description ? `\nDESCRIPTION: ${this.currentGoal.description}` : ""}
+
+${progressSummary}
 
 RECENT OUTPUT FROM CLAUDE:
 ${this.getRecentOutput(3000)}
@@ -502,15 +652,21 @@ Evaluate Claude's progress and decide what to do:
 
 1. CONTINUE - Claude is making good progress, let it keep working
 2. REPLY - Send a follow-up message to Claude (include the message)
-3. COMPLETE - The goal has been achieved, stop execution
+3. COMPLETE - ALL criteria are met and goal is achieved, stop execution
 4. REDIRECT - Claude is off-track, send a correction (include the correction)
 5. ESCALATE - There's a problem that needs human attention
+
+IMPORTANT: Only mark COMPLETE if ALL criteria are verified as met.
+If tasks remain incomplete but criteria are met, still mark COMPLETE.
+If criteria cannot be verified, use REPLY to ask Claude to verify them.
 
 Return JSON only:
 {
   "decision": "continue|reply|complete|redirect|escalate",
   "reasoning": "brief explanation",
   "message": "message to send if reply/redirect",
+  "completedTasks": [1, 2, 3],  // task numbers Claude completed (if any)
+  "metCriteria": [1, 2],        // criteria numbers verified as met (if any)
   "confidence": 0.0-1.0
 }`;
 
@@ -529,6 +685,35 @@ Return JSON only:
         parsed = { decision: EVALUATION_DECISION.CONTINUE, reasoning: "Parse error, continuing" };
       }
 
+      // Update goal manager with GPT's assessment of completed items
+      if (parsed.completedTasks?.length) {
+        const goalManager = getGoalManager();
+        const goalId = this.currentGoal?.id || this.currentGoal?.goalId;
+        const tasks = goalId ? goalManager.getTasks(goalId) : [];
+
+        for (const taskNum of parsed.completedTasks) {
+          const taskIndex = taskNum - 1;
+          if (tasks[taskIndex] && tasks[taskIndex].state !== TASK_STATE.COMPLETED) {
+            goalManager.completeTask(goalId, tasks[taskIndex].id, {
+              completedBy: "gpt-evaluation",
+              evaluation: parsed.reasoning
+            });
+          }
+        }
+      }
+
+      if (parsed.metCriteria?.length) {
+        const goalManager = getGoalManager();
+        const goalId = this.currentGoal?.id || this.currentGoal?.goalId;
+
+        for (const criterionNum of parsed.metCriteria) {
+          goalManager.markCriterionMet(goalId, criterionNum - 1, {
+            verifiedBy: "gpt-evaluation",
+            evaluation: parsed.reasoning
+          });
+        }
+      }
+
       // Record decision
       const decision = {
         timestamp: Date.now(),
@@ -536,6 +721,8 @@ Return JSON only:
         decision: parsed.decision || EVALUATION_DECISION.CONTINUE,
         reasoning: parsed.reasoning || "",
         message: parsed.message || "",
+        completedTasks: parsed.completedTasks || [],
+        metCriteria: parsed.metCriteria || [],
         confidence: parsed.confidence || 0.5
       };
 
@@ -645,6 +832,123 @@ Return JSON only:
       lastDecision: this.decisions[this.decisions.length - 1] || null,
       sessionId: this.sessionId
     };
+  }
+
+  /**
+   * Update progress based on Claude's output
+   * Called during evaluation to sync progress with goal manager
+   */
+  async updateProgress(output) {
+    const goalManager = getGoalManager();
+    const goalId = this.currentGoal?.id || this.currentGoal?.goalId;
+
+    if (!goalId) return;
+
+    // Check for task completion signals in output
+    const taskCompletionRegex = /(?:completed|finished|done with)\s+(?:task\s+)?(\d+)|task\s+(\d+)\s+(?:complete|done|finished)/gi;
+    let match;
+    while ((match = taskCompletionRegex.exec(output)) !== null) {
+      const taskNum = parseInt(match[1] || match[2]) - 1; // Convert to 0-based index
+      const tasks = goalManager.getTasks(goalId);
+      if (tasks[taskNum] && tasks[taskNum].state !== TASK_STATE.COMPLETED) {
+        goalManager.completeTask(goalId, tasks[taskNum].id, {
+          completedBy: "claude-code",
+          output: output.slice(Math.max(0, match.index - 200), match.index + 200)
+        });
+        this.emit("task-completed", { goalId, taskId: tasks[taskNum].id, taskNum: taskNum + 1 });
+        this.narrator.observe(`Task ${taskNum + 1} completed by Claude Code`);
+      }
+    }
+
+    // Check for criterion verification signals
+    const criterionRegex = /(?:criterion|criteria)\s+(\d+)\s+(?:met|satisfied|verified)|(?:verified|confirmed)\s+(?:criterion|criteria)\s+(\d+)/gi;
+    while ((match = criterionRegex.exec(output)) !== null) {
+      const criterionNum = parseInt(match[1] || match[2]) - 1;
+      const criteria = goalManager.getCriteria(goalId);
+      if (criteria[criterionNum] && !criteria[criterionNum].met) {
+        goalManager.markCriterionMet(goalId, criterionNum, {
+          verifiedBy: "claude-code",
+          evidence: output.slice(Math.max(0, match.index - 200), match.index + 200)
+        });
+        this.emit("criterion-met", { goalId, criterionIndex: criterionNum + 1 });
+        this.narrator.observe(`Criterion ${criterionNum + 1} verified by Claude Code`);
+      }
+    }
+
+    // Check for goal completion signal
+    if (output.toLowerCase().includes("goal complete") ||
+        output.toLowerCase().includes("all criteria met") ||
+        output.toLowerCase().includes("all tasks completed")) {
+
+      // Verify all criteria are actually met
+      const allCriteriaMet = await goalManager.evaluateCriteria(goalId);
+
+      if (allCriteriaMet) {
+        this.emit("goal-complete", { goalId });
+        this.narrator.observe(`Goal "${this.currentGoal?.title}" completed by Claude Code`);
+      }
+    }
+  }
+
+  /**
+   * Mark a specific task as in progress
+   */
+  markTaskInProgress(taskNum) {
+    const goalManager = getGoalManager();
+    const goalId = this.currentGoal?.id || this.currentGoal?.goalId;
+
+    if (!goalId) return;
+
+    const tasks = goalManager.getTasks(goalId);
+    const taskIndex = taskNum - 1; // Convert to 0-based
+
+    if (tasks[taskIndex] && tasks[taskIndex].state === TASK_STATE.PENDING) {
+      goalManager.startTask(goalId, tasks[taskIndex].id);
+      this.emit("task-started", { goalId, taskId: tasks[taskIndex].id, taskNum });
+      this.narrator.observe(`Starting task ${taskNum}: ${tasks[taskIndex].title}`);
+    }
+  }
+
+  /**
+   * Get summary of goal progress for evaluation
+   */
+  getProgressSummary() {
+    const goalManager = getGoalManager();
+    const goalId = this.currentGoal?.id || this.currentGoal?.goalId;
+
+    if (!goalId) return "No goal context available";
+
+    const criteria = goalManager.getCriteria(goalId);
+    const tasks = goalManager.getTasks(goalId);
+
+    const criteriaStatus = criteria.map((c, i) =>
+      `${c.met ? "✓" : "○"} Criterion ${i + 1}: ${c.description || c.criterion}`
+    ).join("\n");
+
+    const taskStatus = tasks.map((t, i) => {
+      const icons = {
+        [TASK_STATE.COMPLETED]: "✓",
+        [TASK_STATE.IN_PROGRESS]: "▶",
+        [TASK_STATE.ON_HOLD]: "◐",
+        [TASK_STATE.BLOCKED]: "✗",
+        [TASK_STATE.SKIPPED]: "⊘",
+        [TASK_STATE.PENDING]: "○"
+      };
+      return `${icons[t.state] || "○"} Task ${i + 1}: ${t.title || t.name}`;
+    }).join("\n");
+
+    const completedTasks = tasks.filter(t => t.state === TASK_STATE.COMPLETED).length;
+    const metCriteria = criteria.filter(c => c.met).length;
+
+    return `PROGRESS SUMMARY:
+Tasks: ${completedTasks}/${tasks.length} completed
+Criteria: ${metCriteria}/${criteria.length} met
+
+CRITERIA STATUS:
+${criteriaStatus || "No criteria defined"}
+
+TASK STATUS:
+${taskStatus || "No tasks defined"}`;
   }
 
   /**

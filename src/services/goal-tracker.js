@@ -51,11 +51,12 @@ export const CATEGORY_ICONS = {
 
 /**
  * Create default goals
+ * These are SPECIFIC goals with measurable targets and project names
  */
 const getDefaultGoals = () => ([
   {
     id: "goal_finance_1m",
-    title: "Turn $1,000 into $1,000,000",
+    title: "Turn $1,000 into $1,000,000 through smart investments by July 2027",
     category: GOAL_CATEGORY.FINANCE,
     priority: 1,
     status: GOAL_STATUS.ACTIVE,
@@ -70,12 +71,14 @@ const getDefaultGoals = () => ([
     startValue: 1000,
     targetValue: 1000000,
     unit: "USD",
+    project: "Million Dollar Journey",
+    description: "Grow initial capital through a combination of stock trading, options, and long-term investments",
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
   },
   {
     id: "goal_health_optimal",
-    title: "Achieve optimal health",
+    title: "Achieve 85+ Oura sleep score consistently for 30 consecutive days",
     category: GOAL_CATEGORY.HEALTH,
     priority: 2,
     status: GOAL_STATUS.ACTIVE,
@@ -89,12 +92,14 @@ const getDefaultGoals = () => ([
     startValue: 0,
     targetValue: 90,
     unit: "Oura Sleep Score",
+    project: "Sleep Optimization",
+    description: "Optimize sleep quality through better habits, environment, and tracking",
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
   },
   {
     id: "goal_family_time",
-    title: "Quality family time",
+    title: "Spend 14+ hours per week of quality time with family by end of Q1 2026",
     category: GOAL_CATEGORY.FAMILY,
     priority: 3,
     status: GOAL_STATUS.ACTIVE,
@@ -108,6 +113,8 @@ const getDefaultGoals = () => ([
     startValue: 0,
     targetValue: 20,
     unit: "hours/week",
+    project: "Family First",
+    description: "Prioritize dedicated family time through scheduled activities and reduced work hours",
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
   }
@@ -247,7 +254,9 @@ export class GoalTracker extends EventEmitter {
     startValue = 0,
     currentValue = 0,
     unit = "",
-    milestones = []
+    milestones = [],
+    project = null,
+    description = ""
   }) {
     const goal = {
       id: `goal_${category}_${Date.now()}`,
@@ -260,6 +269,8 @@ export class GoalTracker extends EventEmitter {
       startValue,
       targetValue,
       unit,
+      project: project || category, // Default project to category if not specified
+      description,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     };
@@ -329,9 +340,9 @@ export class GoalTracker extends EventEmitter {
       unit: goal.unit,
       color: CATEGORY_COLORS[goal.category],
       icon: CATEGORY_ICONS[goal.category],
-      nextMilestone: goal.milestones.find(m => !m.achieved)?.label || "Complete",
-      milestonesAchieved: goal.milestones.filter(m => m.achieved).length,
-      totalMilestones: goal.milestones.length
+      nextMilestone: (goal.milestones || []).find(m => !m.achieved)?.label || "Complete",
+      milestonesAchieved: (goal.milestones || []).filter(m => m.achieved).length,
+      totalMilestones: (goal.milestones || []).length
     }));
   }
 

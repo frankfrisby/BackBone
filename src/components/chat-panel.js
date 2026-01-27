@@ -211,7 +211,7 @@ const ChatPanelBase = ({ commands, onSubmit, onTypingChange, modelInfo, compact 
         countLabel: "matches",
         compact: true
       }),
-      // Input line
+      // Input line — auto-expands with content, compact by default
       e(
         Box,
         {
@@ -219,12 +219,12 @@ const ChatPanelBase = ({ commands, onSubmit, onTypingChange, modelInfo, compact 
           borderStyle: "round",
           borderColor,
           paddingX: 1,
-          height: 1
+          minHeight: 1
         },
         e(Text, { color: promptColor, bold: true }, isCommand ? "⟩ " : "› "),
         isEmpty
           ? e(Text, { color: "#64748b" }, 'Ask anything or type / for commands')
-          : e(Text, { color: "#f8fafc" }, displayValue),
+          : e(Text, { color: "#f8fafc", wrap: "wrap" }, displayValue),
         e(Text, { color: "#ffffff" }, "▌")
       )
     );

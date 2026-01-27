@@ -8,12 +8,16 @@ solutions/*/node_modules/
 .env.*.local
 *.env
 
-# Data and cache
-data/
-memory/
+# Data and cache (contents ignored, but .gitkeep files tracked)
+data/*
+!data/.gitkeep
+memory/*
+!memory/.gitkeep
 threads/
-screenshots/
-projects/
+screenshots/*
+!screenshots/.gitkeep
+projects/*
+!projects/.gitkeep
 
 # Build outputs
 dist/
@@ -55,3 +59,4 @@ yarn-error.log*
 credentials.json
 tokens.json
 zig/
+nul

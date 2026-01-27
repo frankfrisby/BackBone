@@ -196,6 +196,34 @@ export const fetchGoogleConfig = async () => {
 };
 
 /**
+ * Fetch Twilio configuration from Firebase (system-level)
+ * Document: config/config_twilio
+ * Expected fields: accountSid, authToken, whatsappNumber
+ */
+export const fetchTwilioConfig = async () => {
+  const config = await fetchConfigWithFallback("config_twilio", {
+    accountSid: process.env.TWILIO_ACCOUNT_SID,
+    authToken: process.env.TWILIO_AUTH_TOKEN,
+    whatsappNumber: process.env.TWILIO_WHATSAPP_NUMBER || "+14155238886"
+  });
+
+  // Handle common field name variations
+  if (config) {
+    if (config.account_sid && !config.accountSid) {
+      config.accountSid = config.account_sid;
+    }
+    if (config.auth_token && !config.authToken) {
+      config.authToken = config.auth_token;
+    }
+    if (config.whatsapp_number && !config.whatsappNumber) {
+      config.whatsappNumber = config.whatsapp_number;
+    }
+  }
+
+  return config;
+};
+
+/**
  * Fetch all app configuration from Firebase
  */
 export const fetchAppConfig = async () => {
@@ -291,6 +319,7 @@ export const initializeRemoteConfig = async () => {
 export default {
   fetchPlaidConfig,
   fetchGoogleConfig,
+  fetchTwilioConfig,
   fetchAppConfig,
   clearConfigCache,
   isPlaidConfigured,

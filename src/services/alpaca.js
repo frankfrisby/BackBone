@@ -232,3 +232,68 @@ export const closeAllPositions = async (config) => {
 
   return { success: true };
 };
+
+/**
+ * Get asset info from Alpaca — validates if a ticker symbol exists and is tradeable
+ * @param {Object} config - Alpaca config
+ * @param {string} symbol - Ticker symbol (e.g., "AAPL")
+ * @returns {{ tradable: boolean, symbol: string, name: string, exchange: string, status: string } | null}
+ */
+export const getAsset = async (config, symbol) => {
+  try {
+    const data = await fetchJson(`${config.baseUrl}/v2/assets/${encodeURIComponent(symbol)}`, {
+      headers: buildHeaders(config)
+    });
+    return {
+      symbol: data.symbol,
+      name: data.name,
+      exchange: data.exchange,
+      status: data.status,
+      tradable: data.tradable === true,
+      shortable: data.shortable === true,
+      fractionable: data.fractionable === true,
+      assetClass: data.class
+    };
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * Validate a list of ticker symbols against Alpaca's asset database.
+ * Returns { valid: string[], invalid: string[], results: Map<string, asset|null> }
+ *
+ * Batches requests with concurrency limit to avoid rate limits.
+ * @param {Object} config - Alpaca config
+ * @param {string[]} symbols - Array of ticker symbols to validate
+ * @param {{ tradeableOnly?: boolean, concurrency?: number }} options
+ */
+export const validateTickers = async (config, symbols, options = {}) => {
+  const { tradeableOnly = true, concurrency = 10 } = options;
+  const valid = [];
+  const invalid = [];
+  const results = new Map();
+
+  // Process in batches to respect rate limits
+  for (let i = 0; i < symbols.length; i += concurrency) {
+    const batch = symbols.slice(i, i + concurrency);
+    const promises = batch.map(async (symbol) => {
+      const asset = await getAsset(config, symbol);
+      if (asset && (!tradeableOnly || asset.tradable)) {
+        valid.push(symbol);
+        results.set(symbol, asset);
+      } else {
+        invalid.push(symbol);
+        results.set(symbol, null);
+      }
+    });
+    await Promise.all(promises);
+
+    // Small delay between batches to be polite to the API
+    if (i + concurrency < symbols.length) {
+      await new Promise(r => setTimeout(r, 200));
+    }
+  }
+
+  return { valid, invalid, results };
+};

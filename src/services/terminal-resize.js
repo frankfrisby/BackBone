@@ -8,7 +8,7 @@ import { spawn, exec } from "child_process";
 // Size presets (in characters - columns x rows)
 // 2200x1100 pixels approx 240 columns x 64 rows (assuming ~9px char width, ~17px char height)
 export const TERMINAL_SIZES = {
-  mini: { cols: 90, rows: 24, width: 800, height: 600 },          // Compact size
+  mini: { cols: 120, rows: 50, width: 1100, height: 900 },        // Mini view - taller for better display
   onboarding: { cols: 120, rows: 45, width: 1100, height: 900 },  // Taller for onboarding, centered
   main: { cols: 240, rows: 64, width: 2200, height: 1100 }        // Full size for main app (maximized)
 };

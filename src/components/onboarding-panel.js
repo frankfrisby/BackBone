@@ -57,6 +57,7 @@ import {
 import { loadUserSettings, updateSetting, updateSettings } from "../services/user-settings.js";
 import { openUrl } from "../services/open-url.js";
 import { requestPhoneCode, verifyPhoneCode, getPhoneRecord, sendWhatsAppMessage } from "../services/phone-auth.js";
+import { fetchTwilioConfig } from "../services/firebase-config.js";
 import { getMobileService } from "../services/mobile.js";
 import { startOAuthFlow as startClaudeOAuth, hasValidCredentials as hasClaudeCredentials } from "../services/claude-oauth.js";
 import { startOAuthFlow as startCodexOAuth, hasValidCredentials as hasCodexCredentials } from "../services/codex-oauth.js";
@@ -67,6 +68,7 @@ import {
   spawnClaudeCodeLogin,
   getInstallInstructions as getClaudeCodeInstallInstructions
 } from "../services/claude-code-cli.js";
+import { startSetupWizard, stopSetupWizard, getSetupWizard } from "../services/setup-wizard.js";
 
 const e = React.createElement;
 
@@ -158,6 +160,7 @@ const B_LOGO_FRAMES = [
 
 // Onboarding steps configuration
 const ONBOARDING_STEPS = [
+  { id: "prerequisites", label: "Prerequisites", required: true, description: "Node.js & Claude Code CLI" },
   { id: "google", label: "Google Account", required: true, description: "Sign in with Google" },
   {
     id: "phone",
@@ -366,6 +369,130 @@ const StepItem = ({ step, status, isActive, isSelected }) => {
 };
 
 /**
+ * Prerequisites Step Component
+ * Checks Node.js and Claude Code CLI installation
+ */
+const PrerequisitesStep = ({ onComplete, onError }) => {
+  const [nodeStatus, setNodeStatus] = useState(null);
+  const [claudeStatus, setClaudeStatus] = useState(null);
+  const [checking, setChecking] = useState(true);
+
+  useEffect(() => {
+    // Node.js — we're running, so it's always present
+    const nodeVer = process.version;
+    const nodeMajor = parseInt(nodeVer.slice(1), 10);
+    setNodeStatus({
+      installed: true,
+      version: nodeVer,
+      ok: nodeMajor >= 18
+    });
+
+    // Claude Code CLI
+    const cliCheck = isClaudeCodeInstalled();
+    if (cliCheck.installed) {
+      const auth = isClaudeCodeLoggedIn();
+      setClaudeStatus({
+        installed: true,
+        version: cliCheck.version,
+        loggedIn: auth.loggedIn
+      });
+    } else {
+      setClaudeStatus({ installed: false, version: null, loggedIn: false });
+    }
+
+    setChecking(false);
+  }, []);
+
+  // Auto-complete if both are installed
+  useEffect(() => {
+    if (!checking && nodeStatus?.ok && claudeStatus?.installed) {
+      const timer = setTimeout(() => onComplete({ node: nodeStatus, claude: claudeStatus }), 1000);
+      return () => clearTimeout(timer);
+    }
+  }, [checking, nodeStatus, claudeStatus]);
+
+  const allGood = nodeStatus?.ok && claudeStatus?.installed;
+
+  return e(
+    Box,
+    { flexDirection: "column", paddingX: 2, paddingY: 1 },
+    e(Text, { bold: true, color: "#e2e8f0" }, "System Prerequisites"),
+    e(Text, { color: "#94a3b8", dimColor: true }, "Checking required software..."),
+    e(Box, { marginTop: 1, flexDirection: "column" },
+
+      // Node.js check
+      e(Box, { flexDirection: "row", marginTop: 1 },
+        e(Text, { color: nodeStatus?.ok ? "#22c55e" : checking ? "#64748b" : "#ef4444" },
+          nodeStatus?.ok ? "  \u2714 " : checking ? "  \u25CB " : "  \u2718 "),
+        e(Text, { color: "#e2e8f0" }, "Node.js "),
+        nodeStatus
+          ? e(Text, { color: nodeStatus.ok ? "#22c55e" : "#ef4444" },
+              `${nodeStatus.version} ${nodeStatus.ok ? "" : "(v18+ required)"}`)
+          : e(Text, { color: "#64748b" }, "checking...")
+      ),
+
+      // Claude Code CLI check
+      e(Box, { flexDirection: "row", marginTop: 1 },
+        e(Text, { color: claudeStatus?.installed ? "#22c55e" : checking ? "#64748b" : "#f97316" },
+          claudeStatus?.installed ? "  \u2714 " : checking ? "  \u25CB " : "  \u2718 "),
+        e(Text, { color: "#e2e8f0" }, "Claude Code CLI "),
+        claudeStatus
+          ? claudeStatus.installed
+            ? e(Text, { color: "#22c55e" },
+                `${claudeStatus.version}${claudeStatus.loggedIn ? " (logged in)" : " (not logged in)"}`)
+            : e(Text, { color: "#f97316" }, "not installed")
+          : e(Text, { color: "#64748b" }, "checking...")
+      ),
+
+      // Instructions if Claude missing
+      !checking && !claudeStatus?.installed && e(Box, { flexDirection: "column", marginTop: 1, paddingX: 2 },
+        e(Text, { color: "#f97316", bold: true }, "To install Claude Code CLI:"),
+        e(Text, { color: "#94a3b8" }, ""),
+        e(Text, { color: "#e2e8f0" }, "  npm install -g @anthropic-ai/claude-code"),
+        e(Text, { color: "#94a3b8" }, ""),
+        e(Text, { color: "#94a3b8" }, "Then run 'claude' in your terminal to log in with your"),
+        e(Text, { color: "#94a3b8" }, "Anthropic Pro or Max subscription."),
+        e(Text, { color: "#94a3b8", marginTop: 1 }, "Press Enter to re-check, or S to skip for now")
+      ),
+
+      // Node too old
+      !checking && nodeStatus && !nodeStatus.ok && e(Box, { flexDirection: "column", marginTop: 1, paddingX: 2 },
+        e(Text, { color: "#ef4444", bold: true }, "Node.js v18+ is required."),
+        e(Text, { color: "#94a3b8" }, "Download from: https://nodejs.org")
+      ),
+
+      // All good
+      allGood && e(Box, { marginTop: 1 },
+        e(Text, { color: "#22c55e" }, "  All prerequisites met! Continuing...")
+      )
+    )
+  );
+};
+
+// Handle input for prerequisites step (re-check or skip)
+const PrerequisitesStepWrapper = ({ onComplete, onError }) => {
+  const wrapperRef = useRef({ onComplete });
+  wrapperRef.current.onComplete = onComplete;
+
+  useInput((input, key) => {
+    if (key.return) {
+      // Re-check by re-rendering — trigger via error then re-mount
+      // Simplest: just call onComplete if prerequisites now met
+      const cli = isClaudeCodeInstalled();
+      if (cli.installed) {
+        wrapperRef.current.onComplete({ node: process.version, claude: cli });
+      }
+    }
+    if (input.toLowerCase() === "s") {
+      // Skip — Claude Code is optional (other AI models work too)
+      wrapperRef.current.onComplete({ skipped: true });
+    }
+  });
+
+  return e(PrerequisitesStep, { onComplete, onError });
+};
+
+/**
  * Google Login Step Component
  * Opens browser for Google OAuth sign-in
  */
@@ -505,6 +632,31 @@ const PhoneVerificationStep = ({ onComplete, onError }) => {
   const [message, setMessage] = useState("");
   const [testCode, setTestCode] = useState(null);
   const completedRef = useRef(false);
+  // Twilio sandbox config from Firebase
+  const [sandboxJoinWords, setSandboxJoinWords] = useState("join <sandbox-words>");
+  const [twilioWhatsAppNumber, setTwilioWhatsAppNumber] = useState("+1 415 523 8886");
+
+  // Fetch Twilio config from Firebase on mount
+  useEffect(() => {
+    const loadTwilioConfig = async () => {
+      try {
+        const config = await fetchTwilioConfig();
+        if (config?.sandboxJoinWords) {
+          setSandboxJoinWords(config.sandboxJoinWords);
+        }
+        if (config?.whatsappNumber) {
+          // Format number for display
+          const num = config.whatsappNumber.replace(/^\+/, "");
+          const formatted = `+${num.slice(0, 1)} ${num.slice(1, 4)} ${num.slice(4, 7)} ${num.slice(7)}`;
+          setTwilioWhatsAppNumber(formatted);
+        }
+      } catch (err) {
+        // Use defaults if fetch fails
+        console.warn("[Onboarding] Could not fetch Twilio config:", err.message);
+      }
+    };
+    loadTwilioConfig();
+  }, []);
 
   useEffect(() => {
     if (!userId) {
@@ -614,7 +766,7 @@ const PhoneVerificationStep = ({ onComplete, onError }) => {
       if (!userId || !phoneEntry) return;
 
       setStatus("verifying");
-      const result = verifyPhoneCode(userId, value.trim());
+      const result = await verifyPhoneCode(userId, value.trim());
 
       if (result.success) {
         setStatus("success");
@@ -743,8 +895,8 @@ Just reply with a, b, or c - or tell me what's on your mind!`;
         ? e(Text, { color: "#22c55e", marginTop: 1 }, `✓ ${existingPhone}`)
         : e(Box, { flexDirection: "column" },
             e(Text, { color: "#64748b" }, "Verify your phone for notifications."),
-            e(Text, { color: "#f59e0b", dimColor: true, marginTop: 1 }, "First, text +1 415 523 8886:"),
-            e(Text, { color: "#f97316", bold: true }, "join check-whose")
+            e(Text, { color: "#f59e0b", dimColor: true, marginTop: 1 }, `First, text ${twilioWhatsAppNumber}:`),
+            e(Text, { color: "#f97316", bold: true }, sandboxJoinWords)
           ),
       e(Box, { marginTop: 1 },
         isVerified
@@ -764,8 +916,8 @@ Just reply with a, b, or c - or tell me what's on your mind!`;
       e(Text, { color: "#64748b" }, "US numbers only (+1)"),
       // Sandbox join instructions
       e(Box, { marginTop: 1, flexDirection: "column" },
-        e(Text, { color: "#f59e0b", dimColor: true }, "First, text +1 415 523 8886 on WhatsApp:"),
-        e(Text, { color: "#f97316", bold: true }, "join check-whose")
+        e(Text, { color: "#f59e0b", dimColor: true }, `First, text ${twilioWhatsAppNumber} on WhatsApp:`),
+        e(Text, { color: "#f97316", bold: true }, sandboxJoinWords)
       ),
       message && e(
         Text,
@@ -2137,6 +2289,13 @@ export const OnboardingPanel = ({ onComplete, userDisplay = "" }) => {
       statuses[step.id] = "pending";
     }
 
+    // Check prerequisites: Node.js is guaranteed (we're running), check Claude Code CLI
+    const nodeVersion = process.version;
+    const claudeCliCheck = isClaudeCodeInstalled();
+    if (claudeCliCheck.installed) {
+      statuses.prerequisites = "complete";
+    }
+
     // Check existing configurations
     if (isSignedIn()) {
       statuses.google = "complete";
@@ -2202,6 +2361,49 @@ export const OnboardingPanel = ({ onComplete, userDisplay = "" }) => {
   // Current selected step index - default to first incomplete
   const [currentStepIndex, setCurrentStepIndex] = useState(() => getFirstIncompleteIndex(stepStatuses));
   const [errorMessage, setErrorMessage] = useState(null);
+  const [wizardActive, setWizardActive] = useState(false);
+
+  // Handle launching the Full Setup wizard in browser
+  const handleLaunchWizard = useCallback(async () => {
+    if (wizardActive) return; // Already running
+
+    setWizardActive(true);
+    setErrorMessage(null);
+
+    try {
+      const firebaseUser = getCurrentFirebaseUser();
+      const userId = firebaseUser?.id || null;
+      await startSetupWizard(userId);
+
+      // Listen for step completions from the wizard
+      const wizard = getSetupWizard();
+      if (wizard) {
+        wizard.on("stepComplete", (stepId, data) => {
+          // Map wizard step IDs to onboarding step IDs
+          const stepMap = {
+            google: "google",
+            whatsapp: "phone",
+            ai: "model",
+            alpaca: "alpaca",
+            oura: "oura",
+            email: "email",
+            plaid: "plaid"
+          };
+          const onboardingStepId = stepMap[stepId];
+          if (onboardingStepId) {
+            setStepStatuses(prev => ({ ...prev, [onboardingStepId]: "complete" }));
+          }
+        });
+
+        wizard.on("stopped", () => {
+          setWizardActive(false);
+        });
+      }
+    } catch (err) {
+      setErrorMessage(`Failed to start wizard: ${err.message}`);
+      setWizardActive(false);
+    }
+  }, [wizardActive]);
 
   // Track if user is manually navigating (to prevent auto-advance)
   const [userNavigating, setUserNavigating] = useState(false);
@@ -2302,6 +2504,12 @@ export const OnboardingPanel = ({ onComplete, userDisplay = "" }) => {
       return;
     }
 
+    // 'w' to launch the Full Setup wizard in browser (DISABLED FOR NOW)
+    // if (input.toLowerCase() === "w") {
+    //   handleLaunchWizard();
+    //   return;
+    // }
+
     // 'q' to quit the program (Escape is handled by individual steps)
     if (input.toLowerCase() === "q") {
       exit();
@@ -2313,6 +2521,11 @@ export const OnboardingPanel = ({ onComplete, userDisplay = "" }) => {
     if (!currentStep) return null;
 
     switch (currentStep.id) {
+      case "prerequisites":
+        return e(PrerequisitesStepWrapper, {
+          onComplete: (data) => handleStepComplete("prerequisites", data),
+          onError: (err) => handleStepError("prerequisites", err)
+        });
       case "google":
         return e(GoogleLoginStep, {
           onComplete: (user) => handleStepComplete("google", user),
@@ -2406,6 +2619,22 @@ export const OnboardingPanel = ({ onComplete, userDisplay = "" }) => {
       e(
         Box,
         { flexDirection: "column", width: 30, marginRight: 2 },
+        // Full Setup button - opens wizard in browser (HIDDEN FOR NOW)
+        // e(
+        //   Box,
+        //   {
+        //     flexDirection: "row",
+        //     paddingY: 0,
+        //     marginBottom: 1,
+        //     borderStyle: "single",
+        //     borderColor: wizardActive ? "#22c55e" : BRAND_COLOR,
+        //     paddingX: 1
+        //   },
+        //   e(Text, { color: wizardActive ? "#22c55e" : BRAND_COLOR, bold: true },
+        //     wizardActive ? "  Wizard Running...  " : "  [W] Full Setup  "
+        //   )
+        // ),
+        // Individual steps
         ...ONBOARDING_STEPS.map((step, i) =>
           e(StepItem, {
             key: step.id,

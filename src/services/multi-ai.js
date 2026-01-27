@@ -134,6 +134,16 @@ export const MODELS = {
     description: "Maximum capability",
     maxTokens: 4096,
     contextWindow: 200000
+  },
+  CLAUDE_CODE_CLI: {
+    id: "claude-code-cli",
+    name: "Claude Code CLI",
+    shortName: "Claude Code",
+    icon: "◇",
+    color: "#f59e0b",
+    description: "Agentic engine powered by Claude Code CLI",
+    maxTokens: 32000,
+    contextWindow: 200000
   }
 };
 
@@ -148,9 +158,9 @@ export const TASK_TYPES = {
   RESEARCH: "research"     // In-depth research and analysis (use Pro)
 };
 
-// Current model state (for display)
-let currentModel = MODELS.GPT5_MINI;
-let lastTaskType = TASK_TYPES.STANDARD;
+// Current model state (for display) — Claude Code CLI is the primary engine
+let currentModel = MODELS.CLAUDE_CODE_CLI;
+let lastTaskType = TASK_TYPES.AGENTIC;
 
 // Check if Codex OAuth is available
 const isCodexAvailable = () => {
@@ -680,18 +690,38 @@ export const sendToGPTAgentic = async (message, context = {}) => {
 };
 
 /**
- * Detect if a task requires agentic execution (file changes, code, etc.)
+ * Detect if a task requires agentic execution (file changes, code, commands, analysis)
+ * Claude CLI should handle any task that requires:
+ * - File operations
+ * - Code execution
+ * - Running commands/tools
+ * - Data analysis
+ * - Web searches
  */
 export const isAgenticTask = (message) => {
   const lower = message.toLowerCase();
   const agenticIndicators = [
+    // File operations
     "create a file", "write a file", "make a file",
     "create a function", "write code", "implement",
+    // Code tasks
     "build", "fix the bug", "fix this", "refactor",
     "update the", "modify the", "change the",
     "add a feature", "remove the", "delete the",
+    // Execution
     "run tests", "execute", "deploy",
-    "set up", "configure", "install"
+    "set up", "configure", "install",
+    // Analysis commands - use Claude CLI for these
+    "run analysis", "run full analysis", "analyze stocks", "analyze the stocks",
+    "analyze tickers", "full analysis", "stock analysis", "ticker analysis",
+    "scan stocks", "scan tickers", "evaluate stocks", "evaluate tickers",
+    "refresh tickers", "update tickers", "fetch tickers",
+    // Research and data tasks
+    "research", "look up", "find out", "search for",
+    "get the latest", "check the", "pull data",
+    // Action commands
+    "send a message", "send message", "send email", "make a trade",
+    "buy", "sell", "place order"
   ];
   return agenticIndicators.some(ind => lower.includes(ind));
 };
@@ -750,19 +780,47 @@ export const executeAgenticTask = async (task, workDir, onOutput) => {
 
   // Prefer Claude Code, fall back to Codex
   const command = capabilities.claudeCode ? "claude" : "codex";
+
+  // For Claude Code, use -p flag (short for --print) with proper message passing
+  // Pass message via stdin to avoid shell escaping issues on Windows
+  const useStdin = capabilities.claudeCode && process.platform === "win32";
   const args = capabilities.claudeCode
-    ? ["--print", "--dangerously-skip-permissions", task]
+    ? useStdin
+      ? ["-p", "--dangerously-skip-permissions"]  // Message via stdin
+      : ["-p", "--dangerously-skip-permissions", task]
     : ["--task", task];
 
   return new Promise((resolve) => {
     const proc = spawn(command, args, {
       cwd: workDir || process.cwd(),
       shell: true,
+      stdio: useStdin ? ["pipe", "pipe", "pipe"] : ["inherit", "pipe", "pipe"],
       env: { ...process.env, FORCE_COLOR: "0" }
     });
 
+    // On Windows, write task to stdin to avoid escaping issues
+    if (useStdin && proc.stdin) {
+      proc.stdin.write(task);
+      proc.stdin.end();
+    }
+
     let output = "";
     let error = "";
+    let resolved = false;
+
+    // Timeout after 2 minutes for simple queries
+    const timeout = setTimeout(() => {
+      if (!resolved) {
+        resolved = true;
+        proc.kill();
+        if (onOutput) onOutput({ type: "error", error: "Timeout after 2 minutes" });
+        resolve({
+          success: false,
+          error: "Request timed out after 2 minutes",
+          output
+        });
+      }
+    }, 120000);
 
     proc.stdout.on("data", (data) => {
       const text = data.toString();
@@ -777,23 +835,31 @@ export const executeAgenticTask = async (task, workDir, onOutput) => {
     });
 
     proc.on("close", (code) => {
-      if (onOutput) onOutput({ type: "done", code, output, error });
-      resolve({
-        success: code === 0,
-        output,
-        error,
-        exitCode: code,
-        tool: command
-      });
+      if (!resolved) {
+        resolved = true;
+        clearTimeout(timeout);
+        if (onOutput) onOutput({ type: "done", code, output, error });
+        resolve({
+          success: code === 0,
+          output,
+          error,
+          exitCode: code,
+          tool: command
+        });
+      }
     });
 
     proc.on("error", (err) => {
-      if (onOutput) onOutput({ type: "error", error: err.message });
-      resolve({
-        success: false,
-        error: err.message,
-        output: ""
-      });
+      if (!resolved) {
+        resolved = true;
+        clearTimeout(timeout);
+        if (onOutput) onOutput({ type: "error", error: err.message });
+        resolve({
+          success: false,
+          error: err.message,
+          output: ""
+        });
+      }
     });
   });
 };
@@ -893,12 +959,13 @@ export const getAIStatus = () => {
     claudeCode: {
       ready: config.claudeCode.ready,
       workDir: config.claudeCode.workDir,
-      status: config.claudeCode.ready ? "Enabled" : "Set CLAUDE_CODE_ENABLED=true"
+      status: config.claudeCode.ready ? "Running" : "Set CLAUDE_CODE_ENABLED=true",
+      modelInfo: MODELS.CLAUDE_CODE_CLI
     },
     codexAvailable: config.codexAvailable,
     currentModel,
     lastTaskType,
-    primaryModel: config.primaryModel,
+    primaryModel: "claude-code",
     anyAvailable: config.ready && (!openaiQuotaExceeded || !claudeQuotaExceeded),
     quotaStatus: {
       openai: quotaStatus.openai,

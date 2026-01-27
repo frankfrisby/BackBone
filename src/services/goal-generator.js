@@ -139,30 +139,47 @@ export async function generateGoalsFromData() {
 USER DATA:
 ${JSON.stringify(context, null, 2)}
 
+CRITICAL: Goals must be SPECIFIC and MEASURABLE, not vague.
+
+BAD examples (too vague):
+- "Make money"
+- "Get healthier"
+- "Spend more time with family"
+
+GOOD examples (specific):
+- "Turn $1,000 into $1,000,000 through investments by July 2027"
+- "Achieve 85+ Oura sleep score consistently for 30 days"
+- "Spend 14 hours per week of quality time with family"
+- "Get a senior software engineer role at a FAANG company by Q3 2026"
+- "Find 3 AI/ML job opportunities in Delaware paying $150K+"
+
 For each goal, provide:
-1. title: Clear, specific goal title
+1. title: SPECIFIC goal with exact numbers, dates, or measurable outcomes (15-30 words)
 2. category: One of: finance, health, family, career, growth, education
 3. rationale: Why this goal makes sense given their data
 4. targetValue: Numeric target
 5. unit: Unit of measurement
 6. priority: 1-5 (1=critical, 5=someday)
+7. project: Short project name (2-5 words) like "Million Dollar Journey" or "Sleep Optimization"
 
 Focus on:
 - Building on their current strengths
 - Addressing areas that need improvement
 - Realistic but ambitious targets
 - Avoiding duplicates with existing goals
+- SPECIFICITY - every goal must have measurable criteria
 
 Return JSON format:
 {
   "goals": [
     {
-      "title": "Goal title",
+      "title": "Specific goal title with numbers and timeframe",
       "category": "category",
       "rationale": "Why this goal",
       "targetValue": 100,
       "unit": "unit",
-      "priority": 2
+      "priority": 2,
+      "project": "Short Project Name"
     }
   ],
   "summary": "Brief overview of the goal recommendations"
@@ -224,23 +241,32 @@ USER'S INPUT:
 
 ${context.hasData ? `ADDITIONAL CONTEXT:\n${JSON.stringify(context, null, 2)}` : ""}
 
+CRITICAL: Goals must be SPECIFIC and MEASURABLE, not vague.
+
+BAD examples: "Make money", "Get healthier", "Find a job"
+GOOD examples:
+- "Turn $1,000 into $1,000,000 through investments by July 2027"
+- "Find 5 AI/ML remote job opportunities paying $140K+ in the next 2 weeks"
+- "Achieve 85+ Oura sleep score for 30 consecutive days"
+
 Create goals that:
 1. Directly address what the user said matters to them
-2. Are specific and measurable
+2. Have EXACT numbers, percentages, or measurable criteria
 3. Have clear targets and timeframes
-4. Are categorized appropriately
+4. Each goal gets a short project name (2-5 words)
 
 Return JSON format:
 {
   "goals": [
     {
-      "title": "Specific goal title (be detailed, at least 15 words describing what exactly to achieve)",
+      "title": "SPECIFIC goal with exact numbers and timeframe (15-30 words)",
       "category": "finance|health|family|career|growth|education",
       "rationale": "How this connects to what the user said",
       "targetValue": 100,
       "startValue": 0,
       "unit": "unit of measurement",
-      "priority": 1-5
+      "priority": 1-5,
+      "project": "Short Project Name"
     }
   ],
   "acknowledgment": "Brief message acknowledging what the user shared and how these goals will help"
@@ -369,24 +395,30 @@ ${Object.entries(answers).map(([q, a]) => `Q: ${q}\nA: ${a}`).join("\n\n")}
 
 ${context.hasData ? `USER'S CURRENT DATA:\n${JSON.stringify(context, null, 2)}` : ""}
 
+CRITICAL: Goals must be SPECIFIC with exact numbers, not vague.
+
+BAD: "Improve finances", "Get healthier"
+GOOD: "Turn $5K into $50K through stock trading by December 2026"
+
 Create 3-5 goals that:
 1. Directly reflect what the user expressed in their answers
-2. Are specific, measurable, and achievable
+2. Have EXACT measurable criteria (numbers, percentages, dates)
 3. Include appropriate targets based on their current situation
-4. Cover the life areas they showed interest in
+4. Each goal gets a short project name (2-5 words)
 
 Return JSON:
 {
   "goals": [
     {
-      "title": "Detailed goal title (at least 15 words describing the specific achievement)",
+      "title": "SPECIFIC goal with exact numbers and timeframe (15-30 words)",
       "category": "finance|health|family|career|growth|education",
       "rationale": "How this connects to their answer",
       "targetValue": 100,
       "startValue": 0,
       "unit": "unit",
       "priority": 1-5,
-      "sourceQuestion": "The question this goal came from"
+      "sourceQuestion": "The question this goal came from",
+      "project": "Short Project Name"
     }
   ],
   "insights": "Key insights from their answers",
@@ -444,7 +476,9 @@ export function saveGeneratedGoals(goals) {
         targetValue: goal.targetValue || 100,
         startValue: goal.startValue || 0,
         currentValue: goal.startValue || 0,
-        unit: goal.unit || "progress"
+        unit: goal.unit || "progress",
+        project: goal.project || null,
+        description: goal.rationale || ""
       });
       saved.push(created);
     } catch (error) {
@@ -475,16 +509,21 @@ export async function quickGenerateGoals(userHint = "") {
 USER CONTEXT:
 ${JSON.stringify(context, null, 2)}
 
-Return JSON with goals that are specific (15+ word titles), measurable, and actionable:
+CRITICAL: Goals must be SPECIFIC with exact numbers, dates, and measurable criteria.
+BAD: "Make money", "Get fit"
+GOOD: "Grow portfolio from $1K to $100K by end of 2027", "Run a 5K in under 25 minutes by March 2026"
+
+Return JSON with specific goals:
 {
   "goals": [
     {
-      "title": "Detailed specific goal",
+      "title": "SPECIFIC goal with exact numbers and timeframe (15-30 words)",
       "category": "finance|health|family|career|growth|education",
       "targetValue": number,
       "startValue": number,
       "unit": "string",
-      "priority": 1-5
+      "priority": 1-5,
+      "project": "Short Project Name (2-5 words)"
     }
   ]
 }`;

@@ -285,10 +285,10 @@ const TickerScoresPanelBase = ({
     );
   }
 
-  // Minimal/compact view - show 5 tickers with full run & update status
+  // Minimal/compact view - show 4 tickers with full run & update status
   if (viewMode === "minimal" || compact) {
-    // Override to show 5 tickers in mini view
-    const miniTickers = sortedTickers.slice(0, 5);
+    // Override to show 4 tickers in mini view (not 5)
+    const miniTickers = sortedTickers.slice(0, 4);
 
     // Calculate market status for indicator
     const getMarketStatus = () => {
@@ -391,7 +391,7 @@ const TickerScoresPanelBase = ({
           })
         )
       ),
-      // Top 5 tickers
+      // Top 4 tickers in mini view
       ...miniTickers.map((ticker, i) => {
         const isTop3 = top3Symbols.has(ticker.symbol);
         const color = getSignalColor(ticker.score);
@@ -414,23 +414,27 @@ const TickerScoresPanelBase = ({
             ` ${getSignalLabel(ticker.score, isTop3)}`)
         );
       }),
-      // Data quality status line
+      // Data quality status line - shows Full (800+) and Refresh (150) status
       e(
         Box,
         { flexDirection: "row", gap: 1, marginTop: 1, borderTop: true, borderColor: "#334155", paddingTop: 1 },
-        // Full scan status
-        e(Text, { color: fullScanStatus.ran ? "#22c55e" : "#ef4444" },
-          fullScanStatus.ran ? "●" : "○"),
+        // Full scan status (800+ tickers)
+        e(StatusDot, {
+          status: fullScanStatus.ran ? "done" : "pending",
+          blinking: tickerStatus?.fullScanRunning || false
+        }),
         e(Text, { color: fullScanStatus.ran ? "#94a3b8" : "#64748b" },
-          fullScanStatus.ran ? `Full scan ${fullScanStatus.time}` : "No full scan today"),
+          fullScanStatus.ran ? `Full ${fullScanStatus.time}` : "Full"),
         e(Text, { color: "#334155" }, "│"),
-        // Update frequency status
-        e(Text, { color: updateStatus.afterHours ? "#64748b" : updateStatus.healthy ? "#22c55e" : "#f59e0b" },
-          updateStatus.afterHours ? "○" : updateStatus.healthy ? "●" : "◐"),
+        // Refresh status (150 ticker list)
+        e(StatusDot, {
+          status: updateStatus.afterHours ? "pending" : updateStatus.healthy ? "done" : "error",
+          blinking: tickerStatus?.refreshing || false
+        }),
         e(Text, { color: updateStatus.afterHours ? "#64748b" : updateStatus.healthy ? "#94a3b8" : "#f59e0b" },
-          updateStatus.afterHours ? "After hours" :
-          updateStatus.healthy ? `Updates OK (${updateStatus.updateCount || 0})` :
-          `${updateStatus.gaps} gap${updateStatus.gaps !== 1 ? "s" : ""} >2h`)
+          "Refresh"),
+        tickerStatus?.scanCount > 0 && e(Text, { color: "#475569", dimColor: true },
+          ` (${tickerStatus.scanCount})`)
       )
     );
   }
@@ -639,7 +643,7 @@ const TickerSummaryLineBase = ({
   const sorted = [...tickers]
     .filter(t => t && t.symbol && typeof t.score === "number")
     .sort((a, b) => (b.score || 0) - (a.score || 0))
-    .slice(0, 5);  // Show 5 tickers now
+    .slice(0, 4);  // Show 4 tickers in mini view
 
   // Calculate scan status
   const scanStatusValue = scanStatus?.working ? "working" :
@@ -670,7 +674,7 @@ const TickerSummaryLineBase = ({
   return e(
     Box,
     { flexDirection: "row", gap: 2 },
-    // Show 5 tickers
+    // Show 4 tickers
     ...sorted.map((ticker, i) => {
       const color = getSignalColor(ticker.score);
       const isQualified = ticker.score >= threshold;

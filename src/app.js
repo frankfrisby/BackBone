@@ -8350,9 +8350,14 @@ Folder: ${result.action.id}`,
       e(
         Box,
         { flexDirection: "column", width: viewMode === VIEW_MODES.MINIMAL || isMedium ? "75%" : "50%", paddingX: 1, overflow: "hidden" },
-        // Engine Status - overlay-rendered when enabled
-        e(AgentActivityPanel, { overlayHeader: overlayEnabled && overlayEngineHeaderEnabled, scrollOffset: engineScrollOffset, privateMode, actionStreamingText, cliStreaming }),
-        // Conversation Panel
+        // Engine Status OR Disaster Overlay (disaster replaces engine panel)
+        showDisasterOverlay
+          ? e(DisasterOverlay, {
+              visible: showDisasterOverlay,
+              onClose: () => setShowDisasterOverlay(false)
+            })
+          : e(AgentActivityPanel, { overlayHeader: overlayEnabled && overlayEngineHeaderEnabled, scrollOffset: engineScrollOffset, privateMode, actionStreamingText, cliStreaming }),
+        // Conversation Panel (always visible)
         e(ConversationPanel, {
           messages,
           isLoading: isProcessing,
@@ -8368,11 +8373,6 @@ Folder: ${result.action.id}`,
           data: linkedInViewerData,
           visible: showLinkedInViewer,
           onClose: () => setShowLinkedInViewer(false)
-        }),
-        // Disaster & Crisis Assessment overlay
-        showDisasterOverlay && e(DisasterOverlay, {
-          visible: showDisasterOverlay,
-          onClose: () => setShowDisasterOverlay(false)
         }),
         // Test Runner Panel overlay (Ctrl+R)
         showTestRunner && e(TestRunnerPanel, {

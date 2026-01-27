@@ -211,7 +211,7 @@ const WhatsAppMessage = ({ message, timestamp, isUser, modelName }) => {
   );
 };
 
-const ConversationPanelBase = ({ messages, isLoading, streamingText, actionStreamingText, actionStreamingTitle, whatsappPollCountdown, whatsappPollingMode }) => {
+const ConversationPanelBase = ({ messages, isLoading, streamingText, actionStreamingText, actionStreamingTitle, whatsappPollCountdown, whatsappPollingMode, scrollOffset = 0 }) => {
   const hasMessages = messages.length > 0 || isLoading || streamingText || actionStreamingText;
 
   if (!hasMessages) {
@@ -245,9 +245,13 @@ const ConversationPanelBase = ({ messages, isLoading, streamingText, actionStrea
     );
   }
 
-  // Show only last 2 messages to keep panel compact
+  // Show messages with scroll support
+  // scrollOffset=0 means latest messages, higher values scroll back in history
   const isStreaming = streamingText || actionStreamingText;
-  const visibleMessages = isStreaming ? messages.slice(-1) : messages.slice(-3);
+  const maxVisible = isStreaming ? 1 : 3;
+  const endIdx = messages.length - scrollOffset;
+  const startIdx = Math.max(0, endIdx - maxVisible);
+  const visibleMessages = messages.slice(startIdx, Math.max(startIdx + maxVisible, endIdx));
 
   return e(
     Box,
@@ -267,6 +271,7 @@ const ConversationPanelBase = ({ messages, isLoading, streamingText, actionStrea
         Box,
         { flexDirection: "row", gap: 2 },
         whatsappPollCountdown && e(PollCountdown, { countdown: whatsappPollCountdown, pollingMode: whatsappPollingMode }),
+        scrollOffset > 0 && e(Text, { color: "#f59e0b" }, `↑${scrollOffset} `),
         e(Text, { color: "#475569", dimColor: true }, `${messages.length} messages`)
       )
     ),
@@ -315,6 +320,7 @@ const arePropsEqual = (prevProps, nextProps) => {
   if (prevProps.actionStreamingTitle !== nextProps.actionStreamingTitle) return false;
   if (prevProps.whatsappPollCountdown !== nextProps.whatsappPollCountdown) return false;
   if (prevProps.whatsappPollingMode !== nextProps.whatsappPollingMode) return false;
+  if (prevProps.scrollOffset !== nextProps.scrollOffset) return false;
   if (prevProps.messages.length !== nextProps.messages.length) return false;
   const prevLast = prevProps.messages[prevProps.messages.length - 1];
   const nextLast = nextProps.messages[nextProps.messages.length - 1];

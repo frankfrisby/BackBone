@@ -1093,21 +1093,34 @@ const AgentActivityPanelBase = ({ overlayHeader = false, compact = false, scroll
     // Otherwise show normal BACKBONE actions/goals/observations
     ...(cliStreaming && actionStreamingText ? [
       // CLAUDE CODE CLI STREAMING — supersedes all BACKBONE actions
-      e(
-        Box,
-        { key: "cli-stream", flexDirection: "column", marginTop: 0 },
-        e(
+      (() => {
+        // Split output into lines for scroll support
+        const allLines = actionStreamingText.split("\n");
+        const visibleLineCount = 15;
+        // scrollOffset=0 means latest (bottom), higher = scroll up
+        const endLine = Math.max(0, allLines.length - scrollOffset);
+        const startLine = Math.max(0, endLine - visibleLineCount);
+        const visibleText = allLines.slice(startLine, endLine).join("\n");
+        const hasMore = startLine > 0;
+
+        return e(
           Box,
-          { flexDirection: "row", gap: 1 },
-          e(Text, { color: "#f59e0b" }, "▶"),
-          e(Text, { color: "#f59e0b", bold: true }, "Running")
-        ),
-        e(
-          Box,
-          { marginLeft: 2, marginTop: 0, flexDirection: "column" },
-          e(Text, { color: "#cbd5e1", wrap: "wrap" }, actionStreamingText.slice(-600))
-        )
-      )
+          { key: "cli-stream", flexDirection: "column", marginTop: 0 },
+          e(
+            Box,
+            { flexDirection: "row", gap: 1 },
+            e(Text, { color: "#f59e0b" }, "▶"),
+            e(Text, { color: "#f59e0b", bold: true }, "Running"),
+            hasMore && e(Text, { color: "#64748b" }, ` (↑ ${startLine} more lines)`),
+            scrollOffset > 0 && e(Text, { color: "#64748b" }, ` [scrolled ↑${scrollOffset}]`)
+          ),
+          e(
+            Box,
+            { marginLeft: 2, marginTop: 0, flexDirection: "column" },
+            e(Text, { color: "#cbd5e1", wrap: "wrap" }, visibleText || "...")
+          )
+        );
+      })()
     ] : cliStreaming && !actionStreamingText ? [
       // CLI is processing but no output yet — show waiting state
       e(

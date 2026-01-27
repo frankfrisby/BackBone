@@ -661,18 +661,20 @@ const App = ({ updateConsoleTitle }) => {
       setShowConversation(false);
       return;
     }
-    // Arrow keys: Scroll conversation overlay or engine section
+    // Arrow keys: Scroll engine and conversation panels
+    // Up/Down: scroll engine panel (CLI streaming, actions, goals)
+    // Shift+Up/Down: scroll conversation history
     if (key.upArrow) {
-      if (showConversation) {
-        setConversationScrollOffset(prev => Math.max(0, prev - 1));
+      if (key.shift) {
+        setConversationScrollOffset(prev => Math.min(Math.max(0, messages.length - 1), prev + 1));
       } else {
         setEngineScrollOffset(prev => Math.max(0, prev - 1));
       }
       return;
     }
     if (key.downArrow) {
-      if (showConversation) {
-        setConversationScrollOffset(prev => prev + 1);
+      if (key.shift) {
+        setConversationScrollOffset(prev => Math.max(0, prev - 1));
       } else {
         setEngineScrollOffset(prev => Math.min(maxEngineScroll, prev + 1));
       }
@@ -7986,7 +7988,8 @@ Folder: ${result.action.id}`,
           actionStreamingText,
           actionStreamingTitle,
           whatsappPollCountdown,
-          whatsappPollingMode
+          whatsappPollingMode,
+          scrollOffset: conversationScrollOffset
         }),
         // LinkedIn Data Viewer overlay
         showLinkedInViewer && e(LinkedInDataViewer, {

@@ -1,6 +1,7 @@
 import React, { useRef, useState, useEffect, useMemo, useCallback, memo } from "react";
 import { Box, Text, useInput } from "ink";
 import { CommandPalette } from "./command-palette.js";
+import { COMMAND_DESCRIPTIONS } from "../commands.js";
 
 const e = React.createElement;
 
@@ -23,7 +24,19 @@ const buildMatches = (input, commands) => {
       .map(opt => `/connect ${opt}`);
   }
 
-  return commands.filter(cmd => cmd.startsWith(trimmed));
+  // Fuzzy match: each word in input must appear somewhere in the command (in order not required)
+  const words = trimmed.toLowerCase().slice(1).split(/\s+/).filter(Boolean);
+  if (words.length === 0) return commands;
+
+  return commands.filter(cmd => {
+    const lower = cmd.toLowerCase();
+    // Exact prefix still works
+    if (lower.startsWith(trimmed.toLowerCase())) return true;
+    // Fuzzy: every typed word must appear in the command or its description
+    const desc = (COMMAND_DESCRIPTIONS[cmd] || "").toLowerCase();
+    const searchable = lower + " " + desc;
+    return words.every(w => searchable.includes(w));
+  });
 };
 
 /**

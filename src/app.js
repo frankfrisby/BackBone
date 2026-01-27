@@ -17,7 +17,8 @@ import {
   formatPercent,
   formatSignal,
   getTickerIcon,
-  validateTickerUniverse
+  validateTickerUniverse,
+  TICKER_UNIVERSE
 } from "./data/tickers.js";
 import { buildDefaultWeights, buildScoringEngine, normalizeWeights } from "./data/scoring.js";
 import { buildMockPortfolio, buildPortfolioFromAlpaca, buildEmptyPortfolio } from "./data/portfolio.js";
@@ -150,7 +151,7 @@ import { getWorkLog, LOG_SOURCE, LOG_STATUS } from "./services/work-log.js";
 import { getGoalTracker, GOAL_CATEGORY } from "./services/goal-tracker.js";
 import { getLifeScores } from "./services/life-scores.js";
 import { getProgressResearch } from "./services/progress-research.js";
-import { getTargetPerson } from "./services/person-matcher.js";
+import { getTargetPerson, findBestMatch } from "./services/person-matcher.js";
 import { getLifeEngine } from "./services/life-engine.js";
 import { getMobileService } from "./services/mobile.js";
 import { sendWhatsAppMessage, isPhoneVerified } from "./services/phone-auth.js";
@@ -3647,8 +3648,8 @@ Execute this task and provide concrete results.`);
               fullScanRunning: result.fullScanRunning || false,
               scanProgress: result.scanProgress || 0,
               scanTotal: result.scanTotal || 0,
-              evaluatedToday: result.evaluatedToday || 0,
-              universeSize: result.universeSize || 0,
+              evaluatedToday: result.tickers.filter(t => t.lastEvaluated && new Date(t.lastEvaluated).toDateString() === new Date().toDateString()).length,
+              universeSize: result.tickers.length || TICKER_UNIVERSE.length,
               updateHistory,
             };
           });
@@ -3718,7 +3719,8 @@ Execute this task and provide concrete results.`);
             // Only update if scan state changed
             if (prev.fullScanRunning === (result.fullScanRunning || false) &&
                 prev.scanProgress === (result.scanProgress || 0) &&
-                prev.scanTotal === (result.scanTotal || 0)) {
+                prev.scanTotal === (result.scanTotal || 0) &&
+                prev.evaluatedToday === result.tickers.filter(t => t.lastEvaluated && new Date(t.lastEvaluated).toDateString() === new Date().toDateString()).length) {
               return prev;
             }
             const updated = {
@@ -3727,8 +3729,8 @@ Execute this task and provide concrete results.`);
               scanProgress: result.scanProgress || 0,
               scanTotal: result.scanTotal || 0,
               lastFullScan: result.lastFullScan || prev.lastFullScan,
-              evaluatedToday: result.evaluatedToday || prev.evaluatedToday || 0,
-              universeSize: result.universeSize || prev.universeSize || 0,
+              evaluatedToday: result.tickers.filter(t => t.lastEvaluated && new Date(t.lastEvaluated).toDateString() === new Date().toDateString()).length,
+              universeSize: result.tickers.length || TICKER_UNIVERSE.length,
             };
             // If scan just finished, update tickers too
             if (prev.fullScanRunning && !result.fullScanRunning && result.tickers.length > 0) {
@@ -5711,6 +5713,44 @@ Folder: ${result.action.id}`,
           }
         ]);
         setLastAction("Daily report");
+        return;
+      }
+
+      // /role model - Explain current role model selection
+      if (resolved === "/role model" || resolved === "/rolemodel") {
+        const connectedData = {
+          firebase: { connected: !!firebaseUserDisplay },
+          ouraHealth: { connected: !!ouraHealth?.connected },
+          portfolio: { connected: !!(alpacaStatus === "connected" || portfolio?.equity) },
+          linkedIn: { connected: !!linkedInProfile?.connected }
+        };
+        const result = findBestMatch(connectedData);
+        const best = result.bestMatch;
+        const top3 = result.topMatches;
+
+        let display = `## Your Role Model: ${best.person.name}\n\n`;
+        display += `**Domain:** ${result.primaryDomain}\n`;
+        display += `**Match Score:** ${best.combined}% (Relatability ${best.relatability}% × 0.4 + Aspirational ${best.aspirational}% × 0.6)\n\n`;
+        display += `**Who:** ${best.person.achievements || best.person.name}\n`;
+        display += `**Starting Point:** ${best.person.starting_point || "N/A"}\n`;
+        display += `**Trajectory:** ${best.person.trajectory || "N/A"}\n`;
+        display += `**Why Relatable:** ${best.person.why_relatable || "N/A"}\n`;
+        display += `**Why Aspirational:** ${best.person.why_aspirational || "N/A"}\n\n`;
+        display += `### How This Was Selected\n`;
+        display += `Your primary domain is **${result.primaryDomain}**, determined by your goals and connected services. `;
+        display += `${result.totalAnalyzed} candidates in this domain were scored on two axes:\n`;
+        display += `- **Relatability (40%):** Age proximity, humble starting point, trait overlap, late-bloomer bonus\n`;
+        display += `- **Aspirational (60%):** Achievement level, goal alignment, clear trajectory, success scale\n\n`;
+        display += `### Top 3 Matches\n`;
+        for (const match of top3) {
+          display += `- **${match.person.name}** — ${match.combined}% (rel: ${match.relatability}%, asp: ${match.aspirational}%)\n`;
+        }
+        display += `\n### How It Changes\n`;
+        display += `Your role model updates when your goals change, you connect new services (Alpaca, Oura), or your profile traits shift. `;
+        display += `The system re-evaluates on each dashboard render.\n`;
+
+        setMessages((prev) => [...prev, { role: "assistant", content: display, timestamp: new Date() }]);
+        setLastAction("Role model info");
         return;
       }
 

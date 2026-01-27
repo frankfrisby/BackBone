@@ -54,6 +54,9 @@ data/                  — User data, settings, activity logs, goal definitions
   trades-log.json      — Trading history
   life-scores.json     — Life dimension scores
   user-settings.json   — User preferences
+  user-skills/         — Custom user-defined skills (index.json + .md files)
+  spreadsheets/        — Excel spreadsheets for persistent data tracking (.xlsx files)
+  firebase-sync-state.json — Tracks last Firebase backup state
 memory/                — AI memory files (markdown summaries of user context)
   BACKBONE.md          — System overview
   profile.md           — User profile summary
@@ -95,6 +98,73 @@ These are detailed instruction files in `skills/`. Read the relevant file when h
 - **video-processing**: Video Processing — edit, convert, analyze video files
 - **web-scraping**: Web Scraping — extract data from websites
 - **word-document**: Word Document Creation — create and format Word files
+
+## Excel Data Persistence
+When working on projects, research, or tracking rolling data, prefer saving to Excel spreadsheets in `data/spreadsheets/`. This ensures data survives across sessions — the AI can read the spreadsheet and continue where it left off.
+
+### When to Use Excel
+- Project cost breakdowns with formulas (e.g., 156 parts × unit costs)
+- Rolling data logs (research findings, comparison tables, tracking sheets)
+- Any structured data that needs to persist and be computable
+- Financial analysis, budgets, inventory tracking
+
+### Excel Commands
+- `/excel list` — Show all saved spreadsheets
+- `/excel read <name>` — Read and display spreadsheet contents
+- `/excel create <name>` — AI-assisted spreadsheet creation
+
+### Programmatic Usage (in AI tool calls)
+```javascript
+import { createSpreadsheet, readSpreadsheet, appendToSpreadsheet, updateSpreadsheetCells, createProjectCostSheet } from "./services/excel-manager.js";
+
+// Create with headers, data, formulas, and totals
+await createSpreadsheet("project-costs", {
+  sheetName: "Budget",
+  headers: [{ name: "Part", key: "part" }, { name: "Qty", key: "quantity" }, { name: "Unit Cost", key: "unitCost" }, { name: "Total", key: "totalCost" }],
+  rows: [{ part: "Widget A", quantity: 10, unitCost: 5.99 }],
+  formulas: { totalCost: "C{row}*D{row}" },
+  totalLabel: "GRAND TOTAL"
+});
+
+// Read back later
+const data = await readSpreadsheet("project-costs");
+
+// Append new rows
+await appendToSpreadsheet("project-costs", [{ part: "Widget B", quantity: 5, unitCost: 12.50 }]);
+```
+
+## Firebase Storage Backup
+All projects, memory files, spreadsheets, goals, and user skills are backed up to Firebase Storage so work is preserved across machines.
+
+### Backup Commands
+- `/backup status` — Show what's synced and what's pending
+- `/backup now` — Upload all changed files to Firebase Storage
+- `/backup restore` — Download files from Firebase to local (won't overwrite existing)
+
+### What Gets Backed Up
+- `projects/` — All project directories
+- `memory/` — AI memory files
+- `data/user-skills/` — Custom skills
+- `data/spreadsheets/` — Excel files
+- `data/goals/` — Goal directories
+- Key data files: goals.json, trades-log.json, life-scores.json, user-settings.json, activity-log.json
+
+## Custom User Skills
+User-defined skills live in `data/user-skills/`. These encode the user's personal processes, preferences, and decision frameworks. The index is at `data/user-skills/index.json`.
+
+When a query matches a custom skill's "When to Use" section, read the full skill file and follow its process. **Custom skills take priority over system skills for matching.**
+
+### Skill Commands
+- `/skill list` — Show all skills (system + user) with usage stats
+- `/skill create <name>` — AI-assisted skill creation
+- `/skill show <name>` — Display skill content
+- `/skill edit <name>` — Edit an existing user skill
+- `/skill delete <name>` — Delete a user skill
+- `/skill learn` — AI analyzes conversation to suggest new skills
+
+### User Skill File Format
+Each skill is a markdown file in `data/user-skills/<slug>.md` with sections:
+`# Name`, `## Category`, `## Tags`, `## Description`, `## When to Use`, `## Process`, `## Decision Framework`, `## My Preferences`, `## Examples`
 
 ## How to Create a Goal
 

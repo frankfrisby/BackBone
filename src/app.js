@@ -79,7 +79,10 @@ import { deleteAllData, getResetSummary, RESET_STEPS } from "./services/reset.js
 import { sendMessage as sendMultiAI, getAIStatus, getMultiAIConfig, getCurrentModel, MODELS, TASK_TYPES, isAgenticTask, executeAgenticTask, getAgenticCapabilities } from "./services/multi-ai.js";
 import { formatToolsList, getToolsSummary, enableServer, disableServer } from "./services/mcp-tools.js";
 import { loadActionsQueue, getActionsDisplay, queueAction, startNextAction, completeAction, initializeDefaultActions, ACTION_TYPES } from "./services/actions-engine.js";
-import { getSkillsCatalog } from "./services/skills-loader.js";
+import { getSkillsCatalog, getUserSkillContent } from "./services/skills-loader.js";
+import { getSkillsLoader } from "./services/skills-loader.js";
+import { listSpreadsheets, readSpreadsheet, createSpreadsheet } from "./services/excel-manager.js";
+import { backupToFirebase, restoreFromFirebase, getBackupStatus } from "./services/firebase-storage.js";
 import { loadProfileSections, updateFromLinkedIn, updateFromHealth, updateFromPortfolio, getProfileSectionDisplay, getProfileOverview, PROFILE_SECTIONS } from "./services/profile-sections.js";
 import { getGitHubConfig, getGitHubStatus } from "./services/github.js";
 import { openUrl } from "./services/open-url.js";
@@ -2996,10 +2999,10 @@ Execute this task and provide concrete results.`);
           contextParts.push(`## Current Goals\n${goalsText}`);
         }
 
-        // Add skills catalog
+        // Add skills catalog (user skills have higher priority)
         const skillsList = getSkillsCatalog();
         if (skillsList) {
-          contextParts.push(`## Available Skills\n${skillsList}`);
+          contextParts.push(`## Available Skills\n${skillsList}\n\nCustom user skills take priority over system skills. When a query matches a custom skill's description or "When to Use" section, read the full skill file from data/user-skills/ and follow its process.`);
         }
 
         // Add saved user context
@@ -3642,6 +3645,10 @@ Execute this task and provide concrete results.`);
               scanDone: result.tickers.length >= 50,
               lastFullScan: result.lastFullScan || lastFullScan,
               fullScanRunning: result.fullScanRunning || false,
+              scanProgress: result.scanProgress || 0,
+              scanTotal: result.scanTotal || 0,
+              evaluatedToday: result.evaluatedToday || 0,
+              universeSize: result.universeSize || 0,
               updateHistory,
             };
           });
@@ -3701,9 +3708,46 @@ Execute this task and provide concrete results.`);
     // Refresh every 10 minutes (from 5:30 AM ET onwards during weekdays)
     const interval = setInterval(smartRefresh, 10 * 60 * 1000);
 
+    // Fast poll for scan progress (every 5 seconds while full scan is running)
+    const scanPollInterval = setInterval(async () => {
+      if (cancelled) return;
+      try {
+        const result = await fetchYahooTickers();
+        if (result.success) {
+          setTickerStatus(prev => {
+            // Only update if scan state changed
+            if (prev.fullScanRunning === (result.fullScanRunning || false) &&
+                prev.scanProgress === (result.scanProgress || 0) &&
+                prev.scanTotal === (result.scanTotal || 0)) {
+              return prev;
+            }
+            const updated = {
+              ...prev,
+              fullScanRunning: result.fullScanRunning || false,
+              scanProgress: result.scanProgress || 0,
+              scanTotal: result.scanTotal || 0,
+              lastFullScan: result.lastFullScan || prev.lastFullScan,
+              evaluatedToday: result.evaluatedToday || prev.evaluatedToday || 0,
+              universeSize: result.universeSize || prev.universeSize || 0,
+            };
+            // If scan just finished, update tickers too
+            if (prev.fullScanRunning && !result.fullScanRunning && result.tickers.length > 0) {
+              setTickers(result.tickers);
+              updated.lastRefresh = new Date().toISOString();
+              updated.scanCount = result.tickers.length;
+            }
+            return updated;
+          });
+        }
+      } catch {
+        // Silently ignore poll errors
+      }
+    }, 5000);
+
     return () => {
       cancelled = true;
       clearInterval(interval);
+      clearInterval(scanPollInterval);
     };
   }, []);
 
@@ -5508,8 +5552,8 @@ Folder: ${result.action.id}`,
         return;
       }
 
-      // /sweep - Full 800+ ticker sweep
-      if (resolved === "/sweep") {
+      // /run stock sweep - Full 800+ ticker sweep
+      if (resolved === "/run stock sweep") {
         setMessages((prev) => [
           ...prev,
           { role: "assistant", content: "Starting full stock sweep (800+ tickers)...", timestamp: new Date() }
@@ -5538,8 +5582,9 @@ Folder: ${result.action.id}`,
         return;
       }
 
-      // /refresh - Refresh core tickers
-      if (resolved === "/refresh") {
+      // /run stock refresh - Refresh core tickers
+      if (resolved === "/run stock refresh") {
+        setTickerStatus(prev => ({ ...prev, refreshing: true, error: null }));
         setMessages((prev) => [
           ...prev,
           { role: "assistant", content: "Refreshing stock tickers...", timestamp: new Date() }
@@ -5560,12 +5605,14 @@ Folder: ${result.action.id}`,
               scanCount: result.tickers.length,
             }));
           } else {
+            setTickerStatus(prev => ({ ...prev, refreshing: false }));
             setMessages((prev) => [
               ...prev,
               { role: "assistant", content: "Refresh completed but no ticker data returned.", timestamp: new Date() }
             ]);
           }
         } catch (error) {
+          setTickerStatus(prev => ({ ...prev, refreshing: false, error: error.message }));
           setMessages((prev) => [
             ...prev,
             { role: "assistant", content: `Refresh error: ${error.message}`, timestamp: new Date() }
@@ -5575,8 +5622,8 @@ Folder: ${result.action.id}`,
         return;
       }
 
-      // /tickers - Display top scored tickers
-      if (resolved === "/tickers") {
+      // /update stock tickers - Display top scored tickers
+      if (resolved === "/update stock tickers") {
         try {
           const result = await fetchYahooTickers();
           if (result.success && result.tickers.length > 0) {
@@ -6466,6 +6513,213 @@ Folder: ${result.action.id}`,
           }
         ]);
         setLastAction("Focus stats");
+        return;
+      }
+
+      // /skill - Custom User Skills
+      if (resolved === "/skill" || resolved === "/skill list") {
+        const loader = getSkillsLoader();
+        const userSkills = loader.getUserSkills();
+        const systemSkills = loader.getDefaultSkills();
+        let display = "## Skills\n\n";
+        display += `### System Skills (${systemSkills.length})\n`;
+        display += systemSkills.map(s => `- **${s.id}**: ${s.description || s.name}`).join("\n");
+        display += "\n\n";
+        if (userSkills.length > 0) {
+          display += `### Your Custom Skills (${userSkills.length})\n`;
+          display += userSkills.map(s => {
+            const tag = s.category ? ` [${s.category}]` : "";
+            const usage = s.usageCount ? ` (used ${s.usageCount}x)` : "";
+            return `- **${s.id}**: ${s.description || s.name}${tag}${usage}`;
+          }).join("\n");
+        } else {
+          display += "### Your Custom Skills\nNo custom skills yet. Use `/skill create <name>` to create one.";
+        }
+        setMessages((prev) => [...prev, { role: "assistant", content: display, timestamp: new Date() }]);
+        setLastAction("Skills list");
+        return;
+      }
+
+      if (resolved.startsWith("/skill create ")) {
+        const skillName = resolved.replace("/skill create ", "").trim();
+        if (!skillName) {
+          setMessages((prev) => [...prev, { role: "assistant", content: "Usage: /skill create <name>", timestamp: new Date() }]);
+          return;
+        }
+        // Use AI to help generate the skill content
+        handleAIMessage(
+          `The user wants to create a custom skill called "${skillName}". Help them define it by generating a structured skill file. ` +
+          `Use this template format:\n\n` +
+          `# ${skillName}\n\n## Category\n<category>\n\n## Tags\n<tags>\n\n## Description\n<description>\n\n## When to Use\n<when to use this skill>\n\n## Process\n<numbered steps>\n\n## Decision Framework\n<decision criteria>\n\n## My Preferences\n<preferences>\n\n## Examples\n<example interactions>\n\n` +
+          `Ask the user questions to fill in the details, then once you have enough info, save the skill by writing the file to data/user-skills/${getSkillsLoader()._slugify(skillName)}.md ` +
+          `and updating the index at data/user-skills/index.json. Tell the user when the skill is saved.`
+        );
+        setLastAction("Creating skill...");
+        return;
+      }
+
+      if (resolved.startsWith("/skill show ")) {
+        const skillId = resolved.replace("/skill show ", "").trim();
+        const loader = getSkillsLoader();
+        const content = loader.getUserSkillContent(skillId);
+        if (content) {
+          setMessages((prev) => [...prev, { role: "assistant", content, timestamp: new Date() }]);
+        } else {
+          setMessages((prev) => [...prev, { role: "assistant", content: `Skill "${skillId}" not found. Use /skill list to see available skills.`, timestamp: new Date() }]);
+        }
+        setLastAction("Skill details");
+        return;
+      }
+
+      if (resolved.startsWith("/skill edit ")) {
+        const skillId = resolved.replace("/skill edit ", "").trim();
+        const loader = getSkillsLoader();
+        const content = loader.getUserSkillContent(skillId);
+        if (!content) {
+          setMessages((prev) => [...prev, { role: "assistant", content: `Skill "${skillId}" not found. Use /skill list to see available skills.`, timestamp: new Date() }]);
+          return;
+        }
+        handleAIMessage(
+          `The user wants to edit their custom skill "${skillId}". Here is the current content:\n\n${content}\n\n` +
+          `Help them update it. Ask what they want to change, then save the updated version to data/user-skills/${skillId}.md ` +
+          `and update data/user-skills/index.json accordingly.`
+        );
+        setLastAction("Editing skill...");
+        return;
+      }
+
+      if (resolved.startsWith("/skill delete ")) {
+        const skillId = resolved.replace("/skill delete ", "").trim();
+        const loader = getSkillsLoader();
+        const deleted = loader.deleteUserSkill(skillId);
+        if (deleted) {
+          setMessages((prev) => [...prev, { role: "assistant", content: `Skill "${skillId}" deleted.`, timestamp: new Date() }]);
+        } else {
+          setMessages((prev) => [...prev, { role: "assistant", content: `Skill "${skillId}" not found.`, timestamp: new Date() }]);
+        }
+        setLastAction("Skill deleted");
+        return;
+      }
+
+      if (resolved === "/skill learn") {
+        handleAIMessage(
+          `Analyze our recent conversation history and identify repeated patterns, preferences, or decision frameworks that could be codified as custom skills. ` +
+          `For each suggestion, provide:\n- Skill name\n- What it would encode\n- Why it would be useful\n\n` +
+          `Then ask the user which ones they want to create. For approved ones, save them to data/user-skills/ using the standard skill template format ` +
+          `and update data/user-skills/index.json.`
+        );
+        setLastAction("Learning skills...");
+        return;
+      }
+
+      // /excel - Excel Spreadsheet Management
+      if (resolved === "/excel" || resolved === "/excel list") {
+        const sheets = listSpreadsheets();
+        let display = "## Spreadsheets\n\n";
+        if (sheets.length > 0) {
+          display += sheets.map(s => `- **${s.name}** — ${(s.size / 1024).toFixed(1)} KB — modified ${new Date(s.modified).toLocaleDateString()}`).join("\n");
+        } else {
+          display += "No spreadsheets yet. Use `/excel create <name>` or ask me to track data in a spreadsheet.";
+        }
+        setMessages((prev) => [...prev, { role: "assistant", content: display, timestamp: new Date() }]);
+        setLastAction("Spreadsheet list");
+        return;
+      }
+
+      if (resolved.startsWith("/excel read ")) {
+        const name = resolved.replace("/excel read ", "").trim();
+        (async () => {
+          try {
+            const result = await readSpreadsheet(name);
+            if (!result) {
+              setMessages((prev) => [...prev, { role: "assistant", content: `Spreadsheet "${name}" not found. Use /excel list to see available files.`, timestamp: new Date() }]);
+              return;
+            }
+            let display = `## Spreadsheet: ${name}\n\n`;
+            for (const sheet of result.sheets) {
+              display += `### ${sheet.name} (${sheet.rows.length} rows)\n`;
+              if (sheet.headers.length > 0) display += `**Columns:** ${sheet.headers.join(" | ")}\n\n`;
+              const preview = sheet.rows.slice(0, 20);
+              for (const row of preview) {
+                display += sheet.headers.map(h => `${h}: ${row[h] ?? ""}`).join(" | ") + "\n";
+              }
+              if (sheet.rows.length > 20) display += `\n... and ${sheet.rows.length - 20} more rows\n`;
+              display += "\n";
+            }
+            setMessages((prev) => [...prev, { role: "assistant", content: display, timestamp: new Date() }]);
+          } catch (err) {
+            setMessages((prev) => [...prev, { role: "assistant", content: `Error reading spreadsheet: ${err.message}`, timestamp: new Date() }]);
+          }
+        })();
+        setLastAction("Reading spreadsheet...");
+        return;
+      }
+
+      if (resolved.startsWith("/excel create ")) {
+        const name = resolved.replace("/excel create ", "").trim();
+        handleAIMessage(
+          `The user wants to create an Excel spreadsheet called "${name}". Ask them what columns/data they want to track. ` +
+          `Once you have the details, use the excel-manager service to create the spreadsheet at data/spreadsheets/${name}.xlsx. ` +
+          `The createSpreadsheet function takes (name, { sheetName, headers: [{name, key, width}], rows: [objects], formulas: {key: "formula with {row}"}, totalLabel }). ` +
+          `Create a well-structured spreadsheet with proper headers, formatting, and formulas where appropriate.`
+        );
+        setLastAction("Creating spreadsheet...");
+        return;
+      }
+
+      // /backup - Firebase Storage Backup
+      if (resolved === "/backup" || resolved === "/backup status") {
+        const status = getBackupStatus();
+        let display = "## Backup Status\n\n";
+        display += `**Bucket:** ${status.bucket}\n`;
+        display += `**Total files:** ${status.total}\n`;
+        display += `**Synced:** ${status.synced}\n`;
+        display += `**Pending upload:** ${status.pending}\n`;
+        display += `**Last sync:** ${status.lastSync ? new Date(status.lastSync).toLocaleString() : "Never"}\n`;
+        if (status.pending > 0) display += `\nRun \`/backup now\` to upload pending changes.`;
+        setMessages((prev) => [...prev, { role: "assistant", content: display, timestamp: new Date() }]);
+        setLastAction("Backup status");
+        return;
+      }
+
+      if (resolved === "/backup now") {
+        setMessages((prev) => [...prev, { role: "assistant", content: "Starting backup to Firebase Storage...", timestamp: new Date() }]);
+        setLastAction("Backing up...");
+        (async () => {
+          try {
+            const result = await backupToFirebase();
+            let display = "## Backup Complete\n\n";
+            display += `**Uploaded:** ${result.uploaded} files\n`;
+            display += `**Skipped (unchanged):** ${result.skipped}\n`;
+            display += `**Duration:** ${(result.duration / 1000).toFixed(1)}s\n`;
+            if (result.errors.length > 0) {
+              display += `\n**Errors:**\n${result.errors.map(e => `- ${e}`).join("\n")}`;
+            }
+            setMessages((prev) => [...prev, { role: "assistant", content: display, timestamp: new Date() }]);
+          } catch (err) {
+            setMessages((prev) => [...prev, { role: "assistant", content: `Backup failed: ${err.message}`, timestamp: new Date() }]);
+          }
+        })();
+        return;
+      }
+
+      if (resolved === "/backup restore") {
+        setMessages((prev) => [...prev, { role: "assistant", content: "Restoring from Firebase Storage...", timestamp: new Date() }]);
+        setLastAction("Restoring...");
+        (async () => {
+          try {
+            const result = await restoreFromFirebase();
+            let display = "## Restore Complete\n\n";
+            display += `**Downloaded:** ${result.downloaded} files\n`;
+            display += `**Skipped (already exists):** ${result.skipped}\n`;
+            if (result.errors.length > 0) {
+              display += `\n**Errors:**\n${result.errors.map(e => `- ${e}`).join("\n")}`;
+            }
+            setMessages((prev) => [...prev, { role: "assistant", content: display, timestamp: new Date() }]);
+          } catch (err) {
+            setMessages((prev) => [...prev, { role: "assistant", content: `Restore failed: ${err.message}`, timestamp: new Date() }]);
+          }
+        })();
         return;
       }
 
@@ -7718,16 +7972,44 @@ Folder: ${result.action.id}`,
               i < 3 && e(Text, { color: "#334155" }, " ")
             );
           }),
-          // Full scan status indicator (800+ tickers) - runs at 5:30am
+          // Full scan / Tickers Ran status
           e(Text, { color: "#334155" }, " │ "),
-          e(Text, { color: tickerStatus?.lastFullScan && new Date(tickerStatus.lastFullScan).toDateString() === new Date().toDateString() ? "#22c55e" : "#ef4444" },
-            tickerStatus?.fullScanRunning ? "◐" : "●"),
-          e(Text, { color: "#64748b" }, " Analysis · 5:30am"),
-          // Refresh status indicator (top 150 tickers refreshed in last 4 hours)
-          e(Text, { color: "#334155" }, " │ "),
-          e(Text, { color: tickerStatus?.refreshing ? "#f59e0b" : (tickerStatus?.lastRefresh && (Date.now() - new Date(tickerStatus.lastRefresh).getTime()) < 4 * 60 * 60 * 1000 ? "#22c55e" : "#ef4444") },
+          (() => {
+            const scanning = tickerStatus?.fullScanRunning;
+            const hasProgress = scanning && (tickerStatus.scanTotal || 0) > 0;
+            const pulseColor = pulsingDotVisible ? "#9ca3af" : "#4b5563";
+            const evaluated = tickerStatus?.evaluatedToday || 0;
+            const universe = tickerStatus?.universeSize || 0;
+            const doneToday = tickerStatus?.lastFullScan && new Date(tickerStatus.lastFullScan).toDateString() === new Date().toDateString();
+
+            if (scanning && hasProgress) {
+              // Actively scanning with real progress
+              return [
+                e(Text, { key: "sd", color: pulseColor }, "◐"),
+                e(Text, { key: "sl", color: pulseColor }, ` Scanning ${tickerStatus.scanProgress}/${tickerStatus.scanTotal}`)
+              ];
+            } else if (scanning) {
+              // Scan just started, no progress yet — show evaluated today count
+              return [
+                e(Text, { key: "sd", color: pulseColor }, "◐"),
+                e(Text, { key: "sl", color: pulseColor }, ` Tickers Ran: ${evaluated}/${universe || "?"}`)
+              ];
+            } else {
+              // Not scanning — show tickers ran today
+              return [
+                e(Text, { key: "sd", color: doneToday ? "#22c55e" : "#ef4444" }, "●"),
+                e(Text, { key: "sl", color: "#64748b" }, ` Tickers Ran: ${evaluated}/${universe}`)
+              ];
+            }
+          })(),
+          // Refresh status indicator — hidden while full scan is running
+          !tickerStatus?.fullScanRunning && e(Text, { color: "#334155" }, " │ "),
+          !tickerStatus?.fullScanRunning && e(Text, { color: tickerStatus?.refreshing
+            ? (pulsingDotVisible ? "#9ca3af" : "#4b5563")
+            : (tickerStatus?.lastRefresh && (Date.now() - new Date(tickerStatus.lastRefresh).getTime()) < 4 * 60 * 60 * 1000 ? "#22c55e" : "#ef4444") },
             tickerStatus?.refreshing ? "◐" : "●"),
-          e(Text, { color: "#64748b" }, " Refresh")
+          !tickerStatus?.fullScanRunning && e(Text, { color: tickerStatus?.refreshing ? (pulsingDotVisible ? "#9ca3af" : "#4b5563") : "#64748b" },
+            tickerStatus?.refreshing ? " Refreshing..." : " Refresh")
         ),
 
         // NET WORTH SUMMARY - Assets, Liabilities, Total
@@ -7940,10 +8222,19 @@ Folder: ${result.action.id}`,
           e(Text, { color: "#334155" }, "|"),
           e(Text, { color: "#f59e0b" }, "/portfolio")
         ),
-        // Right: Cron jobs info
+        // Right: Tickers ran + Cron jobs info
         e(
           Box,
           { flexDirection: "row", gap: 1 },
+          e(Text, { color: "#64748b" }, "Tickers Ran:"),
+          e(Text, {
+            color: tickerStatus?.fullScanRunning
+              ? (pulsingDotVisible ? "#9ca3af" : "#4b5563")
+              : (tickerStatus?.evaluatedToday > 0 ? "#22c55e" : "#ef4444")
+          }, tickerStatus?.fullScanRunning
+            ? `${tickerStatus.scanProgress || 0}/${tickerStatus.scanTotal || "?"}`
+            : `${tickerStatus?.evaluatedToday || 0}/${tickerStatus?.universeSize || 0}`),
+          e(Text, { color: "#334155" }, "|"),
           (() => {
             const cronData = getCronManager().getDisplayData();
             const nextJob = cronData.nextJob;

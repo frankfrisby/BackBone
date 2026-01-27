@@ -8,6 +8,8 @@ import { EventEmitter } from "events";
 const DATA_DIR = path.join(process.cwd(), "data");
 const SKILLS_DIR = path.join(process.cwd(), "skills");
 const SKILLS_INDEX_PATH = path.join(DATA_DIR, "skills-index.json");
+const USER_SKILLS_DIR = path.join(DATA_DIR, "user-skills");
+const USER_SKILLS_INDEX_PATH = path.join(USER_SKILLS_DIR, "index.json");
 
 const SKILL_REPOS = [
   { name: "anthropics/courses", url: "https://api.github.com/repos/anthropics/courses/contents" },
@@ -174,6 +176,11 @@ class SkillsLoader extends EventEmitter {
       }
     }
 
+    // Add user-defined custom skills
+    for (const skill of this.getUserSkills()) {
+      allSkills.set(`user:${skill.id}`, { ...skill, isUserSkill: true });
+    }
+
     return Array.from(allSkills.values());
   }
 
@@ -195,6 +202,128 @@ class SkillsLoader extends EventEmitter {
 
   isLoaded(skillId) { return this.loadedSkills.has(skillId); }
   unloadSkill(skillId) { this.loadedSkills.delete(skillId); this.emit("skill:unloaded", { skillId }); }
+
+  // --- User Skills CRUD ---
+
+  _ensureUserSkillsDir() {
+    if (!fs.existsSync(USER_SKILLS_DIR)) fs.mkdirSync(USER_SKILLS_DIR, { recursive: true });
+  }
+
+  _loadUserSkillsIndex() {
+    try {
+      if (fs.existsSync(USER_SKILLS_INDEX_PATH)) {
+        return JSON.parse(fs.readFileSync(USER_SKILLS_INDEX_PATH, "utf8"));
+      }
+    } catch (e) { /* ignore */ }
+    return { skills: [], lastUpdated: new Date().toISOString() };
+  }
+
+  _saveUserSkillsIndex(index) {
+    this._ensureUserSkillsDir();
+    index.lastUpdated = new Date().toISOString();
+    fs.writeFileSync(USER_SKILLS_INDEX_PATH, JSON.stringify(index, null, 2));
+  }
+
+  _slugify(name) {
+    return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  }
+
+  getUserSkills() {
+    const index = this._loadUserSkillsIndex();
+    return index.skills || [];
+  }
+
+  getUserSkillContent(skillId) {
+    const filePath = path.join(USER_SKILLS_DIR, `${skillId}.md`);
+    if (!fs.existsSync(filePath)) return null;
+    try { return fs.readFileSync(filePath, "utf8"); } catch { return null; }
+  }
+
+  createUserSkill(name, content, metadata = {}) {
+    this._ensureUserSkillsDir();
+    const id = this._slugify(name);
+    const filePath = path.join(USER_SKILLS_DIR, `${id}.md`);
+
+    // Write markdown file
+    fs.writeFileSync(filePath, content);
+
+    // Update index
+    const index = this._loadUserSkillsIndex();
+    const existing = index.skills.findIndex(s => s.id === id);
+    const entry = {
+      id,
+      name,
+      description: metadata.description || "",
+      category: metadata.category || "custom",
+      tags: metadata.tags || [],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      version: 1,
+      usageCount: 0,
+      lastUsedAt: null
+    };
+
+    if (existing >= 0) {
+      entry.createdAt = index.skills[existing].createdAt;
+      entry.version = (index.skills[existing].version || 0) + 1;
+      entry.usageCount = index.skills[existing].usageCount || 0;
+      index.skills[existing] = entry;
+    } else {
+      index.skills.push(entry);
+    }
+
+    this._saveUserSkillsIndex(index);
+    cachedCatalog = null; // bust cache
+    this.emit("user-skill:created", { skill: entry });
+    return entry;
+  }
+
+  updateUserSkill(skillId, content, metadata = {}) {
+    const index = this._loadUserSkillsIndex();
+    const idx = index.skills.findIndex(s => s.id === skillId);
+    if (idx < 0) return null;
+
+    if (content) {
+      fs.writeFileSync(path.join(USER_SKILLS_DIR, `${skillId}.md`), content);
+    }
+
+    const entry = index.skills[idx];
+    if (metadata.name) entry.name = metadata.name;
+    if (metadata.description) entry.description = metadata.description;
+    if (metadata.category) entry.category = metadata.category;
+    if (metadata.tags) entry.tags = metadata.tags;
+    entry.updatedAt = new Date().toISOString();
+    entry.version = (entry.version || 0) + 1;
+
+    this._saveUserSkillsIndex(index);
+    cachedCatalog = null;
+    this.emit("user-skill:updated", { skill: entry });
+    return entry;
+  }
+
+  deleteUserSkill(skillId) {
+    const index = this._loadUserSkillsIndex();
+    const idx = index.skills.findIndex(s => s.id === skillId);
+    if (idx < 0) return false;
+
+    const removed = index.skills.splice(idx, 1)[0];
+    const filePath = path.join(USER_SKILLS_DIR, `${skillId}.md`);
+    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+
+    this._saveUserSkillsIndex(index);
+    cachedCatalog = null;
+    this.emit("user-skill:deleted", { skill: removed });
+    return true;
+  }
+
+  recordSkillUsage(skillId) {
+    const index = this._loadUserSkillsIndex();
+    const entry = index.skills.find(s => s.id === skillId);
+    if (!entry) return;
+    entry.usageCount = (entry.usageCount || 0) + 1;
+    entry.lastUsedAt = new Date().toISOString();
+    this._saveUserSkillsIndex(index);
+  }
 
   getDisplayData() {
     const skills = this.getAllSkills();
@@ -245,21 +374,43 @@ let cachedCatalog = null;
 export function getSkillsCatalog() {
   if (cachedCatalog) return cachedCatalog;
   try {
-    if (!fs.existsSync(SKILLS_DIR)) return null;
-    const files = fs.readdirSync(SKILLS_DIR).filter(f => f.endsWith(".md")).sort();
-    if (files.length === 0) return null;
-    const lines = files.map(f => {
-      const name = f.replace(/\.md$/, "");
-      try {
-        const content = fs.readFileSync(path.join(SKILLS_DIR, f), "utf-8");
-        const firstLine = content.split("\n").find(l => l.startsWith("# "));
-        const desc = firstLine ? firstLine.replace(/^#\s*/, "").replace(/\s*Skill\s*$/, "") : name;
-        return `- ${name}: ${desc}`;
-      } catch {
-        return `- ${name}`;
+    const sections = [];
+
+    // System skills
+    if (fs.existsSync(SKILLS_DIR)) {
+      const files = fs.readdirSync(SKILLS_DIR).filter(f => f.endsWith(".md")).sort();
+      if (files.length > 0) {
+        const lines = files.map(f => {
+          const name = f.replace(/\.md$/, "");
+          try {
+            const content = fs.readFileSync(path.join(SKILLS_DIR, f), "utf-8");
+            const firstLine = content.split("\n").find(l => l.startsWith("# "));
+            const desc = firstLine ? firstLine.replace(/^#\s*/, "").replace(/\s*Skill\s*$/, "") : name;
+            return `- ${name}: ${desc}`;
+          } catch {
+            return `- ${name}`;
+          }
+        });
+        sections.push(`### System Skills\n${lines.join("\n")}`);
       }
-    });
-    cachedCatalog = lines.join("\n");
+    }
+
+    // User-defined custom skills
+    if (fs.existsSync(USER_SKILLS_INDEX_PATH)) {
+      try {
+        const index = JSON.parse(fs.readFileSync(USER_SKILLS_INDEX_PATH, "utf-8"));
+        if (index.skills && index.skills.length > 0) {
+          const userLines = index.skills.map(s => {
+            const tag = s.category ? ` [${s.category}]` : "";
+            return `- ${s.id}: ${s.description || s.name}${tag}`;
+          });
+          sections.push(`### Your Custom Skills\n${userLines.join("\n")}`);
+        }
+      } catch { /* ignore */ }
+    }
+
+    if (sections.length === 0) return null;
+    cachedCatalog = sections.join("\n\n");
     return cachedCatalog;
   } catch {
     return null;
@@ -272,6 +423,19 @@ export function getSkillsCatalog() {
 export function getSkillContent(skillName) {
   try {
     const filePath = path.join(SKILLS_DIR, `${skillName}.md`);
+    if (!fs.existsSync(filePath)) return null;
+    return fs.readFileSync(filePath, "utf-8");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Returns the full markdown content of a user-defined custom skill.
+ */
+export function getUserSkillContent(skillId) {
+  try {
+    const filePath = path.join(USER_SKILLS_DIR, `${skillId}.md`);
     if (!fs.existsSync(filePath)) return null;
     return fs.readFileSync(filePath, "utf-8");
   } catch {

@@ -1,6 +1,6 @@
 # Disaster & Crisis Assessment Skill
 
-Comprehensive threat evaluation framework covering financial, geopolitical, environmental, and societal risks. Used to assess current conditions, identify emerging threats, and recommend defensive actions across all domains that could impact the user's life, portfolio, and plans.
+Comprehensive threat evaluation framework covering 15 domains: financial, geopolitical, environmental, biological, technological, and societal risks. Used to assess current conditions, identify emerging threats, and recommend defensive actions across all domains that could impact the user's life, portfolio, and plans.
 
 ## When to Use
 - User asks about market crashes, recessions, or economic downturns
@@ -9,8 +9,9 @@ Comprehensive threat evaluation framework covering financial, geopolitical, envi
 - User asks "what could go wrong", "what are the risks", "should I be worried"
 - Periodic check-in as part of planning or portfolio review
 - News breaks about a major event (war, pandemic, financial collapse, natural disaster)
+- User runs `/disaster assess` for a full scan
 
-## Assessment Domains
+## Assessment Domains (15 Total)
 
 ### 1. Market Conditions
 Evaluate equity markets, volatility, and systemic financial risk.
@@ -118,22 +119,28 @@ Evaluate employment conditions and economic health signals.
 - ORANGE: Unemployment rising, mass layoffs, wage cuts
 - RED: Rapid job losses, unemployment spike, hiring freeze across sectors
 
-### 7. Food Crisis
-Evaluate food security, supply chains, and agricultural risk.
+### 7. Food Crisis & Scarcity
+Evaluate food security, supply chains, famine, and agricultural collapse.
 
 **Indicators:**
 - Global food price index (FAO) trend
-- Fertilizer prices and availability
+- Fertilizer prices, supply, and sanctions impact
 - Crop yield forecasts (wheat, corn, rice, soybeans)
 - Drought/flood conditions in major agricultural regions
 - Food export bans by producing nations
-- Livestock disease outbreaks
+- Livestock disease outbreaks (avian flu, swine fever)
+- Fishery collapse and ocean dead zones
+- Food desert expansion in urban and rural areas
+- Grocery price inflation vs wage growth
+- Strategic grain reserve levels by nation
+- Pollinator decline impact on crop production
 - Supply chain disruptions (shipping, ports, trucking)
-- US food inflation rate (grocery CPI component)
 
-**Actions:**
-- WebSearch for current food price index, crop conditions
-- Assess impact on consumer spending and inflation outlook
+**Threat Levels:**
+- GREEN: Stable prices, good harvests, reserves adequate
+- YELLOW: Prices rising, regional crop failures, supply tightening
+- ORANGE: Multi-region crop failures, export bans, rationing starts
+- RED: Famine conditions, global shortage, food riots, mass hunger
 
 ### 8. Energy Crisis
 Evaluate energy supply, prices, and transition risks.
@@ -154,24 +161,73 @@ Evaluate energy supply, prices, and transition risks.
 - ORANGE: Price spikes, supply disruptions, rationing risk
 - RED: Energy crisis — shortages, blackouts, economic disruption
 
-### 9. Climate Issues
-Evaluate climate-related risks and extreme weather impacts.
+### 9. Climate & Extreme Weather
+Evaluate climate change impacts, extreme weather, and environmental breakdown.
 
 **Indicators:**
-- Extreme weather event frequency and severity (hurricanes, wildfires, floods, heat waves)
+- Extreme weather frequency (hurricanes, typhoons, cyclones)
+- Wildfire severity and season length
+- Flooding events (riverine, coastal, flash floods)
+- Heat waves, heat domes, and record temperatures
+- Tornado outbreaks and severe storm systems
+- Ice storms, blizzards, polar vortex events
+- Sea level rise trajectory and coastal erosion
+- Arctic ice loss and permafrost thaw
 - Insurance market stress (carrier withdrawals, premium spikes)
-- Infrastructure damage costs (FEMA spending, disaster declarations)
-- Sea level rise trajectory and coastal risk
-- Arctic ice and permafrost status
-- Agricultural zone shifts
-- Climate migration patterns
-- Carbon regulation and compliance costs
+- Climate migration patterns and displacement
+- Agricultural zone shifts and growing season changes
+- Ocean acidification and coral reef collapse
 
-**Actions:**
-- WebSearch for recent extreme weather, insurance market status
-- Assess user's geographic and portfolio exposure to climate risk
+**Threat Levels:**
+- GREEN: Normal seasonal patterns, manageable events
+- YELLOW: Above-average extreme events, insurance tightening
+- ORANGE: Record-breaking events, infrastructure damage, mass displacement
+- RED: Climate tipping points triggered, cascading environmental collapse
 
-### 10. Space & Cosmic Issues
+### 10. Major Natural Disasters
+Evaluate earthquakes, tsunamis, volcanic eruptions, and catastrophic events.
+
+**Indicators:**
+- Seismic activity and major earthquake risk zones
+- Tsunami warning systems and coastal vulnerability
+- Volcanic eruption risk (supervolcano monitoring: Yellowstone, Campi Flegrei)
+- Landslide and mudslide risk areas
+- Sinkhole events and ground subsidence
+- Dam failure and infrastructure collapse risk
+- FEMA disaster declarations and response capacity
+- Infrastructure damage costs and rebuild timelines
+- Cascading failure scenarios (quake -> tsunami -> nuclear)
+
+**Threat Levels:**
+- GREEN: Normal background seismicity, no elevated volcanic risk
+- YELLOW: Earthquake swarms, elevated volcanic unrest, seasonal flood risk
+- ORANGE: Major earthquake, eruption, or multi-disaster event
+- RED: Catastrophic event — megaquake, supervolcano, cascading infrastructure failure
+
+### 11. Biological Threats & Pathogens
+Evaluate pandemics, biowarfare, pathogen outbreaks, and biosecurity.
+
+**Indicators:**
+- Active pandemic and epidemic surveillance (WHO alerts)
+- Novel pathogen emergence (spillover events, gain-of-function)
+- Bioweapon development and proliferation risk
+- Biosafety lab incidents and containment breaches
+- Antimicrobial resistance (superbugs, drug-resistant TB, fungal threats)
+- Vaccine development pipeline and distribution gaps
+- Healthcare system capacity and ICU availability
+- Zoonotic disease monitoring (bird flu H5N1, MERS, Nipah)
+- Synthetic biology and dual-use research concerns
+- Bioterrorism threat assessments
+- Water supply contamination risk
+- Vector-borne disease range expansion (mosquitoes, ticks)
+
+**Threat Levels:**
+- GREEN: No novel outbreaks, AMR stable, healthcare adequate
+- YELLOW: Localized outbreaks, rising AMR, healthcare strain
+- ORANGE: Multi-country spread, pandemic potential, hospital overflow
+- RED: Global pandemic, bioweapon deployment, healthcare collapse
+
+### 12. Space & Cosmic Threats
 Evaluate space-related threats and disruptions.
 
 **Indicators:**
@@ -181,6 +237,7 @@ Evaluate space-related threats and disruptions.
 - Space debris density and collision risk (Kessler syndrome)
 - GPS/satellite constellation vulnerability
 - Geomagnetic storm impacts on communications and power
+- Gamma ray burst proximity monitoring
 - Space weather forecasts (NOAA Space Weather Prediction Center)
 
 **Threat Levels:**
@@ -189,7 +246,31 @@ Evaluate space-related threats and disruptions.
 - ORANGE: Major solar event, satellite disruptions, GPS degradation
 - RED: Extreme solar storm, potential grid damage, communication blackout
 
-### 11. Societal & National Issues
+### 13. AI & Technological Risk
+Evaluate AI advancement risks, automation displacement, and tech-driven threats.
+
+**Indicators:**
+- AGI/ASI development timeline and capability milestones
+- AI alignment and safety research progress
+- Autonomous weapons development and regulation
+- Deepfake proliferation and information warfare
+- Critical infrastructure AI dependency risk
+- Mass automation and workforce displacement pace
+- AI-powered cyber attacks and zero-day exploitation
+- Algorithmic market instability (flash crashes)
+- Surveillance state expansion and privacy erosion
+- AI concentration of power (few companies control critical AI)
+- Synthetic media undermining trust in evidence
+- Quantum computing threat to encryption timelines
+- Social media algorithmic radicalization
+
+**Threat Levels:**
+- GREEN: Steady progress, safety research keeping pace, regulation adequate
+- YELLOW: Rapid capability gains, safety gaps emerging, job disruption accelerating
+- ORANGE: Misaligned systems deployed, mass automation layoffs, AI-powered attacks
+- RED: Loss of control, autonomous weapons deployed, critical systems compromised
+
+### 14. Societal & National Issues
 Evaluate domestic stability, governance, and social cohesion.
 
 **Indicators:**
@@ -204,6 +285,7 @@ Evaluate domestic stability, governance, and social cohesion.
 - Immigration policy impacts on labor and social services
 - Social media misinformation spread rate
 - Domestic extremism threat level (FBI/DHS assessments)
+- Wealth inequality trajectory (Gini coefficient)
 
 **Threat Levels:**
 - GREEN: Stable governance, high trust, low unrest
@@ -211,26 +293,53 @@ Evaluate domestic stability, governance, and social cohesion.
 - ORANGE: Significant unrest, governance dysfunction, institutional failure
 - RED: Civil breakdown, widespread violence, governance collapse
 
+### 15. Mass Devastation & Collapse
+Evaluate civilization-level threats, cascading failures, and systemic collapse.
+
+**Indicators:**
+- Nuclear war probability and escalation ladder
+- Electromagnetic pulse (EMP) attack scenarios
+- Global supply chain cascading failure risk
+- Internet and communications backbone vulnerability
+- Financial system total collapse scenarios
+- Mass migration and refugee crisis triggers
+- Water scarcity and aquifer depletion
+- Topsoil erosion and agricultural land loss
+- Biodiversity loss and ecosystem collapse thresholds
+- Multiple simultaneous crisis (polycrisis) probability
+- Social contract breakdown indicators
+- Critical mineral and rare earth supply disruption
+
+**Threat Levels:**
+- GREEN: No convergence of major threats, systems resilient
+- YELLOW: Multiple domains at elevated risk, early convergence signs
+- ORANGE: Polycrisis forming, cascading failures beginning
+- RED: Civilization-threatening convergence, systemic collapse in progress
+
 ## Composite Threat Assessment
 
 After evaluating all domains, produce a composite score:
 
 ```
-DOMAIN              | STATUS  | LEVEL | TREND     | KEY SIGNAL
---------------------|---------|-------|-----------|---------------------------
-Market Conditions   | [color] | X/10  | [up/down] | [one-line summary]
-Credit & Debt       | [color] | X/10  | [up/down] | [one-line summary]
-Bond Market         | [color] | X/10  | [up/down] | [one-line summary]
-Housing Market      | [color] | X/10  | [up/down] | [one-line summary]
-Geopolitical        | [color] | X/10  | [up/down] | [one-line summary]
-Job Market          | [color] | X/10  | [up/down] | [one-line summary]
-Food Crisis         | [color] | X/10  | [up/down] | [one-line summary]
-Energy Crisis       | [color] | X/10  | [up/down] | [one-line summary]
-Climate Issues      | [color] | X/10  | [up/down] | [one-line summary]
-Space & Cosmic      | [color] | X/10  | [up/down] | [one-line summary]
-Societal & National | [color] | X/10  | [up/down] | [one-line summary]
---------------------|---------|-------|-----------|---------------------------
-COMPOSITE THREAT    | [color] | X/10  | [trend]   | [overall assessment]
+DOMAIN                      | STATUS  | LEVEL | TREND     | KEY SIGNAL
+----------------------------|---------|-------|-----------|---------------------------
+ 1. Market Conditions       | [color] | X/10  | [up/down] | [one-line summary]
+ 2. Credit & Debt           | [color] | X/10  | [up/down] | [one-line summary]
+ 3. Bond Market             | [color] | X/10  | [up/down] | [one-line summary]
+ 4. Housing Market          | [color] | X/10  | [up/down] | [one-line summary]
+ 5. Geopolitical            | [color] | X/10  | [up/down] | [one-line summary]
+ 6. Job Market              | [color] | X/10  | [up/down] | [one-line summary]
+ 7. Food Crisis             | [color] | X/10  | [up/down] | [one-line summary]
+ 8. Energy Crisis           | [color] | X/10  | [up/down] | [one-line summary]
+ 9. Climate & Weather       | [color] | X/10  | [up/down] | [one-line summary]
+10. Natural Disasters       | [color] | X/10  | [up/down] | [one-line summary]
+11. Biological Threats      | [color] | X/10  | [up/down] | [one-line summary]
+12. Space & Cosmic          | [color] | X/10  | [up/down] | [one-line summary]
+13. AI & Technology         | [color] | X/10  | [up/down] | [one-line summary]
+14. Societal & National     | [color] | X/10  | [up/down] | [one-line summary]
+15. Mass Devastation        | [color] | X/10  | [up/down] | [one-line summary]
+----------------------------|---------|-------|-----------|---------------------------
+COMPOSITE THREAT            | [color] | X/10  | [trend]   | [overall assessment]
 ```
 
 **Scoring:**
@@ -281,6 +390,10 @@ Use WebSearch to pull current data from:
 - FEMA (disaster declarations)
 - Treasury.gov (yield curves, debt)
 - IMF/World Bank (global economic outlook)
+- WHO (disease outbreak alerts)
+- CDC (pathogen surveillance)
+- FBI/DHS (threat assessments)
+- ASCE (infrastructure report card)
 
 ## Integration with User Data
 - Read `data/trades-log.json` for portfolio exposure analysis
@@ -289,3 +402,7 @@ Use WebSearch to pull current data from:
 - Read `data/goals.json` to assess which goals are at risk
 - Save assessment to `data/spreadsheets/disaster-assessment.xlsx` for tracking over time
 - Use `appendToSpreadsheet` to log rolling threat scores for trend analysis
+
+## Commands
+- `/disaster` or `/disaster categories` — Open overlay showing all 15 tracked domains
+- `/disaster assess` — Run full web-researched threat assessment across all domains

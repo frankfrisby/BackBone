@@ -130,6 +130,7 @@ import { TradingHistoryPanel } from "./components/trading-history-panel.js";
 import { TestRunnerPanel } from "./components/test-runner-panel.js";
 import { SettingsPanel } from "./components/settings-panel.js";
 import { LinkedInDataViewer } from "./components/linkedin-data-viewer.js";
+import { DisasterOverlay } from "./components/disaster-overlay.js";
 import { loadUserSettings, saveUserSettings, updateSettings as updateUserSettings, updateSetting, getModelConfig, isProviderConfigured, getAppName } from "./services/user-settings.js";
 import { hasValidCredentials as hasCodexCredentials } from "./services/codex-oauth.js";
 import { loadFineTuningConfig, saveFineTuningConfig, runFineTuningPipeline, queryFineTunedModel } from "./services/fine-tuning.js";
@@ -859,6 +860,9 @@ const App = ({ updateConsoleTitle }) => {
   // LinkedIn data viewer
   const [showLinkedInViewer, setShowLinkedInViewer] = useState(false);
   const [linkedInViewerData, setLinkedInViewerData] = useState(null);
+
+  // Disaster overlay
+  const [showDisasterOverlay, setShowDisasterOverlay] = useState(false);
 
   // ===== NEW AUTONOMOUS SYSTEM STATE =====
   const autonomousEngine = useMemo(() => getAutonomousEngine(), []);
@@ -3706,40 +3710,58 @@ Execute this task and provide concrete results.`);
       }
     };
 
-    // Refresh every 10 minutes (from 5:30 AM ET onwards during weekdays)
-    const interval = setInterval(smartRefresh, 10 * 60 * 1000);
+    // Refresh every 3 minutes during market hours (matches server-side core refresh)
+    const interval = setInterval(smartRefresh, 3 * 60 * 1000);
 
-    // Fast poll for scan progress (every 5 seconds while full scan is running)
+    // Poll scan progress + ticker counts (every 5 seconds)
+    // Uses full fetch to get evaluatedToday counts; skips ticker state update unless scan finishes
+    let lastPollEvaluated = -1;
     const scanPollInterval = setInterval(async () => {
-      if (cancelled) return;
+      if (cancelled || pauseUpdatesRef.current || isTypingRef.current) return;
       try {
         const result = await fetchYahooTickers();
-        if (result.success) {
-          setTickerStatus(prev => {
-            // Only update if scan state changed
-            if (prev.fullScanRunning === (result.fullScanRunning || false) &&
-                prev.scanProgress === (result.scanProgress || 0) &&
-                prev.scanTotal === (result.scanTotal || 0) &&
-                prev.evaluatedToday === result.tickers.filter(t => t.lastEvaluated && new Date(t.lastEvaluated).toDateString() === new Date().toDateString()).length) {
-              return prev;
-            }
-            const updated = {
-              ...prev,
-              fullScanRunning: result.fullScanRunning || false,
-              scanProgress: result.scanProgress || 0,
-              scanTotal: result.scanTotal || 0,
-              lastFullScan: result.lastFullScan || prev.lastFullScan,
-              evaluatedToday: result.tickers.filter(t => t.lastEvaluated && new Date(t.lastEvaluated).toDateString() === new Date().toDateString()).length,
-              universeSize: result.tickers.length || TICKER_UNIVERSE.length,
-            };
-            // If scan just finished, update tickers too
-            if (prev.fullScanRunning && !result.fullScanRunning && result.tickers.length > 0) {
-              setTickers(result.tickers);
-              updated.lastRefresh = new Date().toISOString();
-              updated.scanCount = result.tickers.length;
-            }
-            return updated;
-          });
+        if (!result.success) return;
+
+        const todayCount = result.tickers.filter(t => t.lastEvaluated && new Date(t.lastEvaluated).toDateString() === new Date().toDateString()).length;
+        const totalCount = result.tickers.length || TICKER_UNIVERSE.length;
+
+        setTickerStatus(prev => {
+          const scanRunning = result.fullScanRunning || false;
+          const progress = result.scanProgress || 0;
+          const total = result.scanTotal || 0;
+
+          // Check if anything changed
+          if (prev.fullScanRunning === scanRunning &&
+              prev.scanProgress === progress &&
+              prev.scanTotal === total &&
+              prev.evaluatedToday === todayCount) {
+            return prev;
+          }
+
+          const updated = {
+            ...prev,
+            fullScanRunning: scanRunning,
+            scanProgress: progress,
+            scanTotal: total,
+            lastFullScan: result.lastFullScan || prev.lastFullScan,
+            evaluatedToday: todayCount,
+            universeSize: totalCount,
+          };
+
+          // If scan just finished, pull in updated tickers + scores
+          if (prev.fullScanRunning && !scanRunning && result.tickers.length > 0) {
+            setTickers(result.tickers);
+            updated.lastRefresh = new Date().toISOString();
+            updated.scanCount = result.tickers.length;
+          }
+
+          return updated;
+        });
+
+        // On first poll or when evaluatedToday changes, also update tickers
+        if (lastPollEvaluated !== todayCount) {
+          lastPollEvaluated = todayCount;
+          setTickers((prev) => tickersChanged(prev, result.tickers) ? result.tickers : prev);
         }
       } catch {
         // Silently ignore poll errors
@@ -5713,6 +5735,25 @@ Folder: ${result.action.id}`,
           }
         ]);
         setLastAction("Daily report");
+        return;
+      }
+
+      // /disaster - Disaster & Crisis Assessment overlay
+      if (resolved === "/disaster" || resolved === "/disaster categories") {
+        setShowDisasterOverlay(true);
+        setLastAction("Disaster tracker");
+        return;
+      }
+
+      if (resolved === "/disaster assess" || resolved === "/disaster scan") {
+        handleAIMessage(
+          `Run a full disaster and crisis assessment. Read the skill file at skills/disaster-assessment.md for the framework. ` +
+          `Evaluate all 15 threat domains using web research for current data. Produce a composite threat table with scores 1-10 ` +
+          `for each domain, color-coded threat levels, trend direction, and key signals. ` +
+          `Then save the results to data/spreadsheets/disaster-assessment.xlsx using appendToSpreadsheet for historical tracking. ` +
+          `Give me the full assessment with recommended actions based on the composite score.`
+        );
+        setLastAction("Running disaster assessment...");
         return;
       }
 
@@ -8327,6 +8368,11 @@ Folder: ${result.action.id}`,
           data: linkedInViewerData,
           visible: showLinkedInViewer,
           onClose: () => setShowLinkedInViewer(false)
+        }),
+        // Disaster & Crisis Assessment overlay
+        showDisasterOverlay && e(DisasterOverlay, {
+          visible: showDisasterOverlay,
+          onClose: () => setShowDisasterOverlay(false)
         }),
         // Test Runner Panel overlay (Ctrl+R)
         showTestRunner && e(TestRunnerPanel, {

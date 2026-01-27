@@ -45,7 +45,7 @@ const DEFAULT_SKILLS = [
   { id: "economic-policy", name: "Economic Policy", description: "Analyze economic indicators, monetary/fiscal policy", category: "Research" },
   { id: "geopolitical-analysis", name: "Geopolitical Analysis", description: "International relations, regional analysis, strategic assessment", category: "Research" },
   { id: "rare-earth-resources", name: "Rare Earth & Resources", description: "Critical minerals, supply chains, strategic resources", category: "Research" },
-  { id: "disaster-assessment", name: "Disaster & Crisis Assessment", description: "Evaluate market crashes, credit crises, geopolitical threats, climate, energy, food, jobs, housing, space, and societal risks", category: "Research" },
+  { id: "disaster-assessment", name: "Disaster & Crisis Assessment", description: "15 threat domains: markets, credit, bonds, housing, geopolitical, jobs, food scarcity, energy, climate/storms, natural disasters, biological/pathogens, space/cosmic, AI/tech, societal, mass devastation", category: "Research" },
 
   // Media
   { id: "image-processing", name: "Image Processing", description: "Process and manipulate images", category: "Media" },

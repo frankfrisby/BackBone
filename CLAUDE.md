@@ -79,7 +79,7 @@ These are detailed instruction files in `skills/`. Read the relevant file when h
 - **claude-code-cli**: Claude Code CLI — terminal commands, file operations, system tasks
 - **data-analysis**: Data Analysis — analyze datasets, statistics, visualizations
 - **database-operations**: Database Operations — SQL, NoSQL, data modeling, queries
-- **disaster-assessment**: Disaster & Crisis Assessment — market crashes, credit crises, bond/housing markets, geopolitical threats, job market, food/energy crises, climate, space/cosmic risks, societal issues
+- **disaster-assessment**: Disaster & Crisis Assessment — 15 threat domains: markets, credit, bonds, housing, geopolitical, jobs, food scarcity, energy, climate/storms, natural disasters (earthquakes/floods/hurricanes), biological warfare/pathogens, space/cosmic, AI/tech risk, societal, mass devastation/collapse
 - **economic-policy**: Economic Policy Research — economic analysis, policy evaluation
 - **elevenlabs-voice**: ElevenLabs Voice AI — text-to-speech, voice cloning, audio generation
 - **email-automation**: Email Automation — compose, send, manage email workflows

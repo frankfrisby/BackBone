@@ -2476,20 +2476,34 @@ export const OnboardingPanel = ({ onComplete, userDisplay = "" }) => {
   // Handle keyboard shortcuts including arrow navigation
   useInput((input, key) => {
     // Steps that handle their own up/down navigation (for selecting providers)
-    const stepsWithInternalNavigation = ["model", "email"];
+    const stepsWithInternalNavigation = ["model"];
     const currentStepNeedsArrows = stepsWithInternalNavigation.includes(currentStep?.id);
 
     // Arrow Up - navigate to previous step (unless current step handles arrows)
     if (key.upArrow && !currentStepNeedsArrows) {
       setUserNavigating(true);
-      setCurrentStepIndex(prev => (prev > 0 ? prev - 1 : ONBOARDING_STEPS.length - 1));
+      setCurrentStepIndex(prev => {
+        let next = prev > 0 ? prev - 1 : ONBOARDING_STEPS.length - 1;
+        // Skip disabled steps
+        while (ONBOARDING_STEPS[next]?.disabled && next !== prev) {
+          next = next > 0 ? next - 1 : ONBOARDING_STEPS.length - 1;
+        }
+        return next;
+      });
       return;
     }
 
     // Arrow Down - navigate to next step (unless current step handles arrows)
     if (key.downArrow && !currentStepNeedsArrows) {
       setUserNavigating(true);
-      setCurrentStepIndex(prev => (prev < ONBOARDING_STEPS.length - 1 ? prev + 1 : 0));
+      setCurrentStepIndex(prev => {
+        let next = prev < ONBOARDING_STEPS.length - 1 ? prev + 1 : 0;
+        // Skip disabled steps
+        while (ONBOARDING_STEPS[next]?.disabled && next !== prev) {
+          next = next < ONBOARDING_STEPS.length - 1 ? next + 1 : 0;
+        }
+        return next;
+      });
       return;
     }
 

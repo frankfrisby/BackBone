@@ -516,14 +516,17 @@ export const runClaudeCodeStreaming = async (prompt, options = {}) => {
     return emitter;
   }
 
-  const args = ["-p", prompt];
+  // Use --print flag for non-interactive mode
+  // Prompt is passed via stdin to avoid Windows command line length limits
+  const args = ["--print"];
 
   // Use JSON output format for easier parsing if requested
   if (options.json) {
-    args.unshift("--output-format", "json");
+    args.push("--output-format", "json");
   }
 
-  console.log(`[ClaudeCodeCLI] Spawning: claude -p "<${prompt.length} char prompt>"`);
+  console.log(`[ClaudeCodeCLI] Spawning: echo <prompt> | claude --print`);
+  console.log(`[ClaudeCodeCLI] Prompt length: ${prompt.length} chars`);
   console.log(`[ClaudeCodeCLI] CWD: ${options.cwd || process.cwd()}`);
 
   const proc = spawn("claude", args, {
@@ -532,7 +535,16 @@ export const runClaudeCodeStreaming = async (prompt, options = {}) => {
     stdio: ["pipe", "pipe", "pipe"]
   });
 
-  console.log(`[ClaudeCodeCLI] Process spawned, PID: ${proc.pid}`);
+  console.log(`[ClaudeCodeCLI] Process spawned, PID: ${proc.pid || "unknown"}`);
+
+  // Write prompt to stdin and close it to signal end of input
+  if (proc.stdin) {
+    proc.stdin.write(prompt);
+    proc.stdin.end();
+    console.log(`[ClaudeCodeCLI] Prompt written to stdin, stream closed`);
+  } else {
+    console.error(`[ClaudeCodeCLI] ERROR: stdin not available`);
+  }
 
   let fullOutput = "";
   let currentTool = null;

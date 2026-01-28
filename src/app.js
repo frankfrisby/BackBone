@@ -73,8 +73,8 @@ import { getWealthConfig, buildWealthSummary } from "./services/wealth.js";
 import { fetchTickers as fetchYahooTickers, startServer as startYahooServer, isServerRunning, triggerFullScan, refreshTickers } from "./services/yahoo-client.js";
 import { extractLinkedInProfile, saveLinkedInProfile, loadLinkedInProfile, isProfileIncomplete, refreshAndGenerateLinkedInMarkdown, generateLinkedInMarkdown } from "./services/linkedin-scraper.js";
 import { getDataFreshnessChecker } from "./services/data-freshness-checker.js";
-import { getCronManager } from "./services/cron-manager.js";
-import { getGoalsStatus, launchGoalsVoiceApp } from "./services/goals-voice.js";
+import { getCronManager, JOB_FREQUENCY } from "./services/cron-manager.js";
+import { captureSnapshot as captureLinkedInSnapshot, getHistory as getLinkedInHistory, getPostsHistory as getLinkedInPostsHistory } from "./services/linkedin-tracker.js";
 import { loadTradingStatus, saveTradingStatus, buildTradingStatusDisplay, recordTradeAttempt, resetTradingStatus } from "./services/trading-status.js";
 import { deleteAllData, getResetSummary, RESET_STEPS } from "./services/reset.js";
 import { sendMessage as sendMultiAI, getAIStatus, getMultiAIConfig, getCurrentModel, MODELS, TASK_TYPES, isAgenticTask, executeAgenticTask, getAgenticCapabilities } from "./services/multi-ai.js";
@@ -189,7 +189,7 @@ import { addLearningItem, startLearning, updateProgress, completeLearning, addNo
 import { getCurrentFirebaseUser, signOutFirebase } from "./services/firebase-auth.js";
 import { initializeRemoteConfig } from "./services/firebase-config.js";
 import { isOuraConfigured, syncOuraData, getNextSyncTime, getHealthSummary, loadOuraData } from "./services/oura-service.js";
-import { isEmailConfigured, syncEmailCalendar, getEmailSummary, getUpcomingEvents } from "./services/email-calendar-service.js";
+import { isEmailConfigured, syncEmailCalendar, getEmailSummary, getUpcomingEvents, startTokenAutoRefresh, startOAuthFlow as startEmailOAuth } from "./services/email-calendar-service.js";
 import { getPersonalCapitalService } from "./services/personal-capital.js";
 import { getPlaidService, isPlaidConfigured, syncPlaidData } from "./services/plaid-service.js";
 import { runUserEvaluationCycle } from "./services/analysis-scheduler.js";
@@ -412,6 +412,9 @@ const App = ({ updateConsoleTitle }) => {
       } catch (e) {
         // Silent fail - health check is optional
       }
+
+      // Start automatic Google/Microsoft token refresh (every 30 min)
+      startTokenAutoRefresh();
 
       // Initialize AI-powered role model matching (background task)
       // This uses AI to find the best target person for the user
@@ -3696,22 +3699,28 @@ Execute this task and provide concrete results.`);
       if (dayOfWeek === 'Sat' || dayOfWeek === 'Sun') return false;
 
       const currentMinutes = hours * 60 + minutes;
-      const preMarketStart = 5 * 60 + 30;   // 5:30 AM ET
+      const marketOpen = 7 * 60;             // 7:00 AM ET
       const marketClose = 16 * 60;          // 4:00 PM ET
 
-      // Refresh from 5:30 AM to 4:00 PM ET
-      return currentMinutes >= preMarketStart && currentMinutes < marketClose;
+      // Refresh from 7:00 AM to 4:00 PM ET
+      return currentMinutes >= marketOpen && currentMinutes < marketClose;
     };
 
-    // Smart refresh - every 10 minutes during trading hours, less frequent otherwise
+    // Smart refresh - full scan every 10 minutes during market hours (7am-4pm ET)
     const smartRefresh = async () => {
       if (shouldRefreshTickers()) {
-        await fetchFromYahoo();
+        try {
+          await triggerFullScan();
+        } catch (e) {
+          // Fall back to regular fetch if full scan fails
+        }
       }
+      // Always pull latest data into client state
+      await fetchFromYahoo();
     };
 
-    // Refresh every 3 minutes during market hours (matches server-side core refresh)
-    const interval = setInterval(smartRefresh, 3 * 60 * 1000);
+    // Refresh every 10 minutes (pulls latest server data into client)
+    const interval = setInterval(smartRefresh, 10 * 60 * 1000);
 
     // Poll scan progress + ticker counts (every 5 seconds)
     // Uses full fetch to get evaluatedToday counts; skips ticker state update unless scan finishes
@@ -3758,10 +3767,10 @@ Execute this task and provide concrete results.`);
           return updated;
         });
 
-        // On first poll or when evaluatedToday changes, also update tickers
-        if (lastPollEvaluated !== todayCount) {
+        // Update tickers when evaluatedToday changes or on first poll
+        if (lastPollEvaluated !== todayCount || lastPollEvaluated === -1) {
           lastPollEvaluated = todayCount;
-          setTickers((prev) => tickersChanged(prev, result.tickers) ? result.tickers : prev);
+          setTickers(result.tickers);
         }
       } catch {
         // Silently ignore poll errors
@@ -4016,6 +4025,33 @@ Execute this task and provide concrete results.`);
         return;
       }
 
+      // Connect Google email/calendar via OAuth
+      if (resolved === "/connect email" || resolved === "/connect google email") {
+        setMessages((prev) => [
+          ...prev,
+          { role: "assistant", content: "Opening Google sign-in in your browser...\nAuthorize Gmail & Calendar access, then return here.", timestamp: new Date() }
+        ]);
+        setLastAction("Connecting Google email");
+        try {
+          await startEmailOAuth("google");
+          setMessages((prev) => [
+            ...prev,
+            { role: "assistant", content: "Google email connected! Syncing emails and calendar...", timestamp: new Date() }
+          ]);
+          await syncEmailCalendar();
+          setMessages((prev) => [
+            ...prev,
+            { role: "assistant", content: "Email and calendar synced successfully.", timestamp: new Date() }
+          ]);
+        } catch (err) {
+          setMessages((prev) => [
+            ...prev,
+            { role: "assistant", content: `Google email connection failed: ${err.message}`, timestamp: new Date() }
+          ]);
+        }
+        return;
+      }
+
       // LinkedIn data command - show stored profile data in viewer
       if (resolved === "/linkedin data") {
         const storedProfile = loadLinkedInProfile();
@@ -4092,11 +4128,21 @@ Execute this task and provide concrete results.`);
               result.screenshotPath && `Screenshot: ${result.screenshotPath}`
             ].filter(Boolean).join("\n");
 
+            // Capture historical snapshot
+            const snapResult = captureLinkedInSnapshot();
+            const snapMsg = snapResult.success
+              ? snapResult.isFirst
+                ? "First snapshot saved to history."
+                : snapResult.changes.length > 0
+                  ? `Snapshot saved. ${snapResult.changes.length} change(s) detected.`
+                  : "Snapshot saved. No changes from last capture."
+              : "";
+
             setMessages((prev) => [
               ...prev,
               {
                 role: "assistant",
-                content: `LinkedIn profile captured!\n\n${profileSummary}\n\n${mdStatus}\n\nData saved. View with /profile or /profile general`,
+                content: `LinkedIn profile captured!\n\n${profileSummary}\n\n${mdStatus}${snapMsg ? `\n${snapMsg}` : ""}\n\nData saved. View with /profile or /profile general`,
                 timestamp: new Date()
               }
             ]);
@@ -5138,16 +5184,14 @@ Folder: ${result.action.id}`,
         setLastAction("Weights refreshed");
       }
 
-      // /goals voice - Launch voice conversation for setting goals
-      if (resolved === "/goals voice" || resolved === "/goals") {
-        const goalsStatus = getGoalsStatus();
-
-        if (!goalsStatus.openaiReady) {
+      // /talk - Launch voice conversation with BACKBONE
+      if (resolved === "/talk") {
+        if (!process.env.OPENAI_API_KEY) {
           setMessages((prev) => [
             ...prev,
             {
               role: "assistant",
-              content: "OpenAI API key required for voice goals.\n\nTo set up:\n1. Run /models to configure your API keys\n2. Add OPENAI_API_KEY to your .env file\n3. Then run /goals voice again\n\nOr use /goals set <category> to set goals manually.",
+              content: "OpenAI API key required for voice conversation.\n\nTo set up:\n1. Run /models to configure your API keys\n2. Add OPENAI_API_KEY to your .env file\n3. Then run /talk again",
               timestamp: new Date()
             }
           ]);
@@ -5159,11 +5203,25 @@ Folder: ${result.action.id}`,
           ...prev,
           {
             role: "assistant",
-            content: `Starting Goals Voice Coach...\n\nRun this command in your terminal:\n  node scripts/goals-voice.js\n\nThis will start a voice conversation to help you set meaningful goals.\n\nCurrent goals: ${goalsStatus.goalsCount || "none set"}`,
+            content: "Opening voice conversation...",
             timestamp: new Date()
           }
         ]);
-        setLastAction("Goals voice ready - run: node scripts/goals-voice.js");
+        try {
+          const scriptPath = path.join(process.cwd(), "scripts", "voice-server.js");
+          spawn("node", [scriptPath], {
+            detached: true,
+            stdio: "ignore",
+            env: { ...process.env }
+          }).unref();
+          setLastAction("Voice conversation launched");
+        } catch (err) {
+          setMessages((prev) => [
+            ...prev,
+            { role: "assistant", content: `Failed to launch voice: ${err.message}`, timestamp: new Date() }
+          ]);
+          setLastAction("Voice launch failed");
+        }
         return;
       }
 
@@ -5655,18 +5713,25 @@ Folder: ${result.action.id}`,
             const sorted = [...result.tickers].sort((a, b) => (b.score || 0) - (a.score || 0));
             const top = sorted.slice(0, 20);
             let content = "TOP TICKERS BY SCORE\n\n";
-            content += "Symbol     Score  Change%  MACD\n";
-            content += "─────────────────────────────────\n";
+            content += "Symbol     Score  Change%    MACD  Trend     Scored\n";
+            content += "──────────────────────────────────────────────────────\n";
             top.forEach(t => {
               const sym = (t.symbol || "").padEnd(10);
               const score = ((t.score || 0).toFixed(1)).padStart(5);
               const change = ((t.changePercent || 0).toFixed(2) + "%").padStart(8);
-              const macd = t.macdTrend || t.macd || "—";
-              content += `${sym} ${score} ${change}  ${macd}\n`;
+              const macdVal = t.macdValue != null ? t.macdValue.toFixed(2).padStart(7) : "    —  ";
+              const trend = (t.macdTrend || (t.macd?.trend) || "—").padEnd(10);
+              const scoredDate = t.scoredAt ? new Date(t.scoredAt) : (t.lastEvaluated ? new Date(t.lastEvaluated) : null);
+              const scored = scoredDate ? scoredDate.toLocaleDateString() + " " + scoredDate.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", hour12: true }) : "—";
+              content += `${sym} ${score} ${change} ${macdVal}  ${trend} ${scored}\n`;
             });
             content += `\nTotal: ${result.tickers.length} tickers`;
+            content += ` | History: ${top[0]?.historyDays || "?"}d`;
+            if (result.lastUpdate) {
+              content += ` | Last refresh: ${new Date(result.lastUpdate).toLocaleString()}`;
+            }
             if (result.lastFullScan) {
-              content += ` | Last scan: ${new Date(result.lastFullScan).toLocaleString()}`;
+              content += `\nLast full scan: ${new Date(result.lastFullScan).toLocaleString()}`;
             }
             if (result.fullScanRunning) {
               content += " | Full scan running...";
@@ -5688,6 +5753,54 @@ Folder: ${result.action.id}`,
           ]);
         }
         setLastAction("Tickers displayed");
+        return;
+      }
+
+      // /top stocks - Refresh and show top 10 tickers by score
+      if (resolved === "/top stocks") {
+        setMessages((prev) => [
+          ...prev,
+          { role: "assistant", content: "Refreshing stock data...", timestamp: new Date() }
+        ]);
+        try {
+          // Refresh first so user sees latest data
+          await refreshTickers();
+          const result = await fetchYahooTickers();
+          if (result.success && result.tickers.length > 0) {
+            setTickers(result.tickers);
+            const sorted = [...result.tickers].sort((a, b) => (b.score || 0) - (a.score || 0));
+            const top = sorted.slice(0, 10);
+            let content = "TOP 10 STOCKS\n\n";
+            content += "#   Symbol     Name                    Score  Signal       Price     Change%\n";
+            content += "──────────────────────────────────────────────────────────────────────────────\n";
+            top.forEach((t, i) => {
+              const rank = String(i + 1).padEnd(3);
+              const sym = (t.symbol || "").padEnd(10);
+              const name = (t.name || t.shortName || "").substring(0, 23).padEnd(23);
+              const score = ((t.score || 0).toFixed(1)).padStart(5);
+              const signal = (t.signal || t.macdTrend || "—").padEnd(12);
+              const price = t.price ? ("$" + t.price.toFixed(2)).padStart(9) : "      N/A";
+              const change = ((t.changePercent || 0) >= 0 ? "+" : "") + (t.changePercent || 0).toFixed(2) + "%";
+              content += `${rank} ${sym} ${name} ${score}  ${signal} ${price}  ${change}\n`;
+            });
+            content += `\nLast refreshed: ${new Date().toLocaleString()}`;
+            setMessages((prev) => [
+              ...prev,
+              { role: "assistant", content, timestamp: new Date() }
+            ]);
+          } else {
+            setMessages((prev) => [
+              ...prev,
+              { role: "assistant", content: "No ticker data available. Run /run stock sweep first.", timestamp: new Date() }
+            ]);
+          }
+        } catch (error) {
+          setMessages((prev) => [
+            ...prev,
+            { role: "assistant", content: `Top stocks error: ${error.message}`, timestamp: new Date() }
+          ]);
+        }
+        setLastAction("Top stocks shown");
         return;
       }
 
@@ -5735,6 +5848,121 @@ Folder: ${result.action.id}`,
           }
         ]);
         setLastAction("Daily report");
+        return;
+      }
+
+      // /cron - Show all scheduled cron jobs
+      if (resolved === "/cron") {
+        const cronManager = getCronManager();
+        const allJobs = cronManager.getAllJobs();
+
+        // Sort: daily (by time) → weekly (by day) → monthly
+        const freqOrder = { daily: 0, weekly: 1, monthly: 2, once: 3, custom: 4 };
+        const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+        const sorted = [...allJobs].sort((a, b) => {
+          const fa = freqOrder[a.frequency] ?? 5;
+          const fb = freqOrder[b.frequency] ?? 5;
+          if (fa !== fb) return fa - fb;
+          return (a.time || "00:00").localeCompare(b.time || "00:00");
+        });
+
+        const dailyCount = sorted.filter(j => j.frequency === "daily").length;
+        const weeklyCount = sorted.filter(j => j.frequency === "weekly").length;
+        const monthlyCount = sorted.filter(j => j.frequency === "monthly").length;
+        const parts = [];
+        if (dailyCount) parts.push(`${dailyCount} daily`);
+        if (weeklyCount) parts.push(`${weeklyCount} weekly`);
+        if (monthlyCount) parts.push(`${monthlyCount} monthly`);
+
+        const header = `CRON JOBS SCHEDULE                                    ${sorted.length} jobs | ${parts.join(", ")}`;
+        const sep = "─".repeat(78);
+
+        let content = `${header}\n${sep}\n`;
+        content += ` #  JOB                    FREQUENCY    SCHEDULE             RUNS  STATUS\n`;
+        content += `${sep}\n`;
+
+        sorted.forEach((job, i) => {
+          const num = String(i + 1).padStart(2, " ");
+          const name = (job.name || job.id).padEnd(22, " ").slice(0, 22);
+          const freq = (job.frequency || "daily").charAt(0).toUpperCase() + (job.frequency || "daily").slice(1);
+          const freqCol = freq.padEnd(12, " ").slice(0, 12);
+
+          let schedule = "";
+          if (job.frequency === "daily") {
+            schedule = job.weekdaysOnly ? `Weekdays ${job.time || "09:00"}` : `Every day ${job.time || "09:00"}`;
+          } else if (job.frequency === "weekly") {
+            const day = dayNames[job.dayOfWeek ?? 1] || "Monday";
+            schedule = `${day} ${job.time || "09:00"}`;
+          } else if (job.frequency === "monthly") {
+            const d = job.dayOfMonth ?? 1;
+            const suffix = d === 1 ? "st" : d === 2 ? "nd" : d === 3 ? "rd" : "th";
+            schedule = `${d}${suffix} at ${job.time || "09:00"}`;
+          } else {
+            schedule = job.time || "—";
+          }
+          schedule = schedule.padEnd(20, " ").slice(0, 20);
+
+          const runs = String(job.runCount || 0).padStart(4, " ");
+          const status = job.enabled ? (job.status === "paused" ? "Paused" : "Active") : "Disabled";
+
+          content += `${num}  ${name} ${freqCol} ${schedule} ${runs}  ${status}\n`;
+        });
+
+        content += sep;
+
+        setMessages((prev) => [
+          ...prev,
+          { role: "assistant", content, timestamp: new Date() }
+        ]);
+        setLastAction("Cron jobs");
+        return;
+      }
+
+      // /linkedin history - Show LinkedIn snapshot timeline
+      if (resolved === "/linkedin history") {
+        const history = getLinkedInHistory();
+        const postsHistory = getLinkedInPostsHistory();
+
+        let content = "LINKEDIN PROFILE HISTORY\n";
+        content += "─".repeat(60) + "\n\n";
+
+        if (!history.success) {
+          content += "No snapshots captured yet.\n\n";
+          content += "Snapshots are captured automatically by the weekly LinkedIn Sync cron job,\n";
+          content += "or when you run /linkedin to update your profile.\n";
+        } else {
+          content += `Tracking since: ${history.firstCapture}\n`;
+          content += `Last snapshot: ${history.lastCapture}\n`;
+          content += `Total snapshots: ${history.totalSnapshots}\n\n`;
+
+          content += "TIMELINE:\n";
+          for (const snap of history.snapshots.slice().reverse()) {
+            const changeStr = snap.changeCount > 0
+              ? `  ${snap.changeCount} change(s):`
+              : "  No changes";
+            content += `  ${snap.date}${changeStr}\n`;
+            if (snap.changes && snap.changes.length > 0) {
+              for (const c of snap.changes) {
+                content += `    • ${c.field}: "${c.from || "—"}" → "${c.to || "—"}"\n`;
+              }
+            }
+          }
+        }
+
+        content += "\n" + "─".repeat(60) + "\n";
+        content += "POSTS TRACKING\n";
+        if (!postsHistory.success) {
+          content += "  No posts tracked yet.\n";
+        } else {
+          content += `  Total: ${postsHistory.total} | Original: ${postsHistory.originals} | Reposts: ${postsHistory.reposts}\n`;
+          content += `  Last updated: ${postsHistory.lastUpdated}\n`;
+        }
+
+        setMessages((prev) => [
+          ...prev,
+          { role: "assistant", content, timestamp: new Date() }
+        ]);
+        setLastAction("LinkedIn history");
         return;
       }
 
@@ -7985,18 +8213,30 @@ Folder: ${result.action.id}`,
           );
         })(),
 
-        // ENGINE PANEL — always visible, shows live CLI streaming when active
+        // ENGINE + CONVERSATION — conversation overlays engine when messages exist
         e(
           Box,
-          { flexDirection: "column", flexGrow: 1, marginTop: 1 },
-          e(AgentActivityPanel, {
-            overlayHeader: false,
-            compact: true,
-            scrollOffset: engineScrollOffset,
-            privateMode,
-            actionStreamingText,
-            isProcessing
-          })
+          { flexDirection: "column", flexGrow: 1, marginTop: 1, overflow: "hidden" },
+          // Show conversation if there are messages or streaming, otherwise show engine
+          (messages.length > 0 || isProcessing || streamingText || actionStreamingText)
+            ? e(ConversationPanel, {
+                messages,
+                isLoading: isProcessing,
+                streamingText,
+                actionStreamingText,
+                actionStreamingTitle,
+                whatsappPollCountdown,
+                whatsappPollingMode,
+                scrollOffset: conversationScrollOffset
+              })
+            : e(AgentActivityPanel, {
+                overlayHeader: false,
+                compact: true,
+                scrollOffset: engineScrollOffset,
+                privateMode,
+                actionStreamingText,
+                isProcessing
+              })
         ),
 
         // PORTFOLIO SUMMARY - One line with equity, day %, top 2 positions

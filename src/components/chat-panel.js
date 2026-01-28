@@ -164,8 +164,8 @@ const ChatPanelBase = ({ commands, onSubmit, onTypingChange, modelInfo, compact 
       return;
     }
 
-    // Escape - clear
-    if (key.escape) {
+    // Escape - clear input (only if there's content to clear)
+    if (key.escape && inputRef.current.length > 0) {
       inputRef.current = "";
       setDisplayValue("");
       setActiveIndex(0);
@@ -236,7 +236,7 @@ const ChatPanelBase = ({ commands, onSubmit, onTypingChange, modelInfo, compact 
         },
         e(Text, { color: promptColor, bold: true }, isCommand ? "⟩ " : "› "),
         isEmpty
-          ? e(Text, { color: "#64748b" }, 'Ask anything or type / for commands')
+          ? e(Text, { color: "#64748b" }, 'Ask anything, / for commands, /talk to chat')
           : e(Text, { color: "#f8fafc", wrap: "wrap" }, displayValue),
         e(Text, { color: "#ffffff" }, "▌")
       )
@@ -281,7 +281,7 @@ const ChatPanelBase = ({ commands, onSubmit, onTypingChange, modelInfo, compact 
       { flexDirection: "row", paddingY: 0 },
       e(Text, { color: promptColor, bold: true }, isCommand ? "⟩ " : "› "),
       isEmpty
-        ? e(Text, { color: "#64748b" }, 'Ask anything... "Fix broken tests" or type / for commands')
+        ? e(Text, { color: "#64748b" }, 'Ask anything, / for commands, /talk to chat')
         : e(Text, { color: "#f8fafc" }, displayValue),
       e(Text, { color: "#ffffff" }, "▌")
     ),

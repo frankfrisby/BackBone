@@ -195,6 +195,7 @@ import { getPersonalCapitalService } from "./services/personal-capital.js";
 import { getPlaidService, isPlaidConfigured, syncPlaidData } from "./services/plaid-service.js";
 import { getThinkingEngine } from "./services/thinking-engine.js";
 import { getIdleProcessor } from "./services/idle-processor.js";
+import { startRealtimeSync, stopRealtimeSync, isAuthenticated as isFirestoreAuthenticated, pushTickers } from "./services/firestore-sync.js";
 
 // Initialize idle processor immediately on module load
 console.log("[App] Initializing idle processor on module load...");
@@ -2279,6 +2280,22 @@ const App = ({ updateConsoleTitle }) => {
       idleProcessor.stop();
     };
   }, [autonomousEngine]);
+
+  // Firestore real-time sync - pushes tickers, profile, positions to Firebase
+  useEffect(() => {
+    // Only start if user is authenticated with Firebase
+    if (isFirestoreAuthenticated()) {
+      console.log("[App] Starting Firestore real-time sync...");
+      // Sync every 5 minutes (tickers internally throttle to 4 hours)
+      startRealtimeSync(5 * 60 * 1000);
+    } else {
+      console.log("[App] Firestore sync skipped - user not authenticated");
+    }
+
+    return () => {
+      stopRealtimeSync();
+    };
+  }, []);
 
   // Sync goals and life scores with portfolio/health data
   useEffect(() => {
@@ -6284,6 +6301,159 @@ Folder: ${result.action.id}`,
         return;
       }
 
+      // /top stocks detail - Show top 5 with full score breakdown
+      if (resolved === "/top stocks detail" || resolved.startsWith("/top stocks detail ")) {
+        setMessages((prev) => [
+          ...prev,
+          { role: "assistant", content: "Computing detailed score breakdown...", timestamp: new Date() }
+        ]);
+        try {
+          await refreshTickers();
+          const result = await fetchYahooTickers();
+          if (result.success && result.tickers.length > 0) {
+            setTickers(result.tickers);
+            const sorted = [...result.tickers].sort((a, b) => (b.score || 0) - (a.score || 0));
+            const top = sorted.slice(0, 5);
+
+            let content = "═══════════════════════════════════════════════════════════════════════════════\n";
+            content += "                         TOP 5 STOCKS — DETAILED BREAKDOWN\n";
+            content += "═══════════════════════════════════════════════════════════════════════════════\n\n";
+
+            // Header row
+            content += "Ticker   Score  Signal    MACD   Vol σ   Psych   PricePos   RSI    Chg%\n";
+            content += "───────────────────────────────────────────────────────────────────────────────\n";
+
+            top.forEach((t, i) => {
+              const sym = (t.symbol || "").padEnd(8);
+              const score = ((t.score || 0).toFixed(1)).padStart(5);
+              const signal = (t.macdTrend || t.signal || "—").substring(0, 8).padEnd(9);
+
+              // MACD histogram
+              const macdHist = t.macd?.histogram != null ? (t.macd.histogram >= 0 ? "+" : "") + t.macd.histogram.toFixed(2) : "  N/A";
+              const macdStr = macdHist.padStart(6);
+
+              // Volume sigma
+              const volSigma = t.volumeSigma != null ? t.volumeSigma.toFixed(2) : "N/A";
+              const volStr = volSigma.padStart(7);
+
+              // Psychological adjustment (computed from changePercent)
+              const pct = t.changePercent || 0;
+              const absPct = Math.abs(pct);
+              let psych = 0;
+              if (absPct <= 15) {
+                psych = (absPct / 2) * 0.5;
+                psych = pct > 0 ? -psych : psych;
+              }
+              const psychStr = (psych >= 0 ? "+" : "") + psych.toFixed(2);
+              const psychPad = psychStr.padStart(7);
+
+              // Price Position Score (60-day range)
+              let pricePos = 0;
+              let pricePosStr = "   N/A";
+              if (t.price60dMin != null && t.price60dMax != null && t.price != null) {
+                const range = t.price60dMax - t.price60dMin;
+                if (range > 0) {
+                  const position = (t.price - t.price60dMin) / range;
+                  if (position <= 0.1) pricePos = 1.5;
+                  else if (position >= 0.9) pricePos = -1.5;
+                  else pricePos = (1.0 - ((position - 0.1) / 0.8) * 2.0) * 1.5;
+                  pricePosStr = (pricePos >= 0 ? "+" : "") + pricePos.toFixed(2);
+                }
+              } else if (t.pricePositionScore != null) {
+                pricePos = t.pricePositionScore;
+                pricePosStr = (pricePos >= 0 ? "+" : "") + pricePos.toFixed(2);
+              }
+              const pricePosStrPad = pricePosStr.padStart(8);
+
+              // RSI
+              const rsiStr = t.rsi != null ? String(t.rsi).padStart(5) : "  N/A";
+
+              // Change %
+              const change = ((t.changePercent || 0) >= 0 ? "+" : "") + (t.changePercent || 0).toFixed(2) + "%";
+              const changeStr = change.padStart(7);
+
+              content += `${sym} ${score}  ${signal} ${macdStr} ${volStr} ${psychPad} ${pricePosStrPad} ${rsiStr} ${changeStr}\n`;
+            });
+
+            content += "───────────────────────────────────────────────────────────────────────────────\n\n";
+
+            // Detailed breakdown for each
+            content += "SCORE COMPONENTS:\n";
+            content += "─────────────────\n";
+            top.forEach((t, i) => {
+              const pct = t.changePercent || 0;
+              const absPct = Math.abs(pct);
+              let psych = 0;
+              if (absPct <= 15) {
+                psych = (absPct / 2) * 0.5;
+                psych = pct > 0 ? -psych : psych;
+              }
+
+              // Estimate MACD contribution
+              let macdAdj = 0;
+              if (t.macd?.histogram != null) {
+                const hist = t.macd.histogram;
+                if (hist > 0.5) macdAdj = Math.min(1, hist / 2) * 2.5;
+                else if (hist < -0.5) macdAdj = Math.max(-1, hist / 2) * 2.5;
+                else macdAdj = (hist / 0.5) * 0.5 * 2.5;
+              }
+
+              // Volume score estimate
+              const sigma = t.volumeSigma || 1;
+              let volScore = 2.5 * ((sigma - 1) / 10) - 1;
+              volScore = pct < -0.05 ? -Math.abs(volScore) : Math.abs(volScore);
+              volScore = Math.max(-1.5, Math.min(1.5, volScore));
+
+              // Price Position Score for detailed view
+              let detailPricePos = 0;
+              let pricePosLabel = "N/A";
+              if (t.price60dMin != null && t.price60dMax != null && t.price != null) {
+                const range = t.price60dMax - t.price60dMin;
+                if (range > 0) {
+                  const position = (t.price - t.price60dMin) / range;
+                  if (position <= 0.1) detailPricePos = 1.5;
+                  else if (position >= 0.9) detailPricePos = -1.5;
+                  else detailPricePos = (1.0 - ((position - 0.1) / 0.8) * 2.0) * 1.5;
+                  const pctInRange = (position * 100).toFixed(0);
+                  pricePosLabel = `${pctInRange}% of 60d range`;
+                }
+              } else if (t.pricePositionScore != null) {
+                detailPricePos = t.pricePositionScore;
+                pricePosLabel = "from cache";
+              }
+
+              content += `\n${i + 1}. ${t.symbol} (${t.name?.substring(0, 25) || ""})\n`;
+              content += `   MACD: ${t.macd?.macd?.toFixed(2) || "N/A"} | Signal: ${t.macd?.signal?.toFixed(2) || "N/A"} | Hist: ${t.macd?.histogram?.toFixed(2) || "N/A"} → Adj: ${macdAdj >= 0 ? "+" : ""}${macdAdj.toFixed(2)}\n`;
+              content += `   RSI: ${t.rsi || "N/A"} ${t.rsi && t.rsi < 30 ? "(OVERSOLD)" : t.rsi && t.rsi > 70 ? "(OVERBOUGHT)" : ""}\n`;
+              content += `   Volume: ${sigma.toFixed(2)}σ → Score: ${volScore >= 0 ? "+" : ""}${volScore.toFixed(2)}\n`;
+              content += `   PricePos: ${pricePosLabel} → Score: ${detailPricePos >= 0 ? "+" : ""}${detailPricePos.toFixed(2)} (×1.25 = ${(detailPricePos * 1.25) >= 0 ? "+" : ""}${(detailPricePos * 1.25).toFixed(2)})\n`;
+              content += `   Psych (${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%): ${psych >= 0 ? "+" : ""}${psych.toFixed(2)}\n`;
+            });
+
+            content += `\n───────────────────────────────────────────────────────────────────────────────\n`;
+            content += `Last refreshed: ${new Date().toLocaleString()}\n`;
+            content += `\nLEGEND: MACD [-2.5,+2.5] | Vol [-1.5,+1.5] | PricePos [-1.5,+1.5]×1.25 | Psych [-3.75,+3.75]`;
+
+            setMessages((prev) => [
+              ...prev,
+              { role: "assistant", content, timestamp: new Date() }
+            ]);
+          } else {
+            setMessages((prev) => [
+              ...prev,
+              { role: "assistant", content: "No ticker data available. Run /run stock sweep first.", timestamp: new Date() }
+            ]);
+          }
+        } catch (error) {
+          setMessages((prev) => [
+            ...prev,
+            { role: "assistant", content: `Top stocks detail error: ${error.message}`, timestamp: new Date() }
+          ]);
+        }
+        setLastAction("Top stocks detail shown");
+        return;
+      }
+
       // /insights - Daily insights
       if (resolved === "/insights") {
         const insights = generateDailyInsights();
@@ -7521,6 +7691,30 @@ Folder: ${result.action.id}`,
         return;
       }
 
+      // /sync firebase - Push data to Firestore
+      if (resolved === "/sync firebase" || resolved === "/sync firestore") {
+        setMessages((prev) => [...prev, { role: "assistant", content: "Pushing data to Firestore...", timestamp: new Date() }]);
+        setLastAction("Syncing to Firestore...");
+        (async () => {
+          try {
+            if (!isFirestoreAuthenticated()) {
+              setMessages((prev) => [...prev, { role: "assistant", content: "Not authenticated. Please sign in with `/account` first.", timestamp: new Date() }]);
+              return;
+            }
+            // Force push tickers immediately (bypass 4-hour throttle)
+            const tickerResult = await pushTickers(null, true);
+            let display = "## Firestore Sync Complete\n\n";
+            display += `**Tickers pushed:** ${tickerResult?.count || 0}\n`;
+            display += `**Updated at:** ${tickerResult?.updatedAt || "N/A"}\n`;
+            display += `\nTickers are stored in the shared \`tickers/realtime\` collection and daily snapshot \`tickers/${new Date().toISOString().split("T")[0]}\`.`;
+            setMessages((prev) => [...prev, { role: "assistant", content: display, timestamp: new Date() }]);
+          } catch (err) {
+            setMessages((prev) => [...prev, { role: "assistant", content: `Firestore sync failed: ${err.message}`, timestamp: new Date() }]);
+          }
+        })();
+        return;
+      }
+
       // /learn - Learning Tracker
       if (resolved === "/learn" || resolved === "/learn status") {
         const display = formatLearningDisplay();
@@ -8631,13 +8825,16 @@ Folder: ${result.action.id}`,
             // Services count: green if >=5, orange if 2-4, red if <=1
             e(Text, { color: connectedServices >= 5 ? "#22c55e" : connectedServices >= 2 ? "#f59e0b" : "#ef4444" }, `${connectedServices}/${totalServices} services`),
             e(Text, { color: "#475569" }, " · "),
-            // Connection status - CONNECTED with pulsing green dot or OFFLINE
-            connectedServices > 0
+            // Connection status - CONNECTED with pulsing green dot or OFFLINE (based on actual internet connectivity)
+            isInternetConnected
               ? e(Box, { flexDirection: "row" },
                   e(Text, { color: "#22c55e", bold: true }, "CONNECTED "),
                   e(Text, { color: pulsingDotVisible ? "#22c55e" : "#14532d" }, "●")
                 )
-              : e(Text, { color: "#ef4444", bold: true }, "OFFLINE")
+              : e(Box, { flexDirection: "row" },
+                  e(Text, { color: "#ef4444", bold: true }, "OFFLINE "),
+                  e(Text, { color: "#ef4444" }, "✕")
+                )
           ),
           // Right: User name and profession from LinkedIn
           e(
@@ -9021,9 +9218,16 @@ Folder: ${result.action.id}`,
             }
             return e(Text, { color: allDone ? "#22c55e" : "#ef4444" }, `${allDone ? "✓" : "✗"} Sweep`);
           })(),
-          // Trading mode/strategy
+          // Trading mode/strategy (shows OFFLINE when no internet)
           e(Text, { color: "#334155" }, "|"),
           (() => {
+            // Show OFFLINE if not connected to internet
+            if (!isInternetConnected) {
+              return [
+                e(Text, { key: "tm", color: "#ef4444", bold: true }, "OFFLINE"),
+                e(Text, { key: "ts", color: "#64748b" }, " ✕")
+              ];
+            }
             const config = alpacaConfigRef.current || {};
             const strategy = config.strategy || "swing";
             const mode = config.mode || "paper";

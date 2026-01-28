@@ -110,7 +110,14 @@ class IdleProcessor extends EventEmitter {
    * Start monitoring for idle state
    */
   start() {
-    if (this.idleCheckInterval) return;
+    console.log("========================================");
+    console.log("[IdleProcessor] START() CALLED");
+    console.log("========================================");
+
+    if (this.idleCheckInterval) {
+      console.log("[IdleProcessor] Already running, skipping");
+      return;
+    }
 
     console.log("[IdleProcessor] Started - will work when system is idle");
     console.log(`[IdleProcessor] Idle threshold: ${IDLE_THRESHOLD_MS / 1000}s, Work interval: ${MIN_WORK_INTERVAL_MS / 1000}s`);

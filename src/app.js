@@ -2220,13 +2220,22 @@ const App = ({ updateConsoleTitle }) => {
   const idleProcessorRef = useRef(null);
 
   useEffect(() => {
-    if (!autonomousEngine) return () => {};
+    console.log("========================================");
+    console.log("[App] IDLE PROCESSOR INIT - autonomousEngine exists:", !!autonomousEngine);
+    console.log("========================================");
 
+    if (!autonomousEngine) {
+      console.log("[App] No autonomousEngine, skipping idle processor init");
+      return () => {};
+    }
+
+    console.log("[App] Starting idle processor...");
     const idleProcessor = getIdleProcessor();
     idleProcessorRef.current = idleProcessor;
 
     // Start the idle processor
     idleProcessor.start();
+    console.log("[App] Idle processor started");
 
     // Listen for work events and update UI
     const onWorkStarted = (workItem) => {

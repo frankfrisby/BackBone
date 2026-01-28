@@ -196,6 +196,11 @@ import { getPlaidService, isPlaidConfigured, syncPlaidData } from "./services/pl
 import { getThinkingEngine } from "./services/thinking-engine.js";
 import { getIdleProcessor } from "./services/idle-processor.js";
 
+// Initialize idle processor immediately on module load
+console.log("[App] Initializing idle processor on module load...");
+const _idleProcessor = getIdleProcessor();
+console.log("[App] Idle processor initialized:", !!_idleProcessor);
+
 // Life Management Engine imports
 import { getLifeManagementEngine, LIFE_AREAS } from "./services/life-management-engine.js";
 import { getDisasterMonitor } from "./services/disaster-monitor.js";

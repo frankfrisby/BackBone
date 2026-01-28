@@ -787,9 +787,19 @@ let instance = null;
 
 export const getIdleProcessor = () => {
   if (!instance) {
+    console.log("========================================");
+    console.log("[IdleProcessor] CREATING SINGLETON INSTANCE");
+    console.log("========================================");
     instance = new IdleProcessor();
+    // Auto-start on creation
+    instance.start();
   }
   return instance;
 };
+
+// Auto-initialize when module is imported
+console.log("========================================");
+console.log("[IdleProcessor] MODULE LOADED");
+console.log("========================================");
 
 export default IdleProcessor;

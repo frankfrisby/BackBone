@@ -71,10 +71,10 @@ import { saveAllMemory } from "./services/memory.js";
 import { getEmailConfig, buildEmailSummary } from "./services/email.js";
 import { getWealthConfig, buildWealthSummary } from "./services/wealth.js";
 import { fetchTickers as fetchYahooTickers, startServer as startYahooServer, isServerRunning, triggerFullScan, refreshTickers } from "./services/yahoo-client.js";
-import { extractLinkedInProfile, saveLinkedInProfile, loadLinkedInProfile, isProfileIncomplete, refreshAndGenerateLinkedInMarkdown, generateLinkedInMarkdown } from "./services/linkedin-scraper.js";
+import { extractLinkedInProfile, scrapeLinkedInProfile, saveLinkedInProfile, loadLinkedInProfile, isProfileIncomplete, refreshAndGenerateLinkedInMarkdown, generateLinkedInMarkdown, scrapeLinkedInPosts } from "./services/linkedin-scraper.js";
 import { getDataFreshnessChecker } from "./services/data-freshness-checker.js";
 import { getCronManager, JOB_FREQUENCY } from "./services/cron-manager.js";
-import { captureSnapshot as captureLinkedInSnapshot, getHistory as getLinkedInHistory, getPostsHistory as getLinkedInPostsHistory } from "./services/linkedin-tracker.js";
+import { captureSnapshot as captureLinkedInSnapshot, getHistory as getLinkedInHistory, getPostsHistory as getLinkedInPostsHistory, trackPosts as trackLinkedInPosts } from "./services/linkedin-tracker.js";
 import { loadTradingStatus, saveTradingStatus, buildTradingStatusDisplay, recordTradeAttempt, resetTradingStatus } from "./services/trading-status.js";
 import { deleteAllData, getResetSummary, RESET_STEPS } from "./services/reset.js";
 import { sendMessage as sendMultiAI, getAIStatus, getMultiAIConfig, getCurrentModel, MODELS, TASK_TYPES, isAgenticTask, executeAgenticTask, getAgenticCapabilities } from "./services/multi-ai.js";
@@ -192,7 +192,8 @@ import { isOuraConfigured, syncOuraData, getNextSyncTime, getHealthSummary, load
 import { isEmailConfigured, syncEmailCalendar, getEmailSummary, getUpcomingEvents, startTokenAutoRefresh, startOAuthFlow as startEmailOAuth } from "./services/email-calendar-service.js";
 import { getPersonalCapitalService } from "./services/personal-capital.js";
 import { getPlaidService, isPlaidConfigured, syncPlaidData } from "./services/plaid-service.js";
-import { runUserEvaluationCycle } from "./services/analysis-scheduler.js";
+import { getThinkingEngine } from "./services/thinking-engine.js";
+import { getIdleProcessor } from "./services/idle-processor.js";
 
 // Life Management Engine imports
 import { getLifeManagementEngine, LIFE_AREAS } from "./services/life-management-engine.js";
@@ -259,7 +260,7 @@ const DEFAULT_CONNECTION_STATUSES = {
   claudeCode: { connected: false, status: "never", details: "" },
   linkedin: { connected: false, status: "never", details: "" },
   oura: { connected: false, status: "never", details: "" },
-  yahoo: { connected: true, status: "connected", details: "" },
+  yahoo: { connected: false, status: "never", details: "" },
   personalCapital: { connected: false, status: "never", details: "" }
 };
 
@@ -297,6 +298,24 @@ const PLACEHOLDER_OBSERVATIONS = [
   { text: "Connecting to cloud services for real-time sync ensuring all your data is backed up, accessible across devices, and protected with enterprise-grade security measures", timestamp: Date.now(), status: "observation" }
 ];
 
+/**
+ * Check if a timestamp falls within the current "ticker day" (4 AM to 4 AM).
+ * A ticker day starts at 4:00 AM and ends at 3:59 AM the next day.
+ */
+const isTickerToday = (timestamp) => {
+  if (!timestamp) return false;
+  const now = new Date();
+  const ts = new Date(timestamp);
+  // Calculate the start of the current ticker day (4 AM today, or 4 AM yesterday if before 4 AM)
+  const tickerDayStart = new Date(now);
+  tickerDayStart.setHours(4, 0, 0, 0);
+  if (now < tickerDayStart) {
+    // Before 4 AM — ticker day started yesterday at 4 AM
+    tickerDayStart.setDate(tickerDayStart.getDate() - 1);
+  }
+  return ts >= tickerDayStart;
+};
+
 const App = ({ updateConsoleTitle }) => {
   // Pre-render phase: render main view first (invisible) to set terminal rows, then show splash
   const [preRenderPhase, setPreRenderPhase] = useState(true);
@@ -322,6 +341,7 @@ const App = ({ updateConsoleTitle }) => {
   const [showSettings, setShowSettings] = useState(false);
   const [pauseUpdates, setPauseUpdates] = useState(false);
   const pauseUpdatesRef = useRef(false); // Use ref to avoid re-renders in intervals
+  const lastSweepTriggerRef = useRef(0); // Track last sweep auto-restart to debounce
   const [mainViewReady, setMainViewReady] = useState(false);
   const [layoutReady, setLayoutReady] = useState(false);
   const [showConversation, setShowConversation] = useState(false);
@@ -403,6 +423,37 @@ const App = ({ updateConsoleTitle }) => {
     const init = async () => {
       // Load API keys from Firebase (Plaid, Google, Alpaca, OpenAI)
       await initializeRemoteConfig();
+
+      // Start cron manager — checks jobs every 60s
+      const cronManager = getCronManager();
+      cronManager.start();
+
+      // Wire cron job handlers
+      cronManager.on("run:runLinkedInSync", async () => {
+        try {
+          const profile = loadLinkedInProfile();
+          const profileUrl = profile?.profileUrl;
+          if (profileUrl) {
+            await scrapeLinkedInProfile({ headless: true });
+            captureLinkedInSnapshot();
+            const postsResult = await scrapeLinkedInPosts(profileUrl);
+            if (postsResult.success && postsResult.posts?.length) {
+              trackLinkedInPosts(postsResult.posts);
+            }
+          }
+        } catch (e) {
+          console.error("[Cron] LinkedIn sync failed:", e.message);
+        }
+      });
+      cronManager.on("run:runStockAnalysis", () => {
+        triggerFullScan().catch(() => {});
+      });
+      cronManager.on("run:runHealthReview", () => {
+        syncOuraData().catch(() => {});
+      });
+      cronManager.on("run:runMarketClose", () => {
+        triggerFullScan().catch(() => {});
+      });
 
       // Run API health check to verify tokens are available
       // This clears quota exceeded state if tokens were added
@@ -1144,6 +1195,9 @@ const App = ({ updateConsoleTitle }) => {
   const isLiveRef = useRef(false);
   const tickersRef = useRef(tickers);
 
+  // Internet connectivity state
+  const [isInternetConnected, setIsInternetConnected] = useState(false);
+
   // Claude AI state
   const [claudeStatus, setClaudeStatus] = useState("Checking...");
   const [messages, setMessages] = useState([]);
@@ -1267,6 +1321,33 @@ const App = ({ updateConsoleTitle }) => {
     } else {
       setClaudeStatus("Missing key");
     }
+  }, []);
+
+  // Internet connectivity check - runs on mount and every 30 seconds
+  useEffect(() => {
+    const checkConnectivity = async () => {
+      try {
+        // Use a lightweight endpoint to check connectivity
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 5000);
+        const response = await fetch("https://www.google.com/favicon.ico", {
+          method: "HEAD",
+          mode: "no-cors",
+          signal: controller.signal,
+        });
+        clearTimeout(timeoutId);
+        setIsInternetConnected(true);
+      } catch (err) {
+        setIsInternetConnected(false);
+      }
+    };
+
+    // Check immediately on mount
+    checkConnectivity();
+
+    // Then check every 30 seconds
+    const interval = setInterval(checkConnectivity, 30_000);
+    return () => clearInterval(interval);
   }, []);
 
   // UI clock tick for time displays (twice per minute)
@@ -2097,48 +2178,59 @@ const App = ({ updateConsoleTitle }) => {
     };
   }, []);
 
-  const runEvaluationJob = useCallback(() => {
-    if (!autonomousEngine) return 0;
-    const context = evaluationContextRef.current || {};
-    try {
-      const added = runUserEvaluationCycle(autonomousEngine, context);
-      if (added > 0) {
-        setLastAction(`Evaluation queued ${added} actions`);
-      }
-      return added;
-    } catch (error) {
-      console.error("[Evaluation Job] Failed:", error);
-      setLastAction("Evaluation job failed - check logs");
-      return 0;
-    }
-  }, [autonomousEngine]);
+  // Thinking Engine - runs every 15 mins, analyzes user context, updates thesis
+  const thinkingEngineRef = useRef(null);
 
   useEffect(() => {
     if (!autonomousEngine) return () => {};
 
-    let intervalId;
-    let timeoutId;
+    const thinkingEngine = getThinkingEngine();
+    thinkingEngineRef.current = thinkingEngine;
 
-    const now = new Date();
-    const minutes = now.getMinutes();
-    const seconds = now.getSeconds();
-    const ms = now.getMilliseconds();
-    const remainder = minutes % 30;
-    const offsetMinutes = remainder === 0 ? 30 : 30 - remainder;
-    const delay = offsetMinutes * 60000 - seconds * 1000 - ms;
-
-    runEvaluationJob();
-
-    timeoutId = setTimeout(() => {
-      runEvaluationJob();
-      intervalId = setInterval(() => runEvaluationJob(), 30 * 60 * 1000);
-    }, Math.max(0, delay));
+    // Start the thinking engine
+    thinkingEngine.start();
 
     return () => {
-      if (timeoutId) clearTimeout(timeoutId);
-      if (intervalId) clearInterval(intervalId);
+      thinkingEngine.stop();
     };
-  }, [autonomousEngine, runEvaluationJob]);
+  }, [autonomousEngine]);
+
+  // Idle Processor - works on backlog when user is idle
+  const idleProcessorRef = useRef(null);
+
+  useEffect(() => {
+    if (!autonomousEngine) return () => {};
+
+    const idleProcessor = getIdleProcessor();
+    idleProcessorRef.current = idleProcessor;
+
+    // Start the idle processor
+    idleProcessor.start();
+
+    // Listen for work events and update UI
+    const onWorkStarted = (workItem) => {
+      console.log(`[IdleProcessor] Working on: ${workItem.type} - ${workItem.item?.title || workItem.topic}`);
+    };
+
+    const onStream = (text) => {
+      // Could update a streaming display here if desired
+    };
+
+    const onWorkComplete = (result) => {
+      console.log(`[IdleProcessor] Completed: ${result.success ? "success" : "failed"} (${result.actionsCount} actions)`);
+    };
+
+    idleProcessor.on("work-started", onWorkStarted);
+    idleProcessor.on("stream", onStream);
+    idleProcessor.on("work-complete", onWorkComplete);
+
+    return () => {
+      idleProcessor.off("work-started", onWorkStarted);
+      idleProcessor.off("stream", onStream);
+      idleProcessor.off("work-complete", onWorkComplete);
+      idleProcessor.stop();
+    };
+  }, [autonomousEngine]);
 
   // Sync goals and life scores with portfolio/health data
   useEffect(() => {
@@ -2183,8 +2275,8 @@ const App = ({ updateConsoleTitle }) => {
       const linkedinStatusState = linkedinConnected ? "connected" : "never";
       const ouraConnected = ouraHealth?.connected;
       const ouraStatusState = ouraConnected ? "connected" : "never";
-      const yahooConnected = true;
-      const yahooStatusState = "connected";
+      const yahooConnected = isInternetConnected;
+      const yahooStatusState = isInternetConnected ? "connected" : "never";
       const personalCapitalConnected = personalCapitalData?.connected || false;
       const personalCapitalStatusState = personalCapitalConnected ? "connected" : "never";
 
@@ -2205,7 +2297,7 @@ const App = ({ updateConsoleTitle }) => {
       }
       return next;
     });
-  }, [alpacaStatus, alpacaMode, claudeStatus, claudeCodeStatus.available, linkedInProfile?.connected, ouraHealth?.connected, personalCapitalData?.connected]);
+  }, [alpacaStatus, alpacaMode, claudeStatus, claudeCodeStatus.available, linkedInProfile?.connected, ouraHealth?.connected, personalCapitalData?.connected, isInternetConnected]);
 
   // Simple main view readiness - no delays, no multiple refreshes
   useEffect(() => {
@@ -3655,7 +3747,7 @@ Execute this task and provide concrete results.`);
               fullScanRunning: result.fullScanRunning || false,
               scanProgress: result.scanProgress || 0,
               scanTotal: result.scanTotal || 0,
-              evaluatedToday: result.tickers.filter(t => t.lastEvaluated && new Date(t.lastEvaluated).toDateString() === new Date().toDateString()).length,
+              evaluatedToday: result.tickers.filter(t => isTickerToday(t.lastEvaluated)).length,
               universeSize: result.tickers.length || TICKER_UNIVERSE.length,
               updateHistory,
             };
@@ -3731,7 +3823,7 @@ Execute this task and provide concrete results.`);
         const result = await fetchYahooTickers();
         if (!result.success) return;
 
-        const todayCount = result.tickers.filter(t => t.lastEvaluated && new Date(t.lastEvaluated).toDateString() === new Date().toDateString()).length;
+        const todayCount = result.tickers.filter(t => isTickerToday(t.lastEvaluated)).length;
         const totalCount = result.tickers.length || TICKER_UNIVERSE.length;
 
         setTickerStatus(prev => {
@@ -3823,6 +3915,11 @@ Execute this task and provide concrete results.`);
     const resolved = trimmed;
     isTypingRef.current = false;
     setPauseUpdates(false);
+
+    // Record user activity for idle processor
+    if (idleProcessorRef.current) {
+      idleProcessorRef.current.recordUserActivity();
+    }
 
     if (setupOverlay.active) {
       closeSetupOverlay();
@@ -5225,6 +5322,324 @@ Folder: ${result.action.id}`,
         return;
       }
 
+      // /thesis - View current thesis, beliefs, and projects
+      if (resolved === "/thesis" || resolved.startsWith("/thesis ")) {
+        const thinkingEngine = thinkingEngineRef.current || getThinkingEngine();
+        const subCommand = resolved.split(" ")[1];
+
+        if (subCommand === "trigger" || subCommand === "run") {
+          // Manually trigger a thinking cycle
+          setMessages((prev) => [
+            ...prev,
+            { role: "assistant", content: "Triggering thinking cycle...", timestamp: new Date() }
+          ]);
+          thinkingEngine.triggerCycle().then(() => {
+            setMessages((prev) => [
+              ...prev,
+              { role: "assistant", content: "Thinking cycle complete. Run /thesis to see updates.", timestamp: new Date() }
+            ]);
+          });
+          setLastAction("Thinking cycle triggered");
+          return;
+        }
+
+        if (subCommand === "beliefs") {
+          // Show core beliefs
+          const beliefs = thinkingEngine.getBeliefs();
+          if (beliefs.length === 0) {
+            setMessages((prev) => [
+              ...prev,
+              { role: "assistant", content: "No core beliefs defined yet. Run `/thesis trigger` to have the engine infer them from your profile.", timestamp: new Date() }
+            ]);
+          } else {
+            const beliefsText = beliefs.map((b, i) =>
+              `${i + 1}. **${b.name}**\n   ${b.description}`
+            ).join("\n\n");
+            setMessages((prev) => [
+              ...prev,
+              { role: "assistant", content: `## Core Beliefs (Epics)\n\nThese are your fundamental, ongoing priorities:\n\n${beliefsText}\n\nUse \`/thesis add-belief <name> | <description>\` to add one.`, timestamp: new Date() }
+            ]);
+          }
+          setLastAction("Viewed beliefs");
+          return;
+        }
+
+        if (subCommand === "add-belief") {
+          // Add a core belief manually
+          const rest = resolved.slice("/thesis add-belief ".length);
+          const parts = rest.split("|").map(s => s.trim());
+          if (parts.length < 2) {
+            setMessages((prev) => [
+              ...prev,
+              { role: "assistant", content: "Usage: `/thesis add-belief <name> | <description>`\n\nExample: `/thesis add-belief Build Wealth | Grow net worth through smart investments and multiple income streams`", timestamp: new Date() }
+            ]);
+            return;
+          }
+          const belief = thinkingEngine.addBelief(parts[0], parts[1]);
+          setMessages((prev) => [
+            ...prev,
+            { role: "assistant", content: `Added core belief: **${belief.name}**`, timestamp: new Date() }
+          ]);
+          setLastAction("Added belief");
+          return;
+        }
+
+        if (subCommand === "projects") {
+          // Show projects
+          const projects = thinkingEngine.getProjects();
+          if (projects.length === 0) {
+            setMessages((prev) => [
+              ...prev,
+              { role: "assistant", content: "No projects yet. The thinking engine will create them as needed.", timestamp: new Date() }
+            ]);
+          } else {
+            const projectsText = projects.map(p =>
+              `- **${p.name}** (${p.status}): ${p.description.slice(0, 100)}...`
+            ).join("\n");
+            setMessages((prev) => [
+              ...prev,
+              { role: "assistant", content: `## Projects\n\n${projectsText}`, timestamp: new Date() }
+            ]);
+          }
+          setLastAction("Viewed projects");
+          return;
+        }
+
+        // Default: show current thesis
+        const thesis = thinkingEngine.getThesis();
+        const insights = thinkingEngine.getInsights();
+        const status = thinkingEngine.getStatus();
+        const beliefs = thinkingEngine.getBeliefs();
+
+        let content = "";
+        if (thesis) {
+          content = thesis;
+        } else {
+          content = "## Thesis\n\nNo thesis generated yet. The thinking engine will analyze your data and build one.\n";
+        }
+
+        content += `\n---\n**Engine Status:** ${status.isRunning ? "Running" : "Stopped"} | Cycles: ${status.cycleCount}`;
+        if (beliefs.length > 0) {
+          content += ` | Beliefs: ${beliefs.length}`;
+        }
+        if (status.backlogStats) {
+          content += ` | Backlog: ${status.backlogStats.total} items (${status.backlogStats.highImpact} ready)`;
+        }
+        content += `\n\nCommands: \`/thesis beliefs\` · \`/thesis projects\` · \`/thesis trigger\` · \`/backlog\``;
+
+        setMessages((prev) => [
+          ...prev,
+          { role: "assistant", content, timestamp: new Date() }
+        ]);
+        setLastAction("Viewed thesis");
+        return;
+      }
+
+      // /backlog - View and manage the backlog of ideas
+      if (resolved === "/backlog" || resolved.startsWith("/backlog ")) {
+        const thinkingEngine = thinkingEngineRef.current || getThinkingEngine();
+        const parts = resolved.split(" ").filter(Boolean);
+        const subCommand = parts[1];
+
+        if (subCommand === "add") {
+          // /backlog add <title> | <description>
+          const rest = resolved.slice("/backlog add ".length);
+          const itemParts = rest.split("|").map(s => s.trim());
+          if (itemParts.length < 1 || !itemParts[0]) {
+            setMessages((prev) => [
+              ...prev,
+              { role: "assistant", content: "Usage: `/backlog add <title>` or `/backlog add <title> | <description>`\n\nExample: `/backlog add Research AMD earnings call | Analyze Q4 earnings for investment decision`", timestamp: new Date() }
+            ]);
+            return;
+          }
+          const backlog = thinkingEngine.addBacklogItem({
+            title: itemParts[0],
+            description: itemParts[1] || itemParts[0],
+            source: "user-desire",
+            impactScore: 50,
+            urgency: "medium"
+          });
+          setMessages((prev) => [
+            ...prev,
+            { role: "assistant", content: `Added to backlog: **${itemParts[0]}**\n\nBacklog now has ${backlog.items.length} items. Items with impact score >= 75 will graduate to goals.`, timestamp: new Date() }
+          ]);
+          setLastAction("Added backlog item");
+          return;
+        }
+
+        if (subCommand === "boost") {
+          // /backlog boost <id> <score>
+          const id = parts[2];
+          const newScore = parseInt(parts[3], 10);
+          if (!id || isNaN(newScore)) {
+            setMessages((prev) => [
+              ...prev,
+              { role: "assistant", content: "Usage: `/backlog boost <id> <score>`\n\nExample: `/backlog boost backlog_1706000000000_abc1 85`", timestamp: new Date() }
+            ]);
+            return;
+          }
+          const item = thinkingEngine.boostBacklogItem(id, newScore);
+          if (item) {
+            setMessages((prev) => [
+              ...prev,
+              { role: "assistant", content: `Boosted **${item.title}** to impact score ${newScore}${newScore >= 75 ? " - Ready to graduate!" : ""}`, timestamp: new Date() }
+            ]);
+          } else {
+            setMessages((prev) => [
+              ...prev,
+              { role: "assistant", content: `Backlog item not found: ${id}`, timestamp: new Date() }
+            ]);
+          }
+          setLastAction("Boosted backlog item");
+          return;
+        }
+
+        if (subCommand === "dismiss") {
+          // /backlog dismiss <id>
+          const id = parts[2];
+          if (!id) {
+            setMessages((prev) => [
+              ...prev,
+              { role: "assistant", content: "Usage: `/backlog dismiss <id>`", timestamp: new Date() }
+            ]);
+            return;
+          }
+          const removed = thinkingEngine.dismissBacklogItem(id, "Manual dismissal");
+          if (removed) {
+            setMessages((prev) => [
+              ...prev,
+              { role: "assistant", content: `Dismissed: **${removed.title}**`, timestamp: new Date() }
+            ]);
+          } else {
+            setMessages((prev) => [
+              ...prev,
+              { role: "assistant", content: `Backlog item not found: ${id}`, timestamp: new Date() }
+            ]);
+          }
+          setLastAction("Dismissed backlog item");
+          return;
+        }
+
+        // Default: show backlog overview
+        const backlog = thinkingEngine.getBacklog();
+        const status = thinkingEngine.getStatus();
+
+        let content = "## Backlog\n\n";
+        content += `The backlog contains ideas generated from your beliefs, role models, and desires.\n`;
+        content += `Items with impact score >= 75 graduate to goals.\n\n`;
+        content += `**Stats:** ${backlog.items.length} items | ${status.backlogStats?.highImpact || 0} ready to graduate | ${backlog.stats.totalGraduated} graduated\n\n`;
+
+        if (backlog.items.length === 0) {
+          content += "_Backlog is empty. Run `/thesis trigger` to generate ideas._\n";
+        } else {
+          // Show top 15 items by impact score
+          const sortedItems = [...backlog.items]
+            .sort((a, b) => b.impactScore - a.impactScore)
+            .slice(0, 15);
+
+          content += "### Top Items by Impact\n\n";
+          content += "| Score | Title | Source | Urgency |\n";
+          content += "|-------|-------|--------|----------|\n";
+          for (const item of sortedItems) {
+            const scoreEmoji = item.impactScore >= 75 ? "🔥" : (item.impactScore >= 50 ? "📈" : "📝");
+            content += `| ${scoreEmoji} ${item.impactScore} | ${item.title.slice(0, 40)}${item.title.length > 40 ? "..." : ""} | ${item.source} | ${item.urgency} |\n`;
+          }
+
+          if (backlog.items.length > 15) {
+            content += `\n_...and ${backlog.items.length - 15} more items_\n`;
+          }
+        }
+
+        content += `\n---\n**Commands:** \`/backlog add <title>\` · \`/backlog boost <id> <score>\` · \`/backlog dismiss <id>\``;
+
+        setMessages((prev) => [
+          ...prev,
+          { role: "assistant", content, timestamp: new Date() }
+        ]);
+        setLastAction("Viewed backlog");
+        return;
+      }
+
+      // /idle - Idle processor control
+      if (resolved === "/idle" || resolved.startsWith("/idle ")) {
+        const idleProcessor = idleProcessorRef.current || getIdleProcessor();
+        const status = idleProcessor.getStatus();
+
+        if (resolved === "/idle on") {
+          idleProcessor.setEnabled(true);
+          idleProcessor.start();
+          setMessages((prev) => [
+            ...prev,
+            { role: "assistant", content: "Idle processor **enabled**. Will work on backlog when system is idle.", timestamp: new Date() }
+          ]);
+          setLastAction("Idle processor enabled");
+          return;
+        }
+
+        if (resolved === "/idle off") {
+          idleProcessor.setEnabled(false);
+          idleProcessor.stop();
+          setMessages((prev) => [
+            ...prev,
+            { role: "assistant", content: "Idle processor **disabled**. Background work paused.", timestamp: new Date() }
+          ]);
+          setLastAction("Idle processor disabled");
+          return;
+        }
+
+        if (resolved === "/idle work" || resolved === "/idle force") {
+          if (status.isWorking) {
+            setMessages((prev) => [
+              ...prev,
+              { role: "assistant", content: `Already working on: **${status.currentWorkItem?.title || "backlog item"}**`, timestamp: new Date() }
+            ]);
+          } else {
+            idleProcessor.forceWork();
+            setMessages((prev) => [
+              ...prev,
+              { role: "assistant", content: "Starting background work now...", timestamp: new Date() }
+            ]);
+          }
+          setLastAction("Forced idle work");
+          return;
+        }
+
+        // Default: show status
+        const idleSeconds = Math.round(status.idleTimeMs / 1000);
+        const idleMinutes = Math.round(idleSeconds / 60);
+        let content = `## Idle Processor Status\n\n`;
+        content += `**Status:** ${status.isEnabled ? (status.isWorking ? "🔄 Working" : "✓ Enabled") : "○ Disabled"}\n`;
+        content += `**Idle time:** ${idleMinutes > 0 ? `${idleMinutes}m` : `${idleSeconds}s`}\n`;
+
+        if (status.isWorking && status.currentWorkItem) {
+          content += `\n### Currently Working On\n`;
+          content += `- **Type:** ${status.currentWorkItem.type}\n`;
+          content += `- **Item:** ${status.currentWorkItem.title}\n`;
+        }
+
+        content += `\n### Statistics\n`;
+        content += `- Total work sessions: ${status.stats.totalSessions}\n`;
+        content += `- Items processed: ${status.stats.totalItemsProcessed}\n`;
+
+        if (status.stats.recentWork.length > 0) {
+          content += `\n### Recent Work\n`;
+          for (const work of status.stats.recentWork.slice(0, 5)) {
+            const time = new Date(work.timestamp).toLocaleTimeString();
+            const icon = work.success ? "✓" : "✗";
+            content += `- ${icon} ${time} - ${work.workType}: ${work.itemTitle?.slice(0, 40) || "item"}\n`;
+          }
+        }
+
+        content += `\n---\n**Commands:** \`/idle on\` · \`/idle off\` · \`/idle work\``;
+
+        setMessages((prev) => [
+          ...prev,
+          { role: "assistant", content, timestamp: new Date() }
+        ]);
+        setLastAction("Viewed idle processor status");
+        return;
+      }
+
       if (resolved.startsWith("/goals set")) {
         const parts = resolved.split(" ").filter(Boolean).slice(2);
         if (parts.length) {
@@ -5877,8 +6292,15 @@ Folder: ${result.action.id}`,
         const header = `CRON JOBS SCHEDULE                                    ${sorted.length} jobs | ${parts.join(", ")}`;
         const sep = "─".repeat(78);
 
+        const fmtDate = (iso) => {
+          if (!iso) return "Never";
+          const d = new Date(iso);
+          return d.toLocaleDateString("en-US", { month: "short", day: "numeric" }) + " " +
+                 d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true });
+        };
+
         let content = `${header}\n${sep}\n`;
-        content += ` #  JOB                    FREQUENCY    SCHEDULE             RUNS  STATUS\n`;
+        content += ` #  JOB                    FREQUENCY    SCHEDULE             LAST RUN             NEXT RUN             RUNS  STATUS\n`;
         content += `${sep}\n`;
 
         sorted.forEach((job, i) => {
@@ -5902,10 +6324,12 @@ Folder: ${result.action.id}`,
           }
           schedule = schedule.padEnd(20, " ").slice(0, 20);
 
+          const lastRun = fmtDate(job.lastRun).padEnd(20, " ").slice(0, 20);
+          const nextRun = fmtDate(job.nextRun).padEnd(20, " ").slice(0, 20);
           const runs = String(job.runCount || 0).padStart(4, " ");
           const status = job.enabled ? (job.status === "paused" ? "Paused" : "Active") : "Disabled";
 
-          content += `${num}  ${name} ${freqCol} ${schedule} ${runs}  ${status}\n`;
+          content += `${num}  ${name} ${freqCol} ${schedule} ${lastRun} ${nextRun} ${runs}  ${status}\n`;
         });
 
         content += sep;
@@ -8167,7 +8591,7 @@ Folder: ${result.action.id}`,
       // ===== MAIN CONTENT ROW (two columns) =====
       e(
         Box,
-        { flexDirection: "row", flexGrow: 1, overflow: "hidden" },
+        { flexDirection: "row", flexGrow: 1, flexShrink: 1, overflow: "hidden" },
 
         // ===== LEFT COLUMN: Main content (75%) =====
         e(
@@ -8276,7 +8700,7 @@ Folder: ${result.action.id}`,
           })
         ),
 
-        // TOP 4 TICKERS - Compact inline display with decimals, green if > 8, plus Full/Refresh status
+        // TOP 4 TICKERS - Compact inline display with decimals, green if > 8, plus Tickers/Sweep/Trading status
         topTickers.length > 0 && e(
           Box,
           { flexDirection: "row", gap: 1, marginTop: 1, height: 1 },
@@ -8292,45 +8716,7 @@ Folder: ${result.action.id}`,
               e(Text, { color: isHigh ? "#22c55e" : "#94a3b8", backgroundColor: isTop3 && isHigh ? "#14532d" : undefined, bold: isHigh }, score.toFixed(1)),
               i < 3 && e(Text, { color: "#334155" }, " ")
             );
-          }),
-          // Full scan / Tickers Ran status
-          e(Text, { color: "#334155" }, " │ "),
-          (() => {
-            const scanning = tickerStatus?.fullScanRunning;
-            const hasProgress = scanning && (tickerStatus.scanTotal || 0) > 0;
-            const pulseColor = pulsingDotVisible ? "#9ca3af" : "#4b5563";
-            const evaluated = tickerStatus?.evaluatedToday || 0;
-            const universe = tickerStatus?.universeSize || 0;
-            const doneToday = tickerStatus?.lastFullScan && new Date(tickerStatus.lastFullScan).toDateString() === new Date().toDateString();
-
-            if (scanning && hasProgress) {
-              // Actively scanning with real progress
-              return [
-                e(Text, { key: "sd", color: pulseColor }, "◐"),
-                e(Text, { key: "sl", color: pulseColor }, ` Scanning ${tickerStatus.scanProgress}/${tickerStatus.scanTotal}`)
-              ];
-            } else if (scanning) {
-              // Scan just started, no progress yet — show evaluated today count
-              return [
-                e(Text, { key: "sd", color: pulseColor }, "◐"),
-                e(Text, { key: "sl", color: pulseColor }, ` Tickers Ran: ${evaluated}/${universe || "?"}`)
-              ];
-            } else {
-              // Not scanning — show tickers ran today
-              return [
-                e(Text, { key: "sd", color: doneToday ? "#22c55e" : "#ef4444" }, "●"),
-                e(Text, { key: "sl", color: "#64748b" }, ` Tickers Ran: ${evaluated}/${universe}`)
-              ];
-            }
-          })(),
-          // Refresh status indicator — hidden while full scan is running
-          !tickerStatus?.fullScanRunning && e(Text, { color: "#334155" }, " │ "),
-          !tickerStatus?.fullScanRunning && e(Text, { color: tickerStatus?.refreshing
-            ? (pulsingDotVisible ? "#9ca3af" : "#4b5563")
-            : (tickerStatus?.lastRefresh && (Date.now() - new Date(tickerStatus.lastRefresh).getTime()) < 4 * 60 * 60 * 1000 ? "#22c55e" : "#ef4444") },
-            tickerStatus?.refreshing ? "◐" : "●"),
-          !tickerStatus?.fullScanRunning && e(Text, { color: tickerStatus?.refreshing ? (pulsingDotVisible ? "#9ca3af" : "#4b5563") : "#64748b" },
-            tickerStatus?.refreshing ? " Refreshing..." : " Refresh")
+          })
         ),
 
         // NET WORTH SUMMARY - Assets, Liabilities, Total
@@ -8518,6 +8904,7 @@ Folder: ${result.action.id}`,
       ),
 
       // ===== COMPACT FOOTER =====
+      e(Text, { color: "#1e293b" }, "─".repeat(terminalWidth > 0 ? terminalWidth : 80)),
       e(
         Box,
         {
@@ -8525,47 +8912,86 @@ Folder: ${result.action.id}`,
           justifyContent: "space-between",
           paddingX: 1,
           height: 1,
-          borderStyle: "single",
-          borderColor: "#1e293b",
-          borderTop: true,
-          borderBottom: false,
-          borderLeft: false,
-          borderRight: false
+          flexShrink: 0,
         },
-        // Left: Key commands
+        // Left: Tickers, Sweep, Trading
         e(
           Box,
           { flexDirection: "row", gap: 1 },
-          e(Text, { color: "#f59e0b" }, "/"),
-          e(Text, { color: "#64748b" }, "cmds"),
+          // Tickers: x/n (sweep status based on actual count, not timestamp)
+          (() => {
+            const evaluated = tickerStatus?.evaluatedToday || 0;
+            const universe = tickerStatus?.universeSize || 0;
+            const scanning = tickerStatus?.fullScanRunning;
+            const allDone = evaluated >= universe && universe > 0;
+
+            // Auto-restart sweep if incomplete and not currently scanning (debounced to every 30s)
+            const now = Date.now();
+            if (!allDone && !scanning && universe > 0 && evaluated < universe) {
+              if (now - lastSweepTriggerRef.current > 30000) {
+                lastSweepTriggerRef.current = now;
+                triggerFullScan().catch(() => {});
+              }
+            }
+
+            if (scanning) {
+              const progress = tickerStatus?.scanProgress || 0;
+              const total = tickerStatus?.scanTotal || universe;
+              return e(Text, { color: "#9ca3af" }, `Tickers: ${progress}/${total}`);
+            }
+            return [
+              e(Text, { key: "td", color: allDone ? "#22c55e" : "#ef4444" }, "●"),
+              e(Text, { key: "tl", color: "#64748b" }, ` Tickers: ${evaluated}/${universe}`)
+            ];
+          })(),
+          // Sweep status (based on actual ticker count, not just timestamp)
           e(Text, { color: "#334155" }, "|"),
-          e(Text, { color: "#f59e0b" }, "/models"),
+          (() => {
+            const evaluated = tickerStatus?.evaluatedToday || 0;
+            const universe = tickerStatus?.universeSize || 0;
+            const allDone = evaluated >= universe && universe > 0;
+            const scanning = tickerStatus?.fullScanRunning;
+            if (scanning) {
+              return e(Text, { color: "#9ca3af" }, "◐ Sweep");
+            }
+            return e(Text, { color: allDone ? "#22c55e" : "#ef4444" }, `${allDone ? "✓" : "✗"} Sweep`);
+          })(),
+          // Trading mode/strategy
           e(Text, { color: "#334155" }, "|"),
-          e(Text, { color: "#f59e0b" }, "/portfolio")
+          (() => {
+            const config = alpacaConfigRef.current || {};
+            const strategy = config.strategy || "swing";
+            const mode = config.mode || "paper";
+            const risk = config.risk || "conservative";
+            const modeColor = mode === "live" ? "#22c55e" : "#f59e0b";
+            const stratLabel = strategy.charAt(0).toUpperCase() + strategy.slice(1);
+            return [
+              e(Text, { key: "tm", color: modeColor, bold: true }, mode === "live" ? "LIVE" : "PAPER"),
+              e(Text, { key: "ts", color: "#94a3b8" }, ` ${stratLabel}`),
+              e(Text, { key: "tr", color: risk === "risky" ? "#ef4444" : "#64748b" }, ` (${risk})`)
+            ];
+          })()
         ),
-        // Right: Tickers ran + Cron jobs info
+        // Right: Cron + commands
         e(
           Box,
           { flexDirection: "row", gap: 1 },
-          e(Text, { color: "#64748b" }, "Tickers Ran:"),
-          e(Text, {
-            color: tickerStatus?.fullScanRunning
-              ? (pulsingDotVisible ? "#9ca3af" : "#4b5563")
-              : (tickerStatus?.evaluatedToday > 0 ? "#22c55e" : "#ef4444")
-          }, tickerStatus?.fullScanRunning
-            ? `${tickerStatus.scanProgress || 0}/${tickerStatus.scanTotal || "?"}`
-            : `${tickerStatus?.evaluatedToday || 0}/${tickerStatus?.universeSize || 0}`),
-          e(Text, { color: "#334155" }, "|"),
           (() => {
             const cronData = getCronManager().getDisplayData();
             const nextJob = cronData.nextJob;
             return [
               e(Text, { key: "clock", color: "#64748b" }, "⏰"),
-              e(Text, { key: "count", color: "#94a3b8" }, `${cronData.todayCount} today`),
+              e(Text, { key: "count", color: "#94a3b8" }, `${cronData.completedToday}/${cronData.todayCount}`),
               nextJob && e(Text, { key: "sep", color: "#334155" }, "|"),
               nextJob && e(Text, { key: "next", color: "#f59e0b" }, `${nextJob.shortName}`)
             ].filter(Boolean);
-          })()
+          })(),
+          e(Text, { color: "#334155" }, "|"),
+          e(Text, { color: "#38bdf8" }, "Ctrl+S"),
+          e(Text, { color: "#64748b" }, "setup"),
+          e(Text, { color: "#334155" }, "|"),
+          e(Text, { color: "#f59e0b" }, "/"),
+          e(Text, { color: "#64748b" }, "cmds")
         )
       )
     );
@@ -8675,43 +9101,23 @@ Folder: ${result.action.id}`,
                 ? getAlpacaSetupTabs(alpacaConfigRef.current, {
                     onModeSelect: (mode) => {
                       updateAlpacaSetting("mode", mode);
-                      alpacaConfigRef.current = loadAlpacaConfig();
+                      alpacaConfigRef.current = { ...alpacaConfigRef.current, ...loadAlpacaConfig() };
                     },
                     onRiskSelect: (risk) => {
                       updateAlpacaSetting("risk", risk);
-                      alpacaConfigRef.current = loadAlpacaConfig();
+                      alpacaConfigRef.current = { ...alpacaConfigRef.current, ...loadAlpacaConfig() };
                     },
                     onStrategySelect: (strategy) => {
                       updateAlpacaSetting("strategy", strategy);
-                      alpacaConfigRef.current = loadAlpacaConfig();
+                      alpacaConfigRef.current = { ...alpacaConfigRef.current, ...loadAlpacaConfig() };
                     },
-                    onOpenAlpaca: async () => {
-                      const config = alpacaConfigRef.current || loadAlpacaConfig();
-                      const result = await openAlpacaForKeys(config.mode || "paper");
-                      if (result.success) {
-                        setMessages((prev) => [
-                          ...prev,
-                          {
-                            role: "assistant",
-                            content: `Opening Alpaca dashboard...\n\n1. Log in or sign up for Alpaca\n2. Go to API Keys section\n3. Generate new keys if needed\n4. Keep the page open - you'll copy keys in the next step`,
-                            timestamp: new Date()
-                          }
-                        ]);
-                      }
+                    onKeyInput: (key) => {
+                      // Store pending key - don't apply until Connect
+                      alpacaConfigRef.current = { ...alpacaConfigRef.current, pendingKey: key };
                     },
-                    onOpenKeysFile: async () => {
-                      const config = alpacaConfigRef.current || loadAlpacaConfig();
-                      const result = await openKeysFileInEditor(config.mode || "paper");
-                      if (result.success) {
-                        setMessages((prev) => [
-                          ...prev,
-                          {
-                            role: "assistant",
-                            content: `Opening keys file in Notepad...\n\nFile: ${result.filePath}\n\n1. Copy your API Key ID from Alpaca\n2. Paste it after ALPACA_KEY=\n3. Copy your Secret Key from Alpaca\n4. Paste it after ALPACA_SECRET=\n5. Save the file (Ctrl+S)\n6. Come back here and click Connect`,
-                            timestamp: new Date()
-                          }
-                        ]);
-                      }
+                    onSecretInput: (secret) => {
+                      // Store pending secret - don't apply until Connect
+                      alpacaConfigRef.current = { ...alpacaConfigRef.current, pendingSecret: secret };
                     }
                   })
                 : setupOverlay.type === SETUP_TYPES.MODELS
@@ -8792,22 +9198,20 @@ Folder: ${result.action.id}`,
                   if (values.risk) updateAlpacaSetting("risk", values.risk);
                   if (values.strategy) updateAlpacaSetting("strategy", values.strategy);
 
-                  // Read keys from file
+                  // Check for pending keys from direct input (preferred)
+                  const pendingKey = alpacaConfigRef.current?.pendingKey || values.apiKey;
+                  const pendingSecret = alpacaConfigRef.current?.pendingSecret || values.apiSecret;
+
+                  // Fall back to file keys if no pending keys
                   const fileKeys = readKeysFile();
                   let config = loadAlpacaConfig();
 
-                  // Use file keys if available
-                  if (fileKeys.key && fileKeys.secret) {
-                    updateAlpacaSetting("key", fileKeys.key);
-                    updateAlpacaSetting("secret", fileKeys.secret);
-                    config = loadAlpacaConfig();
-                  }
+                  // Use pending keys (direct input) or file keys
+                  const finalKey = pendingKey || fileKeys.key || config.apiKey;
+                  const finalSecret = pendingSecret || fileKeys.secret || config.apiSecret;
 
                   // Final connection test
-                  if (config.apiKey && config.apiSecret) {
-                    // Save to .env for persistence
-                    saveKeysToEnv(config.apiKey, config.apiSecret);
-
+                  if (finalKey && finalSecret) {
                     setMessages((prev) => [
                       ...prev,
                       {
@@ -8817,9 +9221,17 @@ Folder: ${result.action.id}`,
                       }
                     ]);
 
-                    testAlpacaConnection(config.apiKey, config.apiSecret, config.mode || "paper")
+                    testAlpacaConnection(finalKey, finalSecret, config.mode || "paper")
                       .then((result) => {
                         if (result.success) {
+                          // Only save keys after successful connection
+                          updateAlpacaSetting("key", finalKey);
+                          updateAlpacaSetting("secret", finalSecret);
+                          saveKeysToEnv(finalKey, finalSecret);
+
+                          // Clear pending keys
+                          alpacaConfigRef.current = { ...alpacaConfigRef.current, pendingKey: null, pendingSecret: null };
+
                           setMessages((prev) => [
                             ...prev,
                             {
@@ -8834,7 +9246,7 @@ Folder: ${result.action.id}`,
                             ...prev,
                             {
                               role: "assistant",
-                              content: `Connection failed: ${result.error}\n\nPlease check your API keys in the file and try again.\nUse /alpaca to reopen the setup.`,
+                              content: `Connection failed: ${result.error}\n\nPlease check your API keys and try again.\nUse /alpaca to reopen the setup.`,
                               timestamp: new Date()
                             }
                           ]);
@@ -8846,7 +9258,7 @@ Folder: ${result.action.id}`,
                       ...prev,
                       {
                         role: "assistant",
-                        content: "No API keys found.\n\n1. Use /alpaca to open setup\n2. Click 'Get Keys' to open Alpaca dashboard\n3. Click 'Paste Keys' to open the keys file\n4. Paste your keys and save\n5. Click 'Connect'",
+                        content: "No API keys provided.\n\n1. Use /alpaca to open setup\n2. Go to API Key and Secret tabs\n3. Enter your keys from Alpaca dashboard\n4. Click Connect",
                         timestamp: new Date()
                       }
                     ]);

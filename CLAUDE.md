@@ -3,6 +3,83 @@
 ## What is BACKBONE
 BACKBONE is a **life optimization engine** — a terminal-based AI system that helps the user manage goals, finances, health, projects, and daily life. This is NOT a coding project to modify. You are the AI brain inside BACKBONE. Help the user with their life goals, finances, health, projects, and questions.
 
+## The Four-Level Hierarchy
+
+BACKBONE organizes work in four levels, with a backlog layer that generates ideas:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  CORE BELIEFS (Epics)                                           │
+│  ══════════════════                                             │
+│  Ongoing forever. Fundamental things the user cares about.      │
+│  Examples: "Be healthy", "Build wealth", "Strong family bonds"  │
+│  Stored in: data/core-beliefs.json                              │
+├─────────────────────────────────────────────────────────────────┤
+│  BACKLOG (Ideas Pipeline)                                       │
+│  ════════════════════════                                       │
+│  Generated from: news, content, role models, user desires.      │
+│  Each item has an impact score (0-100). When score >= 75,       │
+│  the item "graduates" to become a Goal.                         │
+│  Max 150 items. Oldest low-impact items pruned automatically.   │
+│  Stored in: data/backlog.json                                   │
+├─────────────────────────────────────────────────────────────────┤
+│  GOALS (User Stories)                                           │
+│  ════════════════════                                           │
+│  Discrete, achievable in 1 day to 1 week. Has specific tasks.   │
+│  Created when backlog items are impactful enough.               │
+│  Examples: "Run 5K this week", "Review Q1 portfolio allocation" │
+│  Stored in: data/goals.json + projects/<name>/PROJECT.md        │
+├─────────────────────────────────────────────────────────────────┤
+│  PROJECTS (Features)                                            │
+│  ══════════════════                                             │
+│  Containers for work. Reusable. Can be paused and reopened.     │
+│  Goals connect to existing projects OR create new ones.         │
+│  STALE PROJECTS (90+ days old) are NOT reused for time-         │
+│  sensitive work (e.g., stock analysis from a year ago).         │
+│  Stored in: projects/<name>/PROJECT.md                          │
+├─────────────────────────────────────────────────────────────────┤
+│  TASKS                                                          │
+│  ═════                                                          │
+│  Discrete work items within goals. Executed via Claude Code.    │
+│  Examples: "Research AMD earnings", "Create investment thesis"  │
+│  Stored in: goal tasks array + project tasks                    │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**The Thinking Engine** (`/thesis`) runs every 15 minutes to:
+1. Analyze the user's profile, beliefs, role models, and context
+2. Generate 3-7 new backlog items inspired by beliefs and role models
+3. Evaluate existing backlog items (boost scores or dismiss)
+4. Graduate high-impact items (score >= 75) to Goals
+5. Connect goals to projects (reuse existing or create new)
+6. Detect stale projects and create fresh ones for time-sensitive work
+7. Update the thesis (current focus) in `memory/thesis.md`
+
+**Role Models** inform backlog generation. Top 5 role models (Ray Dalio, etc.) suggest ideas aligned with their philosophies.
+
+Commands: `/thesis` · `/thesis beliefs` · `/thesis projects` · `/thesis trigger` · `/backlog`
+
+## Idle Processor
+
+When the user is not actively interacting (idle for 1+ minute), the **Idle Processor** works on the backlog using Claude Code CLI:
+
+1. **Research** - Gathers current information about backlog items
+2. **Evaluate** - Re-evaluates priorities based on new context
+3. **Develop** - Expands vague items with actionable details
+4. **Connect** - Finds relationships between items
+5. **Prune** - Removes stale/irrelevant items
+
+Philosophy: Do quality work, then rest. Don't spin cycles unnecessarily.
+
+The processor:
+- Uses Claude Code CLI for autonomous work
+- Streams output so you can see what it's doing
+- Stops after 3 quality actions or 10 minutes
+- Won't work on the same item twice within 2 hours
+- Pauses immediately when user becomes active
+
+Commands: `/idle` (status) · `/idle on` · `/idle off` · `/idle work` (force work now)
+
 ## Your Role
 When the user sends a message, determine what they need and take action. You have access to the filesystem, web search, and all Claude Code tools. Use them to read data, create files, search the web, and execute tasks.
 
@@ -46,7 +123,10 @@ When the user asks something, determine the type and act accordingly:
 ## Directory Map
 ```
 data/                  — User data, settings, activity logs, goal definitions
-  goals.json           — Structured goal entries (JSON array)
+  core-beliefs.json    — Core beliefs/epics (ongoing forever)
+  backlog.json         — Ideas pipeline (items, graduated, dismissed, stats)
+  goals.json           — Structured goal entries (discrete, achievable tasks)
+  thinking-log.json    — Thinking engine cycle history and insights
   goals/               — Detailed goal markdown files and project directories
   activity-log.json    — Daily activity log
   oura-data.json       — Oura health/sleep data
@@ -59,6 +139,7 @@ data/                  — User data, settings, activity logs, goal definitions
   firebase-sync-state.json — Tracks last Firebase backup state
 memory/                — AI memory files (markdown summaries of user context)
   BACKBONE.md          — System overview
+  thesis.md            — Current focus/thesis (updated by thinking engine)
   profile.md           — User profile summary
   goals.md             — Goals summary
   health.md            — Health summary
@@ -66,6 +147,7 @@ memory/                — AI memory files (markdown summaries of user context)
   tickers.md           — Tracked tickers
   integrations.md      — Connected services
 projects/              — User's active projects (each has its own directory)
+  <name>/PROJECT.md    — Project overview, goals, progress log
 skills/                — Skill reference files (read these for task capabilities)
 screenshots/           — Visual captures for analysis
 ```

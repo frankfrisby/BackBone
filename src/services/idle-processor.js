@@ -389,7 +389,8 @@ class IdleProcessor extends EventEmitter {
     try {
       const prompt = this.buildPrompt(workItem);
       tracker.setGoal(this.getWorkDescription(workItem));
-      tracker.action("Analyze", this.getWorkTarget(workItem));
+      // Use WEB_SEARCH as the action type for research tasks
+      tracker.action("WEB_SEARCH", `researching: ${this.getWorkTarget(workItem)}`);
 
       console.log(`[IdleProcessor] ========================================`);
       console.log(`[IdleProcessor] RUNNING CLAUDE CODE CLI`);
@@ -416,26 +417,33 @@ class IdleProcessor extends EventEmitter {
         this.streamBuffer += text;
         this.emit("stream", text);
 
-        // Log significant output
-        if (text.trim() && text.length > 10) {
-          // Only log non-trivial output
-          const preview = text.trim().slice(0, 150).replace(/\n/g, " ");
-          if (preview.length > 20) {
-            console.log(`[IdleProcessor] Output: ${preview}${text.length > 150 ? "..." : ""}`);
-          }
+        // Update status with preview of what Claude is saying
+        if (text.trim() && text.length > 20) {
+          const preview = text.trim().slice(0, 80).replace(/\n/g, " ");
+          tracker.setState("working", preview);
         }
 
-        // Track actions in the stream
-        if (text.includes("Read(") || text.includes("WebSearch(") || text.includes("Update(")) {
+        // Track actions in the stream - detect Claude Code tool usage
+        if (text.includes("Read(")) {
           this.qualityActionsThisSession++;
-          tracker.action("Research", text.slice(0, 100));
-          console.log(`[IdleProcessor] Action detected: ${text.slice(0, 80)}`);
+          const match = text.match(/Read\(([^)]+)\)/);
+          tracker.action("READ", match ? match[1] : text.slice(0, 100));
+        } else if (text.includes("WebSearch(") || text.includes("web_search")) {
+          this.qualityActionsThisSession++;
+          const match = text.match(/WebSearch\(([^)]+)\)/);
+          tracker.action("WEB_SEARCH", match ? match[1] : "searching...");
+        } else if (text.includes("Update(") || text.includes("Write(")) {
+          this.qualityActionsThisSession++;
+          const match = text.match(/(Update|Write)\(([^)]+)\)/);
+          tracker.action("UPDATE", match ? match[2] : text.slice(0, 100));
         }
       });
 
       this.currentStream.on("tool", (tool) => {
         console.log(`[IdleProcessor] Tool called: ${tool.tool}(${tool.input?.slice(0, 50)})`);
-        tracker.action(tool.tool, tool.input?.slice(0, 100));
+        // Normalize tool name to uppercase for activity tracker
+        const toolName = tool.tool?.toUpperCase?.() || tool.tool;
+        tracker.action(toolName, tool.input?.slice(0, 100));
         this.qualityActionsThisSession++;
         this.emit("tool", tool);
       });

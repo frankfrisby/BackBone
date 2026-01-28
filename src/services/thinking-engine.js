@@ -729,7 +729,7 @@ ${result.insight || "No specific insight this cycle."}
 - Recently Graduated: ${context.backlog.stats.totalGraduated}
 `;
         writeFile(THESIS_PATH, thesisContent);
-        tracker.action("Update", "memory/thesis.md");
+        tracker.action("UPDATE", "memory/thesis.md");
       }
 
       // 5. Save inferred beliefs if none exist
@@ -744,7 +744,7 @@ ${result.insight || "No specific insight this cycle."}
           }));
           beliefs.lastUpdated = new Date().toISOString();
           writeJson(BELIEFS_PATH, beliefs);
-          tracker.action("Create", `${beliefs.beliefs.length} core beliefs`);
+          tracker.action("WRITE", `created ${beliefs.beliefs.length} core beliefs`);
           console.log(`[ThinkingEngine] Inferred ${beliefs.beliefs.length} core beliefs`);
         }
       }
@@ -752,7 +752,7 @@ ${result.insight || "No specific insight this cycle."}
       // 6. Add new backlog items
       if (result.newBacklogItems && result.newBacklogItems.length > 0) {
         const backlog = addToBacklog(result.newBacklogItems);
-        tracker.action("Create", `${result.newBacklogItems.length} backlog items`);
+        tracker.action("WRITE", `added ${result.newBacklogItems.length} backlog items`);
         console.log(`[ThinkingEngine] Added ${result.newBacklogItems.length} items to backlog (total: ${backlog.items.length})`);
       }
 
@@ -804,10 +804,10 @@ ${result.insight || "No specific insight this cycle."}
           );
 
           if (projectResult.created) {
-            tracker.action("Create", `project: ${action.name}`);
+            tracker.action("MKDIR", `projects/${action.name}`);
             console.log(`[ThinkingEngine] Created project: ${action.name}`);
           } else if (projectResult.reopened) {
-            tracker.action("Reopen", `project: ${action.name}`);
+            tracker.action("UPDATE", `projects/${action.name}/PROJECT.md`);
             console.log(`[ThinkingEngine] Reopened project: ${action.name}`);
           }
         }
@@ -870,7 +870,7 @@ ${result.insight || "No specific insight this cycle."}
           goalsData.goals.push(newGoal);
           existingTitles.add(goal.title.toLowerCase());
 
-          tracker.action("Create", `goal: ${goal.title}`);
+          tracker.action("WRITE", `data/goals.json: ${goal.title}`);
           console.log(`[ThinkingEngine] Created goal: ${goal.title} in ${projectName}`);
         }
 

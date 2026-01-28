@@ -81,7 +81,7 @@ const extractProfession = (headline) => {
 /**
  * Header component with big BACKBONE logo
  */
-const HeaderBase = ({ claudeStatus, version = "2.0.0", compact = false, integrations = {}, userName = null, userProfession = null }) => {
+const HeaderBase = ({ claudeStatus, version = "2.0.0", compact = false, integrations = {}, userName = null, userProfession = null, claudeCodeAlert = null }) => {
   const statusColor = getStatusColor(claudeStatus);
   const statusIcon = getStatusIcon(claudeStatus);
 
@@ -96,35 +96,51 @@ const HeaderBase = ({ claudeStatus, version = "2.0.0", compact = false, integrat
   if (compact) {
     return e(
       Box,
-      {
-        flexDirection: "row",
-        justifyContent: "space-between",
-        paddingX: 1,
-        borderStyle: "round",
-        borderColor: "#334155"
-      },
-      e(
+      { flexDirection: "column" },
+      // Claude Code Alert Banner (if disconnected)
+      claudeCodeAlert && e(
         Box,
-        { flexDirection: "row", gap: 1, alignItems: "center" },
-        e(Text, { color: "#667eea", bold: true }, BACKBONE_COMPACT),
-        // Show user name and profession if available
-        displayName && e(Text, { color: "#334155" }, "│"),
-        displayName && e(Text, { color: "#f59e0b", bold: true }, displayName),
-        profession && e(Text, { color: "#64748b" }, ` · ${profession}`),
-        e(Text, { color: "#334155" }, "│"),
-        e(Text, { color: "#475569" }, `v${version}`)
+        {
+          backgroundColor: "#7f1d1d",
+          paddingX: 2,
+          paddingY: 0,
+          justifyContent: "center"
+        },
+        e(Text, { color: "#fca5a5", bold: true }, claudeCodeAlert)
       ),
+      // Main header row
       e(
         Box,
-        { flexDirection: "row", gap: 2, alignItems: "center" },
+        {
+          flexDirection: "row",
+          justifyContent: "space-between",
+          paddingX: 1,
+          borderStyle: "round",
+          borderColor: claudeCodeAlert ? "#dc2626" : "#334155"
+        },
         e(
           Box,
-          { flexDirection: "row", gap: 1 },
-          e(Text, { color: connectedCount > 0 ? "#22c55e" : "#64748b" }, `${connectedCount}/${totalCount}`),
-          e(Text, { color: "#475569" }, "services")
+          { flexDirection: "row", gap: 1, alignItems: "center" },
+          e(Text, { color: "#667eea", bold: true }, BACKBONE_COMPACT),
+          // Show user name and profession if available
+          displayName && e(Text, { color: "#334155" }, "│"),
+          displayName && e(Text, { color: "#f59e0b", bold: true }, displayName),
+          profession && e(Text, { color: "#64748b" }, ` · ${profession}`),
+          e(Text, { color: "#334155" }, "│"),
+          e(Text, { color: "#475569" }, `v${version}`)
         ),
-        e(Text, { color: "#334155" }, "│"),
-        e(Text, { color: "#475569" }, getDateTime())
+        e(
+          Box,
+          { flexDirection: "row", gap: 2, alignItems: "center" },
+          e(
+            Box,
+            { flexDirection: "row", gap: 1 },
+            e(Text, { color: connectedCount > 0 ? "#22c55e" : "#64748b" }, `${connectedCount}/${totalCount}`),
+            e(Text, { color: "#475569" }, "services")
+          ),
+          e(Text, { color: "#334155" }, "│"),
+          e(Text, { color: "#475569" }, getDateTime())
+        )
       )
     );
   }

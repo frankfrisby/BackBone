@@ -109,6 +109,7 @@ import { getAIBrain } from "./services/ai-brain.js";
 import { getAPIQuotaMonitor, BILLING_URLS } from "./services/api-quota-monitor.js";
 import { QuotaExceededAlert, QuotaWarningBadge } from "./components/quota-exceeded-alert.js";
 import { calculateComprehensiveScore, getSignal, WEIGHT_PROFILES, THRESHOLDS } from "./services/scoring-criteria.js";
+import { updateChat } from "./services/app-store.js";
 import { getRiskyTickers, fetchAllRiskyK8Filings, getSignificantK8Tickers } from "./services/edgar-k8.js";
 import {
   PROVIDERS,
@@ -195,12 +196,19 @@ import { getPersonalCapitalService } from "./services/personal-capital.js";
 import { getPlaidService, isPlaidConfigured, syncPlaidData } from "./services/plaid-service.js";
 import { getThinkingEngine } from "./services/thinking-engine.js";
 import { getIdleProcessor } from "./services/idle-processor.js";
+import { getClaudeCodeMonitor } from "./services/claude-code-monitor.js";
 import { startRealtimeSync, stopRealtimeSync, isAuthenticated as isFirestoreAuthenticated, pushTickers } from "./services/firestore-sync.js";
 
 // Initialize idle processor immediately on module load
 console.log("[App] Initializing idle processor on module load...");
 const _idleProcessor = getIdleProcessor();
 console.log("[App] Idle processor initialized:", !!_idleProcessor);
+
+// Initialize Claude Code connection monitor
+console.log("[App] Initializing Claude Code monitor...");
+const _claudeCodeMonitor = getClaudeCodeMonitor();
+_claudeCodeMonitor.start();
+console.log("[App] Claude Code monitor started");
 
 // Life Management Engine imports
 import { getLifeManagementEngine, LIFE_AREAS } from "./services/life-management-engine.js";
@@ -722,10 +730,22 @@ const App = ({ updateConsoleTitle }) => {
       setShowOnboarding(true);
       setLastAction("Setup wizard opened");
     }
-    // Escape: hide conversation overlay
-    if (key.escape && showConversation) {
-      setShowConversation(false);
-      return;
+    // Escape: Clear conversation to show AI work (when input is empty)
+    // The chat-panel handles escape when input has content
+    // This handles escape when input is empty - clears conversation to show engine
+    if (key.escape) {
+      // If there are messages showing, clear them to show AI work
+      if (messages.length > 0 && !isProcessing && !streamingText) {
+        setMessages([]);
+        setShowConversation(false);
+        setLastAction("Showing AI work");
+        return;
+      }
+      // If conversation overlay is showing, hide it
+      if (showConversation) {
+        setShowConversation(false);
+        return;
+      }
     }
     // Arrow keys: Scroll engine and conversation panels
     // Up/Down: scroll engine panel (CLI streaming, actions, goals)
@@ -1215,6 +1235,7 @@ const App = ({ updateConsoleTitle }) => {
   const [actionStreamingText, setActionStreamingText] = useState("");
   const [actionStreamingTitle, setActionStreamingTitle] = useState("");
   const [cliStreaming, setCliStreaming] = useState(false); // true when Claude Code CLI is actively executing (chat or autonomous)
+  const [claudeCodeAlert, setClaudeCodeAlert] = useState(null); // Alert message when Claude Code disconnects
   const actionStreamBufferRef = useRef("");
   const actionStreamTimerRef = useRef(null);
   const currentActionIdRef = useRef(null);
@@ -1248,6 +1269,11 @@ const App = ({ updateConsoleTitle }) => {
     }, 5000); // Check every 5 seconds
     return () => clearInterval(cleanupInterval);
   }, []);
+
+  // Sync streaming state to app store for AgentActivityPanel
+  useEffect(() => {
+    updateChat({ actionStreamingText, cliStreaming });
+  }, [actionStreamingText, cliStreaming]);
 
   // Current AI model tracking for display
   const [currentModelInfo, setCurrentModelInfo] = useState(() => {
@@ -1875,8 +1901,8 @@ const App = ({ updateConsoleTitle }) => {
           workLog.logResult(LOG_SOURCE.CLAUDE_CODE, "Task completed", "", LOG_STATUS.SUCCESS);
         }
         setCliStreaming(false);
-        setActionStreamingText("");
-        setActionStreamingTitle("");
+        // Keep streaming text visible - don't clear it. Only update title to show completion.
+        setActionStreamingTitle("Completed");
       });
 
       autonomousEngine.on("claude-error", ({ error }) => {
@@ -2248,25 +2274,32 @@ const App = ({ updateConsoleTitle }) => {
       const title = workItem.item?.title || workItem.topic || "backlog";
       console.log(`[IdleProcessor] Working on: ${workItem.type} - ${title}`);
       setActionStreamingTitle(`Background: ${workItem.type}`);
-      setActionStreamingText(`Starting work on: ${title}`);
+      setActionStreamingText(`Starting work on: ${title}\n`);
+      // Enable CLI streaming display so activity panel shows the output
+      setCliStreaming(true);
     };
 
     const onStream = (text) => {
       // Log to console and update streaming display
       if (text.trim()) {
         process.stdout.write(text);
-        // Update action streaming with recent output (last 500 chars)
+        // Ensure CLI streaming is on so output is visible
+        setCliStreaming(true);
+        // Update action streaming with recent output (last 2000 chars for better visibility)
         setActionStreamingText((prev) => {
           const combined = prev + text;
-          return combined.slice(-500);
+          return combined.slice(-2000);
         });
       }
     };
 
     const onWorkComplete = (result) => {
       console.log(`\n[IdleProcessor] Completed: ${result.success ? "success" : "failed"} (${result.actionsCount} actions)`);
-      setActionStreamingTitle("");
-      setActionStreamingText("");
+      // Keep streaming text visible - don't clear it. Only update title to show completion status.
+      setActionStreamingTitle(result.success ? "Background work done" : "Background work failed");
+      // Keep cliStreaming true so output stays visible, but mark as completed
+      // The activity panel will show green checkmark for completed state
+      setCliStreaming(false);
     };
 
     idleProcessor.on("work-started", onWorkStarted);
@@ -2280,6 +2313,40 @@ const App = ({ updateConsoleTitle }) => {
       idleProcessor.stop();
     };
   }, [autonomousEngine]);
+
+  // Claude Code connection monitor - shows alert when disconnected
+  useEffect(() => {
+    const monitor = getClaudeCodeMonitor();
+
+    const onStatusChecked = ({ statusMessage }) => {
+      setClaudeCodeAlert(statusMessage);
+    };
+
+    const onDisconnected = () => {
+      console.log("[App] Claude Code disconnected - showing alert");
+    };
+
+    const onConnected = () => {
+      console.log("[App] Claude Code connected - clearing alert");
+      setClaudeCodeAlert(null);
+    };
+
+    monitor.on("status-checked", onStatusChecked);
+    monitor.on("disconnected", onDisconnected);
+    monitor.on("connected", onConnected);
+
+    // Get initial status
+    const initialStatus = monitor.getDisplayStatus();
+    if (initialStatus.statusMessage) {
+      setClaudeCodeAlert(initialStatus.statusMessage);
+    }
+
+    return () => {
+      monitor.off("status-checked", onStatusChecked);
+      monitor.off("disconnected", onDisconnected);
+      monitor.off("connected", onConnected);
+    };
+  }, []);
 
   // Firestore real-time sync - pushes tickers, profile, positions to Firebase
   useEffect(() => {
@@ -3237,8 +3304,8 @@ Execute this task and provide concrete results.`);
             category: conversationTracker.categorizeMessage(userMessage)
           });
 
-          setActionStreamingText("");
-          setActionStreamingTitle("");
+          // Keep last streaming output visible - don't clear actionStreamingText
+          setActionStreamingTitle("Completed");
           setIsProcessing(false);
           setCliStreaming(false);
           engineState.setStatus("idle");
@@ -3262,9 +3329,8 @@ Execute this task and provide concrete results.`);
           ]);
         }
 
-        // Fall through to API fallback
-        setActionStreamingText("");
-        setActionStreamingTitle("");
+        // Fall through to API fallback - keep last output visible
+        setActionStreamingTitle("Falling back to API");
         setCliStreaming(false);
       }
 
@@ -8811,6 +8877,12 @@ Folder: ${result.action.id}`,
       e(
         Box,
         { flexDirection: "column" },
+        // Claude Code Alert Banner (if disconnected)
+        claudeCodeAlert && e(
+          Box,
+          { backgroundColor: "#7f1d1d", paddingX: 2, justifyContent: "center" },
+          e(Text, { color: "#fca5a5", bold: true }, `⚠️ ${claudeCodeAlert}`)
+        ),
         // Header row: BACKBONE ENGINE · x/n services · CONNECTED/OFFLINE
         e(
           Box,
@@ -8847,7 +8919,7 @@ Folder: ${result.action.id}`,
           )
         ),
         // Separator line below header - dark gray, full width
-        e(Text, { color: "#1e293b" }, "─".repeat(terminalWidth > 0 ? terminalWidth : 80))
+        e(Text, { color: claudeCodeAlert ? "#dc2626" : "#1e293b" }, "─".repeat(terminalWidth > 0 ? terminalWidth : 80))
       ),
 
       // ===== MAIN CONTENT ROW (two columns) =====

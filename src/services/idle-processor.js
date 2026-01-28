@@ -357,8 +357,12 @@ class IdleProcessor extends EventEmitter {
       tracker.setGoal(this.getWorkDescription(workItem));
       tracker.action("Analyze", this.getWorkTarget(workItem));
 
-      console.log(`[IdleProcessor] Sending prompt to Claude Code CLI (${prompt.length} chars)...`);
-      console.log(`[IdleProcessor] Prompt preview: ${prompt.slice(0, 200)}...`);
+      console.log(`[IdleProcessor] ========================================`);
+      console.log(`[IdleProcessor] RUNNING CLAUDE CODE CLI`);
+      console.log(`[IdleProcessor] Prompt length: ${prompt.length} chars`);
+      console.log(`[IdleProcessor] Prompt preview:`);
+      console.log(prompt.slice(0, 500));
+      console.log(`[IdleProcessor] ========================================`);
 
       // Run Claude Code CLI with streaming
       this.currentStream = await runClaudeCodeStreaming(prompt, {
@@ -366,7 +370,13 @@ class IdleProcessor extends EventEmitter {
         cwd: process.cwd(),
       });
 
-      console.log("[IdleProcessor] Claude Code CLI started, streaming output...");
+      if (!this.currentStream) {
+        console.error("[IdleProcessor] ERROR: runClaudeCodeStreaming returned null/undefined");
+        this.handleWorkComplete({ success: false, error: "Stream not created" });
+        return;
+      }
+
+      console.log("[IdleProcessor] Claude Code CLI process started, waiting for output...");
 
       this.currentStream.on("data", (text) => {
         this.streamBuffer += text;
@@ -390,21 +400,37 @@ class IdleProcessor extends EventEmitter {
       });
 
       this.currentStream.on("tool", (tool) => {
+        console.log(`[IdleProcessor] Tool called: ${tool.tool}(${tool.input?.slice(0, 50)})`);
         tracker.action(tool.tool, tool.input?.slice(0, 100));
         this.qualityActionsThisSession++;
         this.emit("tool", tool);
       });
 
-      this.currentStream.on("complete", (result) => {
-        this.handleWorkComplete(result);
+      this.currentStream.on("error", (error) => {
+        console.error("[IdleProcessor] ========================================");
+        console.error("[IdleProcessor] CLAUDE CODE CLI ERROR:");
+        console.error(error);
+        console.error("[IdleProcessor] ========================================");
+        this.handleWorkComplete({ success: false, error: error.error || error.message || JSON.stringify(error) });
       });
 
-      this.currentStream.on("error", (error) => {
-        console.error("[IdleProcessor] Work error:", error);
-        this.handleWorkComplete({ success: false, error: error.error });
+      this.currentStream.on("complete", (result) => {
+        console.log("[IdleProcessor] ========================================");
+        console.log("[IdleProcessor] CLAUDE CODE CLI COMPLETED");
+        console.log(`[IdleProcessor] Success: ${result.success}, Exit code: ${result.exitCode}`);
+        console.log(`[IdleProcessor] Output length: ${result.output?.length || 0} chars`);
+        if (result.output) {
+          console.log("[IdleProcessor] Output preview:");
+          console.log(result.output.slice(0, 500));
+        }
+        console.log("[IdleProcessor] ========================================");
+        this.handleWorkComplete(result);
       });
     } catch (error) {
-      console.error("[IdleProcessor] Failed to start work:", error);
+      console.error("[IdleProcessor] ========================================");
+      console.error("[IdleProcessor] EXCEPTION IN START WORK:");
+      console.error(error);
+      console.error("[IdleProcessor] ========================================");
       this.handleWorkComplete({ success: false, error: error.message });
     }
   }

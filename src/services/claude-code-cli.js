@@ -499,10 +499,13 @@ export const runClaudeCodePrompt = async (prompt, options = {}) => {
  * stream.respond(text);
  */
 export const runClaudeCodeStreaming = async (prompt, options = {}) => {
+  console.log("[ClaudeCodeCLI] runClaudeCodeStreaming called");
   const status = await getClaudeCodeStatus();
+  console.log(`[ClaudeCodeCLI] Status: installed=${status.installed}, loggedIn=${status.loggedIn}, ready=${status.ready}`);
   const emitter = new EventEmitter();
 
   if (!status.ready) {
+    console.error(`[ClaudeCodeCLI] NOT READY - installed=${status.installed}, loggedIn=${status.loggedIn}`);
     process.nextTick(() => {
       emitter.emit("error", {
         error: status.installed
@@ -520,11 +523,16 @@ export const runClaudeCodeStreaming = async (prompt, options = {}) => {
     args.unshift("--output-format", "json");
   }
 
+  console.log(`[ClaudeCodeCLI] Spawning: claude -p "<${prompt.length} char prompt>"`);
+  console.log(`[ClaudeCodeCLI] CWD: ${options.cwd || process.cwd()}`);
+
   const proc = spawn("claude", args, {
     shell: true,
     cwd: options.cwd || process.cwd(),
     stdio: ["pipe", "pipe", "pipe"]
   });
+
+  console.log(`[ClaudeCodeCLI] Process spawned, PID: ${proc.pid}`);
 
   let fullOutput = "";
   let currentTool = null;
@@ -572,14 +580,19 @@ export const runClaudeCodeStreaming = async (prompt, options = {}) => {
   };
 
   proc.stdout.on("data", (data) => {
-    parseOutput(data.toString());
+    const text = data.toString();
+    console.log(`[ClaudeCodeCLI] stdout: ${text.slice(0, 100)}${text.length > 100 ? "..." : ""}`);
+    parseOutput(text);
   });
 
   proc.stderr.on("data", (data) => {
-    emitter.emit("data", data.toString());
+    const text = data.toString();
+    console.log(`[ClaudeCodeCLI] stderr: ${text.slice(0, 100)}${text.length > 100 ? "..." : ""}`);
+    emitter.emit("data", text);
   });
 
   proc.on("close", (code) => {
+    console.log(`[ClaudeCodeCLI] Process closed with code: ${code}`);
     emitter.emit("complete", {
       success: code === 0,
       output: fullOutput,
@@ -588,6 +601,7 @@ export const runClaudeCodeStreaming = async (prompt, options = {}) => {
   });
 
   proc.on("error", (err) => {
+    console.error(`[ClaudeCodeCLI] Process error: ${err.message}`);
     emitter.emit("error", { error: err.message });
   });
 

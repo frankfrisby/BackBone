@@ -113,14 +113,18 @@ class IdleProcessor extends EventEmitter {
     if (this.idleCheckInterval) return;
 
     console.log("[IdleProcessor] Started - will work when system is idle");
+    console.log(`[IdleProcessor] Idle threshold: ${IDLE_THRESHOLD_MS / 1000}s, Work interval: ${MIN_WORK_INTERVAL_MS / 1000}s`);
 
     // Check for idle state every 30 seconds
     this.idleCheckInterval = setInterval(() => {
       this.checkAndWork();
     }, 30_000);
 
-    // Initial check after 2 minutes
-    setTimeout(() => this.checkAndWork(), 120_000);
+    // Initial check after 30 seconds (faster startup)
+    setTimeout(() => {
+      console.log("[IdleProcessor] Running initial idle check...");
+      this.checkAndWork();
+    }, 30_000);
 
     this.emit("started");
   }
@@ -161,24 +165,41 @@ class IdleProcessor extends EventEmitter {
    * Check if we should start working
    */
   async checkAndWork() {
-    if (!this.isEnabled || this.isWorking) return;
-
     const now = Date.now();
     const idleTime = now - this.lastUserActivity;
     const timeSinceLastWork = now - this.lastWorkCompletion;
 
-    // Not idle enough
-    if (idleTime < IDLE_THRESHOLD_MS) return;
+    console.log(`[IdleProcessor] Check: enabled=${this.isEnabled}, working=${this.isWorking}, idle=${Math.round(idleTime/1000)}s, sinceLastWork=${Math.round(timeSinceLastWork/1000)}s`);
 
-    // Too soon since last work
-    if (timeSinceLastWork < MIN_WORK_INTERVAL_MS) return;
-
-    // Check if Claude Code is ready
-    const status = await getClaudeCodeStatus();
-    if (!status.ready) {
-      console.log("[IdleProcessor] Claude Code not ready - skipping");
+    if (!this.isEnabled) {
+      console.log("[IdleProcessor] Disabled - skipping");
       return;
     }
+    if (this.isWorking) {
+      console.log("[IdleProcessor] Already working - skipping");
+      return;
+    }
+
+    // Not idle enough
+    if (idleTime < IDLE_THRESHOLD_MS) {
+      console.log(`[IdleProcessor] Not idle enough (${Math.round(idleTime/1000)}s < ${IDLE_THRESHOLD_MS/1000}s)`);
+      return;
+    }
+
+    // Too soon since last work
+    if (timeSinceLastWork < MIN_WORK_INTERVAL_MS) {
+      console.log(`[IdleProcessor] Too soon since last work (${Math.round(timeSinceLastWork/1000)}s < ${MIN_WORK_INTERVAL_MS/1000}s)`);
+      return;
+    }
+
+    // Check if Claude Code is ready
+    console.log("[IdleProcessor] Checking Claude Code status...");
+    const status = await getClaudeCodeStatus();
+    if (!status.ready) {
+      console.log(`[IdleProcessor] Claude Code not ready - installed=${status.installed}, loggedIn=${status.loggedIn}`);
+      return;
+    }
+    console.log("[IdleProcessor] Claude Code ready, finding work...");
 
     // Find work to do
     const workItem = await this.selectWorkItem();
@@ -186,6 +207,8 @@ class IdleProcessor extends EventEmitter {
       console.log("[IdleProcessor] No suitable work found - resting");
       return;
     }
+
+    console.log(`[IdleProcessor] Found work: ${workItem.type} - ${workItem.item?.title || workItem.topic}`);
 
     // Start working
     await this.startWork(workItem);
@@ -326,6 +349,7 @@ class IdleProcessor extends EventEmitter {
     tracker.setState("working", "Processing backlog...");
 
     console.log(`[IdleProcessor] Starting work: ${workItem.type}`);
+    console.log(`[IdleProcessor] Target: ${workItem.item?.title || workItem.topic || "backlog"}`);
     this.emit("work-started", workItem);
 
     try {
@@ -333,20 +357,35 @@ class IdleProcessor extends EventEmitter {
       tracker.setGoal(this.getWorkDescription(workItem));
       tracker.action("Analyze", this.getWorkTarget(workItem));
 
+      console.log(`[IdleProcessor] Sending prompt to Claude Code CLI (${prompt.length} chars)...`);
+      console.log(`[IdleProcessor] Prompt preview: ${prompt.slice(0, 200)}...`);
+
       // Run Claude Code CLI with streaming
       this.currentStream = await runClaudeCodeStreaming(prompt, {
         timeout: MAX_WORK_SESSION_MS,
         cwd: process.cwd(),
       });
 
+      console.log("[IdleProcessor] Claude Code CLI started, streaming output...");
+
       this.currentStream.on("data", (text) => {
         this.streamBuffer += text;
         this.emit("stream", text);
+
+        // Log significant output
+        if (text.trim() && text.length > 10) {
+          // Only log non-trivial output
+          const preview = text.trim().slice(0, 150).replace(/\n/g, " ");
+          if (preview.length > 20) {
+            console.log(`[IdleProcessor] Output: ${preview}${text.length > 150 ? "..." : ""}`);
+          }
+        }
 
         // Track actions in the stream
         if (text.includes("Read(") || text.includes("WebSearch(") || text.includes("Update(")) {
           this.qualityActionsThisSession++;
           tracker.action("Research", text.slice(0, 100));
+          console.log(`[IdleProcessor] Action detected: ${text.slice(0, 80)}`);
         }
       });
 
@@ -674,17 +713,39 @@ Do quality work, then stop.`;
    * Force start work now (for testing)
    */
   async forceWork() {
+    console.log("[IdleProcessor] Force work requested");
+
     if (this.isWorking) {
       console.log("[IdleProcessor] Already working");
-      return;
+      return { success: false, reason: "Already working" };
     }
 
-    const workItem = await this.selectWorkItem();
-    if (workItem) {
-      await this.startWork(workItem);
-    } else {
-      console.log("[IdleProcessor] No work available");
+    // Check Claude Code is ready
+    const status = await getClaudeCodeStatus();
+    if (!status.ready) {
+      console.log(`[IdleProcessor] Claude Code not ready - installed=${status.installed}, loggedIn=${status.loggedIn}`);
+      return { success: false, reason: "Claude Code not ready" };
     }
+
+    console.log("[IdleProcessor] Claude Code ready, finding work...");
+    let workItem = await this.selectWorkItem();
+
+    // If no work item and backlog is empty, create a general research task
+    if (!workItem) {
+      console.log("[IdleProcessor] No backlog items, creating general research task...");
+      const profile = readFile(path.join(MEMORY_DIR, "profile.md"));
+      const thesis = readFile(path.join(MEMORY_DIR, "thesis.md"));
+
+      workItem = {
+        type: WORK_TYPES.RESEARCH,
+        topic: "user goals and priorities",
+        context: { profile, thesis },
+      };
+    }
+
+    console.log(`[IdleProcessor] Starting work: ${workItem.type} - ${workItem.item?.title || workItem.topic}`);
+    await this.startWork(workItem);
+    return { success: true, workItem };
   }
 }
 

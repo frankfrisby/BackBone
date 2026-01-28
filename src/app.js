@@ -24,6 +24,7 @@ import { buildDefaultWeights, buildScoringEngine, normalizeWeights } from "./dat
 import { buildMockPortfolio, buildPortfolioFromAlpaca, buildEmptyPortfolio } from "./data/portfolio.js";
 import {
   getAlpacaConfig,
+  getTradingSettings,
   fetchAccount,
   fetchPositions,
   fetchLatestBars,
@@ -1289,7 +1290,27 @@ const App = ({ updateConsoleTitle }) => {
       alpacaMode,
       personalCapitalData,
     },
-    [STATE_SLICES.TICKERS]: { tickers, tickerStatus },
+    [STATE_SLICES.TICKERS]: {
+      tickers,
+      tickerStatus,
+      tradingStatus: (() => {
+        const settings = getTradingSettings();
+        const tradingConfig = loadTradingConfig();
+        return {
+          enabled: tradingConfig.enabled !== false,
+          nextTime: nextTradeTimeDisplay?.replace("Next: ", "").split(" (")[0] || null,
+          mode: settings.strategy || "swing",
+          riskLevel: settings.risk || "conservative",
+          lastTrade: tradingStatus?.lastAttempt ? {
+            success: tradingStatus.lastAttempt.success,
+            symbol: tradingStatus.lastAttempt.symbol,
+            action: tradingStatus.lastAttempt.action,
+            message: tradingStatus.lastAttempt.message,
+            timestamp: tradingStatus.lastAttempt.timestamp
+          } : null
+        };
+      })()
+    },
     [STATE_SLICES.HEALTH]: { ouraHealth, ouraHistory },
     [STATE_SLICES.PROJECTS]: { projects },
     [STATE_SLICES.CHAT]: {
@@ -2209,15 +2230,28 @@ const App = ({ updateConsoleTitle }) => {
 
     // Listen for work events and update UI
     const onWorkStarted = (workItem) => {
-      console.log(`[IdleProcessor] Working on: ${workItem.type} - ${workItem.item?.title || workItem.topic}`);
+      const title = workItem.item?.title || workItem.topic || "backlog";
+      console.log(`[IdleProcessor] Working on: ${workItem.type} - ${title}`);
+      setActionStreamingTitle(`Background: ${workItem.type}`);
+      setActionStreamingText(`Starting work on: ${title}`);
     };
 
     const onStream = (text) => {
-      // Could update a streaming display here if desired
+      // Log to console and update streaming display
+      if (text.trim()) {
+        process.stdout.write(text);
+        // Update action streaming with recent output (last 500 chars)
+        setActionStreamingText((prev) => {
+          const combined = prev + text;
+          return combined.slice(-500);
+        });
+      }
     };
 
     const onWorkComplete = (result) => {
-      console.log(`[IdleProcessor] Completed: ${result.success ? "success" : "failed"} (${result.actionsCount} actions)`);
+      console.log(`\n[IdleProcessor] Completed: ${result.success ? "success" : "failed"} (${result.actionsCount} actions)`);
+      setActionStreamingTitle("");
+      setActionStreamingText("");
     };
 
     idleProcessor.on("work-started", onWorkStarted);
@@ -5593,13 +5627,30 @@ Folder: ${result.action.id}`,
               ...prev,
               { role: "assistant", content: `Already working on: **${status.currentWorkItem?.title || "backlog item"}**`, timestamp: new Date() }
             ]);
-          } else {
-            idleProcessor.forceWork();
-            setMessages((prev) => [
-              ...prev,
-              { role: "assistant", content: "Starting background work now...", timestamp: new Date() }
-            ]);
+            setLastAction("Already working");
+            return;
           }
+
+          setMessages((prev) => [
+            ...prev,
+            { role: "assistant", content: "Starting background work now... (check console for output)", timestamp: new Date() }
+          ]);
+
+          // Run forceWork and report result
+          idleProcessor.forceWork().then((result) => {
+            if (result.success) {
+              setMessages((prev) => [
+                ...prev,
+                { role: "assistant", content: `Working on: **${result.workItem?.type}** - ${result.workItem?.item?.title || result.workItem?.topic || "backlog"}`, timestamp: new Date() }
+              ]);
+            } else {
+              setMessages((prev) => [
+                ...prev,
+                { role: "assistant", content: `Could not start work: ${result.reason}`, timestamp: new Date() }
+              ]);
+            }
+          });
+
           setLastAction("Forced idle work");
           return;
         }

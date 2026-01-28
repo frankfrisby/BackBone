@@ -109,29 +109,40 @@ class IdleProcessor extends EventEmitter {
   /**
    * Start monitoring for idle state
    */
-  start() {
-    console.log("========================================");
-    console.log("[IdleProcessor] START() CALLED");
-    console.log("========================================");
-
+  async start() {
     if (this.idleCheckInterval) {
-      console.log("[IdleProcessor] Already running, skipping");
       return;
     }
 
-    console.log("[IdleProcessor] Started - will work when system is idle");
-    console.log(`[IdleProcessor] Idle threshold: ${IDLE_THRESHOLD_MS / 1000}s, Work interval: ${MIN_WORK_INTERVAL_MS / 1000}s`);
+    const tracker = getActivityTracker();
+    tracker.log("connecting", "Claude Code CLI", "working");
+    tracker.setState("connecting", "Connecting to Claude Code CLI...");
+
+    // Check Claude Code CLI status immediately
+    const status = await getClaudeCodeStatus();
+    if (status.ready) {
+      tracker.log("connected", `Claude Code CLI v${status.version || "latest"}`, "completed");
+      tracker.setState("idle", "Claude Code CLI ready");
+      this.log(`Connected to Claude Code CLI (${status.user || "authenticated"})`);
+    } else {
+      tracker.log("error", status.installed ? "Not logged in" : "Not installed", "error");
+      tracker.setState("error", status.installed ? "Claude Code CLI not logged in" : "Claude Code CLI not installed");
+      this.log(`Claude Code CLI not ready: ${status.installed ? "not logged in" : "not installed"}`);
+    }
 
     // Check for idle state every 30 seconds
     this.idleCheckInterval = setInterval(() => {
       this.checkAndWork();
     }, 30_000);
 
-    // Initial check after 30 seconds (faster startup)
-    setTimeout(() => {
-      console.log("[IdleProcessor] Running initial idle check...");
-      this.checkAndWork();
-    }, 30_000);
+    // Start working immediately if Claude is ready
+    if (status.ready) {
+      tracker.setState("working", "Starting background work...");
+      // Small delay to let UI render, then start working
+      setTimeout(() => {
+        this.forceWork();
+      }, 3000);
+    }
 
     this.emit("started");
   }

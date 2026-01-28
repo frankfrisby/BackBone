@@ -300,12 +300,17 @@ class IdleProcessor extends EventEmitter {
     if (text.includes("family") || text.includes("relationship")) {
       topics.push("work-life balance and relationship insights");
     }
+    // Always have fallback topics
+    topics.push("AI and technology trends");
+    topics.push("productivity and time management");
+    topics.push("personal finance optimization");
 
     // Pick a topic that hasn't been researched recently
     const now = Date.now();
     for (const topic of topics) {
       const cached = this.researchCache.topics[topic];
       if (!cached || now - new Date(cached.lastResearched).getTime() > RESEARCH_COOLDOWN_MS) {
+        this.log(`Selected research topic: ${topic}`);
         return {
           type: WORK_TYPES.RESEARCH,
           topic,
@@ -314,8 +319,30 @@ class IdleProcessor extends EventEmitter {
       }
     }
 
-    // All topics recently researched - rest
-    return null;
+    // Force a topic even if recently researched (pick oldest)
+    const oldestTopic = topics.reduce((oldest, topic) => {
+      const cached = this.researchCache.topics[topic];
+      const lastTime = cached ? new Date(cached.lastResearched).getTime() : 0;
+      const oldestTime = this.researchCache.topics[oldest]
+        ? new Date(this.researchCache.topics[oldest].lastResearched).getTime()
+        : 0;
+      return lastTime < oldestTime ? topic : oldest;
+    }, topics[0]);
+
+    this.log(`All topics recently researched, using oldest: ${oldestTopic}`);
+    return {
+      type: WORK_TYPES.RESEARCH,
+      topic: oldestTopic,
+      context: { profile, thesis },
+    };
+  }
+
+  /**
+   * Log to stderr so it shows in Ink apps
+   */
+  log(message) {
+    const timestamp = new Date().toLocaleTimeString();
+    process.stderr.write(`[IdleProcessor ${timestamp}] ${message}\n`);
   }
 
   /**

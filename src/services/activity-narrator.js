@@ -1395,39 +1395,41 @@ class ActivityNarrator extends EventEmitter {
    * @param {string} status - ACTION_STATUS value
    */
   action(type, target, detail = null, status = ACTION_STATUS.WORKING) {
-    const actionType = ACTION_TOOLS[type] || ACTION_TOOLS.BASH;
+    // Normalize type to uppercase for lookup
+    const normalizedType = type?.toUpperCase?.() || type;
+    const actionType = ACTION_TOOLS[normalizedType] || ACTION_TOOLS[type] || ACTION_TOOLS.BASH;
 
     // STRICT VALIDATION - reject invalid actions based on type
     // This prevents hallucinated/fake actions from appearing in the UI
 
-    if (type === "BASH" && !this.isValidBashCommand(target)) {
+    if (normalizedType === "BASH" && !this.isValidBashCommand(target)) {
       console.warn(`[ActivityNarrator] REJECTED BASH: "${target?.slice(0, 50)}" is not a valid bash command`);
       return null;
     }
 
-    if ((type === "MKDIR" || type === "DELETE" || type === "READ" || type === "WRITE" || type === "UPDATE" || type === "EDIT")
+    if ((normalizedType === "MKDIR" || normalizedType === "DELETE" || normalizedType === "READ" || normalizedType === "WRITE" || normalizedType === "UPDATE" || normalizedType === "EDIT")
         && !this.isValidFilePath(target)) {
-      console.warn(`[ActivityNarrator] REJECTED ${type}: "${target?.slice(0, 50)}" is not a valid file path`);
+      console.warn(`[ActivityNarrator] REJECTED ${normalizedType}: "${target?.slice(0, 50)}" is not a valid file path`);
       return null;
     }
 
-    if ((type === "COPY" || type === "MOVE") && !this.isValidCopyMove(target)) {
-      console.warn(`[ActivityNarrator] REJECTED ${type}: "${target?.slice(0, 50)}" is not a valid copy/move format`);
+    if ((normalizedType === "COPY" || normalizedType === "MOVE") && !this.isValidCopyMove(target)) {
+      console.warn(`[ActivityNarrator] REJECTED ${normalizedType}: "${target?.slice(0, 50)}" is not a valid copy/move format`);
       return null;
     }
 
-    if (type === "WEB_FETCH" && !target?.startsWith("http")) {
+    if (normalizedType === "WEB_FETCH" && !target?.startsWith("http")) {
       console.warn(`[ActivityNarrator] REJECTED WEB_FETCH: "${target?.slice(0, 50)}" is not a valid URL`);
       return null;
     }
 
-    if (type === "GREP" && !target?.includes(" ")) {
+    if (normalizedType === "GREP" && !target?.includes(" ")) {
       // GREP should have at least a pattern and path separated by space
       console.warn(`[ActivityNarrator] REJECTED GREP: "${target?.slice(0, 50)}" should have pattern and path`);
       return null;
     }
 
-    if (type === "GLOB" && !/[*?[\]{}]/.test(target || "") && !this.isValidFilePath(target)) {
+    if (normalizedType === "GLOB" && !/[*?[\]{}]/.test(target || "") && !this.isValidFilePath(target)) {
       // GLOB should have glob patterns or be a valid path
       console.warn(`[ActivityNarrator] REJECTED GLOB: "${target?.slice(0, 50)}" is not a valid glob pattern`);
       return null;
@@ -1435,7 +1437,7 @@ class ActivityNarrator extends EventEmitter {
 
     const action = {
       id: `act_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-      type,
+      type: normalizedType,
       target,
       detail,
       status,

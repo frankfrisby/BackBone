@@ -681,7 +681,7 @@ class ThinkingEngine extends EventEmitter {
     try {
       // 1. Build context
       const context = buildContext();
-      tracker.action("Read", "profile, beliefs, projects, goals, backlog");
+      tracker.action("READ", "data/profile.json, data/core-beliefs.json, projects/, data/goals.json, data/backlog.json");
 
       // 2. Send to Claude for analysis
       tracker.setState("analyzing", "Processing patterns...");

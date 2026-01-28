@@ -417,25 +417,56 @@ class IdleProcessor extends EventEmitter {
         this.streamBuffer += text;
         this.emit("stream", text);
 
-        // Update status with preview of what Claude is saying
-        if (text.trim() && text.length > 20) {
-          const preview = text.trim().slice(0, 80).replace(/\n/g, " ");
-          tracker.setState("working", preview);
-        }
+        // Show ALL output from Claude - every meaningful line
+        const lines = text.split('\n');
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || trimmed.length < 3) continue;
 
-        // Track actions in the stream - detect Claude Code tool usage
-        if (text.includes("Read(")) {
-          this.qualityActionsThisSession++;
-          const match = text.match(/Read\(([^)]+)\)/);
-          tracker.action("READ", match ? match[1] : text.slice(0, 100));
-        } else if (text.includes("WebSearch(") || text.includes("web_search")) {
-          this.qualityActionsThisSession++;
-          const match = text.match(/WebSearch\(([^)]+)\)/);
-          tracker.action("WEB_SEARCH", match ? match[1] : "searching...");
-        } else if (text.includes("Update(") || text.includes("Write(")) {
-          this.qualityActionsThisSession++;
-          const match = text.match(/(Update|Write)\(([^)]+)\)/);
-          tracker.action("UPDATE", match ? match[2] : text.slice(0, 100));
+          // Detect tool calls with bullet points: ● Read(file), ◆ Bash(cmd), etc.
+          const bulletToolMatch = trimmed.match(/^[●◆○◇▣⚡]\s*(\w+)\((.+)\)$/);
+          if (bulletToolMatch) {
+            const [, toolName, toolArg] = bulletToolMatch;
+            // Use log() directly to bypass strict validation
+            tracker.log(toolName, toolArg.slice(0, 100), "working");
+            this.qualityActionsThisSession++;
+            continue;
+          }
+
+          // Detect inline tool calls: Read(path), WebSearch(query), etc.
+          const toolPattern = /\b(Read|Write|Update|Edit|Bash|WebSearch|WebFetch|Grep|Glob|Delete|Mkdir|Task|MCP)\(([^)]+)\)/gi;
+          let toolMatch;
+          while ((toolMatch = toolPattern.exec(trimmed)) !== null) {
+            const [, toolName, toolArg] = toolMatch;
+            tracker.log(toolName, toolArg.slice(0, 100), "working");
+            this.qualityActionsThisSession++;
+          }
+
+          // Detect thinking/status indicators
+          if (trimmed.startsWith('Thinking:') || trimmed.startsWith('Searching:') || trimmed.startsWith('Reading:')) {
+            tracker.setState("working", trimmed.slice(0, 100));
+            continue;
+          }
+
+          // Detect markdown headers as status updates
+          if (trimmed.startsWith('##') || trimmed.startsWith('**')) {
+            const cleanText = trimmed.replace(/[#*]/g, '').trim();
+            if (cleanText.length > 5) {
+              tracker.setState("working", cleanText.slice(0, 80));
+            }
+            continue;
+          }
+
+          // Log significant output lines as observations
+          if (trimmed.length > 30 && !trimmed.startsWith('-') && !trimmed.startsWith('*')) {
+            // This is meaningful output - show it
+            tracker.log("output", trimmed.slice(0, 120), "observation");
+          }
+
+          // Always update status with latest non-trivial line
+          if (trimmed.length > 15) {
+            tracker.setState("working", trimmed.slice(0, 80));
+          }
         }
       });
 

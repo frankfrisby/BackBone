@@ -384,11 +384,15 @@ const CLIOutputStream = memo(({ text, isStreaming, scrollOffset = 0, goal = "", 
     const stateMatch = trimmed.match(/^(Thinking|Reading|Searching|Analyzing|Processing|Writing|Updating|Planning|Building):\s*(.*)$/i);
     if (stateMatch) {
       const [, action, detail] = stateMatch;
+      const isThinkingWord = action.toLowerCase() === "thinking";
       return e(
         Box,
         { key: idx, flexDirection: "row" },
         e(Text, { color: THEME.warning }, "◐ "),
-        e(Text, { color: THEME.warning, bold: true }, action),
+        // Use flashlight animation for "Thinking", regular text for others
+        isThinkingWord
+          ? e(FlashlightText, { text: action, baseColor: THEME.warning, bold: true, spotlightWidth: 3 })
+          : e(Text, { color: THEME.warning, bold: true }, action),
         detail && e(Text, { color: THEME.secondary }, ` ${detail.slice(0, 50)}`)
       );
     }
@@ -425,6 +429,16 @@ const CLIOutputStream = memo(({ text, isStreaming, scrollOffset = 0, goal = "", 
         Box,
         { key: idx },
         e(Text, { color: THEME.primary, bold: true }, trimmed.replace(/[#*]/g, "").trim().slice(0, 65))
+      );
+    }
+
+    // Standalone "thinking" word (no colon) - orange with flashlight
+    if (trimmed.toLowerCase() === "thinking" || trimmed.toLowerCase() === "thinking...") {
+      return e(
+        Box,
+        { key: idx, flexDirection: "row" },
+        e(Text, { color: THEME.warning }, "◐ "),
+        e(FlashlightText, { text: trimmed, baseColor: THEME.warning, bold: true, spotlightWidth: 3 })
       );
     }
 

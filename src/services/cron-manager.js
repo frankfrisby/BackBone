@@ -53,6 +53,16 @@ export const DAYS_OF_WEEK = {
  */
 const DEFAULT_JOBS = [
   {
+    id: "ticker-sweep",
+    name: "Full Ticker Sweep",
+    shortName: "Sweep",
+    description: "Full scan of 800+ tickers for daily analysis",
+    frequency: JOB_FREQUENCY.DAILY,
+    time: "05:30",
+    enabled: true,
+    handler: "runTickerSweep"
+  },
+  {
     id: "morning-briefing",
     name: "Morning Briefing",
     shortName: "Briefing",

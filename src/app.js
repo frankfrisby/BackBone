@@ -198,29 +198,23 @@ import { getThinkingEngine } from "./services/thinking-engine.js";
 import { getIdleProcessor } from "./services/idle-processor.js";
 import { getClaudeCodeMonitor } from "./services/claude-code-monitor.js";
 import { getStartupEngine } from "./services/startup-engine.js";
+import { getClaudeEngine } from "./services/claude-engine.js";
 import { startRealtimeSync, stopRealtimeSync, isAuthenticated as isFirestoreAuthenticated, pushTickers } from "./services/firestore-sync.js";
-
-// Initialize idle processor immediately on module load
-console.log("[App] Initializing idle processor on module load...");
-const _idleProcessor = getIdleProcessor();
-console.log("[App] Idle processor initialized:", !!_idleProcessor);
 
 // Initialize Claude Code connection monitor
 console.log("[App] Initializing Claude Code monitor...");
 const _claudeCodeMonitor = getClaudeCodeMonitor();
 _claudeCodeMonitor.start();
-console.log("[App] Claude Code monitor started");
 
-// Initialize startup engine - runs automatic work on startup
-console.log("[App] Initializing startup engine...");
-const _startupEngine = getStartupEngine();
-// Start the startup engine after a short delay to let UI render
+// Initialize and start Claude Engine - this is the main autonomous worker
+// It reads memory/current-work.md to pick up where it left off
+console.log("[App] Starting Claude Engine...");
+const _claudeEngine = getClaudeEngine();
+// Start after 3 seconds to let UI render
 setTimeout(() => {
-  console.log("[App] Running startup engine...");
-  _startupEngine.run().catch(err => {
-    console.error("[App] Startup engine error:", err.message);
-  });
-}, 5000); // Wait 5 seconds for UI to settle
+  console.log("[App] Claude Engine starting work...");
+  _claudeEngine.start();
+}, 3000);
 
 // Life Management Engine imports
 import { getLifeManagementEngine, LIFE_AREAS } from "./services/life-management-engine.js";
@@ -471,6 +465,10 @@ const App = ({ updateConsoleTitle }) => {
         } catch (e) {
           console.error("[Cron] LinkedIn sync failed:", e.message);
         }
+      });
+      cronManager.on("run:runTickerSweep", () => {
+        console.log("[Cron] 5:30am ticker sweep triggered");
+        triggerFullScan().catch(() => {});
       });
       cronManager.on("run:runStockAnalysis", () => {
         triggerFullScan().catch(() => {});
@@ -2268,67 +2266,65 @@ const App = ({ updateConsoleTitle }) => {
     console.log("[App] IDLE PROCESSOR INIT - autonomousEngine exists:", !!autonomousEngine);
     console.log("========================================");
 
-    if (!autonomousEngine) {
-      console.log("[App] No autonomousEngine, skipping idle processor init");
-      return () => {};
-    }
+    // Connect Claude Engine to UI
+    console.log("[App] Connecting Claude Engine to UI...");
+    const claudeEngine = getClaudeEngine();
 
-    console.log("[App] Starting idle processor...");
-    const idleProcessor = getIdleProcessor();
-    idleProcessorRef.current = idleProcessor;
-
-    // Start the idle processor
-    idleProcessor.start();
-    console.log("[App] Idle processor started");
-
-    // Listen for work events and update UI
-    const onWorkStarted = (workItem) => {
-      const title = workItem.item?.title || workItem.topic || "backlog";
-      console.log(`[IdleProcessor] Working on: ${workItem.type} - ${title}`);
-      setActionStreamingTitle(`Background: ${workItem.type}`);
-      setActionStreamingText(`Starting work on: ${title}\n`);
-      // Enable CLI streaming display so activity panel shows the output
+    const onStarted = () => {
+      setActionStreamingTitle("Claude Engine");
+      setActionStreamingText("Claude is working...\n");
       setCliStreaming(true);
     };
 
-    const onStream = (text) => {
-      // Log to console and update streaming display
-      if (text.trim()) {
-        process.stdout.write(text);
-        // Ensure CLI streaming is on so output is visible
+    const onStatus = (statusText) => {
+      // Show status updates in the ENGINE panel
+      if (statusText) {
         setCliStreaming(true);
-        // Update action streaming with recent output (last 2000 chars for better visibility)
         setActionStreamingText((prev) => {
-          const combined = prev + text;
-          return combined.slice(-2000);
+          const lines = prev.split("\n").slice(-20); // Keep last 20 lines
+          lines.push(statusText);
+          return lines.join("\n");
         });
       }
     };
 
-    const onWorkComplete = (result) => {
-      console.log(`\n[IdleProcessor] Completed: ${result.success ? "success" : "failed"} (${result.actionsCount} actions)`);
-      // Keep streaming text visible briefly, then clear for next work session
-      setActionStreamingTitle(result.success ? "Background work done" : "Background work failed");
+    const onComplete = (result) => {
+      console.log(`[ClaudeEngine] Completed: ${result.success ? "success" : "failed"}`);
+      if (result.success) {
+        setActionStreamingTitle("Work completed");
+        setActionStreamingText((prev) => prev + "\n✓ Work done. Next run in 2 minutes.\n\nCheck memory/current-work.md for details.");
+      } else {
+        setActionStreamingTitle("Work failed");
+        setActionStreamingText((prev) => prev + `\n✗ Failed with code ${result.code}\n`);
+      }
       setCliStreaming(false);
-
-      // Clear old streaming text after 30 seconds so ENGINE shows fresh state
-      setTimeout(() => {
-        setActionStreamingText("");
-        setActionStreamingTitle("");
-      }, 30_000);
     };
 
-    idleProcessor.on("work-started", onWorkStarted);
-    idleProcessor.on("stream", onStream);
-    idleProcessor.on("work-complete", onWorkComplete);
+    const onError = (error) => {
+      console.error("[ClaudeEngine] Error:", error);
+      setActionStreamingText((prev) => prev + `\n[Error] ${error.error}\n`);
+      setCliStreaming(false);
+    };
+
+    const onStopped = () => {
+      setCliStreaming(false);
+      setActionStreamingText("");
+    };
+
+    claudeEngine.on("started", onStarted);
+    claudeEngine.on("status", onStatus);
+    claudeEngine.on("complete", onComplete);
+    claudeEngine.on("error", onError);
+    claudeEngine.on("stopped", onStopped);
 
     return () => {
-      idleProcessor.off("work-started", onWorkStarted);
-      idleProcessor.off("stream", onStream);
-      idleProcessor.off("work-complete", onWorkComplete);
-      idleProcessor.stop();
+      claudeEngine.off("started", onStarted);
+      claudeEngine.off("status", onStatus);
+      claudeEngine.off("complete", onComplete);
+      claudeEngine.off("error", onError);
+      claudeEngine.off("stopped", onStopped);
     };
-  }, [autonomousEngine]);
+  }, []);
 
   // Claude Code connection monitor - shows alert when disconnected
   useEffect(() => {
@@ -5707,100 +5703,61 @@ Folder: ${result.action.id}`,
         return;
       }
 
-      // /idle - Idle processor control
-      if (resolved === "/idle" || resolved.startsWith("/idle ")) {
-        const idleProcessor = idleProcessorRef.current || getIdleProcessor();
-        const status = idleProcessor.getStatus();
+      // /engine - Claude Engine control (replaces /idle)
+      if (resolved === "/engine" || resolved.startsWith("/engine ") || resolved === "/idle" || resolved.startsWith("/idle ")) {
+        const claudeEngine = getClaudeEngine();
+        const status = claudeEngine.getStatus();
 
-        if (resolved === "/idle on") {
-          idleProcessor.setEnabled(true);
-          idleProcessor.start();
-          setMessages((prev) => [
-            ...prev,
-            { role: "assistant", content: "Idle processor **enabled**. Will work on backlog when system is idle.", timestamp: new Date() }
-          ]);
-          setLastAction("Idle processor enabled");
-          return;
-        }
-
-        if (resolved === "/idle off") {
-          idleProcessor.setEnabled(false);
-          idleProcessor.stop();
-          setMessages((prev) => [
-            ...prev,
-            { role: "assistant", content: "Idle processor **disabled**. Background work paused.", timestamp: new Date() }
-          ]);
-          setLastAction("Idle processor disabled");
-          return;
-        }
-
-        if (resolved === "/idle work" || resolved === "/idle force") {
-          if (status.isWorking) {
+        if (resolved === "/engine start" || resolved === "/idle on" || resolved === "/idle work" || resolved === "/idle force") {
+          if (status.isRunning) {
             setMessages((prev) => [
               ...prev,
-              { role: "assistant", content: `Already working on: **${status.currentWorkItem?.title || "backlog item"}**`, timestamp: new Date() }
+              { role: "assistant", content: "Claude Engine is already running. Output is streaming to ENGINE panel.", timestamp: new Date() }
             ]);
-            setLastAction("Already working");
             return;
           }
 
           setMessages((prev) => [
             ...prev,
-            { role: "assistant", content: "Starting background work now... (check console for output)", timestamp: new Date() }
+            { role: "assistant", content: "Starting Claude Engine... Watch the ENGINE panel for output.", timestamp: new Date() }
           ]);
 
-          // Run forceWork and report result
-          idleProcessor.forceWork().then((result) => {
-            if (result.success) {
+          claudeEngine.start().then((result) => {
+            if (!result.success) {
               setMessages((prev) => [
                 ...prev,
-                { role: "assistant", content: `Working on: **${result.workItem?.type}** - ${result.workItem?.item?.title || result.workItem?.topic || "backlog"}`, timestamp: new Date() }
-              ]);
-            } else {
-              setMessages((prev) => [
-                ...prev,
-                { role: "assistant", content: `Could not start work: ${result.reason}`, timestamp: new Date() }
+                { role: "assistant", content: `Could not start: ${result.reason}`, timestamp: new Date() }
               ]);
             }
           });
+          setLastAction("Started Claude Engine");
+          return;
+        }
 
-          setLastAction("Forced idle work");
+        if (resolved === "/engine stop" || resolved === "/idle off") {
+          claudeEngine.stop();
+          setMessages((prev) => [
+            ...prev,
+            { role: "assistant", content: "Claude Engine **stopped**.", timestamp: new Date() }
+          ]);
+          setLastAction("Stopped Claude Engine");
           return;
         }
 
         // Default: show status
-        const idleSeconds = Math.round(status.idleTimeMs / 1000);
-        const idleMinutes = Math.round(idleSeconds / 60);
-        let content = `## Idle Processor Status\n\n`;
-        content += `**Status:** ${status.isEnabled ? (status.isWorking ? "🔄 Working" : "✓ Enabled") : "○ Disabled"}\n`;
-        content += `**Idle time:** ${idleMinutes > 0 ? `${idleMinutes}m` : `${idleSeconds}s`}\n`;
+        let content = `## Claude Engine Status\n\n`;
+        content += `**Status:** ${status.isRunning ? "🔄 Running" : "○ Stopped"}\n`;
+        content += `**Output length:** ${status.outputLength} chars\n`;
 
-        if (status.isWorking && status.currentWorkItem) {
-          content += `\n### Currently Working On\n`;
-          content += `- **Type:** ${status.currentWorkItem.type}\n`;
-          content += `- **Item:** ${status.currentWorkItem.title}\n`;
+        if (status.lastOutput) {
+          content += `\n### Recent Output\n\`\`\`\n${status.lastOutput.slice(-300)}\n\`\`\`\n`;
         }
-
-        content += `\n### Statistics\n`;
-        content += `- Total work sessions: ${status.stats.totalSessions}\n`;
-        content += `- Items processed: ${status.stats.totalItemsProcessed}\n`;
-
-        if (status.stats.recentWork.length > 0) {
-          content += `\n### Recent Work\n`;
-          for (const work of status.stats.recentWork.slice(0, 5)) {
-            const time = new Date(work.timestamp).toLocaleTimeString();
-            const icon = work.success ? "✓" : "✗";
-            content += `- ${icon} ${time} - ${work.workType}: ${work.itemTitle?.slice(0, 40) || "item"}\n`;
-          }
-        }
-
-        content += `\n---\n**Commands:** \`/idle on\` · \`/idle off\` · \`/idle work\``;
 
         setMessages((prev) => [
           ...prev,
           { role: "assistant", content, timestamp: new Date() }
         ]);
-        setLastAction("Viewed idle processor status");
+        setLastAction("Viewed Claude Engine status");
         return;
       }
 
@@ -6704,6 +6661,81 @@ Folder: ${result.action.id}`,
           { role: "assistant", content, timestamp: new Date() }
         ]);
         setLastAction("LinkedIn history");
+        return;
+      }
+
+      // /linkedin refresh - Force a fresh scrape with improved scraper
+      if (resolved === "/linkedin refresh") {
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "assistant",
+            content: "Refreshing LinkedIn profile...\nOpening browser to capture fresh data with full-page screenshot.\nThis will scroll through your entire profile to capture all sections.",
+            timestamp: new Date()
+          }
+        ]);
+        setLastAction("Refreshing LinkedIn...");
+
+        try {
+          // Force a fresh scrape (not headless so user can verify login)
+          const result = await extractLinkedInProfile({ headless: false });
+
+          if (result.success) {
+            // Update state
+            const linkedInData = {
+              ...result.profile,
+              profileUrl: result.profileUrl,
+              connected: true,
+              verified: true
+            };
+            setLinkedInProfile(linkedInData);
+            updateFromLinkedIn(linkedInData);
+
+            // Generate updated linkedin.md
+            await generateLinkedInMarkdown(result);
+
+            // Capture snapshot
+            const snapResult = captureLinkedInSnapshot();
+
+            // Build summary showing what was captured
+            const p = result.profile || {};
+            const gpt = result.gpt4oAnalysis || {};
+            const exp = gpt.experience || [];
+            const edu = gpt.education || [];
+            const skills = gpt.skills || p.skills || [];
+
+            let summary = `LinkedIn profile refreshed!\n\n`;
+            summary += `URL: ${result.profileUrl}\n`;
+            summary += `Name: ${p.name || gpt.name || "—"}\n`;
+            summary += `Headline: ${p.headline || gpt.headline || "—"}\n`;
+            summary += `Location: ${p.location || gpt.location || "—"}\n`;
+            summary += `About: ${(p.about || gpt.about || "—").substring(0, 100)}${(p.about || gpt.about || "").length > 100 ? "..." : ""}\n`;
+            summary += `\nExperience: ${exp.length} position(s) captured\n`;
+            summary += `Education: ${edu.length} school(s) captured\n`;
+            summary += `Skills: ${skills.length} skill(s) captured\n`;
+            summary += `\nScreenshot: ${result.screenshotPath}\n`;
+            summary += snapResult.success ? `\n${snapResult.changes?.length || 0} change(s) detected since last capture.` : "";
+            summary += `\n\nView full data with /linkedin data`;
+
+            setMessages((prev) => [
+              ...prev,
+              { role: "assistant", content: summary, timestamp: new Date() }
+            ]);
+            setLastAction("LinkedIn refreshed");
+          } else {
+            setMessages((prev) => [
+              ...prev,
+              { role: "assistant", content: `LinkedIn refresh failed: ${result.error}`, timestamp: new Date() }
+            ]);
+            setLastAction("LinkedIn refresh failed");
+          }
+        } catch (error) {
+          setMessages((prev) => [
+            ...prev,
+            { role: "assistant", content: `Error: ${error.message}`, timestamp: new Date() }
+          ]);
+          setLastAction("LinkedIn error");
+        }
         return;
       }
 

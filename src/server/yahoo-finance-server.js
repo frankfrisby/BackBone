@@ -19,12 +19,30 @@ let tickerCache = {
   lastUpdate: null,
   updating: false,
   fullScanRunning: false,
-  lastFullScan: null
+  lastFullScan: null,
+  scanProgress: 0,
+  scanTotal: 0
 };
 
 const YAHOO_FINANCE_BASE = "https://query1.finance.yahoo.com/v8/finance";
 const YAHOO_CHART_BASE = "https://query1.finance.yahoo.com/v8/finance/chart";
 const REFRESH_INTERVAL = 180000; // 3 minutes
+
+/**
+ * Check if a timestamp falls within the current "ticker day" (4 AM to 4 AM).
+ * A ticker day starts at 4:00 AM and ends at 3:59 AM the next day.
+ */
+const isTickerToday = (timestamp) => {
+  if (!timestamp) return false;
+  const now = new Date();
+  const ts = new Date(timestamp);
+  const tickerDayStart = new Date(now);
+  tickerDayStart.setHours(4, 0, 0, 0);
+  if (now < tickerDayStart) {
+    tickerDayStart.setDate(tickerDayStart.getDate() - 1);
+  }
+  return ts >= tickerDayStart;
+};
 
 // Import ticker lists from shared data
 // CORE_TICKERS (150) = regular refresh, TICKER_UNIVERSE (800+) = full scan
@@ -104,7 +122,7 @@ const fetchQuoteFromAlpaca = async (symbol) => {
   if (!config) return null;
 
   try {
-    const url = `https://data.alpaca.markets/v2/stocks/${symbol}/bars?timeframe=1Day&limit=22&feed=iex`;
+    const url = `https://data.alpaca.markets/v2/stocks/${symbol}/bars?timeframe=1Day&limit=65&feed=iex`;
     const response = await fetch(url, {
       headers: {
         "APCA-API-KEY-ID": config.key,
@@ -155,7 +173,7 @@ const fetchQuoteFromAlpaca = async (symbol) => {
 
 const fetchQuoteFromChart = async (symbol) => {
   try {
-    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=1mo`;
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=3mo`;
 
     const response = await fetch(url, {
       headers: {
@@ -202,6 +220,9 @@ const fetchQuoteFromChart = async (symbol) => {
       marketCap: meta.marketCap,
       fiftyTwoWeekHigh: meta.fiftyTwoWeekHigh,
       fiftyTwoWeekLow: meta.fiftyTwoWeekLow,
+      exchange: meta.exchangeName || meta.fullExchangeName || null,
+      currency: meta.currency || null,
+      instrumentType: meta.instrumentType || null,
       // Include historical for MACD
       historicalCloses: closes,
       historicalVolumes: volumes
@@ -239,7 +260,7 @@ const fetchQuotes = async (symbols) => {
  */
 const fetchHistorical = async (symbol) => {
   try {
-    const url = `${YAHOO_CHART_BASE}/${symbol}?range=1mo&interval=1d`;
+    const url = `${YAHOO_CHART_BASE}/${symbol}?range=3mo&interval=1d`;
 
     const response = await fetch(url, {
       headers: {
@@ -455,6 +476,51 @@ const calculateVolumeSigmaScore = (sigma, priceDirection = 0) => {
   return Math.max(-1.5, Math.min(1.5, score));
 };
 
+// Major US exchanges — reject OTC, pink sheets, foreign exchanges, etc.
+const ALLOWED_EXCHANGES = new Set([
+  "NYSE", "NMS", "NGM", "NCM", "NYQ", "NAS", "NASDAQ", "NYMEX", "NYSEARCA", "AMEX",
+  "BATS", "ARCA", "PCX", "BTS", "CBO", "NYSEArca"
+]);
+
+// OTC / pink sheet / foreign exchange keywords to reject
+const REJECTED_EXCHANGES = ["OTC", "PINK", "GREY", "OTHER OTC", "OTCBB", "TSXV", "TSX", "LSE", "HKSE"];
+
+const isMajorExchange = (exchange) => {
+  if (!exchange) return true; // If unknown (e.g. Alpaca fallback), allow through
+  const upper = exchange.toUpperCase();
+  // Reject known bad exchanges
+  if (REJECTED_EXCHANGES.some(r => upper.includes(r))) return false;
+  return ALLOWED_EXCHANGES.has(upper) ||
+    upper.includes("NYSE") ||
+    upper.includes("NASDAQ") ||
+    upper.includes("NMS") ||
+    upper.includes("AMEX") ||
+    upper.includes("BATS") ||
+    upper.includes("ARCA");
+};
+
+/**
+ * Check if a ticker is actively trading on a major US exchange.
+ * Rejects: delisted, OTC, penny stocks under $0.50, no volume, non-USD, non-equity.
+ */
+const isActiveTicker = (analysis) => {
+  // Must be on a major exchange
+  if (!isMajorExchange(analysis.exchange)) return { valid: false, reason: `exchange: ${analysis.exchange}` };
+  // Must be USD
+  if (analysis.currency && analysis.currency !== "USD") return { valid: false, reason: `currency: ${analysis.currency}` };
+  // Must be equity (not warrant, option, etc.)
+  if (analysis.instrumentType && analysis.instrumentType !== "EQUITY" && analysis.instrumentType !== "ETF") {
+    return { valid: false, reason: `type: ${analysis.instrumentType}` };
+  }
+  // Must have a real price (not delisted penny stock)
+  if (!analysis.price || analysis.price < 0.50) return { valid: false, reason: `price: $${analysis.price || 0}` };
+  // Must have some trading volume
+  if (analysis.avgVolume !== null && analysis.avgVolume !== undefined && analysis.avgVolume < 1000) {
+    return { valid: false, reason: `avg volume: ${analysis.avgVolume}` };
+  }
+  return { valid: true };
+};
+
 /**
  * Build full ticker analysis with comprehensive scoring
  */
@@ -478,6 +544,14 @@ const buildTickerAnalysis = async (symbol, quote) => {
     volumeSigma = Math.round(volumeScoreData.ratio * 100) / 100;
   }
 
+  // === DATA QUALITY CHECK ===
+  // Tickers with missing critical data (no change%, no volume, insufficient history)
+  // get penalized heavily — they're likely dead, delisted, or have stale data
+  const hasChangePercent = quote.regularMarketChangePercent !== null && quote.regularMarketChangePercent !== undefined;
+  const hasVolume = quote.averageDailyVolume10Day !== null && quote.averageDailyVolume10Day !== undefined && quote.averageDailyVolume10Day > 0;
+  const hasHistory = closes.length >= 5;
+  const isMissingData = !hasChangePercent || !hasVolume || !hasHistory;
+
   // === COMPREHENSIVE SCORING (matching score-engine.js) ===
 
   // 1. Technical Score (0-10) from RSI
@@ -499,10 +573,15 @@ const buildTickerAnalysis = async (symbol, quote) => {
   const baseScore = (technicalScore + 5.5 + psychologicalScore) / 2;
 
   // Apply adjustments
-  const rawScore = baseScore +
+  let rawScore = baseScore +
     macdScore +
     volumeScore +
     (pricePositionScore * 1.25);
+
+  // Penalize tickers with missing data — they shouldn't rank high
+  if (isMissingData) {
+    rawScore = Math.min(rawScore, 2.0);
+  }
 
   // Clamp to 0-10 with 1 decimal
   const score = Math.round(Math.max(0, Math.min(10, rawScore)) * 10) / 10;
@@ -518,11 +597,18 @@ const buildTickerAnalysis = async (symbol, quote) => {
     marketCap: quote.marketCap,
     high: quote.regularMarketDayHigh,
     low: quote.regularMarketDayLow,
+    exchange: quote.exchange || null,
+    currency: quote.currency || null,
+    instrumentType: quote.instrumentType || null,
     macd,
+    macdValue: macd?.macd ?? null,
+    macdTrend: macd?.trend || "neutral",
     volumeScore: volumeScoreData,
     volumeSigma,
     rsi,
-    score
+    score,
+    scoredAt: new Date().toISOString(),
+    historyDays: closes.length
   };
 };
 
@@ -560,6 +646,12 @@ const updateTickers = async () => {
         batch.map(quote => buildTickerAnalysis(quote.symbol, quote))
       );
       for (const analysis of batchResults) {
+        const check = isActiveTicker(analysis);
+        if (!check.valid) {
+          console.log(`[Skip] ${analysis.symbol} — ${check.reason}`);
+          existingMap.delete(analysis.symbol);
+          continue;
+        }
         analysis.lastEvaluated = nowISO;
         existingMap.set(analysis.symbol, analysis);
       }
@@ -603,7 +695,11 @@ app.get("/api/tickers", (req, res) => {
     lastUpdate: tickerCache.lastUpdate,
     count: tickerCache.tickers.length,
     fullScanRunning: tickerCache.fullScanRunning,
-    lastFullScan: tickerCache.lastFullScan
+    lastFullScan: tickerCache.lastFullScan,
+    scanProgress: tickerCache.scanProgress,
+    scanTotal: tickerCache.scanTotal,
+    evaluatedToday: tickerCache.tickers.filter(t => isTickerToday(t.lastEvaluated)).length,
+    universeSize: TICKER_UNIVERSE.length
   });
 });
 
@@ -651,12 +747,24 @@ const loadCache = () => {
     if (fs.existsSync(cachePath)) {
       const data = JSON.parse(fs.readFileSync(cachePath, "utf-8"));
       // Restore data but reset runtime flags (may be stale from killed process)
-      tickerCache.tickers = data.tickers || [];
+      const rawTickers = data.tickers || [];
+      // Purge orphan tickers, non-major exchanges, delisted, penny stocks
+      const universeSet = new Set(TICKER_UNIVERSE);
+      tickerCache.tickers = rawTickers.filter(t => {
+        if (!universeSet.has(t.symbol)) return false;
+        const check = isActiveTicker(t);
+        if (!check.valid) {
+          console.log(`[Cache purge] ${t.symbol} — ${check.reason}`);
+          return false;
+        }
+        return true;
+      });
+      const purged = rawTickers.length - tickerCache.tickers.length;
       tickerCache.lastUpdate = data.lastUpdate || null;
       tickerCache.lastFullScan = data.lastFullScan || null;
       tickerCache.updating = false;
       tickerCache.fullScanRunning = false;
-      console.log(`Loaded ${tickerCache.tickers.length} cached tickers from ${tickerCache.lastUpdate} (lastFullScan: ${tickerCache.lastFullScan || "never"})`);
+      console.log(`Loaded ${tickerCache.tickers.length} cached tickers from ${tickerCache.lastUpdate} (lastFullScan: ${tickerCache.lastFullScan || "never"})${purged > 0 ? ` — purged ${purged} orphan tickers` : ""}`);
     }
   } catch (error) {
     console.log("No cache found, starting fresh");
@@ -674,6 +782,7 @@ const runFullScan = async () => {
   }
 
   tickerCache.fullScanRunning = true;
+  tickerCache.scanProgress = 0;
   const totalCount = TICKER_UNIVERSE.length;
   console.log(`[${new Date().toISOString()}] FULL SCAN started — ${totalCount} real tickers...`);
 
@@ -684,20 +793,23 @@ const runFullScan = async () => {
       existingMap.set(t.symbol, t);
     }
 
-    // Figure out which tickers need evaluation (not evaluated today)
-    const today = new Date().toDateString();
+    // Figure out which tickers need evaluation (not evaluated in current ticker day, 4 AM to 4 AM)
     const needsEval = TICKER_UNIVERSE.filter(sym => {
       const existing = existingMap.get(sym);
       if (!existing || !existing.lastEvaluated) return true;
-      return new Date(existing.lastEvaluated).toDateString() !== today;
+      return !isTickerToday(existing.lastEvaluated);
     });
 
     console.log(`[${new Date().toISOString()}] ${needsEval.length} tickers need evaluation (${totalCount - needsEval.length} already done today)`);
+
+    tickerCache.scanTotal = needsEval.length;
 
     if (needsEval.length === 0) {
       console.log("All tickers already evaluated today — full scan complete");
       tickerCache.lastFullScan = new Date().toISOString();
       tickerCache.fullScanRunning = false;
+      tickerCache.scanProgress = 0;
+      tickerCache.scanTotal = 0;
       return;
     }
 
@@ -711,9 +823,18 @@ const runFullScan = async () => {
         if (!quote) continue;
         try {
           const analysis = await buildTickerAnalysis(quote.symbol, quote);
+          const check = isActiveTicker(analysis);
+          if (!check.valid) {
+            console.log(`[Skip] ${analysis.symbol} — ${check.reason}`);
+            existingMap.delete(analysis.symbol);
+            evaluated++;
+            tickerCache.scanProgress = evaluated;
+            continue;
+          }
           analysis.lastEvaluated = new Date().toISOString();
           existingMap.set(analysis.symbol, analysis);
           evaluated++;
+          tickerCache.scanProgress = evaluated;
         } catch (err) {
           console.error(`Error analyzing ${quote.symbol}:`, err.message);
         }
@@ -749,7 +870,67 @@ const runFullScan = async () => {
     console.error("Full scan error:", error.message);
   } finally {
     tickerCache.fullScanRunning = false;
+    tickerCache.scanProgress = 0;
+    tickerCache.scanTotal = 0;
   }
+};
+
+/**
+ * Schedule a function to run at a specific hour (24h format)
+ * Returns the timeout ID
+ */
+const scheduleAt = (hour, minute, fn, label = "task") => {
+  const now = new Date();
+  const next = new Date(now);
+  next.setHours(hour, minute, 0, 0);
+
+  // If time already passed today, schedule for tomorrow
+  if (next <= now) {
+    next.setDate(next.getDate() + 1);
+  }
+
+  const msUntil = next.getTime() - now.getTime();
+  const hoursUntil = (msUntil / 1000 / 60 / 60).toFixed(1);
+  console.log(`[Scheduler] ${label} scheduled for ${next.toLocaleString()} (in ${hoursUntil}h)`);
+
+  return setTimeout(() => {
+    console.log(`[Scheduler] Running ${label}...`);
+    fn();
+    // Reschedule for next day
+    scheduleAt(hour, minute, fn, label);
+  }, msUntil);
+};
+
+/**
+ * Reset ticker sweep at 4am
+ * Clears the "evaluated today" status so count goes to 0/772
+ */
+const reset4amSweep = () => {
+  console.log(`[${new Date().toISOString()}] 4AM RESET — Clearing lastFullScan to reset sweep counter`);
+
+  // Clear the lastFullScan timestamp so UI shows 0/772
+  tickerCache.lastFullScan = null;
+
+  // Clear all lastEvaluated timestamps so evaluatedToday becomes 0
+  for (const ticker of tickerCache.tickers) {
+    // Keep the ticker data but mark as not evaluated today
+    // The isTickerToday check will now return false for all
+    // We don't clear lastEvaluated entirely, just let isTickerToday handle the day boundary
+  }
+
+  // Persist the reset state
+  const dataDir = path.join(process.cwd(), "data");
+  if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(dataDir, "tickers-cache.json"),
+    JSON.stringify(tickerCache, null, 2)
+  );
+
+  console.log(`[${new Date().toISOString()}] 4AM RESET complete — sweep counter now 0/${TICKER_UNIVERSE.length}`);
+
+  // Optionally start the full scan automatically at 4am
+  // Uncomment if you want auto-scan at 4am:
+  // runFullScan();
 };
 
 // Start server
@@ -767,9 +948,17 @@ const startServer = () => {
     console.log(`  GET  /health - Health check`);
   });
 
-  // Check if full scan was done today
-  const lastScanToday = tickerCache.lastFullScan &&
-    new Date(tickerCache.lastFullScan).toDateString() === new Date().toDateString();
+  // Schedule 4am reset of ticker sweep counter
+  scheduleAt(4, 0, reset4amSweep, "4AM ticker sweep reset");
+
+  // Schedule 5:30am full ticker sweep
+  scheduleAt(5, 30, () => {
+    console.log(`[${new Date().toISOString()}] 5:30AM scheduled full sweep starting...`);
+    runFullScan();
+  }, "5:30AM full ticker sweep");
+
+  // Check if full scan was done in current ticker day (4 AM to 4 AM)
+  const lastScanToday = tickerCache.lastFullScan && isTickerToday(tickerCache.lastFullScan);
 
   if (lastScanToday) {
     console.log(`Full scan already done today (${tickerCache.lastFullScan}) — running core refresh only`);

@@ -116,6 +116,32 @@ export const scrapeLinkedInProfile = async (options = {}) => {
     const profileUrl = page.url();
     console.log(`Profile URL: ${profileUrl}`);
 
+    // SCROLL DOWN to load all sections (Experience, Education, Skills)
+    console.log("Scrolling to load full profile...");
+    for (let i = 0; i < 8; i++) {
+      await page.evaluate(() => window.scrollBy(0, 600));
+      await page.waitForTimeout(800);
+    }
+    // Scroll back up slowly to trigger any lazy-loaded content
+    for (let i = 0; i < 3; i++) {
+      await page.evaluate(() => window.scrollBy(0, -1000));
+      await page.waitForTimeout(500);
+    }
+
+    // Click all "See more" and "Show all" buttons to expand content
+    console.log("Expanding collapsed sections...");
+    const expandButtons = await page.$$('button:has-text("see more"), button:has-text("Show all"), button:has-text("more")');
+    for (const btn of expandButtons.slice(0, 10)) {
+      try {
+        await btn.click();
+        await page.waitForTimeout(500);
+      } catch {}
+    }
+
+    // Scroll back to top for screenshot
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await page.waitForTimeout(1000);
+
     // IMMEDIATELY save the URL
     const partialData = {
       profileUrl,
@@ -125,11 +151,11 @@ export const scrapeLinkedInProfile = async (options = {}) => {
     fs.writeFileSync(PROFILE_PATH, JSON.stringify(partialData, null, 2));
     console.log("URL saved to data/linkedin-profile.json");
 
-    // Take screenshot
+    // Take FULL PAGE screenshot to capture all sections
     const timestamp = Date.now();
     const screenshotPath = path.join(SCREENSHOTS_DIR, `linkedin-${timestamp}.png`);
-    await page.screenshot({ path: screenshotPath, fullPage: false });
-    console.log(`Screenshot saved: ${screenshotPath}`);
+    await page.screenshot({ path: screenshotPath, fullPage: true });
+    console.log(`Full-page screenshot saved: ${screenshotPath}`);
 
     // Extract profile data from page - updated selectors for 2026 LinkedIn
     console.log("Extracting profile data...");
@@ -293,19 +319,34 @@ export const analyzeWithGPT4o = async (screenshotPath) => {
             content: [
               {
                 type: "text",
-                text: `Extract this LinkedIn profile as JSON:
+                text: `Extract ALL visible information from this LinkedIn profile screenshot. Be thorough and extract every detail you can see.
+
+Return ONLY valid JSON in this format:
 {
-  "name": "Full name",
-  "headline": "Professional headline",
-  "location": "Location",
-  "currentRole": "Current job title",
-  "currentCompany": "Current company",
-  "isStudent": true/false,
-  "education": { "school": "", "degree": "", "field": "", "year": "" },
-  "skills": ["skill1", "skill2"],
-  "summary": "Brief professional summary"
+  "name": "Full name visible on profile",
+  "headline": "Professional headline/tagline under the name",
+  "location": "City, State/Country",
+  "connections": "Number of connections if visible",
+  "followers": "Number of followers if visible",
+  "about": "The full About/Summary section text if visible",
+  "currentRole": "Current job title from Experience section",
+  "currentCompany": "Current company name",
+  "experience": [
+    {"title": "Job Title", "company": "Company Name", "duration": "Date range", "description": "Role description if visible"}
+  ],
+  "education": [
+    {"school": "School name", "degree": "Degree type", "field": "Field of study", "years": "Date range"}
+  ],
+  "skills": ["skill1", "skill2", "skill3"],
+  "certifications": ["cert1", "cert2"],
+  "languages": ["language1", "language2"],
+  "openToWork": true/false,
+  "isCreator": true/false,
+  "profileStrength": "Profile strength indicator if visible",
+  "summary": "A 2-3 sentence professional summary based on what you see"
 }
-Return ONLY the JSON.`
+
+Extract EVERYTHING visible. If a section is not visible, use null. Be thorough!`
               },
               {
                 type: "image_url",
@@ -314,7 +355,7 @@ Return ONLY the JSON.`
             ]
           }
         ],
-        max_tokens: 1000
+        max_tokens: 2500
       })
     });
 
@@ -573,4 +614,109 @@ export const refreshAndGenerateLinkedInMarkdown = async () => {
   }
 
   return { success: false, error: "No profile data available", profile: currentProfile };
+};
+
+/**
+ * Scrape recent LinkedIn posts from a profile
+ * Navigates to the activity page and extracts post data
+ */
+export const scrapeLinkedInPosts = async (profileUrl, options = {}) => {
+  ensureDirs();
+
+  const { headless = true, maxPosts = 20, timeout = 120000 } = options;
+  let browser = null;
+
+  try {
+    const userDataDir = options.userDataDir || process.env.CHROME_USER_DATA_DIR || DEFAULT_CHROME_USER_DATA_DIR;
+    const profileDirectory = options.profileDirectory || process.env.CHROME_PROFILE_DIRECTORY || "Default";
+
+    browser = await chromium.launchPersistentContext(userDataDir, {
+      headless,
+      channel: findChromeChannel(),
+      args: [
+        `--profile-directory=${profileDirectory}`,
+        "--disable-blink-features=AutomationControlled",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-infobars"
+      ],
+      viewport: { width: 1280, height: 900 },
+      ignoreDefaultArgs: ["--enable-automation"]
+    });
+
+    const page = browser.pages()[0] || await browser.newPage();
+
+    // Navigate to activity page
+    const activityUrl = profileUrl.replace(/\/$/, "") + "/recent-activity/all/";
+    console.log(`[LinkedIn] Navigating to ${activityUrl}`);
+    await page.goto(activityUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+    await page.waitForTimeout(3000);
+
+    // Check if logged in
+    const url = page.url();
+    if (url.includes("/login") || url.includes("/authwall")) {
+      await browser.close();
+      return { success: false, error: "Not logged in to LinkedIn" };
+    }
+
+    // Scroll to load more posts
+    for (let i = 0; i < 3; i++) {
+      await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+      await page.waitForTimeout(2000);
+    }
+
+    // Extract posts from page
+    const posts = await page.evaluate((max) => {
+      const postElements = document.querySelectorAll(".feed-shared-update-v2, .occludable-update");
+      const results = [];
+
+      for (const el of postElements) {
+        if (results.length >= max) break;
+
+        const textEl = el.querySelector(".feed-shared-text, .break-words, .feed-shared-update-v2__description");
+        const content = textEl?.innerText?.trim() || "";
+
+        // Detect repost
+        const headerText = el.querySelector(".feed-shared-actor__sub-description, .update-components-header")?.innerText || "";
+        const isRepost = headerText.toLowerCase().includes("repost") ||
+                         headerText.toLowerCase().includes("shared") ||
+                         !!el.querySelector(".feed-shared-reshared-update");
+        const type = isRepost ? "repost" : "original";
+
+        // Date
+        const timeEl = el.querySelector("time, .feed-shared-actor__sub-description time, span.visually-hidden");
+        const date = timeEl?.getAttribute("datetime") || timeEl?.innerText?.trim() || null;
+
+        // Engagement
+        const likesEl = el.querySelector(".social-details-social-counts__reactions-count, .social-details-social-counts__social-proof-text");
+        const commentsEl = el.querySelector("button[aria-label*='comment'] span, .social-details-social-counts__comments");
+        const likes = parseInt(likesEl?.innerText?.replace(/[^0-9]/g, "") || "0", 10);
+        const comments = parseInt(commentsEl?.innerText?.replace(/[^0-9]/g, "") || "0", 10);
+
+        // Post URL
+        const linkEl = el.querySelector("a[href*='/feed/update/']");
+        const postUrl = linkEl?.href || null;
+
+        if (content || postUrl) {
+          results.push({ content: content.substring(0, 500), type, date, likes, comments, url: postUrl });
+        }
+      }
+      return results;
+    }, maxPosts);
+
+    await browser.close();
+    browser = null;
+
+    const originalCount = posts.filter(p => p.type === "original").length;
+    const repostCount = posts.filter(p => p.type === "repost").length;
+
+    console.log(`[LinkedIn] Scraped ${posts.length} posts (${originalCount} original, ${repostCount} reposts)`);
+
+    return { success: true, posts, originalCount, repostCount, scrapedAt: new Date().toISOString() };
+  } catch (error) {
+    if (browser) {
+      try { await browser.close(); } catch {}
+    }
+    return { success: false, error: error.message, posts: [] };
+  }
 };

@@ -1,6 +1,6 @@
-import React, { memo, useMemo, useState, useEffect, useRef } from "react";
+import React, { memo, useMemo, useState, useEffect } from "react";
 import { Box, Text } from "ink";
-import { getActivityNarrator, AGENT_STATES, ACTION_TOOLS, ACTION_COLORS, ACTION_ICONS, STATE_COLORS } from "../services/activity-narrator.js";
+import { getActivityNarrator, AGENT_STATES, ACTION_COLORS, STATE_COLORS } from "../services/activity-narrator.js";
 import { getAutonomousEngine } from "../services/autonomous-engine.js";
 import { useCoordinatedUpdates } from "../hooks/useCoordinatedUpdates.js";
 import { getAIStatus, getMultiAIConfig, getCurrentModel } from "../services/multi-ai.js";
@@ -11,141 +11,220 @@ import { getBackgroundProjectsManager, BACKGROUND_PROJECT_TYPE } from "../servic
 
 const e = React.createElement;
 
-/**
- * Flashlight text effect with shimmer animation
- * Creates a moving spotlight that sweeps across the text like a shimmer
- * The spotlight position animates from left to right, creating a "loading" shimmer effect
- */
-const FlashlightText = ({ text, baseColor = "#f59e0b", bold = true, spotlightCount = 4 }) => {
-  // Animate spotlight position from 0 to text length
-  const [spotlightPos, setSpotlightPos] = useState(0);
-
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setSpotlightPos(prev => (prev + 1) % (text.length + spotlightCount));
-    }, 100); // Move every 100ms for smooth shimmer
-    return () => clearInterval(interval);
-  }, [text.length, spotlightCount]);
-
-  // Build the text with shimmer effect at current position
-  const beforeSpotlight = text.slice(0, Math.max(0, spotlightPos));
-  const spotlightStart = Math.max(0, spotlightPos);
-  const spotlightEnd = Math.min(text.length, spotlightPos + spotlightCount);
-  const brightText = text.slice(spotlightStart, spotlightEnd);
-  const afterSpotlight = text.slice(spotlightEnd);
-
-  return e(
-    Box,
-    { flexDirection: "row" },
-    // Text before spotlight (base color)
-    beforeSpotlight && e(Text, { color: baseColor, bold }, beforeSpotlight),
-    // Bright spotlight section (white on colored background)
-    brightText && e(Text, { color: "#ffffff", bold, backgroundColor: baseColor }, brightText),
-    // Text after spotlight (base color)
-    afterSpotlight && e(Text, { color: baseColor, bold }, afterSpotlight)
-  );
-};
-
 // ═══════════════════════════════════════════════════════════════════════════
-// ENHANCED ENGINE PANEL - Detailed actions, shimmer state, token tracking
+// CLAUDE CODE STYLE ENGINE PANEL
+// Matches Claude Code CLI terminal output formatting
 // ═══════════════════════════════════════════════════════════════════════════
-
-const PANEL_HEIGHT = 14;
 
 const THEME = {
   bg: "#0f172a",
-  primary: "#f1f5f9",
+  primary: "#e2e8f0",
   secondary: "#94a3b8",
   muted: "#64748b",
   dim: "#475569",
   success: "#22c55e",
   error: "#ef4444",
   warning: "#f59e0b",
-  warningLight: "#fbbf24",
   info: "#3b82f6",
   purple: "#a855f7",
   cyan: "#06b6d4",
   white: "#ffffff",
   gray: "#6b7280",
+  // Diff colors - Claude Code style
   diffAddBg: "#14532d",
   diffAddFg: "#86efac",
   diffRemoveBg: "#7f1d1d",
   diffRemoveFg: "#fca5a5",
 };
 
-// Status dot states - using ACTION_COLORS for consistency
-const STATUS_DOT = {
-  WORKING: { color: ACTION_COLORS.WORKING, icon: ACTION_ICONS.WORKING, blink: true },
-  DONE: { color: ACTION_COLORS.DONE, icon: ACTION_ICONS.DONE, blink: false },
-  FAILED: { color: ACTION_COLORS.FAILED, icon: ACTION_ICONS.FAILED, blink: false },
-  OBSERVATION: { color: ACTION_COLORS.OBSERVATION, icon: ACTION_ICONS.OBSERVATION, blink: false },
-};
+// Tool color - all tools use white for consistency (Claude Code style)
+const TOOL_COLOR = "#ffffff";
 
 /**
- * Status dot component - color indicates status
- * Uses icons from ACTION_ICONS: ● for working, ✓ for done, ✗ for failed, ○ for observation
+ * Flashlight/Shimmer effect for thinking state
+ * Creates moving highlight that sweeps across text (orange background on white text)
  */
-const StatusDot = memo(({ status = "WORKING" }) => {
-  const dotInfo = STATUS_DOT[status] || STATUS_DOT.WORKING;
-  return e(Text, { color: dotInfo.color }, dotInfo.icon || "●");
+const FlashlightText = memo(({ text, baseColor = "#f59e0b", bold = true, spotlightWidth = 4 }) => {
+  const [pos, setPos] = useState(0);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setPos(prev => (prev + 1) % (text.length + spotlightWidth + 2));
+    }, 80);
+    return () => clearInterval(interval);
+  }, [text.length, spotlightWidth]);
+
+  const before = text.slice(0, Math.max(0, pos - 1));
+  const spotlight = text.slice(Math.max(0, pos - 1), Math.min(text.length, pos + spotlightWidth - 1));
+  const after = text.slice(Math.min(text.length, pos + spotlightWidth - 1));
+
+  return e(
+    Box,
+    { flexDirection: "row" },
+    before && e(Text, { color: baseColor, bold }, before),
+    spotlight && e(Text, { color: "#ffffff", backgroundColor: baseColor, bold }, spotlight),
+    after && e(Text, { color: baseColor, bold }, after)
+  );
 });
 
 /**
- * Current State Display with Goal and Project
- *
- * The GOAL persists across state changes (Researching → Planning → Building)
- * The PROJECT is created/found to work on this goal
- *
- * Example:
- *   Researching...
- *   Goal: Finding AI engineering jobs in the DC area that match Frank's
- *         5 years of experience · Project: Job Search DC
- *
- *   Planning...
- *   Goal: Finding AI engineering jobs in the DC area that match Frank's
- *         5 years of experience · Project: Job Search DC
- *
- *   Building...
- *   Goal: Researching the best stocks to buy for Jan 26th week
- *         · Project: Stock Analysis Q1
- *
- *   Idle...
- *   Waiting on: Stock Research - market closed
- *               Job Finding - waiting for user input
+ * Blinking status dot - Claude Code style
+ * ● Green = completed/success
+ * ● Red = error/failed
+ * ○ Gray/White blinking = working/in-progress
  */
-const StateDisplay = memo(({ state, stateInfo, goal, projectName, hideStateLine = false, waitingReasons = [], privateMode = false }) => {
-  const stateText = stateInfo?.text || state || "Idle";
-  // Use STATE_COLORS if available, fallback to stateInfo color
-  const stateKey = (state || "IDLE").toUpperCase();
-  const color = STATE_COLORS[stateKey] || stateInfo?.color || THEME.warning;
-  const isIdle = stateKey === "IDLE";
+const StatusDot = memo(({ status = "working", blink = false }) => {
+  const [visible, setVisible] = useState(true);
 
-  // In private mode, mask goal content
-  const displayGoal = privateMode ? "[goal hidden]" : goal;
-  const displayProject = privateMode ? "[project]" : projectName;
+  useEffect(() => {
+    if (!blink) return;
+    const interval = setInterval(() => setVisible(v => !v), 500);
+    return () => clearInterval(interval);
+  }, [blink]);
 
-  // Get background projects to show when idle
-  const backgroundProjects = useMemo(() => {
-    if (!isIdle) return [];
-    try {
-      const bgManager = getBackgroundProjectsManager();
-      const displayData = bgManager.getDisplayData();
-      if (!displayData.initialized) return [];
+  const dotConfig = {
+    done: { char: "●", color: THEME.success },
+    success: { char: "●", color: THEME.success },
+    completed: { char: "●", color: THEME.success },
+    error: { char: "●", color: THEME.error },
+    failed: { char: "●", color: THEME.error },
+    working: { char: "○", color: visible ? THEME.white : THEME.dim },
+    pending: { char: "○", color: THEME.gray },
+  };
 
-      // Show active/triggered background projects
-      return displayData.projects
-        .filter(p => p.status === "active" || p.status === "triggered")
-        .map(p => ({
-          title: p.title,
-          insight: p.latestInsight,
-          type: p.type
-        }));
-    } catch (e) {
-      return [];
-    }
-  }, [isIdle]);
+  const config = dotConfig[status?.toLowerCase()] || dotConfig.working;
+  return e(Text, { color: config.color }, config.char);
+});
 
-  // Background project display names
+/**
+ * Tool call line - Claude Code format
+ * ○ Read(src/services/auth.js)
+ * ● Bash(npm install)
+ * ○ WebSearch(AI jobs in DC)
+ */
+const ToolCallLine = memo(({ tool, target, status = "working", result = null, privateMode = false }) => {
+  const toolColor = TOOL_COLOR;
+  const isDone = status === "done" || status === "completed" || status === "success";
+  const isFailed = status === "error" || status === "failed";
+
+  // Truncate long targets
+  const displayTarget = privateMode ? "••••••••" : (target?.length > 60 ? target.slice(0, 57) + "..." : target);
+
+  return e(
+    Box,
+    { flexDirection: "column", marginBottom: 1 },
+    // Main line: dot + Tool(target)
+    e(
+      Box,
+      { flexDirection: "row" },
+      e(StatusDot, { status: isDone ? "done" : isFailed ? "error" : "working", blink: !isDone && !isFailed }),
+      e(Text, { color: THEME.muted }, " "),
+      e(Text, { color: toolColor, bold: true }, tool),
+      e(Text, { color: THEME.dim }, "("),
+      e(Text, { color: THEME.primary }, displayTarget || ""),
+      e(Text, { color: THEME.dim }, ")")
+    ),
+    // Result line if present (indented)
+    result && !privateMode && e(
+      Box,
+      { paddingLeft: 3 },
+      e(Text, { color: THEME.dim }, "→ "),
+      e(Text, { color: THEME.secondary }, typeof result === "string" ? result.slice(0, 70) : "")
+    )
+  );
+});
+
+/**
+ * Diff view - Claude Code style with +/- and colored backgrounds
+ *
+ *   35 │ - const oldAuth = require('old');     [RED BG]
+ *   36 │ + const newAuth = require('new');     [GREEN BG]
+ */
+const DiffView = memo(({ diff, isNewFile = false }) => {
+  if (!diff) return null;
+
+  const removed = diff.removed || [];
+  const added = diff.added || [];
+  const startLine = diff.startLine || 1;
+
+  // Limit lines shown
+  const maxLines = 10;
+  const showRemoved = removed.slice(0, maxLines);
+  const showAdded = added.slice(0, maxLines);
+
+  if (showRemoved.length === 0 && showAdded.length === 0) return null;
+
+  return e(
+    Box,
+    { flexDirection: "column", paddingLeft: 3, marginTop: 0, marginBottom: 1 },
+
+    // Header
+    e(Text, { color: THEME.dim }, isNewFile ? "New file:" : `Lines ${startLine}-${startLine + removed.length + added.length}:`),
+    e(Text, { color: THEME.dim }, " "),
+
+    // Removed lines (red background with -)
+    ...showRemoved.map((line, i) => {
+      const lineNum = (startLine + i).toString().padStart(4, " ");
+      const text = typeof line === "object" ? line.text : line;
+      return e(
+        Box,
+        { key: `r${i}`, flexDirection: "row" },
+        e(Text, { color: THEME.diffRemoveFg }, `${lineNum} │ `),
+        e(Text, { color: THEME.diffRemoveFg, backgroundColor: THEME.diffRemoveBg }, `- ${text || " "} `)
+      );
+    }),
+
+    // Added lines (green background with +)
+    ...showAdded.map((line, i) => {
+      const lineNum = (startLine + removed.length + i).toString().padStart(4, " ");
+      const text = typeof line === "object" ? line.text : line;
+      return e(
+        Box,
+        { key: `a${i}`, flexDirection: "row" },
+        e(Text, { color: THEME.diffAddFg }, `${lineNum} │ `),
+        e(Text, { color: THEME.diffAddFg, backgroundColor: THEME.diffAddBg }, `+ ${text || " "} `)
+      );
+    }),
+
+    // Truncation notice
+    (removed.length > maxLines || added.length > maxLines) && e(
+      Text,
+      { color: THEME.dim },
+      `      ... ${Math.max(0, removed.length - maxLines) + Math.max(0, added.length - maxLines)} more lines`
+    )
+  );
+});
+
+/**
+ * Thinking state with orange flashlight effect
+ * * Thinking...  (with shimmer animation)
+ */
+const ThinkingState = memo(({ state = "Thinking", goal = "", projectName = "" }) => {
+  return e(
+    Box,
+    { flexDirection: "column", marginBottom: 1 },
+    // State line with shimmer
+    e(
+      Box,
+      { flexDirection: "row" },
+      e(Text, { color: THEME.warning }, "* "),
+      e(FlashlightText, { text: `${state}...`, baseColor: THEME.warning, bold: true })
+    ),
+    // Goal line (if present)
+    goal && e(
+      Box,
+      { paddingLeft: 2, marginTop: 0 },
+      e(Text, { color: THEME.muted }, "Goal: "),
+      e(Text, { color: THEME.secondary }, goal.slice(0, 60) + (goal.length > 60 ? "..." : "")),
+      projectName && e(Text, { color: THEME.dim }, ` · ${projectName}`)
+    )
+  );
+});
+
+/**
+ * Idle state display
+ */
+const IdleState = memo(({ waitingReasons = [], backgroundProjects = [] }) => {
   const bgProjectNames = {
     [BACKGROUND_PROJECT_TYPE.MARKET_RESEARCH]: "Market Research",
     [BACKGROUND_PROJECT_TYPE.FINANCIAL_GROWTH]: "Financial Growth",
@@ -155,1115 +234,412 @@ const StateDisplay = memo(({ state, stateInfo, goal, projectName, hideStateLine 
   return e(
     Box,
     { flexDirection: "column", marginBottom: 1 },
-    // State with ellipsis - shimmer effect shows system is running
-    // Format: * Researching...  (Esc to interrupt · 5m 33s · ↓ 11.4k tokens · thinking)
-    !hideStateLine && e(
-      Box,
-      { flexDirection: "row" },
-      e(Text, { color }, "* "),
-      e(FlashlightText, { text: `${stateText}...`, baseColor: color, bold: true })
-    ),
-    // Goal with project name (only when not idle)
-    !isIdle && goal && e(
-      Box,
-      { paddingLeft: 2, flexDirection: "row", flexWrap: "wrap" },
-      e(Text, { color: THEME.muted }, "Goal: "),
-      e(Text, { color: privateMode ? THEME.dim : THEME.primary, wrap: "wrap" }, displayGoal),
-      projectName && e(Text, { color: THEME.dim }, " · "),
-      projectName && e(Text, { color: THEME.dim }, "Project: "),
-      projectName && e(Text, { color: THEME.dim }, displayProject)
-    ),
-    // When idle, show waiting reasons for top 2 projects
-    isIdle && waitingReasons && waitingReasons.length > 0 && e(
-      Box,
-      { flexDirection: "column", paddingLeft: 2 },
-      e(Text, { color: THEME.muted }, "Waiting on:"),
-      ...waitingReasons.slice(0, 2).map((reason, i) =>
-        e(
-          Box,
-          { key: i, flexDirection: "row", paddingLeft: 2 },
-          e(Text, { color: THEME.dim }, "• "),
-          e(Text, { color: THEME.secondary, wrap: "wrap" },
-            `${reason.project || reason.goal || "Project"} - ${reason.reason || "waiting"}`
-          )
-        )
-      )
-    ),
-    // When idle with no waiting reasons but has background projects, show those
-    isIdle && (!waitingReasons || waitingReasons.length === 0) && backgroundProjects.length > 0 && e(
-      Box,
-      { flexDirection: "column", paddingLeft: 2 },
-      e(Text, { color: THEME.muted }, "Background work:"),
-      ...backgroundProjects.slice(0, 2).map((bp, i) =>
-        e(
-          Box,
-          { key: i, flexDirection: "column", paddingLeft: 2 },
-          e(Box, { flexDirection: "row" },
-            e(Text, { color: "#64748b" }, "◐ "),
-            e(Text, { color: THEME.secondary }, bgProjectNames[bp.type] || bp.title)
-          ),
-          bp.insight && e(
-            Box,
-            { paddingLeft: 4 },
-            e(Text, { color: THEME.dim, wrap: "wrap" }, bp.insight.slice(0, 60) + (bp.insight.length > 60 ? "..." : ""))
-          )
-        )
-      )
-    ),
-    // When idle with no reasons and no background projects, show generic message
-    isIdle && (!waitingReasons || waitingReasons.length === 0) && backgroundProjects.length === 0 && goal && e(
-      Box,
-      { paddingLeft: 2, flexDirection: "row", flexWrap: "wrap" },
-      e(Text, { color: THEME.muted }, "Status: "),
-      e(Text, { color: THEME.secondary, wrap: "wrap" }, goal)
-    )
-  );
-});
-
-/**
- * Action line - concrete operations with FULL DATA
- *
- * Bash/Search: ● Bash(grep -r "pattern" ./src)
- *              → src/file.js:42: const pattern = "match";
- *              → src/other.js:15: // pattern here
- *
- * WebSearch:   ● WebSearch(Jobs in AI in Delaware with 5 years exp)
- *              → 1. Senior AI Engineer at TechCorp - $180k, Remote
- *              → 2. ML Engineer at DataCo - $165k, DC Area
- *
- * Fetch:       ● Fetch(https://jobs.com/ai-engineer)
- *              → Title: Senior AI Engineer
- *              → Company: TechCorp Inc.
- *
- * Update:      ● Update(/src/services/auth.js)
- *              ↳ Lines 35-42:
- *              35 - const oldAuth = require('old');
- *              36 + const newAuth = require('new');
- *              37 + const config = { secure: true };
- *
- * Write:       ● Write(/projects/job_finding.md)
- *              ↳ New file content:
- *               1 + # Job Search Notes
- *               2 + ## AI Engineer - DC Area
- *               3 + Company: TechCorp Inc.
- */
-const ActionLine = memo(({ action, showDetail = true, privateMode = false }) => {
-  if (!action) {
-    return null;
-  }
-
-  const status = action.status || "WORKING";
-  const verb = action.verb || action.type;
-  const target = action.target || "";
-  const results = action.results || [];
-  const result = action.result || action.detail || "";
-  const color = action.color || THEME.white;
-  const diff = action.diff || null;
-  const category = action.category || "";
-
-  // Determine action type
-  const isNewFile = verb === "Write";
-  const isFileOp = category === "file";
-  const isWebSearch = verb === "WebSearch" || action.type === "WEB_SEARCH";
-  const isWebFetch = verb === "Fetch" || action.type === "WEB_FETCH";
-  const isDone = status === "DONE";
-
-  // Parse results - can be array or newline-separated string
-  let resultLines = results;
-  if (resultLines.length === 0 && result) {
-    resultLines = result.split("\n").filter(line => line.trim());
-  }
-
-  // Status indicator: green dot = done, red dot = failed, gray dot = working
-  const isFailed = status === "FAILED" || status === "failed" || status === "error";
-  const statusIcon = isDone
-    ? e(Text, { color: THEME.success }, "●")  // Green dot for completed
-    : isFailed
-      ? e(Text, { color: THEME.error }, "●")  // Red dot for failed
-      : e(Text, { color: THEME.gray }, "●");  // Gray dot for in-progress
-
-  // In private mode, mask sensitive data
-  const displayTarget = privateMode ? "••••••••" : target;
-  const displayResults = privateMode ? [] : resultLines;
-
-  return e(
-    Box,
-    { flexDirection: "column", marginBottom: 1 },
-    // Main action line: ● Verb(target) - only dot changes color, text stays normal
     e(
       Box,
       { flexDirection: "row" },
-      statusIcon,
-      e(Text, { color: THEME.muted }, " "),
-      e(Text, { color: color, bold: true }, verb),
-      e(Text, { color: THEME.muted }, "("),
-      e(Text, { color: privateMode ? THEME.dim : THEME.white, wrap: "wrap" }, displayTarget),
-      e(Text, { color: THEME.muted }, ")")
+      e(Text, { color: THEME.gray }, "○ "),
+      e(Text, { color: THEME.muted }, "Idle")
     ),
-
-    // For WebSearch/Fetch: show ↓ arrow and results below (hidden in private mode)
-    !privateMode && (isWebSearch || isWebFetch) && e(
+    // Waiting reasons
+    waitingReasons.length > 0 && e(
       Box,
-      { flexDirection: "column", paddingLeft: 2 },
-      // Down arrow to indicate content below
-      e(Text, { color: THEME.dim }, "↓"),
-      // Show result lines with proper formatting
-      ...displayResults.slice(0, 8).map((line, i) =>
-        e(
-          Box,
-          { key: i },
-          e(Text, { color: THEME.secondary, wrap: "wrap" }, `  ${line}`)
+      { flexDirection: "column", paddingLeft: 2, marginTop: 1 },
+      e(Text, { color: THEME.dim }, "Waiting on:"),
+      ...waitingReasons.slice(0, 2).map((r, i) =>
+        e(Box, { key: i, paddingLeft: 2 },
+          e(Text, { color: THEME.dim }, "• "),
+          e(Text, { color: THEME.secondary }, `${r.project || r.goal || "Project"} - ${r.reason || "waiting"}`)
         )
-      ),
-      displayResults.length > 8 && e(
-        Text,
-        { color: THEME.dim },
-        `  ... and ${displayResults.length - 8} more results`
-      ),
-      // Show nothing found if no results and done
-      isDone && displayResults.length === 0 && e(
-        Text,
-        { color: THEME.dim },
-        "  No results found"
       )
     ),
-
-    // In private mode, show minimal indicator for web operations
-    privateMode && (isWebSearch || isWebFetch) && isDone && e(
+    // Background projects
+    waitingReasons.length === 0 && backgroundProjects.length > 0 && e(
       Box,
-      { paddingLeft: 2 },
-      e(Text, { color: THEME.dim }, "↓ [results hidden]")
-    ),
-
-    // For file operations with diff, show the diff (hidden in private mode)
-    !privateMode && isFileOp && diff && e(DiffView, { diff, isNewFile }),
-
-    // In private mode, show minimal indicator for file operations
-    privateMode && isFileOp && diff && e(
-      Box,
-      { paddingLeft: 2 },
-      e(Text, { color: THEME.dim }, "↳ [diff hidden]")
-    ),
-
-    // For other non-file, non-web operations, show result lines with arrow
-    !privateMode && !isFileOp && !isWebSearch && !isWebFetch && resultLines.length > 0 && e(
-      Box,
-      { flexDirection: "column", paddingLeft: 2 },
-      ...resultLines.slice(0, 10).map((line, i) =>
-        e(
-          Box,
-          { key: i },
-          e(Text, { color: THEME.dim }, "→ "),
-          e(Text, { color: THEME.secondary, wrap: "wrap" }, line)
+      { flexDirection: "column", paddingLeft: 2, marginTop: 1 },
+      e(Text, { color: THEME.dim }, "Background:"),
+      ...backgroundProjects.slice(0, 2).map((bp, i) =>
+        e(Box, { key: i, paddingLeft: 2 },
+          e(Text, { color: THEME.dim }, "◐ "),
+          e(Text, { color: THEME.secondary }, bgProjectNames[bp.type] || bp.title)
         )
-      ),
-      resultLines.length > 10 && e(
-        Text,
-        { color: THEME.dim },
-        `  ... and ${resultLines.length - 10} more`
       )
     )
   );
 });
 
 /**
- * Observation line - What the AI discovered/noticed
- *
- * Shows observations with white dot:
- * ○  Found 3 high-yield savings accounts with 5%+ APY
- * ○  Identified sleep pattern: HRV drops on weekdays
- * ○  Located 5 AI engineering jobs paying $180k+
- *
- * Uses white dot (○) with spacing, NOT green arrow
+ * Observation line - discovery/insight
+ * ○  Found 3 matching results
  */
-const ObservationLine = memo(({ observation, privateMode = false }) => {
-  if (!observation) return null;
-
-  const text = observation.text || observation;
-
-  // In private mode, show that an observation was made but hide the content
-  const displayText = privateMode ? "[observation hidden]" : text;
+const ObservationLine = memo(({ text, privateMode = false }) => {
+  if (!text) return null;
+  const displayText = privateMode ? "[hidden]" : text;
 
   return e(
     Box,
     { flexDirection: "row", marginBottom: 1 },
     e(Text, { color: THEME.white }, "○"),
-    e(Text, { color: THEME.white }, "  "),
-    e(Text, { color: privateMode ? THEME.dim : THEME.primary, wrap: "wrap" }, displayText)
+    e(Text, { color: THEME.muted }, "  "),
+    e(Text, { color: THEME.primary }, displayText.slice(0, 70))
   );
 });
 
 /**
- * Build a meaningful, personal outcome summary
- * Instead of "Completed: Analyze portfolio" show:
- * "Hey Frank, I've connected your LinkedIn profile. Now I'm exploring ways to market your skills..."
+ * Completed goal/project line
+ * ● Goal completed: Built the login system
  */
-const buildMeaningfulOutcome = (action, userName = "there") => {
-  const firstName = userName?.split(" ")[0] || "there";
-  const type = action.type?.toLowerCase() || "";
-  const title = action.title?.toLowerCase() || "";
-  const result = action.result || {};
-
-  // LinkedIn connection
-  if (type.includes("linkedin") || title.includes("linkedin")) {
-    if (title.includes("connect") || result.connected) {
-      return `Hey ${firstName}, I've connected your LinkedIn profile. Now I'm exploring ways to leverage your network and skills to prepare for better opportunities.`;
-    }
-    if (title.includes("profile") || title.includes("analyz")) {
-      return `${firstName}, I've reviewed your LinkedIn presence. I'm now identifying ways to strengthen your professional brand and expand your reach.`;
-    }
-  }
-
-  // Oura/Health connection
-  if (type.includes("oura") || type.includes("health") || title.includes("health")) {
-    if (title.includes("connect") || result.connected) {
-      return `${firstName}, your health data is now connected. I'll be tracking your sleep, readiness, and activity to help optimize your performance.`;
-    }
-    if (title.includes("analyz") || title.includes("review")) {
-      return `I've analyzed your recent health metrics, ${firstName}. I'm identifying patterns that could help improve your energy and focus.`;
-    }
-  }
-
-  // Portfolio/Trading
-  if (type.includes("portfolio") || type.includes("trading") || title.includes("stock") || title.includes("invest")) {
-    if (title.includes("analyz") || title.includes("review")) {
-      return `${firstName}, I've reviewed your portfolio positions. I'm now researching market conditions to identify potential opportunities.`;
-    }
-    if (title.includes("trade") || title.includes("buy") || title.includes("sell")) {
-      return `Trade analysis complete, ${firstName}. I've evaluated the position based on current market data and your risk profile.`;
-    }
-  }
-
-  // Goal setting
-  if (type.includes("goal") || title.includes("goal")) {
-    return `${firstName}, I've set up tracking for your goals. I'll monitor progress and suggest actions to keep you on track.`;
-  }
-
-  // Research tasks
-  if (title.includes("research") || title.includes("search") || title.includes("find")) {
-    const topic = title.replace(/research|search|find|for|the/gi, "").trim();
-    return `Research complete, ${firstName}. I've gathered insights on ${topic || "your request"} and I'm planning next steps.`;
-  }
-
-  // Generic but still meaningful fallback
-  if (result.summary && !result.summary.startsWith("Completed:")) {
-    return result.summary;
-  }
-
-  // If we can't make it meaningful, return null to filter it out
-  return null;
-};
-
-/**
- * Check if an outcome is a real goal/project completion (not small tasks)
- * Only show major achievements like completed goals or projects
- * Filters out "no other goals available" and similar useless messages
- */
-const isRealGoalOrProject = (summary) => {
-  if (!summary) return false;
-  const lower = summary.toLowerCase();
-
-  // FIRST: Filter out all useless/empty state messages
-  const uselessPatterns = [
-    /no other goals/i,
-    /no goals available/i,
-    /no outcomes/i,
-    /no active goals/i,
-    /no pending goals/i,
-    /goals? (is|are) empty/i,
-    /nothing to (do|show|display)/i,
-    /^completed:/i,
-    /^analyzed?\s/i,
-    /^processed?\s/i,
-    /^checked?\s/i,
-    /^reviewed?\s/i,
-    /initializ/i,
-    /autonomous agent/i,
-    /help.*manage/i,
-    /waiting for/i,
-    /idle/i,
-    /standby/i
-  ];
-
-  // If it matches any useless pattern, reject it immediately
-  if (uselessPatterns.some(pattern => pattern.test(lower))) {
-    return false;
-  }
-
-  // Must contain goal/project completion keywords
-  const goalPatterns = [
-    /goal.*complete/i,
-    /project.*complete/i,
-    /complete.*goal/i,
-    /complete.*project/i,
-    /finished.*project/i,
-    /achieved.*goal/i,
-    /milestone.*reached/i,
-    /objective.*complete/i
-  ];
-
-  // Check if it matches goal/project patterns
-  return goalPatterns.some(pattern => pattern.test(lower));
-};
-
-/**
- * Outcome line - Only for completed GOALS or PROJECTS
- * Shows green dot with white/gray text
- * Does NOT show "no other goals available" or empty outcomes
- */
-const OutcomeLine = memo(({ outcome }) => {
-  if (!outcome) return null;
-
-  const summary = outcome.summary || outcome;
-
-  // Only show real goal/project completions
-  if (!isRealGoalOrProject(summary)) return null;
-
-  // Filter out "no other goals available" and similar messages
-  const lowerSummary = summary.toLowerCase();
-  if (lowerSummary.includes("no other goals") ||
-      lowerSummary.includes("no goals available") ||
-      lowerSummary.includes("no outcomes")) {
-    return null;
-  }
+const CompletedLine = memo(({ text }) => {
+  if (!text) return null;
 
   return e(
     Box,
-    { flexDirection: "row", gap: 1, marginBottom: 1 },
+    { flexDirection: "row", marginBottom: 1 },
     e(Text, { color: THEME.success }, "●"),
-    e(Text, { color: THEME.primary, wrap: "wrap" }, summary)
+    e(Text, { color: THEME.muted }, " "),
+    e(Text, { color: THEME.primary }, text.slice(0, 70))
   );
 });
 
 /**
- * Full diff view with line numbers like Claude Code
- * Shows: line numbers | - removed (red bg) | + added (green bg)
- *
- * Layout:
- *   ↳ Lines 35-42:
- *   35 | - const oldAuth = require('old');      [RED BACKGROUND]
- *   36 | + const newAuth = require('new');      [GREEN BACKGROUND]
- *   37 | + const config = { secure: true };     [GREEN BACKGROUND]
- *
- * For Update: shows removed then added
- * For Write: shows all lines as added (new file)
+ * Engine Stats Line
+ * ⟨ 11.4k tokens │ 5m 33s ⟩
  */
-const DiffView = memo(({ diff, isNewFile = false, filePath = null }) => {
-  if (!diff) return null;
-
-  const removed = diff.removed || [];
-  const added = diff.added || [];
-  const startLine = diff.startLine || 1;
-
-  // For new files, show all content as added with green background
-  if (isNewFile && added.length > 0) {
-    return e(
-      Box,
-      { flexDirection: "column", paddingLeft: 2, marginTop: 0 },
-      // Header with file path if provided
-      e(Text, { color: THEME.dim }, `  ↳ New file content:`),
-      // Content lines with green background for additions
-      ...added.slice(0, 15).map((line, i) => {
-        const lineNum = (startLine + i).toString().padStart(4);
-        const text = typeof line === "object" ? line.text : line;
-        return e(
-          Box,
-          { key: `a${i}`, flexDirection: "row" },
-          // Line number column (muted)
-          e(Text, { color: THEME.muted }, `${lineNum} │ `),
-          // Content with green background for added lines
-          e(Text, { color: THEME.diffAddFg, backgroundColor: THEME.diffAddBg },
-            `+ ${text || " "}`)
-        );
-      }),
-      added.length > 15 && e(
-        Text,
-        { color: THEME.dim, paddingLeft: 6 },
-        `... and ${added.length - 15} more lines`
-      )
-    );
-  }
-
-  // For updates, show removed then added
-  if (removed.length === 0 && added.length === 0) return null;
-
-  const endLine = diff.endLine || (startLine + removed.length + added.length - 1);
+const StatsLine = memo(({ tokens = 0, runtime = 0 }) => {
+  const formatTokens = (n) => n >= 1000 ? `${(n / 1000).toFixed(1)}k` : n.toString();
+  const formatTime = (ms) => {
+    const secs = Math.floor(ms / 1000);
+    const mins = Math.floor(secs / 60);
+    return mins > 0 ? `${mins}m ${secs % 60}s` : `${secs}s`;
+  };
 
   return e(
     Box,
-    { flexDirection: "column", paddingLeft: 2, marginTop: 0 },
-    // Header showing line range
+    { flexDirection: "row" },
+    e(Text, { color: THEME.dim }, `⟨ ${formatTokens(tokens)} tokens │ ${formatTime(runtime)} ⟩`)
+  );
+});
+
+/**
+ * Model Status Banner - shown when no model or quota exceeded
+ */
+const ModelStatusBanner = memo(({ hasModel, tokensExceeded, provider }) => {
+  if (hasModel && !tokensExceeded) return null;
+
+  const isError = !hasModel || tokensExceeded;
+  const bgColor = isError ? "#7f1d1d" : "#1e293b";
+  const borderColor = isError ? "#dc2626" : "#475569";
+  const textColor = isError ? "#fca5a5" : "#f59e0b";
+
+  return e(
+    Box,
+    { backgroundColor: bgColor, paddingX: 2, paddingY: 1, marginBottom: 1, borderStyle: "round", borderColor },
     e(
-      Text,
-      { color: THEME.dim },
-      `  ↳ Lines ${startLine}-${endLine}:`
-    ),
-    // Removed lines (red background)
-    ...removed.slice(0, 8).map((line, i) => {
-      const lineNum = typeof line === "object" ? line.lineNum : (startLine + i);
-      const text = typeof line === "object" ? line.text : line;
-      return e(
+      Box,
+      { flexDirection: "column" },
+      e(
         Box,
-        { key: `r${i}`, flexDirection: "row" },
-        // Line number column (muted red)
-        e(Text, { color: THEME.diffRemoveFg }, `${lineNum.toString().padStart(4)} │ `),
-        // Content with red background for removed lines
-        e(Text, { color: THEME.diffRemoveFg, backgroundColor: THEME.diffRemoveBg },
-          `- ${text || " "}`)
-      );
-    }),
-    // Added lines (green background)
-    ...added.slice(0, 8).map((line, i) => {
-      const lineNum = typeof line === "object" ? line.lineNum : (startLine + removed.length + i);
-      const text = typeof line === "object" ? line.text : line;
-      return e(
-        Box,
-        { key: `a${i}`, flexDirection: "row" },
-        // Line number column (muted green)
-        e(Text, { color: THEME.diffAddFg }, `${lineNum.toString().padStart(4)} │ `),
-        // Content with green background for added lines
-        e(Text, { color: THEME.diffAddFg, backgroundColor: THEME.diffAddBg },
-          `+ ${text || " "}`)
-      );
-    }),
-    // Show count if more lines
-    (removed.length > 8 || added.length > 8) && e(
-      Text,
-      { color: THEME.dim, paddingLeft: 6 },
-      `... ${Math.max(0, removed.length - 8) + Math.max(0, added.length - 8)} more lines`
+        { flexDirection: "row", gap: 1 },
+        e(Text, { color: textColor }, "⚠"),
+        e(Text, { color: textColor, bold: true }, !hasModel ? "No Model Connected" : "Quota Exceeded")
+      ),
+      e(Text, { color: "#94a3b8" }, !hasModel ? "Add API key to .env" : `Add tokens at ${provider} billing`)
     )
   );
 });
 
-
 /**
- * Stats line - tokens, runtime, current focus
+ * Claude Code CLI Output Stream
+ * Shows real-time output from Claude Code CLI with proper formatting
  */
-const StatsLine = memo(({ stats }) => {
-  const { tokens = 0, runtime = 0, currentFocus = "" } = stats || {};
+const CLIOutputStream = memo(({ text, isStreaming, scrollOffset = 0, goal = "", state = "" }) => {
+  if (!text && !isStreaming) return null;
 
-  const formatRuntime = (ms) => {
-    const secs = Math.floor(ms / 1000);
-    const mins = Math.floor(secs / 60);
-    if (mins > 0) return `${mins}m ${secs % 60}s`;
-    return `${secs}s`;
-  };
+  // Split into lines and handle scrolling
+  const allLines = (text || "").split("\n").filter(l => l.trim());
+  const visibleCount = 12;
+  const endLine = Math.max(0, allLines.length - scrollOffset);
+  const startLine = Math.max(0, endLine - visibleCount);
+  const visibleLines = allLines.slice(startLine, endLine);
 
-  return e(
-    Box,
-    { flexDirection: "row", gap: 2, height: 1 },
-    e(Text, { color: THEME.dim }, `⟨ ${tokens.toLocaleString()} tokens`),
-    e(Text, { color: THEME.dim }, `│ ${formatRuntime(runtime)}`),
-    e(Text, { color: THEME.dim }, "⟩")
-  );
-});
+  // Format a single line based on content
+  const formatLine = (line, idx) => {
+    const trimmed = line.trim();
 
-/**
- * Engine Status Line - Bottom status with shimmer, time, tokens, substatus
- *
- * Format: * Researching...  (Esc to interrupt · 5m 33s · ↓ 11.4k tokens · thinking)
- */
-const EngineStatusLine = memo(({ state, stateInfo, time, tokens, substatus = "working" }) => {
-  const stateKey = (state || "IDLE").toUpperCase();
-  const stateColor = STATE_COLORS[stateKey] || stateInfo?.color || THEME.warning;
-  const stateText = stateInfo?.text || state || "Idle";
-
-  const formatTime = (ms) => {
-    if (!ms) return "0s";
-    const secs = Math.floor(ms / 1000);
-    const mins = Math.floor(secs / 60);
-    if (mins > 0) return `${mins}m ${secs % 60}s`;
-    return `${secs}s`;
-  };
-
-  const formatTokens = (count) => {
-    if (!count) return "0";
-    if (count >= 1000) {
-      return `${(count / 1000).toFixed(1)}k`;
+    // Tool call pattern: Read(...), Bash(...), etc.
+    const toolMatch = trimmed.match(/^[●○◆◇▣⚡→]?\s*(Read|Write|Edit|Update|Bash|WebSearch|WebFetch|Fetch|Grep|Glob|Task|Delete)\((.+)\)$/i);
+    if (toolMatch) {
+      const [, tool, arg] = toolMatch;
+      return e(
+        Box,
+        { key: idx, flexDirection: "row" },
+        e(Text, { color: THEME.gray }, "○ "),
+        e(Text, { color: TOOL_COLOR, bold: true }, tool),
+        e(Text, { color: THEME.dim }, "("),
+        e(Text, { color: THEME.primary }, arg.slice(0, 50) + (arg.length > 50 ? "..." : "")),
+        e(Text, { color: THEME.dim }, ")")
+      );
     }
-    return count.toString();
+
+    // State pattern: Thinking:, Reading:, etc.
+    const stateMatch = trimmed.match(/^(Thinking|Reading|Searching|Analyzing|Processing|Writing|Updating|Planning|Building):\s*(.*)$/i);
+    if (stateMatch) {
+      const [, action, detail] = stateMatch;
+      return e(
+        Box,
+        { key: idx, flexDirection: "row" },
+        e(Text, { color: THEME.warning }, "◐ "),
+        e(Text, { color: THEME.warning, bold: true }, action),
+        detail && e(Text, { color: THEME.secondary }, ` ${detail.slice(0, 50)}`)
+      );
+    }
+
+    // Diff lines: + or -
+    if (trimmed.startsWith("+") && !trimmed.startsWith("++")) {
+      return e(
+        Box,
+        { key: idx, flexDirection: "row" },
+        e(Text, { color: THEME.diffAddFg, backgroundColor: THEME.diffAddBg }, trimmed.slice(0, 70))
+      );
+    }
+    if (trimmed.startsWith("-") && !trimmed.startsWith("--")) {
+      return e(
+        Box,
+        { key: idx, flexDirection: "row" },
+        e(Text, { color: THEME.diffRemoveFg, backgroundColor: THEME.diffRemoveBg }, trimmed.slice(0, 70))
+      );
+    }
+
+    // Success indicators
+    if (trimmed.includes("✓") || trimmed.toLowerCase().includes("done") || trimmed.toLowerCase().includes("complete")) {
+      return e(
+        Box,
+        { key: idx, flexDirection: "row" },
+        e(Text, { color: THEME.success }, "● "),
+        e(Text, { color: THEME.diffAddFg }, trimmed.replace(/[✓]/g, "").trim().slice(0, 65))
+      );
+    }
+
+    // Headers
+    if (trimmed.startsWith("##") || trimmed.startsWith("**")) {
+      return e(
+        Box,
+        { key: idx },
+        e(Text, { color: THEME.primary, bold: true }, trimmed.replace(/[#*]/g, "").trim().slice(0, 65))
+      );
+    }
+
+    // Default line
+    return e(
+      Box,
+      { key: idx },
+      e(Text, { color: THEME.secondary }, "  " + trimmed.slice(0, 68))
+    );
   };
 
-  return e(
-    Box,
-    { flexDirection: "row", marginTop: 1 },
-    // State indicator with shimmer
-    e(Text, { color: stateColor }, "* "),
-    e(FlashlightText, {
-      text: `${stateText}...`,
-      baseColor: stateColor
-    }),
-
-    // Controls hint
-    e(Text, { color: THEME.dim }, "  (Esc to interrupt · "),
-
-    // Time
-    e(Text, { color: THEME.muted }, formatTime(time)),
-
-    // Tokens
-    e(Text, { color: THEME.dim }, " · ↓ "),
-    e(Text, { color: THEME.muted }, `${formatTokens(tokens)} tokens`),
-
-    // Substatus
-    e(Text, { color: THEME.dim }, " · "),
-    e(Text, { color: THEME.muted }, substatus),
-
-    e(Text, { color: THEME.dim }, ")")
-  );
-});
-
-/**
- * Current work description - 25+ words explaining what's happening
- */
-const WorkDescription = memo(({ description }) => {
-  if (!description) return e(Box, { height: 1 }, e(Text, { color: THEME.dim }, " "));
+  const statusColor = isStreaming ? THEME.warning : THEME.success;
+  const statusIcon = isStreaming ? "▶" : "✓";
+  const statusText = isStreaming ? "Running" : "Completed";
 
   return e(
     Box,
-    { flexDirection: "row", height: 1 },
-    e(Text, { color: THEME.secondary }, description.slice(0, 70))
-  );
-});
-
-/**
- * Task progress indicator
- */
-const TaskProgress = memo(({ current, total, taskName }) => {
-  if (!total) return null;
-
-  return e(
-    Box,
-    { flexDirection: "row", gap: 1, height: 1 },
-    e(Text, { color: THEME.dim }, `[${current}/${total}]`),
-    e(Text, { color: THEME.muted }, taskName || "tasks")
-  );
-});
-
-/**
- * Model Status Banner - Shows when no model connected or tokens exceeded
- */
-const ModelStatusBanner = memo(({ status }) => {
-  if (!status) return null;
-
-  const { hasModel, tokensExceeded, provider, billingUrl } = status;
-
-  // No model connected
-  if (!hasModel) {
-    return e(
+    { flexDirection: "column" },
+    // Header
+    e(
       Box,
-      {
-        backgroundColor: "#1e293b",
-        paddingX: 2,
-        paddingY: 1,
-        marginBottom: 1,
-        borderStyle: "round",
-        borderColor: "#475569"
-      },
-      e(
-        Box,
-        { flexDirection: "column" },
-        e(
-          Box,
-          { flexDirection: "row", gap: 1 },
-          e(Text, { color: "#f59e0b" }, "⚠"),
-          e(Text, { color: "#f59e0b", bold: true }, "No Model Connected")
-        ),
-        e(
-          Text,
-          { color: "#94a3b8" },
-          "Please connect a model to enable AI features."
-        ),
-        e(
-          Text,
-          { color: "#64748b", dimColor: true },
-          "Add OPENAI_API_KEY or ANTHROPIC_API_KEY to .env"
-        )
-      )
-    );
-  }
-
-  // Tokens exceeded
-  if (tokensExceeded) {
-    return e(
+      { flexDirection: "row", marginBottom: 1 },
+      e(Text, { color: statusColor }, statusIcon + " "),
+      e(Text, { color: statusColor, bold: true }, statusText),
+      e(Text, { color: THEME.dim }, " · "),
+      e(Text, { color: THEME.purple }, "claude-sonnet-4"),
+      startLine > 0 && e(Text, { color: THEME.dim }, ` · ↑${startLine} more`)
+    ),
+    // Goal/State
+    (goal || state) && e(
       Box,
-      {
-        backgroundColor: "#7f1d1d",
-        paddingX: 2,
-        paddingY: 1,
-        marginBottom: 1,
-        borderStyle: "round",
-        borderColor: "#dc2626"
-      },
-      e(
-        Box,
-        { flexDirection: "column" },
-        e(
-          Box,
-          { flexDirection: "row", gap: 1 },
-          e(Text, { color: "#fca5a5" }, "⚠"),
-          e(Text, { color: "#fca5a5", bold: true }, `${provider === "openai" ? "GPT-5.2" : "Claude"} Tokens Exceeded`)
-        ),
-        e(
-          Text,
-          { color: "#fca5a5" },
-          "Add tokens to continue AI features."
-        ),
-        e(
-          Text,
-          { color: "#f87171", dimColor: true },
-          billingUrl || BILLING_URLS[provider]
-        )
-      )
-    );
-  }
-
-  return null;
+      { marginBottom: 1 },
+      e(Text, { color: THEME.dim }, "State: "),
+      e(Text, { color: THEME.warning, bold: true }, state || "WORKING"),
+      goal && e(Text, { color: THEME.dim }, ` · ${goal.slice(0, 40)}`)
+    ),
+    // Output lines
+    ...visibleLines.map((line, idx) => formatLine(line, idx))
+  );
 });
 
 /**
- * Main Engine Panel
- *
- * Layout:
- * ┌─────────────────────────────────────────────────────────┐
- * │ ENGINE                                    tokens · time │
- * ├─────────────────────────────────────────────────────────┤
- * │ Researching...                                          │
- * │   Topic: Figuring out Frank's LinkedIn page             │
- * │                                                         │
- * │ ● WebSearch(Jobs in AI in Delaware with 5 yrs exp)      │
- * │   → 5 results found                                     │
- * │                                                         │
- * │ ● Fetch(https://jobs.com/ai-engineer-dc)                │
- * │   → Senior AI Engineer at TechCorp, requires Python...  │
- * │                                                         │
- * │ ○ Found 3 matching positions in the DC area             │
- * │                                                         │
- * │ ● Update(/projects/job_finding.md)                      │
- * │   ↓ Adding AI engineer job. Has pros and cons...        │
- * │   [diff view with green/red lines]                      │
- * └─────────────────────────────────────────────────────────┘
+ * Main Engine Panel - Claude Code Style
  */
-const AgentActivityPanelBase = ({ overlayHeader = false, compact = false, scrollOffset = 0, privateMode = false, actionStreamingText = "", cliStreaming = false }) => {
+const AgentActivityPanelBase = ({
+  overlayHeader = false,
+  compact = false,
+  scrollOffset = 0,
+  privateMode = false,
+  actionStreamingText = "",
+  cliStreaming = false
+}) => {
   const narrator = getActivityNarrator();
   const autonomousEngine = getAutonomousEngine();
 
-  // Blinking dot animation - toggles every second to show engine is alive
+  // Blinking animation for header dot
   const [dotVisible, setDotVisible] = useState(true);
   useEffect(() => {
-    const interval = setInterval(() => {
-      setDotVisible(prev => !prev);
-    }, 1000);
+    const interval = setInterval(() => setDotVisible(v => !v), 1000);
     return () => clearInterval(interval);
   }, []);
 
-  // Check model status
+  // Model status
   const modelStatus = useMemo(() => {
     const config = getMultiAIConfig();
     const aiStatus = getAIStatus();
-
-    // Check if any model is available (Claude Code CLI counts as a model)
     const hasOpenAI = config.gptInstant?.ready || config.gptThinking?.ready;
     const hasClaude = config.claude?.ready;
     const hasClaudeCode = config.claudeCode?.ready;
     const hasModel = hasOpenAI || hasClaude || hasClaudeCode;
-
-    // Check if tokens exceeded
-    const openaiExceeded = aiStatus.gptInstant?.quotaExceeded || aiStatus.gptThinking?.quotaExceeded;
-    const claudeExceeded = aiStatus.claude?.quotaExceeded;
-    const tokensExceeded = (hasOpenAI && openaiExceeded) || (hasClaude && claudeExceeded && !hasOpenAI);
-
-    // Determine which provider's tokens are exceeded
-    const provider = openaiExceeded ? "openai" : claudeExceeded ? "anthropic" : "openai";
-    const billingUrl = openaiExceeded ? aiStatus.gptInstant?.billingUrl : aiStatus.claude?.billingUrl;
-
-    return {
-      hasModel,
-      tokensExceeded,
-      provider,
-      billingUrl,
-      // Engine should be paused if no model or tokens exceeded
-      isPaused: !hasModel || tokensExceeded
-    };
+    const tokensExceeded = (hasOpenAI && (aiStatus.gptInstant?.quotaExceeded || aiStatus.gptThinking?.quotaExceeded)) ||
+                          (hasClaude && aiStatus.claude?.quotaExceeded && !hasOpenAI);
+    return { hasModel, tokensExceeded, isPaused: !hasModel || tokensExceeded, provider: "openai" };
   }, []);
 
-  // Use coordinated updates
-  const data = useCoordinatedUpdates(
-    "agent-narrator",
-    () => narrator.getDisplayData(),
-    { initialData: narrator.getDisplayData() }
-  ) || narrator.getDisplayData();
-
-  // Get autonomous engine data
+  // Get narrator data
+  const data = useCoordinatedUpdates("agent-narrator", () => narrator.getDisplayData(), { initialData: narrator.getDisplayData() }) || narrator.getDisplayData();
   const engineData = autonomousEngine?.getDisplayData() || {};
-  const currentAction = engineData.currentAction;
-  const recentCompleted = autonomousEngine?.getRecentCompleted(3) || [];
 
-  // Destructure with stable defaults
   const state = data.state || "OBSERVING";
   const stateInfo = data.stateInfo || AGENT_STATES.OBSERVING;
-  const goal = data.goal || data.workDescription || (currentAction?.title) || "";
+  const goal = data.goal || data.workDescription || engineData.currentAction?.title || "";
   const projectName = data.projectName || null;
   const actions = data.actions || [];
   const observations = data.observations || [];
   const stats = data.stats || { tokens: 0, runtime: 0 };
-  const taskProgress = data.taskProgress;
-  const metricsLine = data.metricsLine || "";
-
-  // Claude Code CLI status - shows orange when active
-  const claudeCode = data.claudeCode || { active: false, status: "inactive" };
+  const claudeCode = data.claudeCode || { active: false };
   const isClaudeCodeActive = claudeCode.active;
-  const claudeCodeColor = "#f97316"; // Orange
 
-  // Get waiting reasons for idle state display
+  // Waiting reasons for idle state
   const waitingReasons = useMemo(() => {
     const stateKey = (state || "IDLE").toUpperCase();
     if (stateKey === "IDLE" || modelStatus.isPaused) {
       try {
-        const goalManager = getGoalManager();
-        return goalManager.getWaitingReasons();
-      } catch {
-        return [];
-      }
+        return getGoalManager().getWaitingReasons();
+      } catch { return []; }
     }
     return [];
   }, [state, modelStatus.isPaused]);
 
-  // Build timeline from real actions (supports scrolling via scrollOffset)
+  // Background projects
+  const backgroundProjects = useMemo(() => {
+    if ((state || "").toUpperCase() !== "IDLE") return [];
+    try {
+      const bgManager = getBackgroundProjectsManager();
+      const displayData = bgManager.getDisplayData();
+      if (!displayData.initialized) return [];
+      return displayData.projects.filter(p => p.status === "active" || p.status === "triggered");
+    } catch { return []; }
+  }, [state]);
+
+  // Build action timeline
   const timeline = useMemo(() => {
-    const items = [
-      ...actions.map(a => ({ ...a, itemType: "action" }))
-    ];
+    const items = actions.map(a => ({ ...a, itemType: "action" }));
     items.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
-
-    // If paused, only show completed items (not in-progress work)
     if (modelStatus.isPaused) {
-      return items.filter(item => item.status === "DONE" || item.status === "completed").slice(0, 3);
+      return items.filter(i => i.status === "DONE" || i.status === "completed").slice(0, 3);
     }
-
-    // Apply scroll offset for keyboard navigation (up/down arrows)
     const start = Math.min(scrollOffset, Math.max(0, items.length - 4));
     return items.slice(start, start + 4);
   }, [actions, modelStatus.isPaused, scrollOffset]);
 
-  // Build discoveries from observations (filter out advice-like text)
-  const discoveries = useMemo(() => {
-    return observations
-      .filter(o => {
-        const text = (o.text || o).toLowerCase();
-        // Filter out advice patterns
-        return !text.includes("you should") &&
-               !text.includes("consider ") &&
-               !text.includes("try to") &&
-               !text.includes("make sure");
-      })
-      .slice(0, 2);
-  }, [observations]);
+  // Get model info for header
+  const claudeCodeStatus = isClaudeCodeLoggedIn();
+  const config = getMultiAIConfig();
+  let modelName = "No Model";
+  let modelColor = THEME.error;
 
-  // Get user's name from narrator context
-  const userName = data.userName || process.env.USER_NAME || "there";
+  if (claudeCodeStatus.loggedIn) {
+    modelName = "Claude Code CLI";
+    modelColor = "#f59e0b";
+  } else if (config.gptInstant?.ready || config.gptThinking?.ready) {
+    modelName = "GPT-5.2";
+    modelColor = "#10a37f";
+  } else if (config.claude?.ready) {
+    modelName = "Claude";
+    modelColor = "#d97706";
+  }
 
-  // Build outcomes from completed actions with meaningful summaries
-  // Deduplicate and limit to only show unique, real outcomes (max 1 to avoid clutter)
-  const outcomes = useMemo(() => {
-    const seen = new Set();
-    return recentCompleted
-      .filter(a => a.status === "completed")
-      .map(a => {
-        // Try to build a meaningful, personal outcome
-        const meaningful = buildMeaningfulOutcome(a, userName);
-        return meaningful ? { summary: meaningful, timestamp: a.completedAt } : null;
-      })
-      .filter(Boolean) // Remove null entries
-      .filter(o => {
-        // Deduplicate by normalized summary text
-        const normalized = o.summary.toLowerCase().replace(/[^a-z0-9]/g, "");
-        if (seen.has(normalized)) return false;
-        seen.add(normalized);
-        // Also filter out useless outcomes here
-        return isRealGoalOrProject(o.summary);
-      })
-      .slice(0, 2); // Max 2 outcomes
-  }, [recentCompleted, userName]);
+  const isThinking = state && !["IDLE", "OBSERVING"].includes(state.toUpperCase());
+  const isIdle = (state || "IDLE").toUpperCase() === "IDLE";
 
   return e(
     Box,
     { flexDirection: "column", paddingX: compact ? 0 : 1 },
 
-    // Header - show ENGINE with actual connected model
-    (() => {
-      const config = getMultiAIConfig();
-      const { model: currentModelInfo } = getCurrentModel();
-
-      // Check Claude Code CLI status first - it's the primary engine
-      const claudeCodeStatus = isClaudeCodeLoggedIn();
-      const claudeCodeAvailable = claudeCodeStatus.loggedIn;
-
-      // Determine what model is actually available/connected
-      // Claude Code CLI is the primary engine
-      let modelName = "No Model";
-      let modelColor = THEME.error;
-
-      if (claudeCodeAvailable) {
-        modelName = "Claude Code CLI";
-        modelColor = "#f59e0b";
-      } else if (config.gptInstant?.ready || config.gptThinking?.ready) {
-        modelName = currentModelInfo?.shortName || "GPT-5.2";
-        modelColor = currentModelInfo?.color || "#10a37f";
-      } else if (config.claude?.ready) {
-        modelName = "Claude";
-        modelColor = "#d97706";
-      }
-
-      // If paused, show why
-      if (modelStatus.isPaused) {
-        if (!modelStatus.hasModel) {
-          modelName = "No API Key";
-          modelColor = THEME.error;
-        } else if (modelStatus.tokensExceeded) {
-          modelName = "Quota Exceeded";
-          modelColor = THEME.error;
-        }
-      }
-      // isClaudeCodeActive comes from narrator data - true when Claude CLI is actually running
-
-      if (compact) {
-        return e(
-          Box,
-          { flexDirection: "column", marginBottom: 1 },
-          e(Box, { flexDirection: "row" },
-            e(Text, { color: THEME.muted, bold: true }, "ENGINE"),
-            // Blinking gray dot to show engine is alive
-            e(Text, { color: dotVisible ? THEME.gray : THEME.dim }, " ● "),
-            e(Text, { color: modelColor, bold: true }, modelName),
-            // Show Claude Code CLI status - ORANGE BACKGROUND when actively running
-            isClaudeCodeActive && e(Text, { color: THEME.dim }, " · "),
-            isClaudeCodeActive && e(Text, { color: claudeCodeColor, backgroundColor: "#7c2d12", bold: true }, " Claude Code ACTIVE "),
-            // Show metrics when Claude Code is active
-            isClaudeCodeActive && claudeCode.toolCallCount > 0 && e(Text, { color: THEME.dim }, " · "),
-            isClaudeCodeActive && claudeCode.toolCallCount > 0 && e(Text, { color: THEME.gray }, `${claudeCode.toolCallCount} tools`),
-            isClaudeCodeActive && claudeCode.tokensUsed > 0 && e(Text, { color: THEME.dim }, " · "),
-            isClaudeCodeActive && claudeCode.tokensUsed > 0 && e(Text, { color: THEME.gray }, `${Math.round(claudeCode.tokensUsed / 1000)}k tokens`),
-            !isClaudeCodeActive && claudeCodeAvailable && e(Text, { color: THEME.dim }, " · "),
-            !isClaudeCodeActive && claudeCodeAvailable && e(Text, { color: THEME.gray }, "Claude CLI Ready")
-          ),
-          e(Text, { color: "#1e293b" }, "─".repeat(50))
-        );
-      }
-
-      if (overlayHeader) {
-        return e(
-          Box,
-          { flexDirection: "column" },
-          e(Text, { color: THEME.dim }, " "),
-          e(Text, { color: THEME.dim }, " ")
-        );
-      }
-
-      return e(
-        React.Fragment,
-        null,
+    // ═══════════════════════════════════════════════════════════════════════
+    // HEADER: ENGINE ● Model · Stats
+    // ═══════════════════════════════════════════════════════════════════════
+    !overlayHeader && e(
+      Box,
+      { flexDirection: "column", marginBottom: 1 },
+      e(
+        Box,
+        { flexDirection: "row", justifyContent: "space-between" },
+        // Left: ENGINE + dot + model
         e(
           Box,
-          { flexDirection: "row", justifyContent: "space-between" },
-          e(Box, { flexDirection: "row" },
-            e(Text, { color: THEME.muted, bold: true }, "ENGINE"),
-            // Blinking gray dot to show engine is alive
-            e(Text, { color: dotVisible ? THEME.gray : THEME.dim }, " ● "),
-            e(Text, { color: modelColor, bold: true }, modelName),
-            // Show Claude Code CLI status - ORANGE BACKGROUND when actively running
-            isClaudeCodeActive && e(Text, { color: THEME.dim }, " · "),
-            isClaudeCodeActive && e(Text, { color: claudeCodeColor, backgroundColor: "#7c2d12", bold: true }, " Claude Code ACTIVE "),
-            // Show metrics when Claude Code is active
-            isClaudeCodeActive && claudeCode.toolCallCount > 0 && e(Text, { color: THEME.dim }, " · "),
-            isClaudeCodeActive && claudeCode.toolCallCount > 0 && e(Text, { color: THEME.gray }, `${claudeCode.toolCallCount} tools`),
-            isClaudeCodeActive && claudeCode.tokensUsed > 0 && e(Text, { color: THEME.dim }, " · "),
-            isClaudeCodeActive && claudeCode.tokensUsed > 0 && e(Text, { color: THEME.gray }, `${Math.round(claudeCode.tokensUsed / 1000)}k tokens`),
-            !isClaudeCodeActive && claudeCodeAvailable && e(Text, { color: THEME.dim }, " · "),
-            !isClaudeCodeActive && claudeCodeAvailable && e(Text, { color: THEME.gray }, "Claude CLI Ready")
-          ),
-          metricsLine
-            ? e(Text, { color: THEME.dim }, metricsLine)
-            : e(StatsLine, { stats })
+          { flexDirection: "row" },
+          e(Text, { color: THEME.muted, bold: true }, "ENGINE"),
+          e(Text, { color: dotVisible ? THEME.gray : THEME.dim }, " ● "),
+          e(Text, { color: modelColor, bold: true }, modelName),
+          isClaudeCodeActive && e(Text, { color: THEME.dim }, " · "),
+          isClaudeCodeActive && e(Text, { color: "#f97316", backgroundColor: "#7c2d12", bold: true }, " ACTIVE "),
+          !isClaudeCodeActive && claudeCodeStatus.loggedIn && e(Text, { color: THEME.dim }, " · Ready")
         ),
-        e(Box, {}, e(Text, { color: "#1e293b" }, "─".repeat(60)))
-      );
-    })(),
+        // Right: Stats
+        e(StatsLine, { tokens: stats.tokens, runtime: stats.runtime })
+      ),
+      e(Text, { color: "#1e293b" }, "─".repeat(60))
+    ),
 
-    // When Claude Code CLI has output to show (streaming or completed), take over the engine body
-    // Otherwise show normal BACKBONE actions/goals/observations
-    ...((cliStreaming || actionStreamingText) ? [
-      // CLAUDE CODE CLI OUTPUT — supersedes all BACKBONE actions
-      (() => {
-        // If no text yet, show waiting state
-        if (!actionStreamingText) {
-          return e(
-            Box,
-            { key: "cli-waiting", flexDirection: "column", marginTop: 0 },
-            e(
-              Box,
-              { flexDirection: "row", gap: 1 },
-              e(Text, { color: "#f59e0b" }, "▶"),
-              e(Text, { color: "#f59e0b", bold: true }, "Claude Code CLI"),
-              e(Text, { color: "#64748b" }, " · "),
-              e(Text, { color: "#8b5cf6" }, "claude-sonnet-4"),
-              e(Text, { color: "#64748b" }, " Processing...")
-            ),
-            goal && e(
-              Box,
-              { marginLeft: 2 },
-              e(Text, { color: "#94a3b8" }, `Goal: ${goal.slice(0, 60)}${goal.length > 60 ? "..." : ""}`)
-            )
-          );
-        }
+    // ═══════════════════════════════════════════════════════════════════════
+    // BODY: CLI Output OR Normal Engine Display
+    // ═══════════════════════════════════════════════════════════════════════
 
-        // Split output into lines for scroll support
-        const allLines = actionStreamingText.split("\n").filter(l => l.trim());
-        const visibleLineCount = 12;
-        // scrollOffset=0 means latest (bottom), higher = scroll up
-        const endLine = Math.max(0, allLines.length - scrollOffset);
-        const startLine = Math.max(0, endLine - visibleLineCount);
-        const visibleLines = allLines.slice(startLine, endLine);
-        const hasMore = startLine > 0;
+    // If CLI is streaming, show its output
+    (cliStreaming || actionStreamingText) ? e(
+      CLIOutputStream,
+      { text: actionStreamingText, isStreaming: cliStreaming, scrollOffset, goal, state }
+    ) : e(
+      Box,
+      { flexDirection: "column" },
 
-        // Status: Running (orange) when streaming, Completed (green) when done
-        const statusIcon = cliStreaming ? "▶" : "✓";
-        const statusText = cliStreaming ? "Running" : "Completed";
-        const statusColor = cliStreaming ? "#f59e0b" : "#22c55e";
+      // Model status banner (when paused)
+      modelStatus.isPaused && e(ModelStatusBanner, { hasModel: modelStatus.hasModel, tokensExceeded: modelStatus.tokensExceeded, provider: modelStatus.provider }),
 
-        // Parse lines for tool calls and formatting
-        const formatLine = (line, idx) => {
-          const trimmed = line.trim();
+      // State display: Thinking (orange shimmer) or Idle
+      isThinking && !modelStatus.isPaused && e(ThinkingState, { state: stateInfo?.text || state, goal, projectName }),
+      isIdle && e(IdleState, { waitingReasons, backgroundProjects }),
 
-          // Tool call patterns
-          const toolMatch = trimmed.match(/^[●◆○◇▣⚡]?\s*(Read|Write|Edit|Bash|WebSearch|Grep|Glob|Task)\((.+)\)$/i);
-          if (toolMatch) {
-            const [, tool, arg] = toolMatch;
-            return e(
-              Box,
-              { key: idx, flexDirection: "row", gap: 1 },
-              e(Text, { color: "#3b82f6" }, "→"),
-              e(Text, { color: "#60a5fa", bold: true }, tool),
-              e(Text, { color: "#64748b" }, `(${arg.slice(0, 50)}${arg.length > 50 ? "..." : ""})`)
-            );
-          }
+      // Space before actions
+      e(Text, { color: THEME.dim }, " "),
 
-          // State changes (Thinking:, Reading:, etc.)
-          const stateMatch = trimmed.match(/^(Thinking|Reading|Searching|Analyzing|Processing|Writing|Updating):\s*(.*)$/i);
-          if (stateMatch) {
-            const [, action, detail] = stateMatch;
-            return e(
-              Box,
-              { key: idx, flexDirection: "row", gap: 1 },
-              e(Text, { color: "#f59e0b" }, "◐"),
-              e(Text, { color: "#fbbf24", bold: true }, action),
-              detail && e(Text, { color: "#94a3b8" }, ` ${detail.slice(0, 50)}`)
-            );
-          }
-
-          // Headers (## or **)
-          if (trimmed.startsWith("##") || trimmed.startsWith("**")) {
-            const cleanText = trimmed.replace(/[#*]/g, "").trim();
-            return e(
-              Box,
-              { key: idx },
-              e(Text, { color: "#e2e8f0", bold: true }, cleanText.slice(0, 60))
-            );
-          }
-
-          // Success/Done indicators
-          if (trimmed.includes("✓") || trimmed.toLowerCase().includes("done") || trimmed.toLowerCase().includes("complete")) {
-            return e(
-              Box,
-              { key: idx, flexDirection: "row", gap: 1 },
-              e(Text, { color: "#22c55e" }, "✓"),
-              e(Text, { color: "#86efac" }, trimmed.replace(/[✓]/g, "").trim().slice(0, 60))
-            );
-          }
-
-          // Default: regular line
-          return e(
-            Box,
-            { key: idx },
-            e(Text, { color: "#cbd5e1" }, trimmed.slice(0, 70))
-          );
-        };
+      // Actions timeline
+      ...timeline.map((action, i) => {
+        const tool = action.verb || action.type || "Action";
+        const target = action.target || action.detail || "";
+        const status = action.status?.toLowerCase() || "working";
+        const result = action.result;
 
         return e(
           Box,
-          { key: "cli-stream", flexDirection: "column", marginTop: 0 },
-          // Status header with model info
-          e(
-            Box,
-            { flexDirection: "row", gap: 1, marginBottom: 1 },
-            e(Text, { color: statusColor }, statusIcon),
-            e(Text, { color: statusColor, bold: true }, statusText),
-            e(Text, { color: "#64748b" }, " · "),
-            e(Text, { color: "#8b5cf6" }, "claude-sonnet-4"),
-            hasMore && e(Text, { color: "#475569" }, ` · ↑${startLine} more`),
-            scrollOffset > 0 && e(Text, { color: "#475569" }, ` [↑${scrollOffset}]`)
-          ),
-          // Current goal/state
-          (goal || state) && e(
-            Box,
-            { marginBottom: 1 },
-            e(Text, { color: "#64748b" }, "State: "),
-            e(Text, { color: "#f59e0b", bold: true }, state || "WORKING"),
-            goal && e(Text, { color: "#64748b" }, ` · ${goal.slice(0, 40)}${goal.length > 40 ? "..." : ""}`)
-          ),
-          // Formatted output lines
-          e(
-            Box,
-            { flexDirection: "column" },
-            ...visibleLines.map((line, idx) => formatLine(line, idx))
-          )
+          { key: action.id || i, flexDirection: "column", marginBottom: 1 },
+          e(ToolCallLine, { tool, target, status, result, privateMode }),
+          // Diff view for file operations
+          action.diff && e(DiffView, { diff: action.diff, isNewFile: tool === "Write" })
         );
-      })()
-    ] : [
-      // NORMAL BACKBONE ENGINE — actions, goals, observations
-      // Model Status Banner (show when no model or tokens exceeded)
-      modelStatus.isPaused && e(ModelStatusBanner, { status: modelStatus }),
-
-      // Current STATE with goal and project - ALWAYS SHOW with flashlight effect
-      e(StateDisplay, {
-        state: modelStatus.isPaused ? "IDLE" : state,
-        stateInfo: modelStatus.isPaused ? AGENT_STATES.IDLE : stateInfo,
-        goal: modelStatus.isPaused ? "Waiting for model connection..." : goal,
-        projectName: modelStatus.isPaused ? null : projectName,
-        hideStateLine: overlayHeader,
-        waitingReasons: waitingReasons,
-        privateMode: privateMode
       }),
 
-      // Real ACTIONS (bash commands, searches, file operations)
-      ...timeline.map((item, i) =>
-        e(ActionLine, { key: item.id || `act${i}`, action: item, showDetail: !compact, privateMode: privateMode })
-      ),
-
-      // OBSERVATIONS - What the AI discovered (white dot with spacing)
-      !compact && discoveries.length > 0 && e(
-        Box,
-        { flexDirection: "column", marginTop: 1 },
-        ...discoveries.map((d, i) =>
-          e(ObservationLine, { key: `obs${i}`, observation: d, privateMode: privateMode })
-        )
-      ),
-
-      // OUTCOMES - Only show completed goals/projects (no label, just green dot + white text)
-      outcomes.length > 0 && e(
-        Box,
-        { flexDirection: "column", marginTop: compact ? 0 : 1 },
-        ...outcomes.map((o, i) =>
-          e(OutcomeLine, { key: `out${i}`, outcome: o })
-        )
-      ),
-
-      // Task progress (only if not paused and not compact)
-      !compact && !modelStatus.isPaused && taskProgress && e(
-        Box,
-        { marginTop: 1 },
-        e(TaskProgress, { ...taskProgress })
+      // Observations
+      !compact && observations.slice(0, 2).map((obs, i) =>
+        e(ObservationLine, { key: i, text: obs.text || obs, privateMode })
       )
-    ].filter(Boolean))
+    )
   );
 };
 
@@ -1274,7 +650,7 @@ export const AgentActivityPanel = memo(AgentActivityPanelBase);
  */
 export const AgentStatusDot = memo(({ state = "OBSERVING" }) => {
   const stateInfo = AGENT_STATES[state] || AGENT_STATES.OBSERVING;
-  return e(Text, { color: stateInfo.color }, "●");
+  return e(Text, { color: stateInfo?.color || THEME.gray }, "●");
 });
 
 export default AgentActivityPanel;

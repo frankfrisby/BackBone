@@ -290,7 +290,8 @@ const SmartGoalsPanelBase = ({
               id: `project-${p.safeName || p.name}`,
               title: p.name,
               project: p.name,
-              status: p.status === "paused" ? "on_hold" : "active"
+              // Use "partial" for started projects to show half-circle (◐)
+              status: p.status === "paused" ? "on_hold" : "partial"
             }));
           if (fallback.length > 0) {
             displayGoals = fallback;

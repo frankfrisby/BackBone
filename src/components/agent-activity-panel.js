@@ -1089,47 +1089,135 @@ const AgentActivityPanelBase = ({ overlayHeader = false, compact = false, scroll
       );
     })(),
 
-    // When Claude Code CLI is actively streaming, take over the entire engine body
+    // When Claude Code CLI has output to show (streaming or completed), take over the engine body
     // Otherwise show normal BACKBONE actions/goals/observations
-    ...(cliStreaming && actionStreamingText ? [
-      // CLAUDE CODE CLI STREAMING — supersedes all BACKBONE actions
+    ...((cliStreaming || actionStreamingText) ? [
+      // CLAUDE CODE CLI OUTPUT — supersedes all BACKBONE actions
       (() => {
+        // If no text yet, show waiting state
+        if (!actionStreamingText) {
+          return e(
+            Box,
+            { key: "cli-waiting", flexDirection: "column", marginTop: 0 },
+            e(
+              Box,
+              { flexDirection: "row", gap: 1 },
+              e(Text, { color: "#f59e0b" }, "▶"),
+              e(Text, { color: "#f59e0b", bold: true }, "Claude Code CLI"),
+              e(Text, { color: "#64748b" }, " · "),
+              e(Text, { color: "#8b5cf6" }, "claude-sonnet-4"),
+              e(Text, { color: "#64748b" }, " Processing...")
+            ),
+            goal && e(
+              Box,
+              { marginLeft: 2 },
+              e(Text, { color: "#94a3b8" }, `Goal: ${goal.slice(0, 60)}${goal.length > 60 ? "..." : ""}`)
+            )
+          );
+        }
+
         // Split output into lines for scroll support
-        const allLines = actionStreamingText.split("\n");
-        const visibleLineCount = 15;
+        const allLines = actionStreamingText.split("\n").filter(l => l.trim());
+        const visibleLineCount = 12;
         // scrollOffset=0 means latest (bottom), higher = scroll up
         const endLine = Math.max(0, allLines.length - scrollOffset);
         const startLine = Math.max(0, endLine - visibleLineCount);
-        const visibleText = allLines.slice(startLine, endLine).join("\n");
+        const visibleLines = allLines.slice(startLine, endLine);
         const hasMore = startLine > 0;
+
+        // Status: Running (orange) when streaming, Completed (green) when done
+        const statusIcon = cliStreaming ? "▶" : "✓";
+        const statusText = cliStreaming ? "Running" : "Completed";
+        const statusColor = cliStreaming ? "#f59e0b" : "#22c55e";
+
+        // Parse lines for tool calls and formatting
+        const formatLine = (line, idx) => {
+          const trimmed = line.trim();
+
+          // Tool call patterns
+          const toolMatch = trimmed.match(/^[●◆○◇▣⚡]?\s*(Read|Write|Edit|Bash|WebSearch|Grep|Glob|Task)\((.+)\)$/i);
+          if (toolMatch) {
+            const [, tool, arg] = toolMatch;
+            return e(
+              Box,
+              { key: idx, flexDirection: "row", gap: 1 },
+              e(Text, { color: "#3b82f6" }, "→"),
+              e(Text, { color: "#60a5fa", bold: true }, tool),
+              e(Text, { color: "#64748b" }, `(${arg.slice(0, 50)}${arg.length > 50 ? "..." : ""})`)
+            );
+          }
+
+          // State changes (Thinking:, Reading:, etc.)
+          const stateMatch = trimmed.match(/^(Thinking|Reading|Searching|Analyzing|Processing|Writing|Updating):\s*(.*)$/i);
+          if (stateMatch) {
+            const [, action, detail] = stateMatch;
+            return e(
+              Box,
+              { key: idx, flexDirection: "row", gap: 1 },
+              e(Text, { color: "#f59e0b" }, "◐"),
+              e(Text, { color: "#fbbf24", bold: true }, action),
+              detail && e(Text, { color: "#94a3b8" }, ` ${detail.slice(0, 50)}`)
+            );
+          }
+
+          // Headers (## or **)
+          if (trimmed.startsWith("##") || trimmed.startsWith("**")) {
+            const cleanText = trimmed.replace(/[#*]/g, "").trim();
+            return e(
+              Box,
+              { key: idx },
+              e(Text, { color: "#e2e8f0", bold: true }, cleanText.slice(0, 60))
+            );
+          }
+
+          // Success/Done indicators
+          if (trimmed.includes("✓") || trimmed.toLowerCase().includes("done") || trimmed.toLowerCase().includes("complete")) {
+            return e(
+              Box,
+              { key: idx, flexDirection: "row", gap: 1 },
+              e(Text, { color: "#22c55e" }, "✓"),
+              e(Text, { color: "#86efac" }, trimmed.replace(/[✓]/g, "").trim().slice(0, 60))
+            );
+          }
+
+          // Default: regular line
+          return e(
+            Box,
+            { key: idx },
+            e(Text, { color: "#cbd5e1" }, trimmed.slice(0, 70))
+          );
+        };
 
         return e(
           Box,
           { key: "cli-stream", flexDirection: "column", marginTop: 0 },
+          // Status header with model info
           e(
             Box,
-            { flexDirection: "row", gap: 1 },
-            e(Text, { color: "#f59e0b" }, "▶"),
-            e(Text, { color: "#f59e0b", bold: true }, "Running"),
-            hasMore && e(Text, { color: "#64748b" }, ` (↑ ${startLine} more lines)`),
-            scrollOffset > 0 && e(Text, { color: "#64748b" }, ` [scrolled ↑${scrollOffset}]`)
+            { flexDirection: "row", gap: 1, marginBottom: 1 },
+            e(Text, { color: statusColor }, statusIcon),
+            e(Text, { color: statusColor, bold: true }, statusText),
+            e(Text, { color: "#64748b" }, " · "),
+            e(Text, { color: "#8b5cf6" }, "claude-sonnet-4"),
+            hasMore && e(Text, { color: "#475569" }, ` · ↑${startLine} more`),
+            scrollOffset > 0 && e(Text, { color: "#475569" }, ` [↑${scrollOffset}]`)
           ),
+          // Current goal/state
+          (goal || state) && e(
+            Box,
+            { marginBottom: 1 },
+            e(Text, { color: "#64748b" }, "State: "),
+            e(Text, { color: "#f59e0b", bold: true }, state || "WORKING"),
+            goal && e(Text, { color: "#64748b" }, ` · ${goal.slice(0, 40)}${goal.length > 40 ? "..." : ""}`)
+          ),
+          // Formatted output lines
           e(
             Box,
-            { marginLeft: 2, marginTop: 0, flexDirection: "column" },
-            e(Text, { color: "#cbd5e1", wrap: "wrap" }, visibleText || "...")
+            { flexDirection: "column" },
+            ...visibleLines.map((line, idx) => formatLine(line, idx))
           )
         );
       })()
-    ] : cliStreaming && !actionStreamingText ? [
-      // CLI is processing but no output yet — show waiting state
-      e(
-        Box,
-        { key: "cli-waiting", flexDirection: "row", gap: 1, marginTop: 0 },
-        e(Text, { color: "#f59e0b" }, "▶"),
-        e(Text, { color: "#f59e0b", bold: true }, "Claude Code CLI"),
-        e(Text, { color: "#64748b" }, " Processing...")
-      )
     ] : [
       // NORMAL BACKBONE ENGINE — actions, goals, observations
       // Model Status Banner (show when no model or tokens exceeded)

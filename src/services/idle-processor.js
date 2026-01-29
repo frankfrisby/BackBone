@@ -16,10 +16,12 @@ import path from "path";
 import { EventEmitter } from "events";
 import { runClaudeCodeStreaming, getClaudeCodeStatus } from "./claude-code-cli.js";
 import { getActivityTracker } from "./activity-tracker.js";
+import { getActivityNarrator } from "./activity-narrator.js";
 import { getThinkingEngine } from "./thinking-engine.js";
 
 const DATA_DIR = path.join(process.cwd(), "data");
 const MEMORY_DIR = path.join(process.cwd(), "memory");
+const PROJECTS_DIR = path.join(process.cwd(), "projects");
 const BACKLOG_PATH = path.join(DATA_DIR, "backlog.json");
 const IDLE_STATE_PATH = path.join(DATA_DIR, "idle-processor-state.json");
 const RESEARCH_CACHE_PATH = path.join(DATA_DIR, "research-cache.json");
@@ -55,6 +57,11 @@ function writeJson(filePath, data) {
     fs.mkdirSync(dir, { recursive: true });
   }
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
+}
+
+function saveBacklog(data) {
+  data.lastUpdated = new Date().toISOString();
+  writeJson(BACKLOG_PATH, data);
 }
 
 function readFile(filePath) {
@@ -241,8 +248,8 @@ class IdleProcessor extends EventEmitter {
     const thesis = readFile(path.join(MEMORY_DIR, "thesis.md"));
 
     if (backlog.items.length === 0) {
-      // No backlog items - do general research based on user profile
-      return this.createResearchWorkItem(profile, thesis);
+      // No backlog items - trigger thinking engine and do research
+      return await this.createResearchWorkItem(profile, thesis);
     }
 
     // Sort backlog by priority factors
@@ -293,8 +300,48 @@ class IdleProcessor extends EventEmitter {
 
   /**
    * Create a research work item when backlog is empty
+   * Also triggers thinking engine to bootstrap the backlog
    */
-  createResearchWorkItem(profile, thesis) {
+  async createResearchWorkItem(profile, thesis) {
+    const tracker = getActivityTracker();
+
+    // First, try to trigger thinking engine to generate backlog items
+    tracker.setState("thinking", "Bootstrapping backlog with thinking engine...");
+    this.emit("stream", "\n=== Backlog is empty - triggering thinking engine ===\n");
+
+    try {
+      const thinkingEngine = getThinkingEngine();
+      if (thinkingEngine && !thinkingEngine.isRunning) {
+        this.log("Triggering thinking engine to generate backlog items...");
+        this.emit("stream", "Running thinking cycle to generate backlog items...\n");
+
+        // Run thinking cycle (this generates backlog items, goals, and projects)
+        await thinkingEngine.runCycle();
+
+        // Check if backlog now has items
+        const backlog = readJson(BACKLOG_PATH) || { items: [] };
+        if (backlog.items.length > 0) {
+          this.log(`Thinking engine generated ${backlog.items.length} backlog items`);
+          this.emit("stream", `Generated ${backlog.items.length} backlog items\n`);
+
+          // Return top item to work on
+          const topItem = backlog.items.sort((a, b) => (b.impactScore || 0) - (a.impactScore || 0))[0];
+          return {
+            type: WORK_TYPES.DEVELOP,
+            item: topItem,
+            context: { profile, thesis },
+          };
+        }
+      }
+    } catch (err) {
+      this.log(`Thinking engine error: ${err.message}`);
+      this.emit("stream", `Thinking engine unavailable: ${err.message}\n`);
+    }
+
+    // Fallback: do manual research with goal-creation focus
+    this.emit("stream", "Falling back to manual research with goal creation...\n");
+    tracker.setState("researching", "Finding opportunities for goals...");
+
     // Extract topics from profile and thesis
     const text = `${profile}\n${thesis}`.toLowerCase();
 
@@ -391,6 +438,12 @@ class IdleProcessor extends EventEmitter {
     this.streamBuffer = "";
 
     const tracker = getActivityTracker();
+    const narrator = getActivityNarrator();
+
+    // Set Claude Code CLI as active in the ENGINE panel
+    narrator.setClaudeCodeActive(true, "starting");
+    narrator.setState("WORKING", `Processing: ${workItem.item?.title || workItem.topic || "backlog"}`);
+
     tracker.setState("working", "Processing backlog...");
 
     console.log(`[IdleProcessor] Starting work: ${workItem.type}`);
@@ -541,17 +594,41 @@ ${context?.thesis?.slice(0, 300) || "No thesis available"}
         if (topic) {
           return `${baseContext}
 
-TASK: Research "${topic}" to find actionable insights for the user.
+TASK: Research "${topic}" to find HIGH-IMPACT actionable opportunities for the user.
+
+## GOAL: Create backlog items that can become REAL GOALS
 
 1. Use WebSearch to find current, relevant information
-2. Focus on practical, actionable insights
-3. Look for trends, opportunities, or risks
-4. Update the backlog with new items if you find valuable opportunities
+2. Focus on HIGH-IMPACT opportunities (score 75+ for important findings)
+3. Look for trends, opportunities, or risks that require ACTION
+4. Create detailed backlog items that can graduate to goals
 
-After researching, create a brief summary and add any valuable findings as new backlog items.
-Save findings to data/backlog.json (add to items array with format: { title, description, source: "research", impactScore: 50-80, urgency: "low"|"medium"|"high", isTimeSensitive: true|false }).
+## Important: Backlog items with impactScore >= 75 will automatically become GOALS
 
-Be concise. Do 2-3 quality searches, extract insights, update backlog, then stop.`;
+After researching, add valuable findings as backlog items to data/backlog.json:
+
+Read the current backlog first, then add items to the "items" array with this format:
+{
+  "id": "backlog_[timestamp]_[random]",
+  "title": "Clear actionable title",
+  "description": "Detailed description with WHY this matters and WHAT to do",
+  "source": "research",
+  "relatedBeliefs": ["relevant beliefs from profile"],
+  "impactScore": 75-90,  // HIGH for important opportunities
+  "urgency": "medium" or "high",
+  "isTimeSensitive": true/false,
+  "suggestedProject": null,
+  "createdAt": "[ISO timestamp]",
+  "lastEvaluated": null
+}
+
+Scoring guide:
+- 80-90: Critical opportunity that could significantly impact user's goals
+- 75-79: Important opportunity worth pursuing as a goal
+- 60-74: Good idea but not urgent enough for immediate goal
+- Below 60: Nice to know but low priority
+
+Be concise. Do 2-3 quality searches, create 1-3 HIGH-IMPACT backlog items (score 75+), then stop.`;
         }
         return `${baseContext}
 
@@ -704,6 +781,11 @@ Do quality work, then stop.`;
    */
   handleWorkComplete(result) {
     const tracker = getActivityTracker();
+    const narrator = getActivityNarrator();
+
+    // Set Claude Code CLI as inactive in the ENGINE panel
+    narrator.setClaudeCodeActive(false, result.success ? "complete" : "error");
+    narrator.setState("IDLE", result.success ? "Work complete" : "Work failed");
 
     this.isWorking = false;
     this.lastWorkCompletion = Date.now();
@@ -756,6 +838,209 @@ Do quality work, then stop.`;
     if (this.qualityActionsThisSession >= GOOD_WORK_THRESHOLD) {
       console.log("[IdleProcessor] Good work done - resting");
     }
+
+    // After work completes, check if any backlog items should graduate to goals
+    this.checkAndGraduateBacklogItems();
+  }
+
+  /**
+   * Check backlog for items ready to graduate to goals
+   */
+  async checkAndGraduateBacklogItems() {
+    try {
+      const backlog = readJson(BACKLOG_PATH) || { items: [] };
+      const GRADUATION_THRESHOLD = 75;
+
+      // Find items ready to graduate (high impact score)
+      const readyItems = backlog.items.filter(item => item.impactScore >= GRADUATION_THRESHOLD);
+
+      if (readyItems.length === 0) {
+        return;
+      }
+
+      this.log(`Found ${readyItems.length} items ready to graduate to goals`);
+      this.emit("stream", `\n=== ${readyItems.length} items ready to graduate to goals ===\n`);
+
+      // Try to use thinking engine for proper graduation
+      try {
+        const thinkingEngine = getThinkingEngine();
+        if (thinkingEngine) {
+          await thinkingEngine.runCycle();
+          this.emit("stream", "Thinking engine graduated items to goals\n");
+          return;
+        }
+      } catch (err) {
+        this.log(`Thinking engine graduation failed: ${err.message}`);
+      }
+
+      // Fallback: manually graduate items to goals
+      const goalsPath = path.join(DATA_DIR, "goals.json");
+      const goals = readJson(goalsPath) || { goals: [], lastUpdated: null };
+
+      for (const item of readyItems.slice(0, 2)) { // Max 2 at a time
+        // Check if goal already exists
+        const exists = goals.goals.some(g =>
+          g.title.toLowerCase() === item.title.toLowerCase() ||
+          g.description?.toLowerCase().includes(item.title.toLowerCase())
+        );
+
+        if (!exists) {
+          const newGoal = {
+            id: `goal-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            title: item.title,
+            description: item.description,
+            category: this.inferCategory(item),
+            progress: 0,
+            status: "active",
+            urgency: item.urgency || "medium",
+            tasks: this.generateBasicTasks(item),
+            fromBacklogItem: item.id,
+            createdAt: new Date().toISOString(),
+            source: "idle-processor-graduation"
+          };
+
+          goals.goals.push(newGoal);
+          this.log(`Graduated backlog item to goal: ${item.title}`);
+          this.emit("stream", `Created goal: ${item.title}\n`);
+
+          // Create project for the goal if needed
+          const projectName = this.createProjectName(item);
+          const projectPath = path.join(PROJECTS_DIR, projectName);
+          if (!fs.existsSync(projectPath)) {
+            this.createProjectForGoal(projectName, newGoal);
+            this.emit("stream", `Created project: ${projectName}\n`);
+          }
+
+          // Move item to graduatedToGoals
+          backlog.graduatedToGoals = backlog.graduatedToGoals || [];
+          backlog.graduatedToGoals.push({
+            ...item,
+            graduatedAt: new Date().toISOString(),
+            goalId: newGoal.id
+          });
+
+          // Remove from items
+          backlog.items = backlog.items.filter(i => i.id !== item.id);
+          backlog.stats = backlog.stats || {};
+          backlog.stats.totalGraduated = (backlog.stats.totalGraduated || 0) + 1;
+        }
+      }
+
+      // Save changes
+      goals.lastUpdated = new Date().toISOString();
+      writeJson(goalsPath, goals);
+      saveBacklog(backlog);
+
+      this.emit("stream", "Backlog items graduated to goals\n");
+    } catch (err) {
+      this.log(`Error graduating backlog items: ${err.message}`);
+    }
+  }
+
+  /**
+   * Infer category from backlog item
+   */
+  inferCategory(item) {
+    const text = `${item.title} ${item.description || ""}`.toLowerCase();
+    if (text.includes("invest") || text.includes("stock") || text.includes("money") || text.includes("portfolio")) {
+      return "finance";
+    }
+    if (text.includes("health") || text.includes("fitness") || text.includes("sleep") || text.includes("exercise")) {
+      return "health";
+    }
+    if (text.includes("career") || text.includes("job") || text.includes("work") || text.includes("skill")) {
+      return "career";
+    }
+    if (text.includes("family") || text.includes("relationship")) {
+      return "personal";
+    }
+    return "growth";
+  }
+
+  /**
+   * Generate basic tasks for a new goal
+   */
+  generateBasicTasks(item) {
+    const tasks = [
+      `Research current state of: ${item.title}`,
+      `Identify 3 actionable steps for: ${item.title}`,
+      `Create timeline and milestones`
+    ];
+
+    if (item.isTimeSensitive) {
+      tasks.unshift(`URGENT: Assess immediate action needed for ${item.title}`);
+    }
+
+    return tasks;
+  }
+
+  /**
+   * Create a slugified project name from item
+   */
+  createProjectName(item) {
+    // Create a slug from the title
+    const slug = item.title
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "")
+      .slice(0, 40);
+    return slug || `project-${Date.now()}`;
+  }
+
+  /**
+   * Create a project directory and PROJECT.md for a goal
+   */
+  createProjectForGoal(projectName, goal) {
+    const projectPath = path.join(PROJECTS_DIR, projectName);
+    const projectMd = path.join(projectPath, "PROJECT.md");
+    const now = new Date().toISOString();
+
+    // Create project directory
+    if (!fs.existsSync(projectPath)) {
+      fs.mkdirSync(projectPath, { recursive: true });
+    }
+
+    // Create PROJECT.md
+    const content = `# ${goal.title}
+
+**Status:** active
+**Created:** ${now}
+**Last Updated:** ${now}
+**Category:** ${goal.category || "general"}
+
+## Description
+
+${goal.description || "No description available."}
+
+## Goals
+
+### ${goal.title}
+**Status:** active | **Urgency:** ${goal.urgency || "medium"}
+
+${goal.description || ""}
+
+**Tasks:**
+${goal.tasks?.map(t => `- [ ] ${t}`).join("\n") || "- [ ] Define specific tasks"}
+
+## Progress Log
+
+- ${now.split("T")[0]}: Project created by idle processor
+
+---
+*Managed by BACKBONE*
+`;
+
+    writeJson(projectMd.replace(".md", ".json"), {
+      name: projectName,
+      title: goal.title,
+      status: "active",
+      category: goal.category,
+      createdAt: now,
+      goalId: goal.id
+    });
+
+    fs.writeFileSync(projectMd, content);
+    this.log(`Created project: ${projectName}`);
   }
 
   /**

@@ -2307,11 +2307,15 @@ const App = ({ updateConsoleTitle }) => {
 
     const onWorkComplete = (result) => {
       console.log(`\n[IdleProcessor] Completed: ${result.success ? "success" : "failed"} (${result.actionsCount} actions)`);
-      // Keep streaming text visible - don't clear it. Only update title to show completion status.
+      // Keep streaming text visible briefly, then clear for next work session
       setActionStreamingTitle(result.success ? "Background work done" : "Background work failed");
-      // Keep cliStreaming true so output stays visible, but mark as completed
-      // The activity panel will show green checkmark for completed state
       setCliStreaming(false);
+
+      // Clear old streaming text after 30 seconds so ENGINE shows fresh state
+      setTimeout(() => {
+        setActionStreamingText("");
+        setActionStreamingTitle("");
+      }, 30_000);
     };
 
     idleProcessor.on("work-started", onWorkStarted);
@@ -8983,17 +8987,21 @@ Folder: ${result.action.id}`,
           );
         })(),
 
-        // ENGINE + CONVERSATION — conversation overlays engine when messages exist
+        // ENGINE + CONVERSATION — show engine when idle, conversation when user is chatting
         e(
           Box,
           { flexDirection: "column", flexGrow: 1, marginTop: 1, overflow: "hidden" },
-          // Show conversation if there are messages or streaming, otherwise show engine
-          (messages.length > 0 || isProcessing || streamingText || actionStreamingText)
+          // Show conversation only when:
+          // 1. User has sent messages (messages.length > 0), OR
+          // 2. AI is processing user input (isProcessing), OR
+          // 3. User conversation is actively streaming (streamingText)
+          // Note: actionStreamingText is for CLI background work - show ENGINE for that
+          (messages.length > 0 || isProcessing || streamingText)
             ? e(ConversationPanel, {
                 messages,
                 isLoading: isProcessing,
                 streamingText,
-                actionStreamingText,
+                actionStreamingText: cliStreaming ? actionStreamingText : "", // Only pass if actively streaming
                 actionStreamingTitle,
                 whatsappPollCountdown,
                 whatsappPollingMode,
@@ -9005,7 +9013,7 @@ Folder: ${result.action.id}`,
                 scrollOffset: engineScrollOffset,
                 privateMode,
                 actionStreamingText,
-                isProcessing
+                cliStreaming
               })
         ),
 

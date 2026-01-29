@@ -27,11 +27,11 @@ const IDLE_STATE_PATH = path.join(DATA_DIR, "idle-processor-state.json");
 const RESEARCH_CACHE_PATH = path.join(DATA_DIR, "research-cache.json");
 
 // Configuration
-const IDLE_THRESHOLD_MS = 60_000; // 1 minute of no user activity = idle
-const MIN_WORK_INTERVAL_MS = 5 * 60_000; // Don't start new work within 5 min of last completion
+const IDLE_THRESHOLD_MS = 30_000; // 30 seconds of no user activity = idle
+const MIN_WORK_INTERVAL_MS = 60_000; // Wait 1 minute between work sessions (was 5 min)
 const MAX_WORK_SESSION_MS = 10 * 60_000; // Max 10 minutes per work session
-const GOOD_WORK_THRESHOLD = 3; // After 3 quality actions, consider resting
-const RESEARCH_COOLDOWN_MS = 30 * 60_000; // Don't research same topic within 30 min
+const GOOD_WORK_THRESHOLD = 5; // After 5 quality actions, consider resting (was 3)
+const RESEARCH_COOLDOWN_MS = 15 * 60_000; // Don't research same topic within 15 min (was 30)
 
 // Work types the processor can do
 const WORK_TYPES = {
@@ -137,10 +137,10 @@ class IdleProcessor extends EventEmitter {
       this.log(`Claude Code CLI not ready: ${status.installed ? "not logged in" : "not installed"}`);
     }
 
-    // Check for idle state every 30 seconds
+    // Check for idle state every 10 seconds for more responsive work
     this.idleCheckInterval = setInterval(() => {
       this.checkAndWork();
-    }, 30_000);
+    }, 10_000);
 
     // Start working immediately if Claude is ready
     if (status.ready) {

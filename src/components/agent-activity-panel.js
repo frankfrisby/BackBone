@@ -201,28 +201,26 @@ const DiffView = memo(({ diff, isNewFile = false, context = [] }) => {
     lineNum++;
   });
 
-  // Removed lines (red with -)
+  // Removed lines (red background with white text)
   showRemoved.forEach((line, i) => {
     const text = typeof line === "object" ? line.text : line;
     lines.push(e(
       Box,
       { key: `r${i}`, flexDirection: "row" },
       e(Text, { color: THEME.dim }, `      ${formatLineNum(lineNum)} `),
-      e(Text, { color: THEME.error }, "-  "),
-      e(Text, { color: THEME.diffRemoveFg }, (text || "").slice(0, 52))
+      e(Text, { color: THEME.white, backgroundColor: THEME.diffRemoveBg }, ` - ${(text || "").slice(0, 50)} `)
     ));
     lineNum++;
   });
 
-  // Added lines (green with +)
+  // Added lines (green background with white text)
   showAdded.forEach((line, i) => {
     const text = typeof line === "object" ? line.text : line;
     lines.push(e(
       Box,
       { key: `a${i}`, flexDirection: "row" },
       e(Text, { color: THEME.dim }, `      ${formatLineNum(lineNum)} `),
-      e(Text, { color: THEME.success }, "+  "),
-      e(Text, { color: THEME.diffAddFg }, (text || "").slice(0, 52))
+      e(Text, { color: THEME.white, backgroundColor: THEME.diffAddBg }, ` + ${(text || "").slice(0, 50)} `)
     ));
     lineNum++;
   });
@@ -516,16 +514,14 @@ const CLIOutputStream = memo(({ text, isStreaming, scrollOffset = 0, goal = "", 
           Box,
           { key: idx, flexDirection: "row" },
           e(Text, { color: THEME.dim }, `      ${paddedNum} `),
-          e(Text, { color: THEME.success }, "+  "),
-          e(Text, { color: THEME.diffAddFg }, content.slice(0, 55))
+          e(Text, { color: THEME.white, backgroundColor: THEME.diffAddBg }, ` + ${content.slice(0, 52)} `)
         );
       } else if (isRemove) {
         return e(
           Box,
           { key: idx, flexDirection: "row" },
           e(Text, { color: THEME.dim }, `      ${paddedNum} `),
-          e(Text, { color: THEME.error }, "-  "),
-          e(Text, { color: THEME.diffRemoveFg }, content.slice(0, 55))
+          e(Text, { color: THEME.white, backgroundColor: THEME.diffRemoveBg }, ` - ${content.slice(0, 52)} `)
         );
       } else {
         // Context line (no +/-)
@@ -548,21 +544,19 @@ const CLIOutputStream = memo(({ text, isStreaming, scrollOffset = 0, goal = "", 
       );
     }
 
-    // Simple diff lines: + or - at start (fallback)
+    // Simple diff lines: + or - at start (fallback) - with background colors
     if (trimmed.startsWith("+") && !trimmed.startsWith("++")) {
       return e(
         Box,
         { key: idx, flexDirection: "row" },
-        e(Text, { color: THEME.success }, "+  "),
-        e(Text, { color: THEME.diffAddFg }, trimmed.slice(1).trim().slice(0, 60))
+        e(Text, { color: THEME.white, backgroundColor: THEME.diffAddBg }, ` + ${trimmed.slice(1).trim().slice(0, 58)} `)
       );
     }
     if (trimmed.startsWith("-") && !trimmed.startsWith("--")) {
       return e(
         Box,
         { key: idx, flexDirection: "row" },
-        e(Text, { color: THEME.error }, "-  "),
-        e(Text, { color: THEME.diffRemoveFg }, trimmed.slice(1).trim().slice(0, 60))
+        e(Text, { color: THEME.white, backgroundColor: THEME.diffRemoveBg }, ` - ${trimmed.slice(1).trim().slice(0, 58)} `)
       );
     }
 

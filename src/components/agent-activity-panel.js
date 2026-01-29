@@ -611,7 +611,7 @@ const CLIOutputStream = memo(({ text, isStreaming, scrollOffset = 0, goal = "", 
     // Header with flashlight animation on "Running" when active
     e(
       Box,
-      { flexDirection: "row", marginBottom: 1 },
+      { flexDirection: "row" },
       e(Text, { color: statusColor }, statusIcon + " "),
       // Use flashlight for "Running" when actively streaming, static text otherwise
       showFlashlight
@@ -629,7 +629,7 @@ const CLIOutputStream = memo(({ text, isStreaming, scrollOffset = 0, goal = "", 
     // Goal/State
     (goal || state) && e(
       Box,
-      { marginBottom: 1 },
+      null,
       e(Text, { color: THEME.dim }, "State: "),
       e(Text, { color: THEME.warning, bold: true }, state || "WORKING"),
       goal && e(Text, { color: THEME.dim }, ` · ${goal.slice(0, 40)}`)
@@ -752,7 +752,7 @@ const AgentActivityPanelBase = ({
     // ═══════════════════════════════════════════════════════════════════════
     !overlayHeader && e(
       Box,
-      { flexDirection: "column", marginBottom: 1 },
+      { flexDirection: "column" },
       e(
         Box,
         { flexDirection: "row", justifyContent: "space-between" },

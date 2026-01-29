@@ -454,12 +454,18 @@ const CLIOutputStream = memo(({ text, isStreaming, scrollOffset = 0, goal = "", 
   const runningColor = "#ea580c";
   const showFlashlight = isStreaming && isRecentlyActive;
 
-  // Split into lines and handle scrolling
+  // Split into lines and handle scrolling - allow full history access
   const allLines = (text || "").split("\n").filter(l => l.trim());
-  const visibleCount = 12;
-  const endLine = Math.max(0, allLines.length - scrollOffset);
+  const visibleCount = 25; // Show more lines at once
+  // scrollOffset=0 means show latest, higher values scroll back in history
+  // Allow scrolling all the way back to the beginning
+  const maxScrollBack = Math.max(0, allLines.length - visibleCount);
+  const effectiveOffset = Math.min(scrollOffset, maxScrollBack);
+  const endLine = Math.max(0, allLines.length - effectiveOffset);
   const startLine = Math.max(0, endLine - visibleCount);
   const visibleLines = allLines.slice(startLine, endLine);
+  const canScrollMore = startLine > 0; // Can scroll back further
+  const totalLines = allLines.length;
 
   // Format a single line based on content
   const formatLine = (line, idx) => {
@@ -619,7 +625,12 @@ const CLIOutputStream = memo(({ text, isStreaming, scrollOffset = 0, goal = "", 
         : e(Text, { color: statusColor, bold: true }, isStreaming ? "Running" : "Completed"),
       e(Text, { color: THEME.dim }, " · "),
       e(Text, { color: modelColor, bold: isOpus }, modelDisplayName),
-      startLine > 0 && e(Text, { color: THEME.dim }, ` · ↑${startLine} more`)
+      // Show scroll position: lines X-Y of Z (scroll up for more)
+      totalLines > visibleCount && e(
+        Text,
+        { color: THEME.dim },
+        ` · ${startLine + 1}-${endLine}/${totalLines}${canScrollMore ? " ↑" : ""}`
+      )
     ),
     // Goal/State
     (goal || state) && e(

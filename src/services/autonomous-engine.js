@@ -5,7 +5,7 @@ import { getGoalManager, GOAL_STATE, TASK_STATE, HOLD_REASON } from "./goal-mana
 import { getToolExecutor, TOOL_TYPES } from "./tool-executor.js";
 import { STATE_FOR_ACTIVITY, getStateForActivity } from "./engine-state.js";
 import { getClaudeOrchestrator, EVALUATION_DECISION, ORCHESTRATION_STATE } from "./claude-orchestrator.js";
-import { getClaudeCodeStatus } from "./claude-code-cli.js";
+import { getClaudeCodeStatus, getCurrentModelInUse } from "./claude-code-cli.js";
 import { getActionScheduler, ACTION_PRIORITY, ACTION_STATUS } from "./action-scheduler.js";
 import { getProjectManager } from "./project-manager.js";
 import { getWorkerCoordination, WORKER_MODE } from "./worker-coordination.js";
@@ -69,12 +69,25 @@ const getDefaultState = () => ({
   lastCycleAt: null,
   cycleCount: 0,
   config: {
-    cycleIntervalMs: 30000,      // 30 seconds between cycles
+    cycleIntervalMs: 30000,      // Default 30 seconds, adjusted based on model
     maxProposedActions: 5,
     requireApproval: true,
     autoApproveTypes: []         // Action types that auto-approve
   }
 });
+
+/**
+ * Get cycle interval based on current model
+ * Opus 4.5: 15 minutes (to respect rate limits)
+ * Sonnet: 10 minutes
+ */
+const getCycleIntervalForModel = () => {
+  const model = getCurrentModelInUse();
+  const isOpus = model.includes("opus");
+  // Opus 4.5: 15 minutes = 900000ms
+  // Sonnet: 10 minutes = 600000ms
+  return isOpus ? 900000 : 600000;
+};
 
 /**
  * Load engine state from disk
@@ -572,10 +585,15 @@ export class AutonomousEngine extends EventEmitter {
     // Run first cycle immediately
     this.runCycle(generateFn);
 
+    // Get interval based on model (Opus: 15min, Sonnet: 30sec)
+    const intervalMs = getCycleIntervalForModel();
+    const intervalLabel = intervalMs >= 60000 ? `${intervalMs / 60000} minutes` : `${intervalMs / 1000} seconds`;
+    console.log(`[AutonomousEngine] Cycle interval: ${intervalLabel} (model: ${getCurrentModelInUse().includes("opus") ? "Opus 4.5" : "Sonnet"})`);
+
     // Start interval
     this.loopInterval = setInterval(() => {
       this.runCycle(generateFn);
-    }, this.state.config.cycleIntervalMs);
+    }, intervalMs);
   }
 
   /**

@@ -454,7 +454,7 @@ const CLIOutputStream = memo(({ text, isStreaming, scrollOffset = 0, goal = "", 
 
   // Split into lines and handle scrolling - allow full history access
   const allLines = (text || "").split("\n").filter(l => l.trim());
-  const visibleCount = 25; // Show more lines at once
+  const visibleCount = 18; // Visible lines at once
   // scrollOffset=0 means show latest, higher values scroll back in history
   // Allow scrolling all the way back to the beginning
   const maxScrollBack = Math.max(0, allLines.length - visibleCount);

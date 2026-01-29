@@ -197,6 +197,7 @@ import { getPlaidService, isPlaidConfigured, syncPlaidData } from "./services/pl
 import { getThinkingEngine } from "./services/thinking-engine.js";
 import { getIdleProcessor } from "./services/idle-processor.js";
 import { getClaudeCodeMonitor } from "./services/claude-code-monitor.js";
+import { getStartupEngine } from "./services/startup-engine.js";
 import { startRealtimeSync, stopRealtimeSync, isAuthenticated as isFirestoreAuthenticated, pushTickers } from "./services/firestore-sync.js";
 
 // Initialize idle processor immediately on module load
@@ -209,6 +210,17 @@ console.log("[App] Initializing Claude Code monitor...");
 const _claudeCodeMonitor = getClaudeCodeMonitor();
 _claudeCodeMonitor.start();
 console.log("[App] Claude Code monitor started");
+
+// Initialize startup engine - runs automatic work on startup
+console.log("[App] Initializing startup engine...");
+const _startupEngine = getStartupEngine();
+// Start the startup engine after a short delay to let UI render
+setTimeout(() => {
+  console.log("[App] Running startup engine...");
+  _startupEngine.run().catch(err => {
+    console.error("[App] Startup engine error:", err.message);
+  });
+}, 5000); // Wait 5 seconds for UI to settle
 
 // Life Management Engine imports
 import { getLifeManagementEngine, LIFE_AREAS } from "./services/life-management-engine.js";

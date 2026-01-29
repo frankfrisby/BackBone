@@ -19,6 +19,8 @@
 import fs from "fs";
 import path from "path";
 import { EventEmitter } from "events";
+import { runClaudeCodeStreaming, getClaudeCodeStatus } from "./claude-code-cli.js";
+import { getActivityNarrator } from "./activity-narrator.js";
 
 const DATA_DIR = path.join(process.cwd(), "data");
 const BACKGROUND_PROJECTS_PATH = path.join(DATA_DIR, "background-projects.json");
@@ -190,8 +192,11 @@ class BackgroundProjectsManager extends EventEmitter {
     this.saveProjects();
     this.initialized = true;
 
-    // Start periodic check
+    // Start periodic check for triggers
     this.startPeriodicCheck();
+
+    // Start work scheduler to ensure 1-2 projects are always active
+    this.startWorkScheduler();
 
     this.emit("initialized");
     return this.projects;
@@ -459,8 +464,339 @@ class BackgroundProjectsManager extends EventEmitter {
       marketTheories: this.projects[BACKGROUND_PROJECT_TYPE.MARKET_RESEARCH]?.theories?.length || 0,
       activeThreats: this.projects[BACKGROUND_PROJECT_TYPE.DISASTER_PLANNING]?.activeThreats?.filter(
         t => t.status === "monitoring" && (t.severity === "high" || t.severity === "critical")
-      ).length || 0
+      ).length || 0,
+      activeWorkCount: this.activeWorkCount || 0,
+      currentlyWorking: this.currentlyWorkingOn || null
     };
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ACTIVE PROJECT WORK MANAGEMENT
+  // Ensures 1-2 projects are always being actively worked on
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Ensure at least 1-2 projects are actively being worked on
+   * Called periodically by the work scheduler
+   */
+  async ensureActiveWork() {
+    if (this.isWorking) {
+      console.log("[BackgroundProjects] Already working on a project");
+      return;
+    }
+
+    // Check if Claude Code CLI is ready
+    const cliStatus = await getClaudeCodeStatus();
+    if (!cliStatus.ready) {
+      console.log("[BackgroundProjects] Claude Code CLI not ready");
+      return;
+    }
+
+    // Get projects that need work
+    const projectsNeedingWork = this.getProjectsNeedingWork();
+
+    if (projectsNeedingWork.length === 0) {
+      console.log("[BackgroundProjects] All projects up to date");
+      return;
+    }
+
+    // Work on the highest priority project
+    const projectToWork = projectsNeedingWork[0];
+    console.log(`[BackgroundProjects] Starting work on: ${projectToWork.title}`);
+
+    await this.workOnProject(projectToWork.type);
+  }
+
+  /**
+   * Get projects that need work, sorted by priority
+   */
+  getProjectsNeedingWork() {
+    const now = Date.now();
+    const projects = [];
+
+    for (const [type, project] of Object.entries(this.projects)) {
+      // Calculate how long since last active
+      const lastActive = project.lastActive ? new Date(project.lastActive).getTime() : 0;
+      const hoursSinceActive = (now - lastActive) / (1000 * 60 * 60);
+
+      // Projects need work if:
+      // 1. Status is TRIGGERED
+      // 2. Status is ON_HOLD but not worked on in 24+ hours
+      // 3. Status is ACTIVE (continue working)
+      let needsWork = false;
+      let priority = 0;
+
+      if (project.status === PROJECT_STATUS.TRIGGERED) {
+        needsWork = true;
+        priority = 100;
+      } else if (project.status === PROJECT_STATUS.ACTIVE) {
+        needsWork = true;
+        priority = 80;
+      } else if (project.status === PROJECT_STATUS.ON_HOLD && hoursSinceActive > 24) {
+        needsWork = true;
+        priority = 50;
+      }
+
+      // Boost priority based on type
+      if (type === BACKGROUND_PROJECT_TYPE.MARKET_RESEARCH) {
+        priority += 10; // Market research is always somewhat important
+      }
+      if (type === BACKGROUND_PROJECT_TYPE.DISASTER_PLANNING) {
+        // Boost if there are active threats
+        const threatCount = (project.activeThreats || []).filter(t => t.status === "monitoring").length;
+        priority += threatCount * 5;
+      }
+
+      if (needsWork) {
+        projects.push({ type, priority, ...project });
+      }
+    }
+
+    // Sort by priority descending
+    projects.sort((a, b) => b.priority - a.priority);
+
+    return projects;
+  }
+
+  /**
+   * Start working on a specific project using Claude Code CLI
+   */
+  async workOnProject(type) {
+    const project = this.projects[type];
+    if (!project) {
+      console.error(`[BackgroundProjects] Project not found: ${type}`);
+      return;
+    }
+
+    this.isWorking = true;
+    this.currentlyWorkingOn = project.title;
+    this.activeWorkCount = (this.activeWorkCount || 0) + 1;
+
+    const narrator = getActivityNarrator();
+    narrator.setState("WORKING", `Background: ${project.title}`);
+    narrator.setClaudeCodeActive(true, "starting");
+
+    // Update project status
+    this.updateProjectStatus(type, PROJECT_STATUS.ACTIVE, {});
+
+    try {
+      const prompt = this.buildProjectPrompt(type, project);
+
+      const stream = await runClaudeCodeStreaming(prompt, {
+        timeout: 10 * 60_000, // 10 minutes max
+        cwd: process.cwd()
+      });
+
+      if (!stream) {
+        console.error("[BackgroundProjects] Failed to start Claude Code CLI");
+        this.handleWorkComplete(type, { success: false, error: "Stream not created" });
+        return;
+      }
+
+      stream.on("data", (text) => {
+        this.emit("stream", { type, text });
+        // Extract insights from the stream
+        this.extractInsightsFromStream(type, text);
+      });
+
+      stream.on("complete", (result) => {
+        console.log(`[BackgroundProjects] Work on ${project.title} complete`);
+        this.handleWorkComplete(type, result);
+      });
+
+      stream.on("error", (error) => {
+        console.error(`[BackgroundProjects] Error working on ${project.title}:`, error);
+        this.handleWorkComplete(type, { success: false, error: error.message });
+      });
+
+    } catch (error) {
+      console.error(`[BackgroundProjects] Exception working on ${project.title}:`, error);
+      this.handleWorkComplete(type, { success: false, error: error.message });
+    }
+  }
+
+  /**
+   * Handle work completion
+   */
+  handleWorkComplete(type, result) {
+    const narrator = getActivityNarrator();
+    narrator.setClaudeCodeActive(false, result.success ? "complete" : "error");
+    narrator.setState("IDLE", result.success ? "Background work complete" : "Background work failed");
+
+    this.isWorking = false;
+    this.currentlyWorkingOn = null;
+
+    // Update project status
+    this.updateProjectStatus(type, PROJECT_STATUS.ON_HOLD, {
+      insight: result.success ? "Work session completed" : `Work session failed: ${result.error}`
+    });
+
+    this.emit("work-complete", { type, result });
+  }
+
+  /**
+   * Extract insights from streaming output
+   */
+  extractInsightsFromStream(type, text) {
+    // Look for patterns that indicate insights
+    const lines = text.split("\n");
+    for (const line of lines) {
+      const trimmed = line.trim();
+
+      // Key finding patterns
+      if (trimmed.startsWith("INSIGHT:") || trimmed.startsWith("Finding:") || trimmed.startsWith("Key:")) {
+        const insight = trimmed.replace(/^(INSIGHT:|Finding:|Key:)\s*/i, "");
+        if (insight.length > 20) {
+          this.addInsight(type, insight, "streaming");
+        }
+      }
+
+      // Market theories
+      if (type === BACKGROUND_PROJECT_TYPE.MARKET_RESEARCH) {
+        if (trimmed.startsWith("THEORY:") || trimmed.includes("market hypothesis")) {
+          const theory = trimmed.replace(/^THEORY:\s*/i, "");
+          if (theory.length > 20) {
+            this.addTheory(theory, 50);
+          }
+        }
+      }
+
+      // Threat detection
+      if (type === BACKGROUND_PROJECT_TYPE.DISASTER_PLANNING) {
+        if (trimmed.startsWith("THREAT:") || trimmed.includes("potential risk")) {
+          const threat = trimmed.replace(/^THREAT:\s*/i, "");
+          if (threat.length > 20) {
+            this.addThreat(threat, "medium", {});
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Build prompt for project work
+   */
+  buildProjectPrompt(type, project) {
+    const base = `You are working on a BACKBONE background project autonomously.
+Project: ${project.title}
+
+${project.description}
+
+Previous Insights (last 5):
+${(project.insights || []).slice(0, 5).map(i => `- ${i.text}`).join("\n") || "None yet"}
+
+`;
+
+    switch (type) {
+      case BACKGROUND_PROJECT_TYPE.MARKET_RESEARCH:
+        return `${base}
+
+TASK: Analyze current market conditions and update research.
+
+1. Use WebSearch to find current market news and analysis
+2. Look for macroeconomic trends, geopolitical events affecting markets
+3. Analyze any significant market movements
+4. Update your theories on market direction
+
+For each finding, prefix with "INSIGHT:" so it can be captured.
+For new theories, prefix with "THEORY:" so they can be tracked.
+
+Focus on:
+- S&P 500 and major index movements
+- Bond market signals
+- Currency movements
+- Geopolitical events affecting markets
+- Sector rotations
+
+Do 3-5 quality searches, extract key insights, then stop.`;
+
+      case BACKGROUND_PROJECT_TYPE.FINANCIAL_GROWTH:
+        return `${base}
+
+TASK: Analyze opportunities for financial growth.
+
+1. Review current market conditions (from market_research if available)
+2. Identify entry/exit opportunities
+3. Look for undervalued assets or sectors
+4. Analyze risk/reward scenarios
+
+For each finding, prefix with "INSIGHT:" so it can be captured.
+
+Focus on:
+- Value opportunities in current market
+- Risk factors to consider
+- Portfolio optimization ideas
+- Timing considerations
+
+Do 2-4 quality searches, extract actionable insights, then stop.`;
+
+      case BACKGROUND_PROJECT_TYPE.DISASTER_PLANNING:
+        return `${base}
+
+TASK: Monitor world events for potential threats and preparation needs.
+
+1. Search for emerging global risks (pandemic, economic, geopolitical, climate)
+2. Identify early warning indicators
+3. Suggest preparedness actions if needed
+4. Update threat assessments
+
+For each threat, prefix with "THREAT:" so it can be tracked.
+For insights, prefix with "INSIGHT:" for capture.
+
+Focus on:
+- Supply chain disruptions
+- Disease outbreaks
+- Geopolitical tensions
+- Economic instability indicators
+- Climate/weather events
+
+Do 3-5 quality searches, assess risks, then stop.`;
+
+      default:
+        return `${base}
+
+TASK: Continue project work.
+
+1. Review current state
+2. Identify next actions
+3. Execute research or analysis
+4. Document findings
+
+Mark key findings with "INSIGHT:" prefix.`;
+    }
+  }
+
+  /**
+   * Start the work scheduler to ensure projects are being worked on
+   */
+  startWorkScheduler() {
+    if (this.workSchedulerInterval) return;
+
+    console.log("[BackgroundProjects] Starting work scheduler");
+
+    // Check every 15 minutes if we should start working on a project
+    this.workSchedulerInterval = setInterval(() => {
+      this.ensureActiveWork().catch(err => {
+        console.error("[BackgroundProjects] Work scheduler error:", err.message);
+      });
+    }, 15 * 60 * 1000);
+
+    // Initial check after 2 minutes
+    setTimeout(() => {
+      this.ensureActiveWork().catch(err => {
+        console.error("[BackgroundProjects] Initial work check error:", err.message);
+      });
+    }, 2 * 60 * 1000);
+  }
+
+  /**
+   * Stop the work scheduler
+   */
+  stopWorkScheduler() {
+    if (this.workSchedulerInterval) {
+      clearInterval(this.workSchedulerInterval);
+      this.workSchedulerInterval = null;
+    }
   }
 }
 

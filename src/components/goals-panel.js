@@ -1,7 +1,7 @@
 /**
  * Goals Panel Component
  *
- * Displays 5-7 goals on the right side of the engine view.
+ * Displays 2-3 active/on-hold goals on the right side of the engine view.
  * Format:
  *   ● Goal title that can wrap
  *     to two lines if needed
@@ -10,7 +10,7 @@
  * Dot colors:
  * - Gray blinking: currently working (first active goal)
  * - Gray solid: pending/waiting
- * - Green: complete
+ * - Green: complete (not shown in this list)
  * - Red: failed/blocked
  *
  * Each goal is SPECIFIC (not vague like "make money")
@@ -141,20 +141,20 @@ const GoalLine = memo(({ goal, isWorking = false, blinkVisible = true, isFirst =
 
   return e(
     Box,
-    { flexDirection: "column", marginBottom: 1 },
-    // Goal line with indicator and title
+    { flexDirection: "row", marginBottom: 1 },
+    // Left column: indicator (fixed width for grid alignment)
     e(
       Box,
-      { flexDirection: "row", gap: 2 },
-      // Indicator
-      e(Text, { color: indicatorColor }, indicator),
-      // Goal title (light gray, can wrap to 2 lines)
-      e(Text, { color: privateMode ? "#475569" : "#94a3b8", wrap: "wrap" }, displayTitle)
+      { width: 2, flexShrink: 0 },
+      e(Text, { color: indicatorColor }, indicator)
     ),
-    // Project name below in darker gray, indented to align with title after dot
+    // Right column: goal text and project (can wrap)
     e(
       Box,
-      { paddingLeft: 4 },  // Align with title (dot + gap = ~4 chars)
+      { flexDirection: "column", flexGrow: 1 },
+      // Goal title (light gray, can wrap)
+      e(Text, { color: privateMode ? "#475569" : "#94a3b8", wrap: "wrap" }, displayTitle),
+      // Project name below in darker gray
       e(Text, { color: "#475569", dimColor: true, wrap: "wrap" }, displayProject)
     )
   );
@@ -162,14 +162,14 @@ const GoalLine = memo(({ goal, isWorking = false, blinkVisible = true, isFirst =
 
 /**
  * Goals Panel
- * Shows max 3 goals (min 2 if available) as part of the 6-item total limit
- * Combined with "working on" and outcomes, total should be max 6 items
+ * Shows max 3 non-completed goals (next up / active / on-hold)
+ * Completed goals should appear under outcomes instead.
  */
 const GoalsPanelBase = ({
   goals = [],
   currentGoalId = null,
   isGenerating = false,
-  maxGoals = 3,  // Max 3 goals as part of total 6 items (goals + working + outcomes)
+  maxGoals = 3,  // Show 2-3 active/on-hold goals
   privateMode = false
 }) => {
   // Blink state for active goal indicator
@@ -183,8 +183,8 @@ const GoalsPanelBase = ({
     return () => clearInterval(interval);
   }, []);
 
-  // Get display goals (limit to maxGoals)
-  const displayGoals = goals.slice(0, maxGoals);
+  // Get display goals (limit to maxGoals, exclude completed)
+  const displayGoals = goals.filter(g => g.status !== "completed").slice(0, maxGoals);
   const hasGoals = displayGoals.length > 0;
 
   // Find the first goal to mark as working (if no currentGoalId, use first active goal)
@@ -206,16 +206,12 @@ const GoalsPanelBase = ({
       // Loading state
       isGenerating && e(
         Box,
-        { flexDirection: "column" },
+        { flexDirection: "row" },
+        e(Box, { width: 2, flexShrink: 0 }, e(Text, { color: blinkVisible ? "#64748b" : "#1e293b" }, "●")),
         e(
           Box,
-          { flexDirection: "row", gap: 1 },
-          e(Text, { color: blinkVisible ? "#64748b" : "#1e293b" }, "●"),
-          e(Text, { color: "#64748b", italic: true }, "Analyzing data...")
-        ),
-        e(
-          Box,
-          { paddingLeft: 3 },
+          { flexDirection: "column", flexGrow: 1 },
+          e(Text, { color: "#64748b", italic: true }, "Analyzing data..."),
           e(Text, { color: "#64748b", dimColor: true }, "Generating goals")
         )
       ),
@@ -235,16 +231,12 @@ const GoalsPanelBase = ({
       // Empty state
       !isGenerating && !hasGoals && e(
         Box,
-        { flexDirection: "column" },
+        { flexDirection: "row" },
+        e(Box, { width: 2, flexShrink: 0 }, e(Text, { color: "#64748b" }, "○")),
         e(
           Box,
-          { flexDirection: "row", gap: 1 },
-          e(Text, { color: "#64748b" }, "○"),
-          e(Text, { color: "#64748b" }, "No goals set")
-        ),
-        e(
-          Box,
-          { paddingLeft: 3 },
+          { flexDirection: "column", flexGrow: 1 },
+          e(Text, { color: "#64748b" }, "No goals set"),
           e(Text, { color: "#64748b", dimColor: true }, "Run /goals to create")
         )
       )
@@ -274,14 +266,41 @@ const SmartGoalsPanelBase = ({
       const tracker = getGoalTracker();
       const allGoals = tracker.getAll();
 
-      // Sort: active first, then by priority
-      const sortedGoals = [...allGoals].sort((a, b) => {
+      // Sort: active/on-hold first, then by priority; exclude completed from panel
+      const sortedGoals = [...allGoals]
+        .filter(g => g.status !== "completed")
+        .sort((a, b) => {
         if (a.status === "active" && b.status !== "active") return -1;
         if (b.status === "active" && a.status !== "active") return 1;
+        if (a.status === "on_hold" && b.status !== "on_hold") return -1;
+        if (b.status === "on_hold" && a.status !== "on_hold") return 1;
         return (a.priority || 5) - (b.priority || 5);
       });
 
-      setGoals(sortedGoals);
+      // If no active/on-hold goals, fall back to default projects
+      let displayGoals = sortedGoals;
+      const hasActiveOrHold = sortedGoals.some(g => g.status === "active" || g.status === "on_hold");
+      if (!hasActiveOrHold) {
+        try {
+          const projectManager = getProjectManager();
+          const projects = projectManager.listProjects();
+          const fallback = projects
+            .slice(0, 3)
+            .map((p) => ({
+              id: `project-${p.safeName || p.name}`,
+              title: p.name,
+              project: p.name,
+              status: p.status === "paused" ? "on_hold" : "active"
+            }));
+          if (fallback.length > 0) {
+            displayGoals = fallback;
+          }
+        } catch (e) {
+          // Ignore fallback errors
+        }
+      }
+
+      setGoals(displayGoals);
 
       // Get current working goal from goal manager (if available)
       try {
@@ -301,10 +320,10 @@ const SmartGoalsPanelBase = ({
       }
 
       if (onGoalsUpdated) {
-        onGoalsUpdated(sortedGoals);
+        onGoalsUpdated(displayGoals);
       }
 
-      return sortedGoals;
+      return displayGoals;
     } catch (error) {
       console.error("[GoalsPanel] Failed to load goals:", error.message);
       return [];
@@ -442,7 +461,7 @@ const SmartGoalsPanelBase = ({
     goals,
     currentGoalId,
     isGenerating,
-    maxGoals: 7,
+    maxGoals: 3,
     privateMode
   });
 };

@@ -16,7 +16,7 @@ const THREADS_DIR = path.join(DATA_DIR, "threads");
 export const ENGINE_STATUS = {
   STARTING: { id: "starting", label: "Starting up Engine", icon: "⚡", color: "#f59e0b" },
   RESEARCHING: { id: "researching", label: "Researching", icon: "🔍", color: "#38bdf8" },
-  THINKING: { id: "thinking", label: "Thinking", icon: "💭", color: "#a78bfa" },
+  THINKING: { id: "thinking", label: "Thinking", icon: "💭", color: "#f59e0b" },
   PLANNING: { id: "planning", label: "Planning", icon: "📋", color: "#60a5fa" },
   BUILDING: { id: "building", label: "Building", icon: "🔨", color: "#22c55e" },
   WORKING: { id: "working", label: "Working", icon: "⚙️", color: "#f97316" },

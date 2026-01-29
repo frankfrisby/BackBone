@@ -317,7 +317,7 @@ const ChatPanelBase = ({ commands, onSubmit, onTypingChange, modelInfo, compact 
         e(Text, { color: "#334155" }, "instant"),
         e(Text, { color: "#475569" }, "fast"),
         e(Text, { color: "#334155" }, "│"),
-        e(Text, { color: "#8b5cf6" }, "thinking"),
+        e(Text, { color: "#f59e0b" }, "thinking"),
         e(Text, { color: "#475569" }, "complex")
       )
     )

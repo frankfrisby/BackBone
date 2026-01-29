@@ -5,7 +5,7 @@ import { getAutonomousEngine } from "../services/autonomous-engine.js";
 import { useCoordinatedUpdates } from "../hooks/useCoordinatedUpdates.js";
 import { getAIStatus, getMultiAIConfig, getCurrentModel } from "../services/multi-ai.js";
 import { BILLING_URLS } from "../services/api-quota-monitor.js";
-import { isClaudeCodeLoggedIn } from "../services/claude-code-cli.js";
+import { isClaudeCodeLoggedIn, getCurrentModelInUse } from "../services/claude-code-cli.js";
 import { getGoalManager } from "../services/goal-manager.js";
 import { getBackgroundProjectsManager, BACKGROUND_PROJECT_TYPE } from "../services/background-projects.js";
 
@@ -98,100 +98,168 @@ const StatusDot = memo(({ status = "working", blink = false }) => {
 
 /**
  * Tool call line - Claude Code format
- * ○ Read(src/services/auth.js)
+ * ● Read(src/services/auth.js)
  * ● Bash(npm install)
- * ○ WebSearch(AI jobs in DC)
+ * ● WebSearch(AI jobs in DC)
  */
-const ToolCallLine = memo(({ tool, target, status = "working", result = null, privateMode = false }) => {
+const ToolCallLine = memo(({ tool, target, status = "working", result = null, privateMode = false, diff = null }) => {
   const toolColor = TOOL_COLOR;
   const isDone = status === "done" || status === "completed" || status === "success";
   const isFailed = status === "error" || status === "failed";
+  const isWorking = !isDone && !isFailed;
 
-  // Truncate long targets
-  const displayTarget = privateMode ? "••••••••" : (target?.length > 60 ? target.slice(0, 57) + "..." : target);
+  // Use filled dot (●) for all states, color indicates status
+  const dotColor = isDone ? THEME.success : isFailed ? THEME.error : THEME.white;
+
+  // Truncate long targets - show path-like format
+  const displayTarget = privateMode ? "••••••••" : (target?.length > 55 ? target.slice(0, 52) + "..." : target);
 
   return e(
     Box,
-    { flexDirection: "column", marginBottom: 1 },
-    // Main line: dot + Tool(target)
+    { flexDirection: "column", marginBottom: 0 },
+    // Main line: ● Tool(target)
     e(
       Box,
       { flexDirection: "row" },
-      e(StatusDot, { status: isDone ? "done" : isFailed ? "error" : "working", blink: !isDone && !isFailed }),
-      e(Text, { color: THEME.muted }, " "),
+      e(Text, { color: dotColor }, "● "),
       e(Text, { color: toolColor, bold: true }, tool),
       e(Text, { color: THEME.dim }, "("),
-      e(Text, { color: THEME.primary }, displayTarget || ""),
+      e(Text, { color: THEME.secondary }, displayTarget || ""),
       e(Text, { color: THEME.dim }, ")")
     ),
-    // Result line if present (indented)
-    result && !privateMode && e(
+    // Diff view if present (for Edit/Update/Write tools)
+    diff && e(DiffView, { diff, isNewFile: tool === "Write" }),
+    // Result line if present and no diff (indented)
+    result && !diff && !privateMode && e(
       Box,
-      { paddingLeft: 3 },
-      e(Text, { color: THEME.dim }, "→ "),
-      e(Text, { color: THEME.secondary }, typeof result === "string" ? result.slice(0, 70) : "")
+      { paddingLeft: 2 },
+      e(Text, { color: THEME.dim }, "  ⎿  "),
+      e(Text, { color: THEME.secondary }, typeof result === "string" ? result.slice(0, 60) : "")
     )
   );
 });
 
 /**
- * Diff view - Claude Code style with +/- and colored backgrounds
+ * Diff view - Claude Code style with line numbers
  *
- *   35 │ - const oldAuth = require('old');     [RED BG]
- *   36 │ + const newAuth = require('new');     [GREEN BG]
+ * ● Update(src/file.js)
+ *   ⎿  Updated 3 lines
+ *       775    existingLine,
+ *       776    anotherLine,
+ *       777 +  newAddedLine,
+ *       778    contextAfter,
  */
-const DiffView = memo(({ diff, isNewFile = false }) => {
+const DiffView = memo(({ diff, isNewFile = false, context = [] }) => {
   if (!diff) return null;
 
   const removed = diff.removed || [];
   const added = diff.added || [];
   const startLine = diff.startLine || 1;
+  const contextBefore = diff.contextBefore || context.slice(0, 2) || [];
+  const contextAfter = diff.contextAfter || context.slice(-2) || [];
+
+  // Calculate summary
+  const addedCount = added.length;
+  const removedCount = removed.length;
+  let summaryText = "";
+  if (isNewFile) {
+    summaryText = `Wrote ${addedCount} line${addedCount !== 1 ? "s" : ""}`;
+  } else if (addedCount > 0 && removedCount > 0) {
+    summaryText = `Updated ${addedCount + removedCount} line${(addedCount + removedCount) !== 1 ? "s" : ""}`;
+  } else if (addedCount > 0) {
+    summaryText = `Added ${addedCount} line${addedCount !== 1 ? "s" : ""}`;
+  } else if (removedCount > 0) {
+    summaryText = `Removed ${removedCount} line${removedCount !== 1 ? "s" : ""}`;
+  }
+
+  if (!summaryText && contextBefore.length === 0 && contextAfter.length === 0) return null;
 
   // Limit lines shown
-  const maxLines = 10;
+  const maxLines = 8;
+  const showContextBefore = contextBefore.slice(-2);
   const showRemoved = removed.slice(0, maxLines);
   const showAdded = added.slice(0, maxLines);
+  const showContextAfter = contextAfter.slice(0, 2);
 
-  if (showRemoved.length === 0 && showAdded.length === 0) return null;
+  // Calculate line numbers
+  let lineNum = Math.max(1, startLine - showContextBefore.length);
+  const maxLineNum = lineNum + showContextBefore.length + showRemoved.length + showAdded.length + showContextAfter.length;
+  const lineNumWidth = Math.max(3, String(maxLineNum).length);
+
+  const formatLineNum = (num) => String(num).padStart(lineNumWidth, " ");
+
+  const lines = [];
+
+  // Context before (dim, no +/-)
+  showContextBefore.forEach((line, i) => {
+    const text = typeof line === "object" ? line.text : line;
+    lines.push(e(
+      Box,
+      { key: `cb${i}`, flexDirection: "row" },
+      e(Text, { color: THEME.dim }, `      ${formatLineNum(lineNum)}    ${(text || "").slice(0, 55)}`)
+    ));
+    lineNum++;
+  });
+
+  // Removed lines (red with -)
+  showRemoved.forEach((line, i) => {
+    const text = typeof line === "object" ? line.text : line;
+    lines.push(e(
+      Box,
+      { key: `r${i}`, flexDirection: "row" },
+      e(Text, { color: THEME.dim }, `      ${formatLineNum(lineNum)} `),
+      e(Text, { color: THEME.error }, "-  "),
+      e(Text, { color: THEME.diffRemoveFg }, (text || "").slice(0, 52))
+    ));
+    lineNum++;
+  });
+
+  // Added lines (green with +)
+  showAdded.forEach((line, i) => {
+    const text = typeof line === "object" ? line.text : line;
+    lines.push(e(
+      Box,
+      { key: `a${i}`, flexDirection: "row" },
+      e(Text, { color: THEME.dim }, `      ${formatLineNum(lineNum)} `),
+      e(Text, { color: THEME.success }, "+  "),
+      e(Text, { color: THEME.diffAddFg }, (text || "").slice(0, 52))
+    ));
+    lineNum++;
+  });
+
+  // Context after (dim, no +/-)
+  showContextAfter.forEach((line, i) => {
+    const text = typeof line === "object" ? line.text : line;
+    lines.push(e(
+      Box,
+      { key: `ca${i}`, flexDirection: "row" },
+      e(Text, { color: THEME.dim }, `      ${formatLineNum(lineNum)}    ${(text || "").slice(0, 55)}`)
+    ));
+    lineNum++;
+  });
+
+  // Truncation notice
+  const totalTruncated = Math.max(0, removed.length - maxLines) + Math.max(0, added.length - maxLines);
+  if (totalTruncated > 0) {
+    lines.push(e(
+      Box,
+      { key: "trunc" },
+      e(Text, { color: THEME.dim }, `      ... ${totalTruncated} more line${totalTruncated !== 1 ? "s" : ""}`)
+    ));
+  }
 
   return e(
     Box,
-    { flexDirection: "column", paddingLeft: 3, marginTop: 0, marginBottom: 1 },
-
-    // Header
-    e(Text, { color: THEME.dim }, isNewFile ? "New file:" : `Lines ${startLine}-${startLine + removed.length + added.length}:`),
-    e(Text, { color: THEME.dim }, " "),
-
-    // Removed lines (red background with -)
-    ...showRemoved.map((line, i) => {
-      const lineNum = (startLine + i).toString().padStart(4, " ");
-      const text = typeof line === "object" ? line.text : line;
-      return e(
-        Box,
-        { key: `r${i}`, flexDirection: "row" },
-        e(Text, { color: THEME.diffRemoveFg }, `${lineNum} │ `),
-        e(Text, { color: THEME.diffRemoveFg, backgroundColor: THEME.diffRemoveBg }, `- ${text || " "} `)
-      );
-    }),
-
-    // Added lines (green background with +)
-    ...showAdded.map((line, i) => {
-      const lineNum = (startLine + removed.length + i).toString().padStart(4, " ");
-      const text = typeof line === "object" ? line.text : line;
-      return e(
-        Box,
-        { key: `a${i}`, flexDirection: "row" },
-        e(Text, { color: THEME.diffAddFg }, `${lineNum} │ `),
-        e(Text, { color: THEME.diffAddFg, backgroundColor: THEME.diffAddBg }, `+ ${text || " "} `)
-      );
-    }),
-
-    // Truncation notice
-    (removed.length > maxLines || added.length > maxLines) && e(
-      Text,
-      { color: THEME.dim },
-      `      ... ${Math.max(0, removed.length - maxLines) + Math.max(0, added.length - maxLines)} more lines`
-    )
+    { flexDirection: "column", paddingLeft: 2, marginTop: 0, marginBottom: 0 },
+    // Summary line with special character
+    e(
+      Box,
+      { flexDirection: "row" },
+      e(Text, { color: THEME.dim }, "  ⎿  "),
+      e(Text, { color: THEME.secondary }, summaryText)
+    ),
+    // All lines
+    ...lines
   );
 });
 
@@ -354,6 +422,38 @@ const ModelStatusBanner = memo(({ hasModel, tokensExceeded, provider }) => {
 const CLIOutputStream = memo(({ text, isStreaming, scrollOffset = 0, goal = "", state = "" }) => {
   if (!text && !isStreaming) return null;
 
+  // Track last activity time for flashlight timeout
+  const [lastActivityTime, setLastActivityTime] = useState(() => Date.now());
+  const [isRecentlyActive, setIsRecentlyActive] = useState(true);
+
+  // Update last activity when text changes or streaming starts
+  useEffect(() => {
+    if (isStreaming || text) {
+      setLastActivityTime(Date.now());
+      setIsRecentlyActive(true);
+    }
+  }, [text, isStreaming]);
+
+  // Check for inactivity timeout (10 minutes = 600000ms)
+  useEffect(() => {
+    const checkInterval = setInterval(() => {
+      const inactiveMs = Date.now() - lastActivityTime;
+      const isActive = inactiveMs < 600000; // 10 minutes
+      setIsRecentlyActive(isActive);
+    }, 5000); // Check every 5 seconds
+    return () => clearInterval(checkInterval);
+  }, [lastActivityTime]);
+
+  // Get current model - Opus 4.5 or Sonnet (fallback)
+  const currentModel = getCurrentModelInUse();
+  const isOpus = currentModel.includes("opus");
+  const modelDisplayName = isOpus ? "Opus 4.5" : "Sonnet 4";
+  const modelColor = isOpus ? "#d97706" : THEME.purple; // Amber for Opus, purple for Sonnet
+
+  // Running status color - orange-red (#ea580c)
+  const runningColor = "#ea580c";
+  const showFlashlight = isStreaming && isRecentlyActive;
+
   // Split into lines and handle scrolling
   const allLines = (text || "").split("\n").filter(l => l.trim());
   const visibleCount = 12;
@@ -365,17 +465,17 @@ const CLIOutputStream = memo(({ text, isStreaming, scrollOffset = 0, goal = "", 
   const formatLine = (line, idx) => {
     const trimmed = line.trim();
 
-    // Tool call pattern: Read(...), Bash(...), etc.
-    const toolMatch = trimmed.match(/^[●○◆◇▣⚡→]?\s*(Read|Write|Edit|Update|Bash|WebSearch|WebFetch|Fetch|Grep|Glob|Task|Delete)\((.+)\)$/i);
+    // Tool call pattern: Read(...), Bash(...), etc. - Claude Code style with ●
+    const toolMatch = trimmed.match(/^[●○◆◇▣⚡→]?\s*(Read|Write|Edit|Update|Bash|WebSearch|WebFetch|Fetch|Grep|Glob|Task|Delete|NotebookEdit)\((.+)\)$/i);
     if (toolMatch) {
       const [, tool, arg] = toolMatch;
       return e(
         Box,
         { key: idx, flexDirection: "row" },
-        e(Text, { color: THEME.gray }, "○ "),
+        e(Text, { color: THEME.white }, "● "),
         e(Text, { color: TOOL_COLOR, bold: true }, tool),
         e(Text, { color: THEME.dim }, "("),
-        e(Text, { color: THEME.primary }, arg.slice(0, 50) + (arg.length > 50 ? "..." : "")),
+        e(Text, { color: THEME.secondary }, arg.slice(0, 50) + (arg.length > 50 ? "..." : "")),
         e(Text, { color: THEME.dim }, ")")
       );
     }
@@ -397,19 +497,66 @@ const CLIOutputStream = memo(({ text, isStreaming, scrollOffset = 0, goal = "", 
       );
     }
 
-    // Diff lines: + or -
+    // Claude Code style line numbers with +/- : "      778 +  newLine" or "      775    existingLine"
+    const lineNumMatch = trimmed.match(/^(\s*)(\d+)\s*([+-])?\s{0,2}(.*)$/);
+    if (lineNumMatch) {
+      const [, indent, lineNum, changeType, content] = lineNumMatch;
+      const isAdd = changeType === "+";
+      const isRemove = changeType === "-";
+      const paddedNum = lineNum.padStart(4, " ");
+
+      if (isAdd) {
+        return e(
+          Box,
+          { key: idx, flexDirection: "row" },
+          e(Text, { color: THEME.dim }, `      ${paddedNum} `),
+          e(Text, { color: THEME.success }, "+  "),
+          e(Text, { color: THEME.diffAddFg }, content.slice(0, 55))
+        );
+      } else if (isRemove) {
+        return e(
+          Box,
+          { key: idx, flexDirection: "row" },
+          e(Text, { color: THEME.dim }, `      ${paddedNum} `),
+          e(Text, { color: THEME.error }, "-  "),
+          e(Text, { color: THEME.diffRemoveFg }, content.slice(0, 55))
+        );
+      } else {
+        // Context line (no +/-)
+        return e(
+          Box,
+          { key: idx, flexDirection: "row" },
+          e(Text, { color: THEME.dim }, `      ${paddedNum}    ${content.slice(0, 55)}`)
+        );
+      }
+    }
+
+    // Summary line: "⎿  Added 3 lines" or "⎿  Updated 5 lines"
+    const summaryMatch = trimmed.match(/^⎿\s+(.+)$/);
+    if (summaryMatch) {
+      return e(
+        Box,
+        { key: idx, flexDirection: "row" },
+        e(Text, { color: THEME.dim }, "  ⎿  "),
+        e(Text, { color: THEME.secondary }, summaryMatch[1])
+      );
+    }
+
+    // Simple diff lines: + or - at start (fallback)
     if (trimmed.startsWith("+") && !trimmed.startsWith("++")) {
       return e(
         Box,
         { key: idx, flexDirection: "row" },
-        e(Text, { color: THEME.diffAddFg, backgroundColor: THEME.diffAddBg }, trimmed.slice(0, 70))
+        e(Text, { color: THEME.success }, "+  "),
+        e(Text, { color: THEME.diffAddFg }, trimmed.slice(1).trim().slice(0, 60))
       );
     }
     if (trimmed.startsWith("-") && !trimmed.startsWith("--")) {
       return e(
         Box,
         { key: idx, flexDirection: "row" },
-        e(Text, { color: THEME.diffRemoveFg, backgroundColor: THEME.diffRemoveBg }, trimmed.slice(0, 70))
+        e(Text, { color: THEME.error }, "-  "),
+        e(Text, { color: THEME.diffRemoveFg }, trimmed.slice(1).trim().slice(0, 60))
       );
     }
 
@@ -432,13 +579,18 @@ const CLIOutputStream = memo(({ text, isStreaming, scrollOffset = 0, goal = "", 
       );
     }
 
-    // Standalone "thinking" word (no colon) - orange with flashlight
-    if (trimmed.toLowerCase() === "thinking" || trimmed.toLowerCase() === "thinking...") {
+    // "Thinking" detection - catch all variations: "⏺ Thinking...", "● Thinking", "thinking", etc.
+    // Remove Unicode indicators and check if line contains "thinking"
+    const cleanedLine = trimmed.replace(/^[●○◆◇▣⚡→⏺◐◑◒◓]\s*/, "").trim();
+    const lowerClean = cleanedLine.toLowerCase();
+    if (lowerClean === "thinking" || lowerClean === "thinking..." ||
+        lowerClean.startsWith("thinking") && lowerClean.length < 15) {
       return e(
         Box,
         { key: idx, flexDirection: "row" },
         e(Text, { color: THEME.warning }, "◐ "),
-        e(FlashlightText, { text: trimmed, baseColor: THEME.warning, bold: true, spotlightWidth: 3 })
+        e(FlashlightText, { text: "Thinking", baseColor: THEME.warning, bold: true, spotlightWidth: 3 }),
+        cleanedLine.length > 10 && e(Text, { color: THEME.secondary }, cleanedLine.slice(8, 40))
       );
     }
 
@@ -450,21 +602,23 @@ const CLIOutputStream = memo(({ text, isStreaming, scrollOffset = 0, goal = "", 
     );
   };
 
-  const statusColor = isStreaming ? THEME.warning : THEME.success;
+  const statusColor = isStreaming ? runningColor : THEME.success;
   const statusIcon = isStreaming ? "▶" : "✓";
-  const statusText = isStreaming ? "Running" : "Completed";
 
   return e(
     Box,
     { flexDirection: "column" },
-    // Header
+    // Header with flashlight animation on "Running" when active
     e(
       Box,
       { flexDirection: "row", marginBottom: 1 },
       e(Text, { color: statusColor }, statusIcon + " "),
-      e(Text, { color: statusColor, bold: true }, statusText),
+      // Use flashlight for "Running" when actively streaming, static text otherwise
+      showFlashlight
+        ? e(FlashlightText, { text: "Running", baseColor: runningColor, bold: true, spotlightWidth: 4 })
+        : e(Text, { color: statusColor, bold: true }, isStreaming ? "Running" : "Completed"),
       e(Text, { color: THEME.dim }, " · "),
-      e(Text, { color: THEME.purple }, "claude-sonnet-4"),
+      e(Text, { color: modelColor, bold: isOpus }, modelDisplayName),
       startLine > 0 && e(Text, { color: THEME.dim }, ` · ↑${startLine} more`)
     ),
     // Goal/State
@@ -568,8 +722,11 @@ const AgentActivityPanelBase = ({
   let modelColor = THEME.error;
 
   if (claudeCodeStatus.loggedIn) {
-    modelName = "Claude Code CLI";
-    modelColor = "#f59e0b";
+    // Show specific model being used (Opus 4.5 or Sonnet fallback)
+    const currentModel = getCurrentModelInUse();
+    const isOpus = currentModel.includes("opus");
+    modelName = isOpus ? "Opus 4.5" : "Sonnet 4";
+    modelColor = isOpus ? "#d97706" : "#a855f7"; // Amber for Opus, Purple for Sonnet
   } else if (config.gptInstant?.ready || config.gptThinking?.ready) {
     modelName = "GPT-5.2";
     modelColor = "#10a37f";

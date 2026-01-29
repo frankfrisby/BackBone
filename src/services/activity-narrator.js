@@ -348,7 +348,7 @@ export const ACTION_COLORS = {
 
   // Information states
   OBSERVATION: "#ffffff",  // White - AI observation/discovery
-  THINKING: "#a78bfa",     // Purple - AI thinking (not shown as action)
+  THINKING: "#f59e0b",     // Orange - AI thinking (with flashlight animation)
 };
 
 /**
@@ -368,7 +368,7 @@ export const ACTION_ICONS = {
 export const STATE_COLORS = {
   RESEARCHING: "#38bdf8",  // Cyan/blue
   ANALYZING: "#14b8a6",    // Teal
-  THINKING: "#a78bfa",     // Purple
+  THINKING: "#f59e0b",     // Orange (with flashlight animation)
   PLANNING: "#60a5fa",     // Blue
   BUILDING: "#22c55e",     // Green
   WORKING: "#f97316",      // Orange

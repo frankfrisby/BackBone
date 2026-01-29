@@ -140,13 +140,13 @@ const ActionStreamingMessage = ({ text, title }) => {
     e(
       Box,
       { flexDirection: "row", gap: 1 },
-      e(Text, { color: "#8b5cf6" }, "◉"),
+      e(Text, { color: "#f59e0b" }, "◉"),
       e(Text, { color: "#22c55e", bold: true }, modelName),
       e(Text, { color: "#f59e0b" }, text ? "streaming..." : "thinking...")
     ),
     text && e(
       Box,
-      { paddingLeft: 2, width: "100%", borderLeft: true, borderColor: "#8b5cf6", borderStyle: "single", borderTop: false, borderBottom: false, borderRight: false },
+      { paddingLeft: 2, width: "100%", borderLeft: true, borderColor: "#f59e0b", borderStyle: "single", borderTop: false, borderBottom: false, borderRight: false },
       e(Text, { color: "#cbd5e1", wrap: "wrap" }, text.slice(-300))
     )
   );

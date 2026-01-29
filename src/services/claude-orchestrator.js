@@ -21,7 +21,7 @@ import { spawn } from "child_process";
 import { EventEmitter } from "events";
 import path from "path";
 import fs from "fs";
-import { getClaudeCodeStatus } from "./claude-code-cli.js";
+import { getClaudeCodeStatus, getCurrentModelInUse, PREFERRED_MODEL, FALLBACK_MODEL } from "./claude-code-cli.js";
 
 // Debug log for diagnosing streaming issues
 const DEBUG_LOG = path.join(process.cwd(), "data", "claude-debug.log");
@@ -357,7 +357,10 @@ ${sourcesList}
       this.state = ORCHESTRATION_STATE.RUNNING;
 
       // Build Claude Code args — use stdin for prompt (not -p) to get real-time streaming
+      // Use Opus 4.5 by default, falls back to Sonnet if rate limited
+      const modelToUse = options.model || getCurrentModelInUse();
       const args = [
+        "--model", modelToUse,
         "--output-format", "stream-json",
         "--verbose",
         "--dangerously-skip-permissions",

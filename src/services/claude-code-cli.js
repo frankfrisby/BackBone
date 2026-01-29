@@ -11,6 +11,11 @@ import path from "path";
 import os from "os";
 import { EventEmitter } from "events";
 
+// Find Claude CLI path - on Windows it's in npm global bin
+const CLAUDE_CMD = process.platform === "win32"
+  ? path.join(os.homedir(), "AppData", "Roaming", "npm", "claude.cmd")
+  : "claude";
+
 // Claude Code stores credentials in these locations
 const CLAUDE_CODE_PATHS = {
   // Windows: %APPDATA%\claude-code or %USERPROFILE%\.claude
@@ -95,7 +100,7 @@ export const isClaudeCodeInstalled = () => {
  */
 export const isClaudeCodeInstalledAsync = async () => {
   return new Promise((resolve) => {
-    const proc = spawn("claude", ["--version"], {
+    const proc = spawn(CLAUDE_CMD, ["--version"], {
       shell: true,
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -352,7 +357,7 @@ export const spawnClaudeCodeLogin = async (onStatus = () => {}) => {
 
       if (!proc) {
         // Fallback: run in current terminal (will block)
-        proc = spawn("claude", [], {
+        proc = spawn(CLAUDE_CMD, [], {
           shell: true,
           stdio: "inherit",
         });
@@ -427,7 +432,7 @@ export const runClaudeCodePrompt = async (prompt, options = {}) => {
       args.unshift("--output-format", options.outputFormat);
     }
 
-    const proc = spawn("claude", args, {
+    const proc = spawn(CLAUDE_CMD, args, {
       shell: true,
       cwd: options.cwd || process.cwd(),
     });
@@ -474,16 +479,55 @@ export const runClaudeCodePrompt = async (prompt, options = {}) => {
   });
 };
 
+// Model configuration - Opus 4.5 by default, Sonnet as fallback
+export const PREFERRED_MODEL = "claude-opus-4-5-20251101";
+export const FALLBACK_MODEL = "claude-sonnet-4-20250514";
+
+// Track current model state for rate limit fallback
+let currentModelInUse = PREFERRED_MODEL;
+let rateLimitedUntil = null; // Timestamp when rate limit expires (null = not limited)
+const RATE_LIMIT_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes cooldown before retrying Opus
+
+/**
+ * Get the current model being used (for display purposes)
+ */
+export const getCurrentModelInUse = () => {
+  // Check if rate limit cooldown has expired
+  if (rateLimitedUntil && Date.now() > rateLimitedUntil) {
+    rateLimitedUntil = null;
+    currentModelInUse = PREFERRED_MODEL;
+    console.log("[ClaudeCodeCLI] Rate limit cooldown expired, switching back to Opus 4.5");
+  }
+  return currentModelInUse;
+};
+
+/**
+ * Check if text indicates rate limiting
+ */
+const isRateLimitError = (text) => {
+  const lowerText = text.toLowerCase();
+  return lowerText.includes("rate limit") ||
+         lowerText.includes("rate_limit") ||
+         lowerText.includes("429") ||
+         lowerText.includes("overloaded") ||
+         lowerText.includes("capacity") ||
+         lowerText.includes("too many requests") ||
+         lowerText.includes("quota exceeded");
+};
+
 /**
  * Run Claude Code with streaming output
  * Returns an EventEmitter that emits 'data', 'tool', 'complete', and 'error' events
+ *
+ * Uses Opus 4.5 by default, automatically falls back to Sonnet on rate limits
  *
  * Events:
  * - 'data': Raw text output
  * - 'tool': Tool call detected { tool, input, output }
  * - 'action': Action requiring approval { id, type, description }
- * - 'complete': Process completed { success, output }
+ * - 'complete': Process completed { success, output, model }
  * - 'error': Error occurred { error }
+ * - 'model-fallback': Switched to fallback model due to rate limit
  *
  * Usage:
  * const stream = runClaudeCodeStreaming("Analyze this file", { cwd: "/path" });
@@ -516,20 +560,20 @@ export const runClaudeCodeStreaming = async (prompt, options = {}) => {
     return emitter;
   }
 
-  // Use --print flag for non-interactive mode
-  // Prompt is passed via stdin to avoid Windows command line length limits
-  const args = ["--print"];
+  // Determine which model to use
+  const modelToUse = options.model || getCurrentModelInUse();
+  const isUsingFallback = modelToUse === FALLBACK_MODEL;
 
-  // Use JSON output format for easier parsing if requested
-  if (options.json) {
-    args.push("--output-format", "json");
-  }
+  // Build args with model selection
+  // Use plain --print mode - stream-json requires --verbose which has issues
+  const args = ["--model", modelToUse, "--print"];
 
-  console.log(`[ClaudeCodeCLI] Spawning: echo <prompt> | claude --print`);
+  console.log(`[ClaudeCodeCLI] Spawning: claude --model ${modelToUse} --print`);
   console.log(`[ClaudeCodeCLI] Prompt length: ${prompt.length} chars`);
   console.log(`[ClaudeCodeCLI] CWD: ${options.cwd || process.cwd()}`);
+  console.log(`[ClaudeCodeCLI] Using ${isUsingFallback ? "FALLBACK (Sonnet)" : "PREFERRED (Opus 4.5)"} model`);
 
-  const proc = spawn("claude", args, {
+  const proc = spawn(CLAUDE_CMD, args, {
     shell: true,
     cwd: options.cwd || process.cwd(),
     stdio: ["pipe", "pipe", "pipe"]
@@ -546,11 +590,13 @@ export const runClaudeCodeStreaming = async (prompt, options = {}) => {
     console.error(`[ClaudeCodeCLI] ERROR: stdin not available`);
   }
 
+  // Track if we've detected a rate limit for this request
+  let rateLimitDetected = false;
+
   let fullOutput = "";
-  let currentTool = null;
   const pendingActions = new Map();
 
-  // Track tool calls and actions from output
+  // Parse text output for tool calls
   const parseOutput = (text) => {
     fullOutput += text;
 
@@ -566,25 +612,7 @@ export const runClaudeCodeStreaming = async (prompt, options = {}) => {
       let match;
       while ((match = pattern.exec(text)) !== null) {
         const tool = { tool: match[1], input: match[2], timestamp: Date.now() };
-        currentTool = tool;
         emitter.emit("tool", tool);
-      }
-    }
-
-    // Detect actions requiring approval
-    const actionPatterns = [
-      /\[ACTION\s*(\w+)\]\s*(.*?)(?:\n|$)/g,
-      /Approve\?\s*\(y\/n\):\s*(.*?)(?:\n|$)/gi,
-      /Allow\s+(\w+).*?\?\s*(.*?)(?:\n|$)/gi
-    ];
-
-    for (const pattern of actionPatterns) {
-      let match;
-      while ((match = pattern.exec(text)) !== null) {
-        const actionId = `action_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-        const action = { id: actionId, type: match[1], description: match[2] || match[1] };
-        pendingActions.set(actionId, action);
-        emitter.emit("action", action);
       }
     }
 
@@ -594,27 +622,79 @@ export const runClaudeCodeStreaming = async (prompt, options = {}) => {
   proc.stdout.on("data", (data) => {
     const text = data.toString();
     console.log(`[ClaudeCodeCLI] stdout: ${text.slice(0, 100)}${text.length > 100 ? "..." : ""}`);
+
+    // Check for rate limit in output
+    if (!rateLimitDetected && isRateLimitError(text)) {
+      rateLimitDetected = true;
+      console.log(`[ClaudeCodeCLI] Rate limit detected in stdout`);
+    }
+
     parseOutput(text);
   });
 
   proc.stderr.on("data", (data) => {
     const text = data.toString();
     console.log(`[ClaudeCodeCLI] stderr: ${text.slice(0, 100)}${text.length > 100 ? "..." : ""}`);
+
+    // Check for rate limit in stderr
+    if (!rateLimitDetected && isRateLimitError(text)) {
+      rateLimitDetected = true;
+      console.log(`[ClaudeCodeCLI] Rate limit detected in stderr`);
+    }
+
     emitter.emit("data", text);
   });
 
   proc.on("close", (code) => {
     console.log(`[ClaudeCodeCLI] Process closed with code: ${code}`);
+
+    // If rate limit detected and we were using Opus, retry with Sonnet
+    if (rateLimitDetected && modelToUse === PREFERRED_MODEL && !options._isRetry) {
+      console.log(`[ClaudeCodeCLI] Rate limited on Opus 4.5, switching to Sonnet fallback`);
+
+      // Set rate limit cooldown
+      rateLimitedUntil = Date.now() + RATE_LIMIT_COOLDOWN_MS;
+      currentModelInUse = FALLBACK_MODEL;
+
+      // Emit fallback event
+      emitter.emit("model-fallback", {
+        from: PREFERRED_MODEL,
+        to: FALLBACK_MODEL,
+        reason: "rate_limit",
+        cooldownMs: RATE_LIMIT_COOLDOWN_MS
+      });
+
+      // Retry with fallback model
+      console.log(`[ClaudeCodeCLI] Retrying with Sonnet...`);
+      const retryEmitter = runClaudeCodeStreaming(prompt, {
+        ...options,
+        model: FALLBACK_MODEL,
+        _isRetry: true
+      });
+
+      // Forward all events from retry to original emitter
+      retryEmitter.then(retry => {
+        retry.on("data", (d) => emitter.emit("data", d));
+        retry.on("tool", (t) => emitter.emit("tool", t));
+        retry.on("complete", (c) => emitter.emit("complete", { ...c, model: FALLBACK_MODEL, wasRetry: true }));
+        retry.on("error", (e) => emitter.emit("error", e));
+      });
+
+      return;
+    }
+
     emitter.emit("complete", {
       success: code === 0,
       output: fullOutput,
-      exitCode: code
+      exitCode: code,
+      model: modelToUse,
+      wasRetry: options._isRetry || false
     });
   });
 
   proc.on("error", (err) => {
     console.error(`[ClaudeCodeCLI] Process error: ${err.message}`);
-    emitter.emit("error", { error: err.message });
+    emitter.emit("error", { error: err.message, model: modelToUse });
   });
 
   // Timeout handling
@@ -665,6 +745,8 @@ export const runClaudeCodeStreaming = async (prompt, options = {}) => {
 
   emitter.process = proc;
   emitter.getPendingActions = () => Array.from(pendingActions.values());
+  emitter.model = modelToUse;
+  emitter.isUsingFallback = isUsingFallback;
 
   return emitter;
 };
@@ -693,10 +775,13 @@ export default {
   isClaudeCodeInstalledAsync,
   isClaudeCodeLoggedIn,
   getClaudeCodeModel,
+  getCurrentModelInUse,
   getClaudeCodeStatus,
   spawnClaudeCodeLogin,
   runClaudeCodePrompt,
   runClaudeCodeStreaming,
   getInstallInstructions,
   getClaudeCodeConfigDir,
+  PREFERRED_MODEL,
+  FALLBACK_MODEL,
 };

@@ -17,6 +17,7 @@ import { runClaudeCodeStreaming, getClaudeCodeStatus } from "./claude-code-cli.j
 import { getActivityNarrator } from "./activity-narrator.js";
 import { getActivityTracker } from "./activity-tracker.js";
 import { getIdleProcessor } from "./idle-processor.js";
+import { getConversationAnalysisEngine } from "./conversation-analysis-engine.js";
 
 const DATA_DIR = path.join(process.cwd(), "data");
 const MEMORY_DIR = path.join(process.cwd(), "memory");
@@ -193,13 +194,36 @@ class StartupEngine extends EventEmitter {
       linkedin: this.loadLinkedInData()
     };
 
+    // Initialize and analyze conversations
+    try {
+      const conversationEngine = getConversationAnalysisEngine();
+      await conversationEngine.initialize();
+
+      // Analyze recent conversations for insights
+      const recentAnalyses = await conversationEngine.analyzeRecentConversations(5);
+      this.context.conversationInsights = conversationEngine.getContextForEngine();
+      this.context.recentConversationAnalyses = recentAnalyses;
+
+      console.log(`[StartupEngine] Conversation analysis: ${recentAnalyses.length} conversations analyzed`);
+
+      // Listen for new analyses to potentially trigger work
+      conversationEngine.on("backlog-item-created", (item) => {
+        console.log(`[StartupEngine] New backlog item from conversation: ${item.title}`);
+        this.emit("backlog-item-created", item);
+      });
+    } catch (err) {
+      console.error("[StartupEngine] Conversation analysis error:", err.message);
+      this.context.conversationInsights = null;
+    }
+
     console.log(`[StartupEngine] Context loaded:
   - Profile: ${this.context.profile ? "yes" : "no"}
   - Beliefs: ${this.context.beliefs.beliefs?.length || 0} defined
   - Goals: ${this.context.goals.goals?.length || 0} active
   - Thesis: ${this.context.thesis ? "yes" : "no"}
   - Health data: ${this.context.health ? "yes" : "no"}
-  - Portfolio: ${this.context.portfolio ? "yes" : "no"}`);
+  - Portfolio: ${this.context.portfolio ? "yes" : "no"}
+  - Conversation insights: ${this.context.conversationInsights ? "yes" : "no"}`);
 
     this.emit("context-assessed", this.context);
   }

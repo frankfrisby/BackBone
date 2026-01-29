@@ -406,3 +406,28 @@ Use WebSearch to pull current data from:
 ## Commands
 - `/disaster` or `/disaster categories` — Open overlay showing all 15 tracked domains
 - `/disaster assess` — Run full web-researched threat assessment across all domains
+- `/disaster protocols` — Show Plan A/B/C/D action protocols
+
+## Integration with Disaster Planning Project
+
+The disaster assessment skill works in conjunction with the background project at `projects/disaster-planning/`:
+
+### Project Files
+- `PROJECT.md` — Main project file with protocols and action items
+- `research/threat-assessments.json` — Current threat levels for all 15 domains
+- `research/readiness-scores.json` — Personal preparedness metrics
+- `research/sources.json` — Tracked data sources
+
+### Automated Updates
+When running `/disaster assess`, the system:
+1. Researches current threat indicators across all 15 domains
+2. Updates `threat-assessments.json` with current risk levels
+3. Logs findings to the project progress log
+4. Triggers Plan A/B/C/D protocols when thresholds are crossed
+5. Updates readiness recommendations based on composite score
+
+### Protocol Triggers
+- **Plan A** (10-20% threat probability): Early warning indicators detected
+- **Plan B** (30-50% threat probability): Elevated threat response
+- **Plan C** (50%+ threat probability): Imminent threat response
+- **Plan D** (Crisis materialization): Full emergency mode

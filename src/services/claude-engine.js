@@ -54,6 +54,114 @@ class ClaudeEngine extends EventEmitter {
   }
 
   /**
+   * Parse a stream-json line into human-readable text for the UI.
+   * Claude Code CLI with --output-format stream-json emits one JSON object per line.
+   */
+  _parseStreamLine(line) {
+    try {
+      const msg = JSON.parse(line);
+      const type = msg.type;
+
+      if (type === "assistant") {
+        // Extract text from assistant messages
+        const content = msg.message?.content;
+        if (Array.isArray(content)) {
+          const parts = [];
+          for (const block of content) {
+            if (block.type === "text" && block.text) {
+              // Split multi-line text and return first meaningful line
+              const lines = block.text.split("\n").filter(l => l.trim());
+              for (const l of lines) {
+                parts.push(l.trim());
+              }
+            } else if (block.type === "tool_use") {
+              // Tool use inside assistant message content
+              const tool = block.name || "Tool";
+              const input = block.input || {};
+              parts.push(this._formatToolCall(tool, input));
+            }
+          }
+          return parts.length > 0 ? parts.join("\n") : null;
+        }
+        return null;
+      }
+
+      if (type === "tool_use" || type === "content_block_start") {
+        const tool = msg.tool?.name || msg.content_block?.name || msg.name;
+        const input = msg.tool?.input || msg.content_block?.input || msg.input || {};
+        if (tool) return this._formatToolCall(tool, input);
+        return null;
+      }
+
+      if (type === "tool_result" || type === "content_block_stop") {
+        return null; // Don't show raw tool results - too noisy
+      }
+
+      if (type === "result") {
+        const text = msg.result?.text || msg.result || "";
+        if (typeof text === "string" && text.trim()) {
+          const firstLine = text.split("\n").find(l => l.trim());
+          return firstLine ? `✓ ${firstLine.trim().slice(0, 70)}` : null;
+        }
+        return null;
+      }
+
+      if (type === "system") {
+        return null; // Skip system messages
+      }
+
+      if (type === "error") {
+        return `Error: ${msg.error?.message || msg.error || "unknown"}`;
+      }
+
+      // Unknown type - skip it
+      return null;
+    } catch {
+      // Not valid JSON - emit as-is (could be plain text output)
+      if (line.length > 0 && !line.startsWith("{")) {
+        return line.slice(0, 80);
+      }
+      return null;
+    }
+  }
+
+  /**
+   * Format a tool call into a human-readable string that CLIOutputStream can render
+   */
+  _formatToolCall(tool, input) {
+    switch (tool) {
+      case "Read":
+        return `Read(${input.file_path || input.path || "..."})`;
+      case "Write":
+        return `Write(${input.file_path || input.path || "..."})`;
+      case "Edit":
+        return `Edit(${input.file_path || input.path || "..."})`;
+      case "Bash":
+        return `Bash(${(input.command || "...").slice(0, 60)})`;
+      case "Glob":
+        return `Glob(${input.pattern || "..."})`;
+      case "Grep":
+        return `Grep(${input.pattern || "..."} ${input.path || ""})`;
+      case "WebSearch":
+        return `WebSearch(${input.query || "..."})`;
+      case "WebFetch":
+      case "Fetch":
+        return `Fetch(${input.url || "..."})`;
+      case "Task":
+        return `Task(${input.description || "..."})`;
+      default:
+        // MCP tools: mcp__backbone-google__search → Google: search
+        if (tool.startsWith("mcp__backbone-")) {
+          const parts = tool.replace("mcp__backbone-", "").split("__");
+          const server = parts[0] || "mcp";
+          const method = parts.slice(1).join("/") || "call";
+          return `${server}: ${method}`;
+        }
+        return `${tool}(...)`;
+    }
+  }
+
+  /**
    * Detect which project is being worked on from current-work.md or recent file changes
    */
   detectCurrentProject() {
@@ -515,10 +623,12 @@ Write-Output $p.Id
             this.lastLogSize = stat.size;
             const chunk = buffer.toString("utf-8");
             if (chunk.trim()) {
-              // Split to avoid giant single line in UI
               chunk.split(/\r?\n/).forEach((line) => {
-                if (line.trim().length > 0) {
-                  this.emit("status", line);
+                if (!line.trim()) return;
+                // Parse stream-json lines into human-readable text
+                const parsed = this._parseStreamLine(line.trim());
+                if (parsed) {
+                  this.emit("status", parsed);
                 }
               });
             }

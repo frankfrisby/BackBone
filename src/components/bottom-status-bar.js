@@ -1,4 +1,4 @@
-import React, { memo, useMemo } from "react";
+import React, { memo } from "react";
 import { useAppStoreMultiple, STATE_SLICES } from "../hooks/useAppStore.js";
 import { AppFooterBar } from "./app-footer-bar.js";
 
@@ -11,15 +11,12 @@ const BottomStatusBarBase = () => {
   const tickers = state[STATE_SLICES.TICKERS] || {};
 
   // Extract SPY data for footer display
-  const spyData = useMemo(() => {
-    const tickerList = tickers.tickers || [];
-    const spy = tickerList.find(t => t.symbol === "SPY");
-    if (!spy) return null;
-    return {
-      score: spy.score ?? null,
-      change: spy.changePercent ?? spy.change ?? 0,
-    };
-  }, [tickers.tickers]);
+  const tickerList = tickers.tickers || [];
+  const spy = tickerList.find(t => t.symbol === "SPY");
+  const spyData = spy ? {
+    score: spy.score ?? null,
+    change: spy.changePercent ?? spy.change ?? 0,
+  } : null;
 
   return e(AppFooterBar, {
     currentTier: ui.currentTier,

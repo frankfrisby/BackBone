@@ -185,9 +185,16 @@ const areLeftColumnPropsEqual = (prevProps, nextProps) => {
 
   // Compare positions and trailing stops (for stop dots)
   if ((prevProps.positions?.length || 0) !== (nextProps.positions?.length || 0)) return false;
-  const prevStops = Object.keys(prevProps.trailingStops || {}).length;
-  const nextStops = Object.keys(nextProps.trailingStops || {}).length;
-  if (prevStops !== nextStops) return false;
+  const prevStops = prevProps.trailingStops || {};
+  const nextStops = nextProps.trailingStops || {};
+  const prevStopKeys = Object.keys(prevStops).sort();
+  const nextStopKeys = Object.keys(nextStops).sort();
+  if (prevStopKeys.length !== nextStopKeys.length) return false;
+  if (prevStopKeys.join(",") !== nextStopKeys.join(",")) return false;
+  for (const k of prevStopKeys) {
+    if (prevStops[k]?.trailPercent !== nextStops[k]?.trailPercent) return false;
+    if (prevStops[k]?.gainPercent !== nextStops[k]?.gainPercent) return false;
+  }
 
   return true;
 };

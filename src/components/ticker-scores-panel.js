@@ -51,10 +51,16 @@ const areTickerScoresEqual = (prevProps, nextProps) => {
   const nextPos = nextProps.positions || [];
   if (prevPos.length !== nextPos.length) return false;
 
-  // Compare trailing stops keys
-  const prevStopKeys = Object.keys(prevProps.trailingStops || {}).sort().join(",");
-  const nextStopKeys = Object.keys(nextProps.trailingStops || {}).sort().join(",");
-  if (prevStopKeys !== nextStopKeys) return false;
+  // Compare trailing stops keys and values
+  const prevStops = prevProps.trailingStops || {};
+  const nextStops = nextProps.trailingStops || {};
+  const prevStopKeys = Object.keys(prevStops).sort();
+  const nextStopKeys = Object.keys(nextStops).sort();
+  if (prevStopKeys.join(",") !== nextStopKeys.join(",")) return false;
+  for (const k of prevStopKeys) {
+    if (prevStops[k]?.trailPercent !== nextStops[k]?.trailPercent) return false;
+    if (prevStops[k]?.gainPercent !== nextStops[k]?.gainPercent) return false;
+  }
 
   return true;
 };

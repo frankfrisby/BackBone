@@ -781,20 +781,35 @@ export const executeAgenticTask = async (task, workDir, onOutput) => {
   // Prefer Claude Code, fall back to Codex
   const command = capabilities.claudeCode ? "claude" : "codex";
 
-  // For Claude Code, use -p flag (short for --print) with proper message passing
+  // MCP tool prefixes for BACKBONE servers
+  const mcpTools = [
+    "mcp__backbone-google", "mcp__backbone-linkedin", "mcp__backbone-contacts",
+    "mcp__backbone-news", "mcp__backbone-life", "mcp__backbone-health",
+    "mcp__backbone-trading", "mcp__backbone-projects",
+  ];
+  const allowedTools = [
+    "Read", "Glob", "Grep", "WebFetch", "WebSearch", "Task",
+    "Write", "Edit", "Bash", ...mcpTools
+  ];
+
+  // For Claude Code, use -p flag with stream-json and MCP tools
   // Pass message via stdin to avoid shell escaping issues on Windows
   const useStdin = capabilities.claudeCode && process.platform === "win32";
   const args = capabilities.claudeCode
-    ? useStdin
-      ? ["-p", "--dangerously-skip-permissions"]  // Message via stdin
-      : ["-p", "--dangerously-skip-permissions", task]
+    ? [
+        "-p",
+        "--output-format", "stream-json",
+        "--dangerously-skip-permissions",
+        "--allowedTools", allowedTools.join(","),
+        ...(useStdin ? [] : [task])
+      ]
     : ["--task", task];
 
   return new Promise((resolve) => {
     const proc = spawn(command, args, {
       cwd: workDir || process.cwd(),
       shell: true,
-      stdio: useStdin ? ["pipe", "pipe", "pipe"] : ["inherit", "pipe", "pipe"],
+      stdio: useStdin ? ["pipe", "pipe", "pipe"] : ["ignore", "pipe", "pipe"],
       env: { ...process.env, FORCE_COLOR: "0" }
     });
 
@@ -805,27 +820,76 @@ export const executeAgenticTask = async (task, workDir, onOutput) => {
     }
 
     let output = "";
+    let finalText = "";
     let error = "";
     let resolved = false;
+    let lineBuffer = "";
 
-    // Timeout after 2 minutes for simple queries
+    // Parse a stream-json line and emit structured events
+    const processStreamLine = (line) => {
+      if (!line.trim()) return;
+      try {
+        const msg = JSON.parse(line);
+        switch (msg.type) {
+          case "assistant": {
+            const text = msg.message?.content?.[0]?.text || msg.content?.[0]?.text || "";
+            if (text) {
+              finalText = text;
+              output = text;
+              if (onOutput) onOutput({ type: "stdout", text, output: text });
+            }
+            break;
+          }
+          case "tool_use": {
+            const tool = msg.tool?.name || msg.name || "unknown";
+            const input = msg.tool?.input || msg.input || {};
+            const toolLine = `[Tool] ${tool}: ${JSON.stringify(input).slice(0, 200)}`;
+            if (onOutput) onOutput({ type: "stdout", text: toolLine, output: toolLine });
+            break;
+          }
+          case "tool_result": {
+            const content = typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content || "").slice(0, 300);
+            if (onOutput) onOutput({ type: "stdout", text: content, output: content });
+            break;
+          }
+          case "result": {
+            const resultText = msg.result || msg.message?.content?.[0]?.text || "";
+            if (resultText) {
+              finalText = resultText;
+              output = resultText;
+            }
+            break;
+          }
+        }
+      } catch {
+        // Not JSON — treat as raw text
+        output += line;
+        if (onOutput) onOutput({ type: "stdout", text: line, output });
+      }
+    };
+
+    // Timeout after 3 minutes
     const timeout = setTimeout(() => {
       if (!resolved) {
         resolved = true;
         proc.kill();
-        if (onOutput) onOutput({ type: "error", error: "Timeout after 2 minutes" });
+        if (onOutput) onOutput({ type: "error", error: "Timeout after 3 minutes" });
         resolve({
           success: false,
-          error: "Request timed out after 2 minutes",
-          output
+          error: "Request timed out after 3 minutes",
+          output: finalText || output
         });
       }
-    }, 120000);
+    }, 180000);
 
     proc.stdout.on("data", (data) => {
-      const text = data.toString();
-      output += text;
-      if (onOutput) onOutput({ type: "stdout", text, output });
+      const chunk = data.toString();
+      lineBuffer += chunk;
+      const lines = lineBuffer.split("\n");
+      lineBuffer = lines.pop() || "";
+      for (const line of lines) {
+        processStreamLine(line);
+      }
     });
 
     proc.stderr.on("data", (data) => {
@@ -835,13 +899,16 @@ export const executeAgenticTask = async (task, workDir, onOutput) => {
     });
 
     proc.on("close", (code) => {
+      // Process any remaining buffered line
+      if (lineBuffer.trim()) processStreamLine(lineBuffer);
       if (!resolved) {
         resolved = true;
         clearTimeout(timeout);
-        if (onOutput) onOutput({ type: "done", code, output, error });
+        const finalOutput = finalText || output;
+        if (onOutput) onOutput({ type: "done", code, output: finalOutput, error });
         resolve({
           success: code === 0,
-          output,
+          output: finalOutput,
           error,
           exitCode: code,
           tool: command

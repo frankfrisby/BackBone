@@ -168,6 +168,7 @@ export class ClaudeCodeExecutor extends EventEmitter {
       const args = [
         "-p",
         "--output-format", "stream-json",
+        "--dangerously-skip-permissions",
         "--allowedTools", this.getAllowedTools().join(",")
       ];
 

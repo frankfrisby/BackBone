@@ -342,7 +342,7 @@ echo ========================================
 echo.
 echo Running ${backend === "claude" ? "Claude Code CLI" : "Codex CLI"}...
 ${backend === "claude"
-  ? `type "${promptPath}" | "${CLAUDE_CMD}" --print --dangerously-skip-permissions > "${logPath}" 2>&1`
+  ? `type "${promptPath}" | "${CLAUDE_CMD}" --print --verbose --output-format stream-json --dangerously-skip-permissions --allowedTools "Read,Glob,Grep,WebFetch,WebSearch,Task,Write,Edit,Bash,mcp__backbone-google,mcp__backbone-linkedin,mcp__backbone-contacts,mcp__backbone-news,mcp__backbone-life,mcp__backbone-health,mcp__backbone-trading,mcp__backbone-projects" > "${logPath}" 2>&1`
   : `codex exec --dangerously-bypass-approvals-and-sandbox "Read memory/current-work.md and do the work described there. Update the file when done." > "${logPath}" 2>&1`
 }
 echo.
@@ -463,7 +463,7 @@ Write-Output $p.Id
         this.emit("complete", { success: false, reason: "timeout" });
       }
 
-    const quickExit = reason === "process-exited" && this.currentStartTime && (Date.now() - this.currentStartTime) < 5000;
+    const quickExit = reason === "process-exited" && this.currentStartTime && (Date.now() - this.currentStartTime) < 15000;
 
       this.currentPid = null;
       this.currentBackend = null;
@@ -480,23 +480,23 @@ Write-Output $p.Id
         (logTail ? `### CLI Output (tail)\n\n\`\`\`\n${logTail}\n\`\`\`\n` : "");
       this.appendEngineLog(logEntry);
 
-      // If Claude hit rate limit, try Codex once (if Codex not recently rate-limited)
-      if (!this.triedCodexFallback && rateLimited && backend === "claude" && codexAvailable && !codexRateLimitedRecently) {
+      // If Claude hit rate limit, wait and retry Claude
+      if (!this.triedCodexFallback && rateLimited && backend === "claude") {
         this.triedCodexFallback = true;
-        this.emit("status", "Claude rate-limited - trying Codex");
+        this.emit("status", "Claude rate-limited - retrying in 2 minutes");
         setTimeout(() => {
-          if (!this.isRunning) this.start("codex");
-        }, 1000);
+          if (!this.isRunning) this.start("claude");
+        }, 120000);
         return;
       }
 
-      // If Claude exited immediately, try Codex once
-      if (!this.triedCodexFallback && quickExit && backend === "claude" && codexAvailable) {
+      // If Claude exited immediately, retry Claude (not Codex) after a delay
+      if (!this.triedCodexFallback && quickExit && backend === "claude") {
         this.triedCodexFallback = true;
-        this.emit("status", "Claude failed quickly - trying Codex");
+        this.emit("status", "Claude exited quickly - retrying in 30s");
         setTimeout(() => {
-          if (!this.isRunning) this.start("codex");
-        }, 1000);
+          if (!this.isRunning) this.start("claude");
+        }, 30000);
         return;
       }
 
@@ -540,12 +540,11 @@ Write-Output $p.Id
         } catch {}
       }
 
-      // If Claude hasn't produced any output in 30s, fall back to Codex
+      // If Claude hasn't produced any output in 60s, retry Claude
       if (
         backend === "claude" &&
         !this.triedCodexFallback &&
-        codexAvailable &&
-        elapsed > 30 * 1000
+        elapsed > 60 * 1000
       ) {
         let logEmpty = true;
         if (this.currentLogPath && fs.existsSync(this.currentLogPath)) {
@@ -558,15 +557,14 @@ Write-Output $p.Id
           return;
         }
         this.triedCodexFallback = true;
-        this.emit("status", "Claude stalled >30s - switching to Codex");
+        this.emit("status", "Claude stalled >60s - restarting Claude");
         if (this.currentPid) {
-          // Kill entire process tree, not just the parent cmd.exe
           exec(`taskkill /T /F /PID ${this.currentPid}`, { windowsHide: true }, () => {});
           this.currentPid = null;
         }
         this.isRunning = false;
         setTimeout(() => {
-          if (!this.isRunning) this.start("codex");
+          if (!this.isRunning) this.start("claude");
         }, 1000);
         clearInterval(checkInterval);
         return;

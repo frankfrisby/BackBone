@@ -798,6 +798,7 @@ export const executeAgenticTask = async (task, workDir, onOutput) => {
   const args = capabilities.claudeCode
     ? [
         "-p",
+        "--verbose",
         "--output-format", "stream-json",
         "--dangerously-skip-permissions",
         "--allowedTools", allowedTools.join(","),

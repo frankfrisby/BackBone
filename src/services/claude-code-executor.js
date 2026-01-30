@@ -167,6 +167,7 @@ export class ClaudeCodeExecutor extends EventEmitter {
     return new Promise((resolve) => {
       const args = [
         "-p",
+        "--verbose",
         "--output-format", "stream-json",
         "--dangerously-skip-permissions",
         "--allowedTools", this.getAllowedTools().join(",")

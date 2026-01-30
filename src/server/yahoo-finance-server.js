@@ -414,27 +414,63 @@ const calculatePricePosition = (currentPrice, prices) => {
 };
 
 /**
- * Calculate psychological adjustment from price momentum (-3.5 to +3.5)
+ * Calculate psychological adjustment from price momentum
+ * Matches BackBoneApp reference algorithm with breaking points
+ *
+ * Rules (mean-reversion logic):
+ * - Zone 1 (0-15%): Down INCREASES score (buying opportunity), Up DECREASES score
+ * - Zone 2 (15-25%): First reversal - momentum energy reversal
+ * - Zone 3 (>25%): Second reversal
+ *
+ * Formula: For every 2% change, adjust by 0.5 points
  */
 const calculatePsychological = (percentChange) => {
   if (!percentChange) return 0;
 
   const absPercent = Math.abs(percentChange);
-  const direction = percentChange >= 0 ? 1 : -1;
+  const isPositive = percentChange > 0;
 
-  let adjustment = 0;
-  if (absPercent < 1) adjustment = 0;
-  else if (absPercent < 3) adjustment = (absPercent - 1) / 2 * 1.5;
-  else if (absPercent < 5) adjustment = 1.5;
-  else if (absPercent < 10) adjustment = 2.0;
-  else if (absPercent < 15) adjustment = 3.0;
-  else adjustment = 3.5;
+  // Zone 1: Normal momentum (0-15%)
+  if (absPercent <= 15) {
+    const adjustment = (absPercent / 2) * 0.5;
+    // Up = decrease score (overbought), Down = increase score (buying opportunity)
+    return isPositive ? -adjustment : adjustment;
+  }
 
-  return adjustment * direction;
+  // Zone 2: First reversal (15-25%) - momentum energy reversal
+  if (absPercent <= 25) {
+    const first15Adjustment = (15 / 2) * 0.5; // 3.75
+    const beyondAdjustment = ((absPercent - 15) / 2) * 0.5;
+
+    if (isPositive) {
+      // Up: first 15% decreases, beyond 15% increases (reversal)
+      return -first15Adjustment + beyondAdjustment;
+    } else {
+      // Down: first 15% increases, beyond 15% decreases (reversal)
+      return first15Adjustment - beyondAdjustment;
+    }
+  }
+
+  // Zone 3: Second reversal (>25%) - reverses again
+  const first15Adjustment = (15 / 2) * 0.5; // 3.75
+  const next10Adjustment = (10 / 2) * 0.5;  // 2.5 (from 15% to 25%)
+  const beyondAdjustment = ((absPercent - 25) / 2) * 0.5;
+
+  if (isPositive) {
+    // Up: first 15% decreases, 15-25% increases, beyond 25% decreases again
+    return -first15Adjustment + next10Adjustment - beyondAdjustment;
+  } else {
+    // Down: first 15% increases, 15-25% decreases, beyond 25% increases again
+    return first15Adjustment - next10Adjustment + beyondAdjustment;
+  }
 };
 
 /**
- * Calculate MACD adjustment score (-2.5 to +2.5)
+ * Calculate MACD adjustment score (-1.5 to +1.5)
+ * Reduced from reference (-2.5 to +2.5) since we lack multi-timeframe analysis
+ *
+ * Without the sophisticated 15d/5d/2d weighted analysis from reference,
+ * we use a simpler histogram-based approach with reduced weight.
  */
 const calculateMACDScore = (macdData) => {
   if (!macdData || macdData.histogram === null) return 0;
@@ -457,20 +493,64 @@ const calculateMACDScore = (macdData) => {
     score -= 0.25;
   }
 
-  return Math.max(-2.5, Math.min(2.5, score * 2.5));
+  // Reduced weight: 1.5 instead of 2.5 since we lack multi-timeframe analysis
+  return Math.max(-1.5, Math.min(1.5, score * 1.5));
+};
+
+/**
+ * Calculate price movement penalty for extreme moves (always <= 0)
+ * Matches BackBoneApp reference algorithm
+ *
+ * DOWN movements (negative %):
+ * - -1 point at -12%
+ * - -2 points at -20%
+ * - Continues at -1 per 10%
+ *
+ * UP movements (positive %):
+ * - -0.5 points at +12%
+ * - -1 point at +20%
+ * - Continues at half the down rate
+ */
+const calculatePriceMovementPenalty = (percentChange) => {
+  if (!percentChange) return 0;
+
+  const absPercent = Math.abs(percentChange);
+  const isNegative = percentChange < 0;
+
+  // No penalty if movement is less than 12%
+  if (absPercent < 12) return 0;
+
+  if (isNegative) {
+    // DOWN: -1 point at 12%, -2 at 20%, continues every 10%
+    const excessPercent = absPercent - 12;
+    return -1.0 - (excessPercent / 10);
+  } else {
+    // UP: -0.5 points at 12%, -1 at 20% (half rate)
+    const excessPercent = absPercent - 12;
+    return -0.5 - (excessPercent / 20);
+  }
 };
 
 /**
  * Calculate volume sigma score (-1.5 to +1.5)
+ * Matches BackBoneApp reference: Force NEGATIVE when stock declining
+ *
+ * Direction Validation:
+ * - If stock declining (< -0.05%): force NEGATIVE volume score
+ * - This prevents misleading pump signals on declining stocks
  */
 const calculateVolumeSigmaScore = (sigma, priceDirection = 0) => {
   if (!sigma || sigma === 1) return 0;
 
-  let score = 2.5 * (sigma - 1) / 10;
+  const DECLINE_THRESHOLD = -0.05;
+  let score = 2.5 * ((sigma - 1) / 10) - 1;
 
-  // Dampen positive volume on declining price
-  if (score > 0 && priceDirection < 0) {
-    score = score * 0.3;
+  // CRITICAL: Force negative if stock is declining
+  // This prevents high volume on a falling stock from boosting score
+  if (priceDirection < DECLINE_THRESHOLD) {
+    score = -Math.abs(score);
+  } else {
+    score = Math.abs(score);
   }
 
   return Math.max(-1.5, Math.min(1.5, score));
@@ -569,14 +649,23 @@ const buildTickerAnalysis = async (symbol, quote) => {
   // 5. Psychological Adjustment (-3.5 to +3.5)
   const psychologicalScore = calculatePsychological(quote.regularMarketChangePercent);
 
+  // 6. Price Movement Penalty (for extreme moves)
+  const priceMovementPenalty = calculatePriceMovementPenalty(quote.regularMarketChangePercent);
+
   // Base score: average of technical and a neutral prediction (5.5) plus psychological
   const baseScore = (technicalScore + 5.5 + psychologicalScore) / 2;
 
-  // Apply adjustments
+  // Apply adjustments (matching BackBoneApp formula)
   let rawScore = baseScore +
     macdScore +
     volumeScore +
-    (pricePositionScore * 1.25);
+    (pricePositionScore * 1.25) +
+    priceMovementPenalty;  // Add extreme movement penalty
+
+  // Debug logging for score breakdown
+  if (quote.symbol === "ZS" || rawScore >= 9.5) {
+    console.log(`[Score Debug] ${quote.symbol}: tech=${technicalScore.toFixed(2)}, psych=${psychologicalScore.toFixed(2)}, base=${baseScore.toFixed(2)}, macd=${macdScore.toFixed(2)}, vol=${volumeScore.toFixed(2)}, pos=${pricePositionScore.toFixed(2)}, penalty=${priceMovementPenalty.toFixed(2)}, raw=${rawScore.toFixed(2)}`);
+  }
 
   // Penalize tickers with missing data — they shouldn't rank high
   if (isMissingData) {

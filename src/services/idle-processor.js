@@ -40,6 +40,7 @@ const WORK_TYPES = {
   DEVELOP: "develop", // Develop/expand a backlog item
   CONNECT: "connect", // Find connections between items
   PRUNE: "prune", // Clean up stale/irrelevant items
+  PLAN: "plan", // Develop plans for unplanned goals
 };
 
 function readJson(filePath) {
@@ -142,14 +143,14 @@ class IdleProcessor extends EventEmitter {
       this.checkAndWork();
     }, 10_000);
 
-    // Start working immediately if Claude is ready
-    if (status.ready) {
-      tracker.setState("working", "Starting background work...");
-      // Small delay to let UI render, then start working
-      setTimeout(() => {
-        this.forceWork();
-      }, 3000);
-    }
+    // DISABLED: Auto-start was causing streaming issues
+    // Use /idle work to manually trigger work
+    // if (status.ready) {
+    //   tracker.setState("working", "Starting background work...");
+    //   setTimeout(() => {
+    //     this.forceWork();
+    //   }, 3000);
+    // }
 
     this.emit("started");
   }
@@ -246,6 +247,24 @@ class IdleProcessor extends EventEmitter {
     const backlog = readJson(BACKLOG_PATH) || { items: [] };
     const profile = readFile(path.join(MEMORY_DIR, "profile.md"));
     const thesis = readFile(path.join(MEMORY_DIR, "thesis.md"));
+
+    // Check for unplanned goals first — planning takes priority
+    const goalsPath = path.join(DATA_DIR, "goals.json");
+    const goalsData = readJson(goalsPath) || { goals: [] };
+    const unplannedGoals = goalsData.goals.filter(g =>
+      g.status !== "completed" &&
+      (!g.plan || g.plan.status === "none")
+    );
+
+    if (unplannedGoals.length > 0) {
+      const goalToPlan = unplannedGoals[0];
+      console.log(`[IdleProcessor] Found unplanned goal: ${goalToPlan.title}`);
+      return {
+        type: WORK_TYPES.PLAN,
+        item: goalToPlan,
+        context: { profile, thesis },
+      };
+    }
 
     if (backlog.items.length === 0) {
       // No backlog items - trigger thinking engine and do research
@@ -730,6 +749,38 @@ Don't dismiss items with high impact scores unless clearly outdated.
 
 Be conservative. Only prune what's clearly stale.`;
 
+      case WORK_TYPES.PLAN:
+        return `${baseContext}
+
+TASK: Develop an execution plan for this goal.
+
+Goal:
+- ID: ${item.id}
+- Title: ${item.title}
+- Description: ${item.description || "No description"}
+- Category: ${item.category || "general"}
+- Project: ${item.project || "none"}
+- Tasks so far: ${(item.tasks || []).map(t => typeof t === "string" ? t : t.text).join(", ") || "None"}
+
+This goal needs a PLAN before work can begin. Create a detailed execution plan:
+
+1. Read the goal from data/goals.json
+2. Check if a project directory exists in projects/${item.project || ""}
+3. Create a PLAN.md file in the project directory with:
+   - Objective (why this matters)
+   - 2-4 phases with specific tasks
+   - Deliverables
+   - Acceptance criteria
+   - Timeline (1-4 weeks)
+   - Risks and mitigations
+4. Update the goal in data/goals.json:
+   - Set plan.status to "ready"
+   - Set plan.planFile to the path
+   - Add phases, deliverables, acceptanceCriteria
+   - Change goal status from "planning" to "planned"
+
+Be practical and specific. Plans should be achievable. Then stop.`;
+
       default:
         return `${baseContext}
 
@@ -762,6 +813,8 @@ Do quality work, then stop.`;
         return "Finding connections in backlog";
       case WORK_TYPES.PRUNE:
         return "Cleaning up stale backlog items";
+      case WORK_TYPES.PLAN:
+        return `Planning goal: ${workItem.item?.title}`;
       default:
         return "Processing backlog";
     }
@@ -1149,12 +1202,11 @@ let instance = null;
 
 export const getIdleProcessor = () => {
   if (!instance) {
-    console.log("========================================");
-    console.log("[IdleProcessor] CREATING SINGLETON INSTANCE");
-    console.log("========================================");
+    console.log("[IdleProcessor] Creating instance (disabled by default)");
     instance = new IdleProcessor();
-    // Auto-start on creation
-    instance.start();
+    // DISABLED: Auto-start was causing issues - use /idle on to enable manually
+    // instance.start();
+    instance.isEnabled = false;
   }
   return instance;
 };

@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BACKBONE — Voice</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0a0a0f;
+    color: #e0e0e0;
+    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+  }
+  #status {
+    font-size: 14px;
+    color: #666;
+    margin-bottom: 24px;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+  }
+  #status.connected { color: #4ecdc4; }
+  #status.error { color: #ff6b6b; }
+
+  #orb-container {
+    width: 200px;
+    height: 200px;
+    position: relative;
+    margin-bottom: 32px;
+  }
+  #orb {
+    width: 100%;
+    height: 100%;
+    border-radius: 50%;
+    background: radial-gradient(circle at 40% 40%, #1a1a2e, #0a0a1a);
+    border: 2px solid #1a1a2e;
+    transition: all 0.3s ease;
+    position: relative;
+  }
+  #orb.listening {
+    border-color: #4ecdc4;
+    box-shadow: 0 0 40px rgba(78, 205, 196, 0.2);
+  }
+  #orb.speaking {
+    border-color: #a78bfa;
+    box-shadow: 0 0 60px rgba(167, 139, 250, 0.3);
+    animation: pulse 1s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { transform: scale(1); }
+    50% { transform: scale(1.05); }
+  }
+
+  #transcript-box {
+    width: 90%;
+    max-width: 600px;
+    max-height: 240px;
+    overflow-y: auto;
+    padding: 16px;
+    flex-shrink: 0;
+    margin-bottom: 24px;
+  }
+  .transcript-line {
+    margin-bottom: 8px;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  .transcript-line.ai { color: #a78bfa; }
+  .transcript-line.user { color: #4ecdc4; }
+  .transcript-line .label {
+    font-weight: bold;
+    margin-right: 8px;
+    opacity: 0.7;
+    font-size: 11px;
+    text-transform: uppercase;
+  }
+
+  #controls {
+    display: flex;
+    gap: 12px;
+  }
+  button {
+    background: #1a1a2e;
+    color: #e0e0e0;
+    border: 1px solid #333;
+    padding: 10px 24px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 13px;
+    transition: all 0.2s;
+  }
+  button:hover { background: #2a2a3e; border-color: #555; }
+  #end-btn { border-color: #ff6b6b44; color: #ff6b6b; }
+  #end-btn:hover { background: #2e1a1a; border-color: #ff6b6b; }
+  #mute-btn.muted { border-color: #f0ad4e44; color: #f0ad4e; }
+
+  #title {
+    position: absolute;
+    top: 24px;
+    left: 24px;
+    font-size: 12px;
+    color: #333;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+  }
+</style>
+</head>
+<body>
+<div id="title">BACKBONE</div>
+<div id="status">Connecting...</div>
+<div id="orb-container"><div id="orb"></div></div>
+<div id="transcript-box"></div>
+<div id="controls">
+  <button id="mute-btn" onclick="toggleMute()">Mute</button>
+  <button id="end-btn" onclick="endSession()">End</button>
+</div>
+
+<script>
+const statusEl = document.getElementById('status');
+const orbEl = document.getElementById('orb');
+const transcriptBox = document.getElementById('transcript-box');
+const muteBtn = document.getElementById('mute-btn');
+
+let ws = null;
+let audioCtx = null;
+let micStream = null;
+let micProcessor = null;
+let isMuted = false;
+let isPlaying = false;
+let audioQueue = [];
+let currentAiText = '';
+let playbackSourceNode = null;
+
+// --- Audio Playback ---
+function initAudioCtx() {
+  if (!audioCtx) audioCtx = new AudioContext({ sampleRate: 24000 });
+  return audioCtx;
+}
+
+function base64ToPcm16(b64) {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new Int16Array(bytes.buffer);
+}
+
+function queueAudio(b64chunk) {
+  audioQueue.push(b64chunk);
+  if (!isPlaying) playNext();
+}
+
+function playNext() {
+  if (audioQueue.length === 0) {
+    isPlaying = false;
+    orbEl.classList.remove('speaking');
+    return;
+  }
+  isPlaying = true;
+  orbEl.classList.add('speaking');
+
+  const ctx = initAudioCtx();
+  // Combine all queued chunks
+  const chunks = audioQueue.splice(0, audioQueue.length);
+  const allSamples = [];
+  for (const c of chunks) {
+    const pcm = base64ToPcm16(c);
+    for (let i = 0; i < pcm.length; i++) allSamples.push(pcm[i] / 32768);
+  }
+
+  const buf = ctx.createBuffer(1, allSamples.length, 24000);
+  buf.getChannelData(0).set(new Float32Array(allSamples));
+
+  const src = ctx.createBufferSource();
+  src.buffer = buf;
+  src.connect(ctx.destination);
+  src.onended = () => playNext();
+  src.start();
+  playbackSourceNode = src;
+}
+
+// --- Mic Capture ---
+async function startMic() {
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: { sampleRate: 24000, channelCount: 1, echoCancellation: true } });
+  } catch (e) {
+    setStatus('Mic access denied', 'error');
+    return;
+  }
+
+  const ctx = initAudioCtx();
+  const source = ctx.createMediaStreamSource(micStream);
+
+  // Use ScriptProcessorNode (widely supported)
+  micProcessor = ctx.createScriptProcessor(4096, 1, 1);
+  micProcessor.onaudioprocess = (e) => {
+    if (isMuted || !ws || ws.readyState !== WebSocket.OPEN) return;
+    const float32 = e.inputBuffer.getChannelData(0);
+    // Convert to PCM16
+    const pcm16 = new Int16Array(float32.length);
+    for (let i = 0; i < float32.length; i++) {
+      const s = Math.max(-1, Math.min(1, float32[i]));
+      pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+    }
+    // Base64 encode
+    const bytes = new Uint8Array(pcm16.buffer);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    const b64 = btoa(binary);
+
+    ws.send(JSON.stringify({
+      type: 'input_audio_buffer.append',
+      audio: b64
+    }));
+  };
+
+  source.connect(micProcessor);
+  micProcessor.connect(ctx.destination); // Required for ScriptProcessor to work
+  orbEl.classList.add('listening');
+}
+
+function stopMic() {
+  if (micStream) {
+    micStream.getTracks().forEach(t => t.stop());
+    micStream = null;
+  }
+  if (micProcessor) {
+    micProcessor.disconnect();
+    micProcessor = null;
+  }
+  orbEl.classList.remove('listening');
+}
+
+// --- Transcript ---
+function addTranscript(role, text) {
+  const div = document.createElement('div');
+  div.className = `transcript-line ${role}`;
+  const label = document.createElement('span');
+  label.className = 'label';
+  label.textContent = role === 'ai' ? 'BACKBONE' : 'You';
+  div.appendChild(label);
+  div.appendChild(document.createTextNode(text));
+  transcriptBox.appendChild(div);
+  transcriptBox.scrollTop = transcriptBox.scrollHeight;
+}
+
+// --- WebSocket ---
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${proto}//${location.host}`);
+
+  ws.onopen = () => {
+    setStatus('Connected', 'connected');
+    startMic();
+  };
+
+  ws.onmessage = (e) => {
+    try {
+      const event = JSON.parse(e.data);
+      handleEvent(event);
+    } catch {}
+  };
+
+  ws.onclose = () => {
+    setStatus('Disconnected', '');
+    stopMic();
+  };
+
+  ws.onerror = () => {
+    setStatus('Connection error', 'error');
+  };
+}
+
+function handleEvent(event) {
+  switch (event.type) {
+    case 'response.audio.delta':
+      if (event.delta) queueAudio(event.delta);
+      break;
+
+    case 'response.audio_transcript.delta':
+      if (event.delta) currentAiText += event.delta;
+      break;
+
+    case 'response.audio_transcript.done':
+      if (currentAiText) {
+        addTranscript('ai', currentAiText);
+        currentAiText = '';
+      } else if (event.transcript) {
+        addTranscript('ai', event.transcript);
+      }
+      break;
+
+    case 'conversation.item.input_audio_transcription.completed':
+      if (event.transcript) addTranscript('user', event.transcript);
+      break;
+
+    case 'input_audio_buffer.speech_started':
+      // User started speaking — interrupt playback
+      orbEl.classList.add('listening');
+      orbEl.classList.remove('speaking');
+      if (playbackSourceNode) {
+        try { playbackSourceNode.stop(); } catch {}
+        playbackSourceNode = null;
+      }
+      audioQueue = [];
+      isPlaying = false;
+      break;
+
+    case 'input_audio_buffer.speech_stopped':
+      break;
+
+    case 'error':
+      setStatus(event.message || event.error?.message || 'Error', 'error');
+      break;
+
+    case 'session.closed':
+      setStatus('Session ended', '');
+      stopMic();
+      break;
+  }
+}
+
+function setStatus(text, cls) {
+  statusEl.textContent = text;
+  statusEl.className = cls || '';
+}
+
+// --- Controls ---
+function toggleMute() {
+  isMuted = !isMuted;
+  muteBtn.textContent = isMuted ? 'Unmute' : 'Mute';
+  muteBtn.classList.toggle('muted', isMuted);
+  orbEl.classList.toggle('listening', !isMuted);
+}
+
+function endSession() {
+  if (ws) ws.close();
+  stopMic();
+  setStatus('Session ended', '');
+}
+
+// Start
+connect();
+</script>
+</body>
+</html>

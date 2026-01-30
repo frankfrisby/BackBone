@@ -4,6 +4,7 @@
  */
 
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { execSync } from "child_process";
 import { Box, Text, useInput, useApp } from "ink";
 import TextInput from "ink-text-input";
 import { signInWithGoogle, signOutFirebase, getCurrentFirebaseUser, isSignedIn } from "../services/firebase-auth.js";
@@ -63,12 +64,14 @@ import { startOAuthFlow as startClaudeOAuth, hasValidCredentials as hasClaudeCre
 import { startOAuthFlow as startCodexOAuth, hasValidCredentials as hasCodexCredentials } from "../services/codex-oauth.js";
 import {
   isClaudeCodeInstalled,
+  isClaudeCodeInstalledAsync,
   isClaudeCodeLoggedIn,
   getClaudeCodeStatus,
   spawnClaudeCodeLogin,
   getInstallInstructions as getClaudeCodeInstallInstructions
 } from "../services/claude-code-cli.js";
 import { startSetupWizard, stopSetupWizard, getSetupWizard } from "../services/setup-wizard.js";
+import { scrapeLinkedInProfile } from "../services/linkedin-scraper.js";
 
 const e = React.createElement;
 
@@ -160,7 +163,7 @@ const B_LOGO_FRAMES = [
 
 // Onboarding steps configuration
 const ONBOARDING_STEPS = [
-  { id: "prerequisites", label: "Prerequisites", required: true, description: "Node.js & Claude Code CLI" },
+  { id: "prerequisites", label: "Prerequisites", required: true, description: "Node.js & Claude/Codex CLI" },
   { id: "google", label: "Google Account", required: true, description: "Sign in with Google" },
   {
     id: "phone",
@@ -169,6 +172,8 @@ const ONBOARDING_STEPS = [
     description: "Required for notifications and AI messaging"
   },
   { id: "model", label: "AI Model", required: true, description: "Choose your AI assistant" },
+  { id: "coreGoals", label: "Core Goals", required: true, description: "What matters to you (40+ words)" },
+  { id: "linkedin", label: "LinkedIn Profile", required: false, description: "Connect your professional identity" },
   { id: "alpaca", label: "Trading (Alpaca)", required: false, description: "Auto-trading" },
   { id: "oura", label: "Health (Oura)", required: false, description: "Health tracking" },
   { id: "email", label: "Email & Calendar", required: false, description: "Email access" },
@@ -370,11 +375,12 @@ const StepItem = ({ step, status, isActive, isSelected }) => {
 
 /**
  * Prerequisites Step Component
- * Checks Node.js and Claude Code CLI installation
+ * Checks Node.js and Claude/Codex CLI installation
  */
 const PrerequisitesStep = ({ onComplete, onError }) => {
   const [nodeStatus, setNodeStatus] = useState(null);
   const [claudeStatus, setClaudeStatus] = useState(null);
+  const [codexStatus, setCodexStatus] = useState(null);
   const [checking, setChecking] = useState(true);
 
   useEffect(() => {
@@ -400,18 +406,30 @@ const PrerequisitesStep = ({ onComplete, onError }) => {
       setClaudeStatus({ installed: false, version: null, loggedIn: false });
     }
 
+    // Codex CLI
+    try {
+      const codexVersion = execSync("codex --version", {
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
+        timeout: 5000
+      }).trim();
+      setCodexStatus({ installed: true, version: codexVersion });
+    } catch {
+      setCodexStatus({ installed: false, version: null });
+    }
+
     setChecking(false);
   }, []);
 
-  // Auto-complete if both are installed
+  // Auto-complete if Node is OK and at least one CLI is installed
   useEffect(() => {
-    if (!checking && nodeStatus?.ok && claudeStatus?.installed) {
-      const timer = setTimeout(() => onComplete({ node: nodeStatus, claude: claudeStatus }), 1000);
+    if (!checking && nodeStatus?.ok && (claudeStatus?.installed || codexStatus?.installed)) {
+      const timer = setTimeout(() => onComplete({ node: nodeStatus, claude: claudeStatus, codex: codexStatus }), 1000);
       return () => clearTimeout(timer);
     }
-  }, [checking, nodeStatus, claudeStatus]);
+  }, [checking, nodeStatus, claudeStatus, codexStatus]);
 
-  const allGood = nodeStatus?.ok && claudeStatus?.installed;
+  const allGood = nodeStatus?.ok && (claudeStatus?.installed || codexStatus?.installed);
 
   return e(
     Box,
@@ -444,14 +462,27 @@ const PrerequisitesStep = ({ onComplete, onError }) => {
           : e(Text, { color: "#64748b" }, "checking...")
       ),
 
+      // Codex CLI check
+      e(Box, { flexDirection: "row", marginTop: 1 },
+        e(Text, { color: codexStatus?.installed ? "#22c55e" : checking ? "#64748b" : "#f97316" },
+          codexStatus?.installed ? "  \u2714 " : checking ? "  \u25CB " : "  \u2718 "),
+        e(Text, { color: "#e2e8f0" }, "Codex CLI "),
+        codexStatus
+          ? codexStatus.installed
+            ? e(Text, { color: "#22c55e" }, `${codexStatus.version}`)
+            : e(Text, { color: "#f97316" }, "not installed")
+          : e(Text, { color: "#64748b" }, "checking...")
+      ),
+
       // Instructions if Claude missing
-      !checking && !claudeStatus?.installed && e(Box, { flexDirection: "column", marginTop: 1, paddingX: 2 },
+      !checking && !claudeStatus?.installed && !codexStatus?.installed && e(Box, { flexDirection: "column", marginTop: 1, paddingX: 2 },
         e(Text, { color: "#f97316", bold: true }, "To install Claude Code CLI:"),
         e(Text, { color: "#94a3b8" }, ""),
         e(Text, { color: "#e2e8f0" }, "  npm install -g @anthropic-ai/claude-code"),
         e(Text, { color: "#94a3b8" }, ""),
         e(Text, { color: "#94a3b8" }, "Then run 'claude' in your terminal to log in with your"),
         e(Text, { color: "#94a3b8" }, "Anthropic Pro or Max subscription."),
+        e(Text, { color: "#94a3b8", marginTop: 1 }, "Or install and login with Codex CLI for fallback."),
         e(Text, { color: "#94a3b8", marginTop: 1 }, "Press Enter to re-check, or S to skip for now")
       ),
 
@@ -479,8 +510,17 @@ const PrerequisitesStepWrapper = ({ onComplete, onError }) => {
       // Re-check by re-rendering — trigger via error then re-mount
       // Simplest: just call onComplete if prerequisites now met
       const cli = isClaudeCodeInstalled();
-      if (cli.installed) {
-        wrapperRef.current.onComplete({ node: process.version, claude: cli });
+      let codex = { installed: false, version: null };
+      try {
+        const codexVersion = execSync("codex --version", {
+          encoding: "utf-8",
+          stdio: ["pipe", "pipe", "pipe"],
+          timeout: 5000
+        }).trim();
+        codex = { installed: true, version: codexVersion };
+      } catch {}
+      if (cli.installed || codex.installed) {
+        wrapperRef.current.onComplete({ node: process.version, claude: cli, codex });
       }
     }
     if (input.toLowerCase() === "s") {
@@ -507,8 +547,10 @@ const GoogleLoginStep = ({ onComplete, onError, onLogout }) => {
       setUser(existingUser);
       setStatus("signed-in");
       setMessage(`Signed in as ${existingUser.email}`);
+      // Auto-complete after brief delay if already signed in
+      setTimeout(() => onComplete(existingUser), 800);
     }
-  }, []);
+  }, [onComplete]);
 
   const handleSignIn = useCallback(async () => {
     setStatus("waiting");
@@ -668,11 +710,15 @@ const PhoneVerificationStep = ({ onComplete, onError }) => {
 
     const record = getPhoneRecord(userId);
     if (record?.verification?.verifiedAt) {
-      // Already verified
+      // Already verified - auto-complete after brief delay
       setExistingPhone(record.phoneNumber);
       setPhase("ready");
       setStatus("verified");
       setMessage(`Verified: ${record.phoneNumber}`);
+      if (!completedRef.current) {
+        completedRef.current = true;
+        setTimeout(() => onComplete({ existing: true, phone: record.phoneNumber }), 800);
+      }
       return;
     }
 
@@ -680,7 +726,7 @@ const PhoneVerificationStep = ({ onComplete, onError }) => {
     setPhase("ready");
     setStatus("ready");
     setMessage("Verify your phone for WhatsApp notifications.");
-  }, [userId]);
+  }, [userId, onComplete]);
 
   // Validate phone number format (+1 required)
   const validatePhone = (phone) => {
@@ -1001,59 +1047,96 @@ const ModelSelectionStep = ({ onComplete, onError }) => {
   const proCheckTimeoutRef = useRef(null);
   const useInlineKeyEntry = isModernTerminal();
 
-  // Check if any provider is already configured
+  // Cache model connection status to avoid expensive sync calls on every render
+  const [modelStatus, setModelStatus] = useState({});
+  const [statusLoading, setStatusLoading] = useState(true);
+
+  // Load model connection status asynchronously on mount
   useEffect(() => {
-    // First check Claude Code CLI (best option)
-    const cliStatus = isClaudeCodeInstalled();
-    if (cliStatus.installed) {
-      const authStatus = isClaudeCodeLoggedIn();
-      if (authStatus.loggedIn) {
-        setMessage(`Claude Code connected! (${authStatus.model || "Opus 4.5"})`);
-        setTimeout(() => onComplete({ provider: "claude-code", existing: true, model: authStatus.model }), 1000);
-        return;
+    const loadModelStatus = async () => {
+      const status = {};
+
+      // Check Claude Code CLI (async)
+      const cliCheck = await isClaudeCodeInstalledAsync();
+      const cliAuth = cliCheck.installed ? isClaudeCodeLoggedIn() : { loggedIn: false };
+
+      status["claude-code"] = {
+        connected: cliAuth.loggedIn,
+        label: !cliCheck.installed ? "Not Installed" : (cliAuth.loggedIn ? "CLI Logged In" : "Not Logged In")
+      };
+
+      // Check Claude OAuth
+      status["claude-oauth"] = {
+        connected: hasClaudeCredentials(),
+        label: hasClaudeCredentials() ? "Browser OAuth" : null
+      };
+
+      // Check OpenAI Codex
+      status["openai-codex"] = {
+        connected: hasCodexCredentials(),
+        label: hasCodexCredentials() ? "Codex Logged In" : null
+      };
+
+      // Check API key providers
+      for (const id of ["openai", "anthropic", "google"]) {
+        const configured = isProviderConfigured(id);
+        status[id] = {
+          connected: configured,
+          label: configured ? "API Key" : null
+        };
       }
+
+      setModelStatus(status);
+      setStatusLoading(false);
+    };
+
+    loadModelStatus();
+  }, []);
+
+  // Check if any provider is already configured (after status loads)
+  useEffect(() => {
+    if (statusLoading) return;
+
+    // First check Claude Code CLI (best option)
+    if (modelStatus["claude-code"]?.connected) {
+      const authStatus = isClaudeCodeLoggedIn();
+      setMessage(`Claude Code connected! (${authStatus.model || "Opus 4.5"})`);
+      setTimeout(() => onComplete({ provider: "claude-code", existing: true, model: authStatus.model }), 1000);
+      return;
     }
 
     // Then check Claude OAuth credentials
-    if (hasClaudeCredentials()) {
+    if (modelStatus["claude-oauth"]?.connected) {
       setMessage("Claude Pro/Max already connected!");
       setTimeout(() => onComplete({ provider: "claude-oauth", existing: true }), 1000);
       return;
     }
 
     // Check Codex credentials
-    if (hasCodexCredentials()) {
+    if (modelStatus["openai-codex"]?.connected) {
       setMessage("OpenAI Codex already connected!");
       setTimeout(() => onComplete({ provider: "openai-codex", existing: true }), 1000);
       return;
     }
 
-    // Check other providers - map model IDs to provider IDs
-    const providerMap = {
-      "openai": "openai",
-      "anthropic": "anthropic",
-      "google": "google",
-    };
-
+    // Check other providers
     for (const opt of MODEL_OPTIONS) {
       if (opt.id === "claude-code" || opt.id === "claude-oauth" || opt.id === "openai-codex") continue;
-      const providerId = providerMap[opt.id] || opt.id;
-      if (isProviderConfigured(providerId)) {
+      if (modelStatus[opt.id]?.connected) {
         setMessage(`${opt.label} already configured!`);
         setTimeout(() => onComplete({ provider: opt.id, existing: true }), 1000);
         return;
       }
     }
-  }, [onComplete]);
+  }, [onComplete, statusLoading, modelStatus]);
 
   // Handle Claude Code CLI login (opens terminal)
   const handleClaudeCodeLogin = async () => {
-    const cliStatus = isClaudeCodeInstalled();
-
-    if (!cliStatus.installed) {
+    // Use cached status to check if installed (avoid slow sync call)
+    const cachedStatus = modelStatus["claude-code"];
+    if (cachedStatus?.label === "Not Installed") {
       // Claude Code not installed - show instructions
       setSubStep("oauth");
-      const instructions = getClaudeCodeInstallInstructions();
       setOauthStatus("Claude Code CLI not installed");
       setMessage(`Run: npm install -g @anthropic-ai/claude-code`);
       setTimeout(() => {
@@ -1064,8 +1147,8 @@ const ModelSelectionStep = ({ onComplete, onError }) => {
     }
 
     // Check if already logged in
-    const authStatus = isClaudeCodeLoggedIn();
-    if (authStatus.loggedIn) {
+    if (cachedStatus?.connected) {
+      const authStatus = isClaudeCodeLoggedIn();
       setMessage(`Claude Code already connected! (${authStatus.model || "Opus 4.5"})`);
       setTimeout(() => onComplete({ provider: "claude-code", existing: true, model: authStatus.model }), 1000);
       return;
@@ -1215,29 +1298,38 @@ const ModelSelectionStep = ({ onComplete, onError }) => {
       return;
     }
     if (subStep === "select") {
-      // Up/Down navigation - ALWAYS works regardless of panel mode
-      if (key.upArrow) {
-        setSelectedProvider((p) => (p - 1 + MODEL_OPTIONS.length) % MODEL_OPTIONS.length);
+      const isInProviderMode = activePanel === "sub";
+
+      // Up/Down navigation - ONLY when in provider selection mode
+      if (isInProviderMode) {
+        if (key.upArrow) {
+          setSelectedProvider((p) => (p - 1 + MODEL_OPTIONS.length) % MODEL_OPTIONS.length);
+          return;
+        }
+        if (key.downArrow) {
+          setSelectedProvider((p) => (p + 1) % MODEL_OPTIONS.length);
+          return;
+        }
+      }
+
+      // Enter or Right arrow - enter provider selection mode (or execute if already in)
+      if (key.return || key.rightArrow) {
+        if (!isInProviderMode) {
+          // Enter provider selection mode
+          setActivePanel("sub");
+        } else {
+          // Execute setup for selected provider
+          const provider = MODEL_OPTIONS[selectedProvider];
+          executeProviderSetup(provider);
+        }
         return;
       }
-      if (key.downArrow) {
-        setSelectedProvider((p) => (p + 1) % MODEL_OPTIONS.length);
-        return;
-      }
-      // Right arrow - enter options mode (orange border)
-      if (key.rightArrow) {
-        setActivePanel("sub");
-        return;
-      }
-      // Left arrow - exit options mode (gray border)
-      if (key.leftArrow) {
-        setActivePanel("main");
-        return;
-      }
-      // Enter - execute setup for selected provider
-      if (key.return) {
-        const provider = MODEL_OPTIONS[selectedProvider];
-        executeProviderSetup(provider);
+
+      // Escape or Left arrow - exit provider selection mode
+      if (key.escape || key.leftArrow) {
+        if (isInProviderMode) {
+          setActivePanel("main");
+        }
         return;
       }
     } else if (subStep === "pro-check") {
@@ -1278,10 +1370,10 @@ const ModelSelectionStep = ({ onComplete, onError }) => {
     return e(
       Box,
       { flexDirection: "column", paddingX: 1 },
-      e(Text, { color: "#e2e8f0", bold: true }, "Select AI Provider"),
-      e(Text, { color: "#64748b", marginBottom: 1 },
-        isInOptionsMode ? "↑↓ Navigate  ← Back  Enter Setup" : "↑↓ Navigate  Enter Setup"
-      ),
+      e(Text, { color: "#e2e8f0", bold: true }, "AI Model"),
+      isInOptionsMode
+        ? e(Text, { color: "#f97316", marginBottom: 1 }, "↑↓ Select Provider  Enter Confirm  Esc Back")
+        : e(Text, { color: "#64748b", marginBottom: 1 }, "Press Enter to select a provider"),
 
       // Single box with orange border when in options mode
       e(
@@ -1294,43 +1386,46 @@ const ModelSelectionStep = ({ onComplete, onError }) => {
           paddingY: 0
         },
 
-        // Provider list
-        ...MODEL_OPTIONS.map((opt, i) => {
-          const isConnected = isModelConnected(opt.id);
-          const connectionLabel = getConnectionLabel(opt.id);
-          const isSelected = i === selectedProvider;
+        // Provider list (use cached modelStatus to avoid expensive sync calls)
+        ...(statusLoading
+          ? [e(Text, { key: "loading", color: "#f59e0b" }, "Loading providers...")]
+          : MODEL_OPTIONS.map((opt, i) => {
+              const status = modelStatus[opt.id] || {};
+              const isConnected = status.connected;
+              const connectionLabel = status.label;
+              const isSelected = i === selectedProvider;
 
-          // Special handling for Claude Code CLI
-          const isCLI = opt.cli;
-          let labelColor = "#22c55e";
-          if (isCLI && connectionLabel === "Not Installed") {
-            labelColor = "#ef4444"; // Red for not installed
-          } else if (isCLI && connectionLabel === "Not Logged In") {
-            labelColor = "#f59e0b"; // Orange for installed but not logged in
-          }
+              // Special handling for Claude Code CLI
+              const isCLI = opt.cli;
+              let labelColor = "#22c55e";
+              if (isCLI && connectionLabel === "Not Installed") {
+                labelColor = "#ef4444"; // Red for not installed
+              } else if (isCLI && connectionLabel === "Not Logged In") {
+                labelColor = "#f59e0b"; // Orange for installed but not logged in
+              }
 
-          return e(
-            Box,
-            { key: opt.id, flexDirection: "row", gap: 1 },
-            // Selection arrow
-            e(Text, { color: isSelected ? "#f97316" : "#1e293b" },
-              isSelected ? "▶" : " "
-            ),
-            // Status dot
-            e(Text, { color: isConnected ? "#22c55e" : "#475569" },
-              isConnected ? "●" : "○"
-            ),
-            // Label
-            e(Text, {
-              color: isConnected ? "#22c55e" : (isSelected ? "#e2e8f0" : "#94a3b8"),
-              bold: isSelected
-            }, opt.label),
-            // Recommended badge for first/best option
-            opt.recommended && !isConnected && e(Text, { color: "#f59e0b", bold: true }, " (Recommended)"),
-            // Connection type label (API Key, Logged In, etc.)
-            connectionLabel && e(Text, { color: labelColor, dimColor: !isConnected }, ` (${connectionLabel})`)
-          );
-        })
+              return e(
+                Box,
+                { key: opt.id, flexDirection: "row", gap: 1 },
+                // Selection arrow
+                e(Text, { color: isSelected ? "#f97316" : "#1e293b" },
+                  isSelected ? "▶" : " "
+                ),
+                // Status dot
+                e(Text, { color: isConnected ? "#22c55e" : "#475569" },
+                  isConnected ? "●" : "○"
+                ),
+                // Label
+                e(Text, {
+                  color: isConnected ? "#22c55e" : (isSelected ? "#e2e8f0" : "#94a3b8"),
+                  bold: isSelected
+                }, opt.label),
+                // Recommended badge for first/best option
+                opt.recommended && !isConnected && e(Text, { color: "#f59e0b", bold: true }, " (Recommended)"),
+                // Connection type label (API Key, Logged In, etc.)
+                connectionLabel && e(Text, { color: labelColor, dimColor: !isConnected }, ` (${connectionLabel})`)
+              );
+            }))
       )
     );
   }
@@ -1425,6 +1520,336 @@ const ModelSelectionStep = ({ onComplete, onError }) => {
       e(Text, { color: "#f97316" }, "Waiting for API key...")
     ),
     subStep === "validating" && e(Text, { color: "#f97316" }, "Validating...")
+  );
+};
+
+/**
+ * Core Goals Step Component
+ * User describes what matters to them - beliefs, goals, ideology
+ * Minimum 40 words required
+ * Auto-saves as user types (new entry) or requires Enter to save (editing)
+ */
+const CoreGoalsStep = ({ onComplete, onError }) => {
+  const [text, setText] = useState("");
+  const [originalText, setOriginalText] = useState(""); // Track original for edit mode
+  const [isEditing, setIsEditing] = useState(false); // true if editing existing goals
+  const [saveStatus, setSaveStatus] = useState(""); // "saving", "saved", ""
+  const [submitted, setSubmitted] = useState(false);
+  const saveTimeoutRef = useRef(null);
+
+  // Load existing core goals if any
+  useEffect(() => {
+    const settings = loadUserSettings();
+    if (settings.coreGoals) {
+      setText(settings.coreGoals);
+      setOriginalText(settings.coreGoals);
+      setIsEditing(true);
+      // Auto-complete if already has 40+ words
+      const existingWordCount = settings.coreGoals.trim().split(/\s+/).filter(w => w.length > 0).length;
+      if (existingWordCount >= 40) {
+        setTimeout(() => onComplete({ coreGoals: settings.coreGoals, existing: true }), 800);
+      }
+    }
+  }, [onComplete]);
+
+  const wordCount = text.trim().split(/\s+/).filter(w => w.length > 0).length;
+  const wordsNeeded = Math.max(0, 40 - wordCount);
+  const isValid = wordCount >= 40;
+  const hasChanges = text !== originalText;
+
+  // Auto-save with debounce (only for new entries, not editing)
+  const handleTextChange = useCallback((newText) => {
+    setText(newText);
+
+    // Clear any pending save
+    if (saveTimeoutRef.current) {
+      clearTimeout(saveTimeoutRef.current);
+    }
+
+    // Auto-save for new entries (not editing existing)
+    if (!isEditing) {
+      const newWordCount = newText.trim().split(/\s+/).filter(w => w.length > 0).length;
+      if (newWordCount > 0) {
+        setSaveStatus("saving");
+        saveTimeoutRef.current = setTimeout(() => {
+          updateSetting("coreGoals", newText.trim());
+          setSaveStatus("saved");
+          // Clear "saved" status after 2 seconds
+          setTimeout(() => setSaveStatus(""), 2000);
+        }, 500); // Save 500ms after user stops typing
+      }
+    }
+  }, [isEditing]);
+
+  // Cleanup timeout on unmount
+  useEffect(() => {
+    return () => {
+      if (saveTimeoutRef.current) {
+        clearTimeout(saveTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  const handleSubmit = useCallback(() => {
+    if (!isValid) return;
+    setSubmitted(true);
+    updateSetting("coreGoals", text.trim());
+    setOriginalText(text.trim());
+    setTimeout(() => onComplete({ coreGoals: text.trim() }), 500);
+  }, [isValid, text, onComplete]);
+
+  const handleCancel = useCallback(() => {
+    setText(originalText);
+    setSaveStatus("");
+  }, [originalText]);
+
+  useInput((input, key) => {
+    if (submitted) return;
+
+    // Enter to save/continue
+    if (key.return && isValid) {
+      handleSubmit();
+      return;
+    }
+
+    // Escape to cancel edits (only in edit mode)
+    if (key.escape && isEditing && hasChanges) {
+      handleCancel();
+      return;
+    }
+  });
+
+  if (submitted) {
+    return e(
+      Box,
+      { flexDirection: "column", paddingX: 1 },
+      e(Text, { color: "#22c55e", bold: true }, "Core Goals Saved!"),
+      e(Text, { color: "#94a3b8" }, "The AI will use this to guide its actions on your behalf.")
+    );
+  }
+
+  return e(
+    Box,
+    { flexDirection: "column", paddingX: 1 },
+    e(Text, { color: "#e2e8f0", bold: true }, "Core Goals"),
+    e(Text, { color: "#94a3b8" },
+      "Describe what matters to you - your beliefs, goals, values, and priorities."
+    ),
+    e(Text, { color: "#94a3b8" },
+      "The AI uses this to help with finances, projects, health, and decisions."
+    ),
+    e(Box, { marginTop: 1 }),
+    e(
+      Box,
+      {
+        borderStyle: "single",
+        borderColor: isValid ? "#22c55e" : "#f97316",
+        paddingX: 1,
+        width: 65
+      },
+      e(TextInput, {
+        value: text,
+        onChange: handleTextChange,
+        placeholder: "Type what matters to you..."
+      })
+    ),
+    e(Box, { marginTop: 1, flexDirection: "row", gap: 2 },
+      e(Text, { color: isValid ? "#22c55e" : "#f59e0b" },
+        `Words: ${wordCount}/40`
+      ),
+      !isValid && e(Text, { color: "#f59e0b" }, `(${wordsNeeded} more needed)`),
+      isValid && e(Text, { color: "#22c55e" }, "Ready!"),
+      // Save status indicator
+      saveStatus === "saving" && e(Text, { color: "#f59e0b" }, " Saving..."),
+      saveStatus === "saved" && e(Text, { color: "#22c55e" }, " Saved!")
+    ),
+    // Different instructions for new vs editing
+    isEditing
+      ? e(Box, { flexDirection: "column" },
+          hasChanges
+            ? e(Text, { color: "#f59e0b" }, "Press Enter to save changes, Esc to cancel")
+            : e(Text, { color: isValid ? "#22c55e" : "#64748b" },
+                isValid ? "Press Enter to continue" : "Write at least 40 words to continue"
+              )
+        )
+      : e(Box, { flexDirection: "column" },
+          e(Text, { color: "#94a3b8", dimColor: true }, "Auto-saving as you type..."),
+          e(Text, { color: isValid ? "#22c55e" : "#64748b", dimColor: !isValid },
+            isValid ? "Press Enter to continue" : "Write at least 40 words to continue"
+          )
+        )
+  );
+};
+
+/**
+ * LinkedIn Profile Step Component
+ * Optional - allows user to connect their LinkedIn profile
+ */
+const LinkedInStep = ({ onComplete, onSkip, onError }) => {
+  const [status, setStatus] = useState("ready"); // ready, connecting, connected, error
+  const [message, setMessage] = useState("");
+  const [profile, setProfile] = useState(null); // Full profile data
+
+  // Load existing LinkedIn data if any (from linkedin-profile.json)
+  useEffect(() => {
+    const loadExisting = async () => {
+      try {
+        const fs = await import("fs");
+        const path = await import("path");
+        const profilePath = path.default.join(process.cwd(), "data", "linkedin-profile.json");
+        if (fs.default.existsSync(profilePath)) {
+          const profileData = JSON.parse(fs.default.readFileSync(profilePath, "utf-8"));
+          if (profileData.success && profileData.profileUrl) {
+            setProfile(profileData);
+            setStatus("connected");
+            // Save to settings for consistency
+            updateSetting("linkedInUrl", profileData.profileUrl);
+            updateSetting("linkedInName", profileData.profile?.name || "");
+            updateSetting("connections", { ...loadUserSettings().connections, linkedin: true });
+          }
+        }
+      } catch {}
+    };
+
+    loadExisting();
+  }, []);
+
+  const handleConnect = useCallback(async () => {
+    setStatus("connecting");
+    setMessage("Opening browser to LinkedIn...");
+
+    try {
+      const result = await scrapeLinkedInProfile({ headless: false });
+
+      if (result && result.success && result.profileUrl) {
+        setProfile(result);
+        updateSetting("linkedInUrl", result.profileUrl);
+        updateSetting("linkedInName", result.profile?.name || "");
+        updateSetting("connections", { ...loadUserSettings().connections, linkedin: true });
+        setStatus("connected");
+        setMessage("Profile captured!");
+      } else {
+        setStatus("error");
+        setMessage(result?.error || "Could not capture profile. Try again or skip.");
+      }
+    } catch (err) {
+      setStatus("error");
+      setMessage(err.message || "Failed to connect. Try again or skip.");
+    }
+  }, []);
+
+  useInput((input, key) => {
+    if (status === "connecting") return;
+
+    const lower = input.toLowerCase();
+
+    if (lower === "s" && status !== "connected") {
+      onSkip();
+      return;
+    }
+
+    // Update profile (U key when connected)
+    if (lower === "u" && status === "connected") {
+      handleConnect();
+      return;
+    }
+
+    // Continue to next step (Enter when connected)
+    if (key.return && status === "connected") {
+      onComplete({ linkedInUrl: profile?.profileUrl, profile: profile?.profile, existing: true });
+      return;
+    }
+
+    if (key.return && status === "ready") {
+      handleConnect();
+      return;
+    }
+
+    if (key.return && status === "error") {
+      setStatus("ready");
+      setMessage("");
+      return;
+    }
+  });
+
+  if (status === "connected" && profile) {
+    const p = profile.profile || {};
+    const skills = p.skills?.slice(0, 3) || [];
+    const capturedDate = profile.capturedAt ? new Date(profile.capturedAt).toLocaleDateString() : "";
+
+    return e(
+      Box,
+      { flexDirection: "column", paddingX: 1 },
+      e(Text, { color: "#22c55e", bold: true }, "LinkedIn Connected"),
+      e(Box, { marginTop: 1 }),
+      // Name
+      p.name && e(Text, { color: "#e2e8f0", bold: true }, p.name),
+      // Headline/Title
+      p.headline && e(Text, { color: "#94a3b8" }, p.headline),
+      // Current role & company
+      (p.currentRole || p.currentCompany) && e(Text, { color: "#64748b" },
+        [p.currentRole, p.currentCompany].filter(Boolean).join(" at ")
+      ),
+      // Location
+      p.location && e(Text, { color: "#64748b", dimColor: true }, p.location),
+      // Skills
+      skills.length > 0 && e(Box, { marginTop: 1 },
+        e(Text, { color: "#64748b" }, "Skills: "),
+        e(Text, { color: "#94a3b8" }, skills.join(", "))
+      ),
+      // Last updated & cron info
+      e(Box, { marginTop: 1 }),
+      capturedDate && e(Text, { color: "#64748b", dimColor: true }, `Last updated: ${capturedDate}`),
+      e(Text, { color: "#3b82f6", dimColor: true }, "Auto-updates weekly (Mondays 9 AM)"),
+      // Actions
+      e(Box, { marginTop: 1 }),
+      e(Text, { color: "#22c55e" }, "Enter Continue  "),
+      e(Text, { color: "#f59e0b" }, "U Update Now")
+    );
+  }
+
+  if (status === "connecting") {
+    return e(
+      Box,
+      { flexDirection: "column", paddingX: 1 },
+      e(Text, { color: "#e2e8f0", bold: true }, "LinkedIn Profile (Optional)"),
+      e(Text, { color: "#f59e0b" }, message || "Opening browser..."),
+      e(Box, { marginTop: 1 }),
+      e(Text, { color: "#94a3b8" }, "1. Browser will open to LinkedIn"),
+      e(Text, { color: "#94a3b8" }, "2. Log in if prompted"),
+      e(Text, { color: "#94a3b8" }, "3. Your profile URL will be captured automatically"),
+      e(Box, { marginTop: 1 }),
+      e(Text, { color: "#64748b", dimColor: true }, "Please wait...")
+    );
+  }
+
+  if (status === "error") {
+    return e(
+      Box,
+      { flexDirection: "column", paddingX: 1 },
+      e(Text, { color: "#e2e8f0", bold: true }, "LinkedIn Profile (Optional)"),
+      e(Text, { color: "#ef4444" }, message),
+      e(Box, { marginTop: 1 }),
+      e(Text, { color: "#64748b" }, "Press Enter to try again"),
+      e(Text, { color: "#64748b", dimColor: true }, "Press S to skip")
+    );
+  }
+
+  return e(
+    Box,
+    { flexDirection: "column", paddingX: 1 },
+    e(Text, { color: "#e2e8f0", bold: true }, "LinkedIn Profile (Optional)"),
+    e(Text, { color: "#94a3b8" },
+      "Connect your LinkedIn to help the AI understand your professional background."
+    ),
+    e(Box, { marginTop: 1 }),
+    e(Text, { color: "#94a3b8" }, "A browser will open and navigate to your LinkedIn profile."),
+    e(Text, { color: "#94a3b8" }, "Log in if needed - your profile will be captured automatically."),
+    e(Box, { marginTop: 1 }),
+    e(Text, { color: "#3b82f6", dimColor: true }, "Auto-updates weekly (Mondays 9 AM)"),
+    e(Box, { marginTop: 1 }),
+    e(Text, { color: "#22c55e" }, "Press Enter to connect"),
+    e(Text, { color: "#64748b", dimColor: true }, "Press S to skip")
   );
 };
 
@@ -2282,60 +2707,106 @@ const OptionalSetupStep = ({ step, onComplete, onSkip }) => {
 export const OnboardingPanel = ({ onComplete, userDisplay = "" }) => {
   const { exit } = useApp();
 
-  // Initialize step statuses based on existing configuration
+  // Loading state - shown immediately while checking configurations
+  const [loading, setLoading] = useState(true);
+
+  // Initialize step statuses with just pending - heavy checks done in useEffect
   const [stepStatuses, setStepStatuses] = useState(() => {
     const statuses = {};
     for (const step of ONBOARDING_STEPS) {
       statuses[step.id] = "pending";
     }
-
-    // Check prerequisites: Node.js is guaranteed (we're running), check Claude Code CLI
-    const nodeVersion = process.version;
-    const claudeCliCheck = isClaudeCodeInstalled();
-    if (claudeCliCheck.installed) {
-      statuses.prerequisites = "complete";
-    }
-
-    // Check existing configurations
-    if (isSignedIn()) {
-      statuses.google = "complete";
-    }
-
-    // Check model connections (Claude Code CLI, OAuth, or API keys)
-    const cliStatus = isClaudeCodeInstalled();
-    const cliAuth = cliStatus.installed ? isClaudeCodeLoggedIn() : { loggedIn: false };
-    const hasClaudeCode = cliAuth.loggedIn;
-    const hasClaudeOAuth = hasClaudeCredentials();
-    const hasCodex = hasCodexCredentials();
-    const hasApiKey = isProviderConfigured("anthropic") || isProviderConfigured("openai") || isProviderConfigured("google");
-
-    if (hasClaudeCode || hasClaudeOAuth || hasCodex || hasApiKey) {
-      statuses.model = "complete";
-    }
-    const alpacaConfig = loadAlpacaConfig();
-    if (alpacaConfig.apiKey && !alpacaConfig.apiKey.includes("PASTE")) {
-      statuses.alpaca = "complete";
-    }
-    if (isOuraConfigured()) {
-      statuses.oura = "complete";
-    }
-    if (isEmailConfigured()) {
-      statuses.email = "complete";
-    }
-    const firebaseUser = getCurrentFirebaseUser();
-    if (firebaseUser) {
-      const phoneRecord = getPhoneRecord(firebaseUser.id);
-      if (phoneRecord?.verification?.verifiedAt) {
-        statuses.phone = "complete";
-      }
-    }
-    // Check Plaid configuration
-    if (isPlaidConfigured()) {
-      statuses.plaid = "complete";
-    }
-
     return statuses;
   });
+
+  // Run heavy configuration checks after first render
+  useEffect(() => {
+    const checkConfigurations = async () => {
+      const statuses = {};
+      for (const step of ONBOARDING_STEPS) {
+        statuses[step.id] = "pending";
+      }
+
+      // Check prerequisites: Node.js is guaranteed (we're running), check Claude Code CLI
+      // Use async version to avoid blocking
+      const claudeCliCheck = await isClaudeCodeInstalledAsync();
+      if (claudeCliCheck.installed) {
+        statuses.prerequisites = "complete";
+      }
+
+      // Check existing configurations
+      if (isSignedIn()) {
+        statuses.google = "complete";
+      }
+
+      // Check model connections (Claude Code CLI, OAuth, or API keys)
+      const cliAuth = claudeCliCheck.installed ? isClaudeCodeLoggedIn() : { loggedIn: false };
+      const hasClaudeCode = cliAuth.loggedIn;
+      const hasClaudeOAuth = hasClaudeCredentials();
+      const hasCodex = hasCodexCredentials();
+      const hasApiKey = isProviderConfigured("anthropic") || isProviderConfigured("openai") || isProviderConfigured("google");
+
+      if (hasClaudeCode || hasClaudeOAuth || hasCodex || hasApiKey) {
+        statuses.model = "complete";
+      }
+      const alpacaConfig = loadAlpacaConfig();
+      if (alpacaConfig.apiKey && !alpacaConfig.apiKey.includes("PASTE")) {
+        statuses.alpaca = "complete";
+      }
+      if (isOuraConfigured()) {
+        statuses.oura = "complete";
+      }
+      if (isEmailConfigured()) {
+        statuses.email = "complete";
+      }
+      const firebaseUser = getCurrentFirebaseUser();
+      if (firebaseUser) {
+        const phoneRecord = getPhoneRecord(firebaseUser.id);
+        if (phoneRecord?.verification?.verifiedAt) {
+          statuses.phone = "complete";
+        }
+      }
+      // Check Plaid configuration
+      if (isPlaidConfigured()) {
+        statuses.plaid = "complete";
+      }
+
+      // Check Core Goals (required - must have 40+ words)
+      const settings = loadUserSettings();
+      if (settings.coreGoals) {
+        const wordCount = settings.coreGoals.trim().split(/\s+/).filter(w => w.length > 0).length;
+        if (wordCount >= 40) {
+          statuses.coreGoals = "complete";
+        }
+      }
+
+      // Check LinkedIn (optional) - check both settings and linkedin-profile.json
+      if (settings.linkedInUrl) {
+        statuses.linkedin = "complete";
+      } else {
+        // Also check if linkedin-profile.json exists with valid data
+        try {
+          const fs = await import("fs");
+          const path = await import("path");
+          const profilePath = path.default.join(process.cwd(), "data", "linkedin-profile.json");
+          if (fs.default.existsSync(profilePath)) {
+            const profileData = JSON.parse(fs.default.readFileSync(profilePath, "utf-8"));
+            if (profileData.success && profileData.profileUrl) {
+              statuses.linkedin = "complete";
+              // Also save to settings for consistency
+              updateSetting("linkedInUrl", profileData.profileUrl);
+              updateSetting("linkedInName", profileData.profile?.name || "");
+            }
+          }
+        } catch {}
+      }
+
+      setStepStatuses(statuses);
+      setLoading(false);
+    };
+
+    checkConfigurations();
+  }, []);
 
   // Find the first incomplete step to use as default
   const getFirstIncompleteIndex = useCallback((statuses) => {
@@ -2358,10 +2829,19 @@ export const OnboardingPanel = ({ onComplete, userDisplay = "" }) => {
     return 0; // Default to first if all complete
   }, []);
 
-  // Current selected step index - default to first incomplete
-  const [currentStepIndex, setCurrentStepIndex] = useState(() => getFirstIncompleteIndex(stepStatuses));
+  // Current selected step index - default to 0, updated when loading completes
+  const [currentStepIndex, setCurrentStepIndex] = useState(0);
   const [errorMessage, setErrorMessage] = useState(null);
   const [wizardActive, setWizardActive] = useState(false);
+  const [initialLoadDone, setInitialLoadDone] = useState(false);
+
+  // Set initial step ONLY ONCE when loading completes (not on every status change)
+  useEffect(() => {
+    if (!loading && !initialLoadDone) {
+      setCurrentStepIndex(getFirstIncompleteIndex(stepStatuses));
+      setInitialLoadDone(true);
+    }
+  }, [loading, initialLoadDone, stepStatuses, getFirstIncompleteIndex]);
 
   // Handle launching the Full Setup wizard in browser
   const handleLaunchWizard = useCallback(async () => {
@@ -2405,24 +2885,12 @@ export const OnboardingPanel = ({ onComplete, userDisplay = "" }) => {
     }
   }, [wizardActive]);
 
-  // Track if user is manually navigating (to prevent auto-advance)
-  const [userNavigating, setUserNavigating] = useState(false);
-
   const currentStep = ONBOARDING_STEPS[currentStepIndex];
 
   const handleStepComplete = useCallback((stepId, data) => {
     setStepStatuses((prev) => {
       const newStatuses = { ...prev, [stepId]: "complete" };
-
-      // Auto-advance to next incomplete step after a short delay
-      // (unless user is manually navigating)
-      if (!userNavigating) {
-        setTimeout(() => {
-          const nextIndex = getFirstIncompleteIndex(newStatuses);
-          setCurrentStepIndex(nextIndex);
-        }, 500);
-      }
-
+      // No auto-advance - let user navigate freely
       return newStatuses;
     });
     setErrorMessage(null);
@@ -2442,7 +2910,7 @@ export const OnboardingPanel = ({ onComplete, userDisplay = "" }) => {
       updateSetting("phoneNumber", data.phone);
       updateSetting("connections", { ...loadUserSettings().connections, phone: true });
     }
-  }, [userNavigating, getFirstIncompleteIndex]);
+  }, []);
 
   const handleStepLogout = useCallback((stepId) => {
     setStepStatuses((prev) => ({ ...prev, [stepId]: "pending" }));
@@ -2470,18 +2938,30 @@ export const OnboardingPanel = ({ onComplete, userDisplay = "" }) => {
     onComplete();
   }, [onComplete]);
 
-  // Check if required steps are complete (login and model)
-  const requiredStepsComplete = stepStatuses.google === "complete" && stepStatuses.model === "complete";
+  // Check if required steps are complete
+  const requiredStepsComplete =
+    stepStatuses.prerequisites === "complete" &&
+    stepStatuses.google === "complete" &&
+    stepStatuses.phone === "complete" &&
+    stepStatuses.model === "complete" &&
+    stepStatuses.coreGoals === "complete";
+
+  // Auto-save onboardingComplete when all required steps are done
+  useEffect(() => {
+    if (requiredStepsComplete && !loading) {
+      updateSetting("onboardingComplete", true);
+    }
+  }, [requiredStepsComplete, loading]);
 
   // Handle keyboard shortcuts including arrow navigation
   useInput((input, key) => {
     // Steps that handle their own up/down navigation (for selecting providers)
-    const stepsWithInternalNavigation = ["model"];
-    const currentStepNeedsArrows = stepsWithInternalNavigation.includes(currentStep?.id);
+    // No steps block main navigation - user can always navigate between steps
+    // Individual steps handle their own internal navigation when focused
+    const currentStepNeedsArrows = false;
 
     // Arrow Up - navigate to previous step (unless current step handles arrows)
     if (key.upArrow && !currentStepNeedsArrows) {
-      setUserNavigating(true);
       setCurrentStepIndex(prev => {
         let next = prev > 0 ? prev - 1 : ONBOARDING_STEPS.length - 1;
         // Skip disabled steps
@@ -2495,7 +2975,6 @@ export const OnboardingPanel = ({ onComplete, userDisplay = "" }) => {
 
     // Arrow Down - navigate to next step (unless current step handles arrows)
     if (key.downArrow && !currentStepNeedsArrows) {
-      setUserNavigating(true);
       setCurrentStepIndex(prev => {
         let next = prev < ONBOARDING_STEPS.length - 1 ? prev + 1 : 0;
         // Skip disabled steps
@@ -2556,6 +3035,17 @@ export const OnboardingPanel = ({ onComplete, userDisplay = "" }) => {
           onComplete: (data) => handleStepComplete("model", data),
           onError: (err) => handleStepError("model", err)
         });
+      case "coreGoals":
+        return e(CoreGoalsStep, {
+          onComplete: (data) => handleStepComplete("coreGoals", data),
+          onError: (err) => handleStepError("coreGoals", err)
+        });
+      case "linkedin":
+        return e(LinkedInStep, {
+          onComplete: (data) => handleStepComplete("linkedin", data),
+          onSkip: () => handleStepSkip("linkedin"),
+          onError: (err) => handleStepError("linkedin", err)
+        });
       case "alpaca":
         return e(AlpacaSetupStep, {
           onComplete: (data) => handleStepComplete("alpaca", data),
@@ -2601,6 +3091,27 @@ export const OnboardingPanel = ({ onComplete, userDisplay = "" }) => {
   const googleUser = getCurrentFirebaseUser();
   const showLogoutHint = currentStep?.id === "google" && !!googleUser;
 
+  // Show loading screen while checking configurations
+  if (loading) {
+    return e(
+      Box,
+      {
+        flexDirection: "column",
+        padding: 2,
+        borderStyle: "round",
+        borderColor: BRAND_COLOR,
+        alignItems: "center",
+        justifyContent: "center",
+        height: 20
+      },
+      e(Text, { color: BRAND_COLOR, bold: true }, "BACKBONE"),
+      e(Text, { color: "#64748b" }, "Setup Wizard"),
+      e(Box, { marginTop: 2 }),
+      e(Text, { color: "#f59e0b" }, "Loading configuration..."),
+      e(Text, { color: "#94a3b8", dimColor: true }, "Checking integrations")
+    );
+  }
+
   return e(
     Box,
     {
@@ -2623,7 +3134,7 @@ export const OnboardingPanel = ({ onComplete, userDisplay = "" }) => {
     ),
 
     // Divider
-    e(Text, { color: "#334155" }, "\u2500".repeat(56)),
+    e(Text, { color: "#334155" }, "\u2500".repeat(110)),
 
     // Main content area
     e(
@@ -2632,7 +3143,7 @@ export const OnboardingPanel = ({ onComplete, userDisplay = "" }) => {
       // Step checklist (left side)
       e(
         Box,
-        { flexDirection: "column", width: 30, marginRight: 2 },
+        { flexDirection: "column", width: 34, marginRight: 3 },
         // Full Setup button - opens wizard in browser (HIDDEN FOR NOW)
         // e(
         //   Box,
@@ -2665,7 +3176,7 @@ export const OnboardingPanel = ({ onComplete, userDisplay = "" }) => {
         Box,
         {
           flexDirection: "column",
-          width: 40,
+          width: 72,
           borderStyle: "single",
           borderColor: "#334155",
           paddingX: 1
@@ -2682,7 +3193,7 @@ export const OnboardingPanel = ({ onComplete, userDisplay = "" }) => {
     ),
 
     // Divider
-    e(Text, { color: "#334155", marginTop: 1 }, "\u2500".repeat(56)),
+    e(Text, { color: "#334155", marginTop: 1 }, "\u2500".repeat(110)),
 
     // Footer with controls
     e(

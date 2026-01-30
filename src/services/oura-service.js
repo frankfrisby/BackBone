@@ -289,9 +289,40 @@ export const fetchTodaySummary = async () => {
 };
 
 /**
+ * Generate a hash of health data for change detection
+ */
+const hashHealthData = (data) => {
+  // Create a simple hash from the key metrics
+  const keyMetrics = {
+    sleepScores: (data.sleep || []).map(s => s.score).join(","),
+    readinessScores: (data.readiness || []).map(r => r.score).join(","),
+    activityScores: (data.activity || []).map(a => a.score).join(","),
+    steps: (data.activity || []).map(a => a.steps).join(",")
+  };
+  return JSON.stringify(keyMetrics);
+};
+
+/**
+ * Check if health data has changed compared to stored data
+ */
+export const hasHealthDataChanged = (newData) => {
+  try {
+    const existingData = loadOuraData();
+    if (!existingData?.latest) return true; // No existing data, so it's "changed"
+
+    const oldHash = hashHealthData(existingData.latest);
+    const newHash = hashHealthData(newData);
+
+    return oldHash !== newHash;
+  } catch (e) {
+    return true; // On error, assume changed
+  }
+};
+
+/**
  * Save Oura data to file
  */
-export const saveOuraData = (data) => {
+export const saveOuraData = (data, forceUpdate = false) => {
   // Load existing data
   let existingData = { history: [] };
   try {
@@ -300,9 +331,21 @@ export const saveOuraData = (data) => {
     }
   } catch (e) {}
 
+  // Check if data actually changed (unless forced)
+  if (!forceUpdate && existingData.latest) {
+    const dataChanged = hasHealthDataChanged(data);
+    if (!dataChanged) {
+      // Update only the lastChecked timestamp, not the data
+      existingData.lastChecked = new Date().toISOString();
+      fs.writeFileSync(OURA_DATA_FILE, JSON.stringify(existingData, null, 2));
+      return { saved: false, reason: "no_change" };
+    }
+  }
+
   // Add new data with timestamp
   existingData.latest = data;
   existingData.lastUpdated = new Date().toISOString();
+  existingData.lastChecked = new Date().toISOString();
 
   // Keep history (last 30 entries)
   if (!existingData.history) existingData.history = [];
@@ -315,7 +358,7 @@ export const saveOuraData = (data) => {
   }
 
   fs.writeFileSync(OURA_DATA_FILE, JSON.stringify(existingData, null, 2));
-  return true;
+  return { saved: true, reason: "data_changed" };
 };
 
 /**
@@ -332,34 +375,27 @@ export const loadOuraData = () => {
 
 /**
  * Sync Oura data (fetch and save)
+ * Only saves if data has changed (prevents duplicate entries)
  */
-export const syncOuraData = async () => {
+export const syncOuraData = async (forceUpdate = false) => {
   try {
+    if (!isOuraConfigured()) {
+      return { success: false, error: "Oura not configured" };
+    }
     const data = await fetchAllOuraData(7);
-    saveOuraData(data);
-    return { success: true, data };
+    const saveResult = saveOuraData(data, forceUpdate);
+    return { success: true, data, ...saveResult };
   } catch (err) {
     return { success: false, error: err.message };
   }
 };
 
 /**
- * Get sync schedule times (8am and 8pm)
+ * Get next sync time (every 10 minutes)
  */
 export const getNextSyncTime = () => {
   const now = new Date();
-  const hour = now.getHours();
-
-  let nextSync = new Date(now);
-  if (hour < 8) {
-    nextSync.setHours(8, 0, 0, 0);
-  } else if (hour < 20) {
-    nextSync.setHours(20, 0, 0, 0);
-  } else {
-    nextSync.setDate(nextSync.getDate() + 1);
-    nextSync.setHours(8, 0, 0, 0);
-  }
-
+  const nextSync = new Date(now.getTime() + 10 * 60 * 1000); // 10 minutes from now
   return nextSync;
 };
 
@@ -421,5 +457,6 @@ export default {
   syncOuraData,
   getNextSyncTime,
   formatDuration,
-  getHealthSummary
+  getHealthSummary,
+  hasHealthDataChanged
 };

@@ -592,6 +592,14 @@ export const executeBuy = async (symbol, price, reason) => {
     // Show trade notification in terminal title (30 seconds)
     showNotificationTitle("trade", `BUY ${symbol} x${quantity} @ $${price.toFixed(2)}`, 30000);
 
+    // Immediately apply trailing stop to the new position
+    try {
+      const tsm = await getTrailingStopManager();
+      await tsm.applyStopToPosition(symbol, quantity, price, price);
+    } catch (err) {
+      console.error(`Failed to apply trailing stop for ${symbol}:`, err.message);
+    }
+
     return { success: true, order, trade };
   } catch (error) {
     return { success: false, error: error.message };
@@ -865,38 +873,8 @@ export const monitorAndTrade = async (tickers, positions = [], marketContext = {
   // Track executed buys for position limit check
   let buyCount = results.executed.filter(t => t.side === "buy").length;
 
-  // STEP 0: Check trailing stop triggers first (highest priority)
-  try {
-    const tsm = await getTrailingStopManager();
-    const triggeredStops = tsm.checkStopTriggers(positions);
-
-    for (const trigger of triggeredStops) {
-      results.sellSignals.push({
-        action: "TRAILING_STOP",
-        symbol: trigger.symbol,
-        price: trigger.currentPrice,
-        stopPrice: trigger.stopPrice,
-        signals: [`TRAILING STOP: ${trigger.reason}`],
-        isTrailingStop: true
-      });
-
-      const sellResult = await executeSell(
-        trigger.symbol,
-        trigger.currentPrice,
-        trigger.qty,
-        `TRAILING STOP: Hit $${trigger.stopPrice.toFixed(2)}, protected ${trigger.protectedGain}% gain`
-      );
-
-      if (sellResult.success) {
-        results.executed.push(sellResult.trade);
-      } else {
-        results.skipped.push({ symbol: trigger.symbol, reason: sellResult.error });
-      }
-    }
-  } catch (error) {
-    // Continue even if trailing stop check fails
-    console.error("Trailing stop check error:", error.message);
-  }
+  // STEP 0: Trailing stops are handled server-side by Alpaca trailing_stop orders.
+  // No client-side polling needed — Alpaca triggers the sell automatically.
 
   // STEP 0.5: Check for momentum drift (avg of timeframes < -0.75%)
   try {

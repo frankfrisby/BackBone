@@ -166,6 +166,7 @@ export const clearPhoneInput = async (config) => {
     });
   } catch (error) {
     console.error("Failed to clear phone input:", error.message);
+    return { success: false, error: error.message };
   }
 };
 

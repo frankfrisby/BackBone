@@ -53,28 +53,62 @@ export const DEFAULT_MCP_SERVERS = {
       { name: "get_bars", description: "Get historical price bars" }
     ]
   },
-  calendar: {
-    name: "Calendar",
-    description: "Google Calendar integration",
-    enabled: false,
+  google: {
+    name: "Google Mail & Calendar",
+    description: "Unified email and calendar (Gmail/Outlook + Google Calendar/Outlook Calendar)",
+    enabled: true,
     tools: [
-      { name: "list_events", description: "List upcoming events" },
+      { name: "get_recent_emails", description: "Get recent inbox emails" },
+      { name: "get_unread_count", description: "Count unread emails" },
+      { name: "search_emails", description: "Search emails by query" },
+      { name: "get_email_body", description: "Read full email content by ID" },
+      { name: "draft_email", description: "Create email draft (requires approval)" },
+      { name: "analyze_emails_by_topic", description: "Correlate emails with user interests" },
+      { name: "get_today_events", description: "Get today's calendar events" },
+      { name: "get_upcoming_events", description: "Get upcoming events for N days" },
       { name: "create_event", description: "Create a new calendar event" },
-      { name: "update_event", description: "Update an existing event" },
-      { name: "delete_event", description: "Delete a calendar event" },
-      { name: "get_free_busy", description: "Check availability" }
+      { name: "update_event", description: "Update an existing calendar event" },
+      { name: "delete_event", description: "Delete a calendar event" }
     ]
   },
-  email: {
-    name: "Email",
-    description: "Gmail integration",
-    enabled: false,
+  contacts: {
+    name: "Contacts Directory",
+    description: "Manage contacts across categories (LinkedIn, family, friends, coworkers, startup)",
+    enabled: true,
     tools: [
-      { name: "list_emails", description: "List recent emails" },
-      { name: "read_email", description: "Read email content" },
-      { name: "send_email", description: "Send a new email" },
-      { name: "reply_email", description: "Reply to an email" },
-      { name: "search_emails", description: "Search emails" }
+      { name: "add_contact", description: "Add a new contact" },
+      { name: "get_contacts", description: "List contacts by category" },
+      { name: "search_contacts", description: "Search contacts by name, company, or notes" },
+      { name: "get_contact_profile", description: "Get full profile for a contact" },
+      { name: "update_contact", description: "Update contact details" },
+      { name: "categorize_contact", description: "Move contact to a different category" }
+    ]
+  },
+  news: {
+    name: "News & Research",
+    description: "News fetching, market summaries, and AI-powered research",
+    enabled: true,
+    tools: [
+      { name: "fetch_latest_news", description: "Fetch and analyze latest news" },
+      { name: "get_market_summary", description: "Get latest market summary" },
+      { name: "research_topic", description: "Deep research on a topic" },
+      { name: "get_news_for_beliefs", description: "Get news relevant to core beliefs" },
+      { name: "correlate_news_with_portfolio", description: "Analyze news impact on portfolio" }
+    ]
+  },
+  life: {
+    name: "Life Management",
+    description: "Goals, beliefs, backlog, life scores, and thinking engine",
+    enabled: true,
+    tools: [
+      { name: "get_goals", description: "Get goals by status or category" },
+      { name: "get_beliefs", description: "Get core beliefs" },
+      { name: "get_backlog", description: "Get backlog items with filtering" },
+      { name: "get_life_scores", description: "Get life dimension scores" },
+      { name: "add_goal", description: "Create a new goal" },
+      { name: "add_belief", description: "Add a new core belief" },
+      { name: "get_thesis", description: "Get current thesis/focus" },
+      { name: "trigger_thinking_cycle", description: "Force a thinking engine cycle" }
     ]
   },
   github: {

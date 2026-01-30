@@ -112,7 +112,7 @@ export const fetchGmailMessages = async (config, maxResults = 10) => {
     return data.messages || [];
   } catch (error) {
     console.error("Gmail fetch failed:", error.message);
-    return null;
+    return { error: error.message, messages: [] };
   }
 };
 
@@ -156,7 +156,7 @@ export const fetchOutlookMessages = async (config, maxResults = 10) => {
     return data.value || [];
   } catch (error) {
     console.error("Outlook fetch failed:", error.message);
-    return null;
+    return { error: error.message, messages: [] };
   }
 };
 

@@ -88,7 +88,7 @@ class ProactiveEngine extends EventEmitter {
   /**
    * Initialize with dependencies
    */
-  initialize() {
+  async initialize() {
     this.conversationTracker = getConversationTracker();
     this.disasterMonitor = getDisasterMonitor();
     this.polymarketService = getPolymarketService();
@@ -97,7 +97,7 @@ class ProactiveEngine extends EventEmitter {
     this.syncWithConversationTracker();
 
     // Schedule initial checks
-    this.scheduleChecks();
+    await this.scheduleChecks();
   }
 
   /**
@@ -368,9 +368,9 @@ class ProactiveEngine extends EventEmitter {
   /**
    * Schedule periodic checks
    */
-  scheduleChecks() {
+  async scheduleChecks() {
     // Check Polymarket every 2 days
-    this.scheduleCheckin("polymarket", 2 * 24 * 60 * 60 * 1000, async () => {
+    await this.scheduleCheckin("polymarket", 2 * 24 * 60 * 60 * 1000, async () => {
       if (this.polymarketService) {
         await this.polymarketService.refresh();
         const highImpact = this.polymarketService.getHighImpact(60);
@@ -385,7 +385,7 @@ class ProactiveEngine extends EventEmitter {
     });
 
     // Check disaster risks daily
-    this.scheduleCheckin("disaster", 24 * 60 * 60 * 1000, async () => {
+    await this.scheduleCheckin("disaster", 24 * 60 * 60 * 1000, async () => {
       if (this.disasterMonitor) {
         const display = this.disasterMonitor.getDisplayData();
         if (display.activeAlerts.length > 0) {
@@ -402,7 +402,7 @@ class ProactiveEngine extends EventEmitter {
     const categories = ["financial", "health", "career", "family", "goals"];
     let categoryIndex = 0;
 
-    this.scheduleCheckin("life_areas", 3 * 24 * 60 * 60 * 1000, () => {
+    await this.scheduleCheckin("life_areas", 3 * 24 * 60 * 60 * 1000, () => {
       const category = categories[categoryIndex];
       categoryIndex = (categoryIndex + 1) % categories.length;
 
@@ -419,15 +419,15 @@ class ProactiveEngine extends EventEmitter {
   /**
    * Schedule a periodic check-in
    */
-  scheduleCheckin(name, intervalMs, callback) {
+  async scheduleCheckin(name, intervalMs, callback) {
     const lastCheckin = this.state.lastCheckins[name];
     const now = Date.now();
 
     // Check if it's time to run
     if (!lastCheckin || now - new Date(lastCheckin).getTime() >= intervalMs) {
-      // Run the callback
+      // Run the callback (properly await async callbacks)
       try {
-        callback();
+        await callback();
       } catch (err) {
         console.error(`Checkin ${name} failed:`, err.message);
       }
@@ -447,14 +447,14 @@ class ProactiveEngine extends EventEmitter {
   /**
    * Run scheduled check-ins
    */
-  runScheduledCheckins() {
+  async runScheduledCheckins() {
     const now = Date.now();
 
     for (const checkin of this.scheduledCheckins) {
       const lastRun = this.state.lastCheckins[checkin.name];
       if (!lastRun || now - new Date(lastRun).getTime() >= checkin.intervalMs) {
         try {
-          checkin.callback();
+          await checkin.callback();
         } catch (err) {
           console.error(`Checkin ${checkin.name} failed:`, err.message);
         }
@@ -507,7 +507,10 @@ let instance = null;
 export const getProactiveEngine = () => {
   if (!instance) {
     instance = new ProactiveEngine();
-    instance.initialize();
+    // Initialize asynchronously - errors are caught within scheduleCheckin
+    instance.initialize().catch(err => {
+      console.error("ProactiveEngine initialization error:", err.message);
+    });
   }
   return instance;
 };

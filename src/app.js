@@ -137,7 +137,7 @@ import { loadUserSettings, saveUserSettings, updateSettings as updateUserSetting
 import { hasValidCredentials as hasCodexCredentials } from "./services/codex-oauth.js";
 import { loadFineTuningConfig, saveFineTuningConfig, runFineTuningPipeline, queryFineTunedModel } from "./services/fine-tuning.js";
 import { monitorAndTrade, loadConfig as loadTradingConfig, setTradingEnabled } from "./services/auto-trader.js";
-import { updateAllTrailingStops, checkStopTriggers, shouldUpdateStops } from "./services/trailing-stop-manager.js";
+import { shouldUpdateStops, applyStopsToAllPositions } from "./services/trailing-stop-manager.js";
 import { recordMomentumSnapshot } from "./services/momentum-drift.js";
 import { isMarketOpen } from "./services/trading-status.js";
 import { analyzeAllPositions, getPositionContext, explainWhyHeld } from "./services/position-analyzer.js";
@@ -191,6 +191,7 @@ import { addLearningItem, startLearning, updateProgress, completeLearning, addNo
 import { getCurrentFirebaseUser, signOutFirebase } from "./services/firebase-auth.js";
 import { initializeRemoteConfig } from "./services/firebase-config.js";
 import { isOuraConfigured, syncOuraData, getNextSyncTime, getHealthSummary, loadOuraData } from "./services/oura-service.js";
+import { fetchAndAnalyzeNews, shouldFetchNews } from "./services/news-service.js";
 import { isEmailConfigured, syncEmailCalendar, getEmailSummary, getUpcomingEvents, startTokenAutoRefresh, startOAuthFlow as startEmailOAuth } from "./services/email-calendar-service.js";
 import { getPersonalCapitalService } from "./services/personal-capital.js";
 import { getPlaidService, isPlaidConfigured, syncPlaidData } from "./services/plaid-service.js";
@@ -479,6 +480,18 @@ const App = ({ updateConsoleTitle }) => {
       cronManager.on("run:runMarketClose", () => {
         triggerFullScan().catch(() => {});
       });
+      cronManager.on("run:runNewsFetch", async () => {
+        // News fetch - generates backlog items for thinking engine
+        if (shouldFetchNews()) {
+          console.log("[Cron] Fetching and analyzing news...");
+          const result = await fetchAndAnalyzeNews();
+          if (result.success) {
+            console.log(`[Cron] News: ${result.itemsAdded} backlog items added. ${result.insight || ""}`);
+          }
+        } else {
+          console.log("[Cron] News fetch skipped (too recent)");
+        }
+      });
 
       // Run API health check to verify tokens are available
       // This clears quota exceeded state if tokens were added
@@ -577,7 +590,8 @@ const App = ({ updateConsoleTitle }) => {
     scheduleResize();
   }, [showOnboarding, isInitializing, scheduleResize]);
 
-  // Oura Ring data sync scheduler (8am and 8pm daily)
+  // Oura Ring data sync scheduler (every 10 minutes when connected)
+  // Only saves data if health metrics have changed (prevents duplicate entries)
   useEffect(() => {
     if (!isOuraConfigured()) return;
 
@@ -946,6 +960,7 @@ const App = ({ updateConsoleTitle }) => {
   // Trading history (8-week performance)
   const [tradingHistory, setTradingHistory] = useState(null);
   const [portfolioLastUpdated, setPortfolioLastUpdated] = useState(null);
+  const [trailingStops, setTrailingStops] = useState({});
   const [nextTradeTimeDisplay, setNextTradeTimeDisplay] = useState(null);
 
   // LinkedIn data viewer
@@ -1331,6 +1346,7 @@ const App = ({ updateConsoleTitle }) => {
       alpacaStatus,
       alpacaMode,
       personalCapitalData,
+      trailingStops,
     },
     [STATE_SLICES.TICKERS]: {
       tickers,
@@ -3627,11 +3643,49 @@ Execute this task and provide concrete results.`);
       }
 
       try {
-        const [account, positions] = await Promise.all([fetchAccount(config), fetchPositions(config)]);
+        const [account, positions, openOrders] = await Promise.all([
+          fetchAccount(config),
+          fetchPositions(config),
+          getOrders(config, "open").catch(() => []),
+        ]);
 
         if (cancelled || isTypingRef.current) {
           return;
         }
+
+        // Build trailing stop map from open orders
+        const stops = {};
+        for (const o of openOrders) {
+          if (o.type === "trailing_stop" && o.side === "sell") {
+            const sym = o.symbol;
+            const pos = positions.find(p => p.symbol === sym);
+            const entry = parseFloat(pos?.avg_entry_price || 0);
+            const current = parseFloat(pos?.current_price || 0);
+            const gainPct = entry > 0 ? ((current - entry) / entry) * 100 : 0;
+            stops[sym] = {
+              trailPercent: parseFloat(o.trail_percent),
+              gainPercent: +gainPct.toFixed(2),
+              orderId: o.id,
+            };
+          }
+        }
+        setTrailingStops((prev) => {
+          const prevKeys = Object.keys(prev).sort().join(",");
+          const nextKeys = Object.keys(stops).sort().join(",");
+          if (prevKeys === nextKeys) {
+            // Check if values changed
+            let same = true;
+            for (const k of Object.keys(stops)) {
+              if (prev[k]?.trailPercent !== stops[k].trailPercent ||
+                  prev[k]?.gainPercent !== stops[k].gainPercent) {
+                same = false;
+                break;
+              }
+            }
+            if (same) return prev;
+          }
+          return stops;
+        });
 
         // Successfully got data - update everything (with change detection)
         const newPortfolio = buildPortfolioFromAlpaca(account, positions);
@@ -3760,19 +3814,18 @@ Execute this task and provide concrete results.`);
           return;
         }
 
-        // Update trailing stops (at 9 AM and top of each hour)
+        // Re-evaluate trailing stops hourly — updates Alpaca trailing_stop orders
+        // if the gain threshold has changed (no-ops if stop already matches)
         if (shouldUpdateStops()) {
-          const stopUpdate = updateAllTrailingStops(portfolio.positions);
-          if (stopUpdate.results.updated.length > 0) {
-            setLastAction(`Trailing stops updated: ${stopUpdate.results.updated.map(s => `${s.symbol} @ $${s.newStop?.toFixed(2)}`).join(", ")}`);
+          try {
+            const stopResult = await applyStopsToAllPositions();
+            const changed = (stopResult.summary?.created || 0) + (stopResult.summary?.replaced || 0);
+            if (changed > 0) {
+              setLastAction(`Trailing stops updated: ${changed} order(s) changed`);
+            }
+          } catch (err) {
+            console.error("Trailing stop update error:", err.message);
           }
-        }
-
-        // Check if any trailing stops have been triggered
-        const triggeredStops = checkStopTriggers(portfolio.positions);
-        if (triggeredStops.length > 0) {
-          // Stops triggered - these will be handled by monitorAndTrade
-          setLastAction(`Stop triggered: ${triggeredStops.map(s => s.symbol).join(", ")}`);
         }
 
         // Record momentum snapshot for drift analysis
@@ -3789,6 +3842,19 @@ Execute this task and provide concrete results.`);
         console.error("Auto-trading error:", error.message);
       }
     };
+
+    // Apply trailing stops to any unprotected positions on startup
+    (async () => {
+      try {
+        const stopResult = await applyStopsToAllPositions();
+        const changed = (stopResult.summary?.created || 0) + (stopResult.summary?.replaced || 0);
+        if (changed > 0) {
+          setLastAction(`Startup: applied trailing stops to ${changed} position(s)`);
+        }
+      } catch (err) {
+        console.error("Startup trailing stop error:", err.message);
+      }
+    })();
 
     // Run immediately on mount (if conditions are met)
     runAutoTrading();
@@ -9155,12 +9221,14 @@ Folder: ${result.action.id}`,
         ),
 
         // HEALTH SUMMARY - Readiness, Sleep, Calories, HR with backgrounds and trend arrows
+        // When privateMode is ON, all health values are masked with "**"
         ouraHealth?.connected && e(
           Box,
           { flexDirection: "row", gap: 1, marginTop: 1, height: 1 },
           e(Text, { color: "#64748b" }, "HEALTH "),
           // Readiness with background (high = relaxed, low = stressed)
           (() => {
+            if (privateMode) return e(Text, { color: "#64748b" }, "Ready **");
             const score = ouraHealth.today?.readinessScore ?? ouraHealth.readiness?.score;
             const avgScore = ouraHealth.weekAverage?.readinessScore;
             if (score == null) return e(Text, { color: "#64748b" }, "Ready --");
@@ -9177,6 +9245,7 @@ Folder: ${result.action.id}`,
           e(Text, { color: "#334155" }, " | "),
           // Sleep with background
           (() => {
+            if (privateMode) return e(Text, { color: "#64748b" }, "Sleep **");
             const score = ouraHealth.today?.sleepScore ?? ouraHealth.sleep?.score;
             const avgScore = ouraHealth.weekAverage?.sleepScore;
             if (score == null) return e(Text, { color: "#64748b" }, "Sleep --");
@@ -9192,6 +9261,7 @@ Folder: ${result.action.id}`,
           })(),
           // Calories burned - goal is 500 active calories per day
           (() => {
+            if (privateMode) return [e(Text, { key: "calsep", color: "#334155" }, " | "), e(Text, { key: "cal", color: "#64748b" }, "** cal")];
             const cals = ouraHealth.today?.activeCalories ?? ouraHealth.activity?.activeCalories;
             if (!cals) return null;
             const calorieGoal = 500; // Daily active calorie goal
@@ -9203,6 +9273,7 @@ Folder: ${result.action.id}`,
           })(),
           // Resting heart rate
           (() => {
+            if (privateMode) return [e(Text, { key: "hrsep", color: "#334155" }, " | "), e(Text, { key: "hr", color: "#64748b" }, "** bpm")];
             const hr = ouraHealth.today?.restingHeartRate;
             if (!hr) return null;
             const isGood = hr <= 65;
@@ -9213,6 +9284,7 @@ Folder: ${result.action.id}`,
           })(),
           // Steps - goal is 10,000 steps per day
           (() => {
+            if (privateMode) return [e(Text, { key: "stepsep", color: "#334155" }, " | "), e(Text, { key: "steps", color: "#64748b" }, "**k steps")];
             const steps = ouraHealth.today?.steps ?? ouraHealth.activity?.steps;
             if (!steps) return null;
             const stepGoal = 10000; // Daily step goal

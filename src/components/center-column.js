@@ -45,7 +45,7 @@ const CenterColumnBase = ({
   const overlaysState = useAppStore(STATE_SLICES.OVERLAYS);
 
   // Extract needed data
-  const { messages, isProcessing, streamingText, actionStreamingText, actionStreamingTitle, currentModelInfo } = chatState;
+  const { messages, isProcessing, streamingText, actionStreamingText, actionStreamingTitle, cliStreaming, currentModelInfo } = chatState;
   const { showTestRunner, showSettings, showLinkedInViewer, linkedInViewerData, setupOverlay } = overlaysState;
 
   // Close handlers
@@ -69,8 +69,8 @@ const CenterColumnBase = ({
     Box,
     { flexDirection: "column", width: "100%", overflow: "hidden" },
 
-    // Engine Status - self-contained panel (no props needed)
-    e(AgentActivityPanel, null),
+    // Engine Status - shows Claude Code CLI streaming output
+    e(AgentActivityPanel, { actionStreamingText, cliStreaming }),
 
     // Conversation Panel
     e(ConversationPanel, {

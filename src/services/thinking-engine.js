@@ -3,6 +3,7 @@ import path from "path";
 import { EventEmitter } from "events";
 import { sendMessage } from "./claude.js";
 import { getActivityTracker } from "./activity-tracker.js";
+import { developPlan, initPlanFields, getUnplannedGoals } from "./goal-planner.js";
 
 /**
  * Thinking Engine - The brain that actually thinks and acts
@@ -51,6 +52,8 @@ const GOALS_PATH = path.join(DATA_DIR, "goals.json");
 const BACKLOG_PATH = path.join(DATA_DIR, "backlog.json");
 const THINKING_LOG_PATH = path.join(DATA_DIR, "thinking-log.json");
 const ROLE_MODELS_PATH = path.join(DATA_DIR, "person-match-cache.json");
+const PROFILE_SECTIONS_PATH = path.join(DATA_DIR, "profile-sections.json");
+const LINKEDIN_PROFILE_PATH = path.join(DATA_DIR, "linkedin-profile.json");
 
 const CYCLE_INTERVAL = 15 * 60 * 1000; // 15 minutes
 
@@ -87,6 +90,68 @@ function writeFile(filePath, content) {
 
 function writeJson(filePath, data) {
   writeFile(filePath, JSON.stringify(data, null, 2));
+}
+
+function getUserSkillSignals() {
+  const signals = {
+    isExperiencedDev: false,
+    skillKeywords: new Set()
+  };
+
+  const profile = readJson(PROFILE_SECTIONS_PATH);
+  const linkedIn = readJson(LINKEDIN_PROFILE_PATH);
+
+  const headline = profile?.general?.headline || linkedIn?.profile?.headline || linkedIn?.gpt4oAnalysis?.headline || "";
+  const currentRole = profile?.work?.currentRole || linkedIn?.profile?.currentRole || linkedIn?.gpt4oAnalysis?.currentRole || "";
+  const skills = [
+    ...(profile?.skills?.technical || []),
+    ...(profile?.skills?.languages || []),
+    ...(linkedIn?.profile?.skills || []),
+    ...(linkedIn?.gpt4oAnalysis?.skills || [])
+  ].map(s => String(s).toLowerCase());
+
+  const roleText = `${headline} ${currentRole}`.toLowerCase();
+  const devSignals = /(engineer|developer|software|full\s*stack|frontend|backend|react|javascript|typescript|node|web|ai|ml)/i;
+  signals.isExperiencedDev = devSignals.test(roleText);
+
+  skills.forEach(s => signals.skillKeywords.add(s));
+  roleText.split(/\W+/).forEach(token => {
+    if (token.length >= 3) signals.skillKeywords.add(token);
+  });
+
+  return signals;
+}
+
+function isRedundantLearningProject(name, description, signals) {
+  const text = `${name} ${description}`.toLowerCase();
+  const learningWords = /(learn|learning|study|course|bootcamp|tutorial|certification)/;
+  if (!learningWords.test(text)) return false;
+
+  if (!signals.isExperiencedDev) return false;
+
+  // If it targets common dev skills already implied by role, treat as redundant
+  const skillTargets = /(react|javascript|js\b|typescript|node|frontend|backend|web\s*dev|web\s*development|full\s*stack|software)/;
+  if (skillTargets.test(text)) return true;
+
+  for (const kw of signals.skillKeywords) {
+    if (kw.length >= 3 && text.includes(kw)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function normalizeProjectNameForLearning(name, description, signals) {
+  if (!isRedundantLearningProject(name, description, signals)) {
+    return { name, description, adjusted: false };
+  }
+
+  return {
+    name: "engineering-execution",
+    description: "Apply and deepen existing engineering skills through real deliverables and measurable outcomes.",
+    adjusted: true
+  };
 }
 
 // Get all projects with their status and metadata
@@ -794,21 +859,27 @@ ${result.insight || "No specific insight this cycle."}
 
       // 8. Handle project actions
       if (result.projectActions && result.projectActions.length > 0) {
+        const signals = getUserSkillSignals();
         for (const action of result.projectActions) {
           if (!action.name) continue;
 
+          const adjusted = normalizeProjectNameForLearning(action.name, action.description || "", signals);
+          if (adjusted.adjusted) {
+            console.log(`[ThinkingEngine] Adjusted learning project "${action.name}" -> "${adjusted.name}"`);
+          }
+
           const projectResult = ensureProject(
-            action.name.toLowerCase().replace(/\s+/g, "-"),
-            action.description || "",
+            adjusted.name.toLowerCase().replace(/\s+/g, "-"),
+            adjusted.description || "",
             action.relatedBeliefs || []
           );
 
           if (projectResult.created) {
-            tracker.action("MKDIR", `projects/${action.name}`);
-            console.log(`[ThinkingEngine] Created project: ${action.name}`);
+            tracker.action("MKDIR", `projects/${adjusted.name}`);
+            console.log(`[ThinkingEngine] Created project: ${adjusted.name}`);
           } else if (projectResult.reopened) {
-            tracker.action("UPDATE", `projects/${action.name}/PROJECT.md`);
-            console.log(`[ThinkingEngine] Reopened project: ${action.name}`);
+            tracker.action("UPDATE", `projects/${adjusted.name}/PROJECT.md`);
+            console.log(`[ThinkingEngine] Reopened project: ${adjusted.name}`);
           }
         }
       }
@@ -819,9 +890,17 @@ ${result.insight || "No specific insight this cycle."}
         const existingTitles = new Set(goalsData.goals.map(g => g.title.toLowerCase()));
         const currentProjects = getProjects();
 
+        const signals = getUserSkillSignals();
         for (const goal of result.goals) {
           if (!goal.title || !goal.project) continue;
           if (existingTitles.has(goal.title.toLowerCase())) continue;
+
+          const adjusted = normalizeProjectNameForLearning(goal.project, goal.description || "", signals);
+          if (adjusted.adjusted) {
+            console.log(`[ThinkingEngine] Adjusted learning project "${goal.project}" -> "${adjusted.name}"`);
+            goal.project = adjusted.name;
+            goal.description = adjusted.description || goal.description;
+          }
 
           const projectName = goal.project.toLowerCase().replace(/\s+/g, "-");
 
@@ -852,30 +931,48 @@ ${result.insight || "No specific insight this cycle."}
           // Add goal to project's PROJECT.md
           addGoalToProject(goal.project || projectName, goal);
 
-          // Add to goals.json
-          const newGoal = {
+          // Add to goals.json with plan fields
+          const newGoal = initPlanFields({
             id: `goal_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
             title: goal.title,
             project: goal.project || projectName,
             description: goal.description,
             tasks: goal.tasks || [],
             dueDate: goal.dueDate,
-            status: "active",
+            status: "planning",
             progress: 0,
             createdAt: new Date().toISOString(),
             createdBy: "thinking-engine",
             fromBacklogItem: goal.fromBacklogItem || null
-          };
+          });
 
           goalsData.goals.push(newGoal);
           existingTitles.add(goal.title.toLowerCase());
 
           tracker.action("WRITE", `data/goals.json: ${goal.title}`);
-          console.log(`[ThinkingEngine] Created goal: ${goal.title} in ${projectName}`);
+          console.log(`[ThinkingEngine] Created goal: ${goal.title} in ${projectName} (status: planning)`);
         }
 
         goalsData.lastUpdated = new Date().toISOString();
         writeJson(GOALS_PATH, goalsData);
+
+        // Develop plans for newly created goals
+        tracker.setState("planning", "Developing goal plans...");
+        const unplanned = getUnplannedGoals();
+        for (const unplannedGoal of unplanned.slice(0, 2)) { // Plan max 2 per cycle
+          try {
+            console.log(`[ThinkingEngine] Developing plan for: ${unplannedGoal.title}`);
+            const planResult = await developPlan(unplannedGoal);
+            if (planResult.success) {
+              tracker.action("WRITE", `${planResult.planFile}`);
+              console.log(`[ThinkingEngine] Plan created: ${planResult.planFile}`);
+            } else {
+              console.log(`[ThinkingEngine] Plan failed for ${unplannedGoal.title}: ${planResult.error}`);
+            }
+          } catch (planError) {
+            console.error(`[ThinkingEngine] Plan error for ${unplannedGoal.title}:`, planError.message);
+          }
+        }
       }
 
       // 10. Log the cycle

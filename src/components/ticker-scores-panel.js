@@ -5,6 +5,21 @@ import { SCORE_THRESHOLDS, getSignalFromScore } from "../services/score-engine.j
 const e = React.createElement;
 
 /**
+ * Check if a timestamp falls within the current "ticker day" (4 AM to 4 AM).
+ */
+const isTickerToday = (timestamp) => {
+  if (!timestamp) return false;
+  const now = new Date();
+  const ts = new Date(timestamp);
+  const tickerDayStart = new Date(now);
+  tickerDayStart.setHours(4, 0, 0, 0);
+  if (now < tickerDayStart) {
+    tickerDayStart.setDate(tickerDayStart.getDate() - 1);
+  }
+  return ts >= tickerDayStart;
+};
+
+/**
  * Custom comparison for ticker scores to prevent unnecessary re-renders
  * NOTE: Ignores timestamp prop since time display is cached internally
  */
@@ -30,6 +45,16 @@ const areTickerScoresEqual = (prevProps, nextProps) => {
     if (prev.score !== next.score) return false;
     if (prev.change !== next.change || prev.changePercent !== next.changePercent) return false;
   }
+
+  // Compare positions (for trailing stop dots)
+  const prevPos = prevProps.positions || [];
+  const nextPos = nextProps.positions || [];
+  if (prevPos.length !== nextPos.length) return false;
+
+  // Compare trailing stops keys
+  const prevStopKeys = Object.keys(prevProps.trailingStops || {}).sort().join(",");
+  const nextStopKeys = Object.keys(nextProps.trailingStops || {}).sort().join(",");
+  if (prevStopKeys !== nextStopKeys) return false;
 
   return true;
 };
@@ -198,6 +223,16 @@ const formatVolume = (sigma) => {
 };
 
 /**
+ * Format dollar value in compact notation ($1.2K, $34.5K, $1.2M)
+ */
+const formatCompactValue = (value) => {
+  if (value == null || isNaN(value)) return "";
+  if (Math.abs(value) >= 1000000) return `$${(value / 1000000).toFixed(1)}M`;
+  if (Math.abs(value) >= 1000) return `$${(value / 1000).toFixed(1)}K`;
+  return `$${value.toFixed(0)}`;
+};
+
+/**
  * Score bar visualization
  */
 const ScoreBar = ({ score, width = 6 }) => {
@@ -243,7 +278,10 @@ const TickerScoresPanelBase = ({
   timestamp = null,
   spyPositive = null,  // SPY direction for dynamic threshold
   spyChange = null,    // SPY % change for display
-  tickerStatus = null  // Status: { refreshing, lastRefresh, error, scanCount, scanDone }
+  tickerStatus = null,  // Status: { refreshing, lastRefresh, error, scanCount, scanDone }
+  tradingStatus = null,  // Trading: { enabled, nextTime, lastTrade: { success, symbol, action, message, timestamp } }
+  positions = [],       // Portfolio positions (from Alpaca)
+  trailingStops = {},   // Trailing stop data keyed by symbol { symbol: { trailPercent, gainPercent } }
 }) => {
   // Format timestamp for display
   const displayTime = formatDateTime(timestamp ? new Date(timestamp) : new Date());
@@ -270,6 +308,43 @@ const TickerScoresPanelBase = ({
   );
 
   const top3Count = top3Symbols.size;
+
+  // Build a set of held position symbols and their gain data for trailing stop dots
+  const positionMap = {};
+  if (positions && positions.length > 0) {
+    for (const pos of positions) {
+      const sym = pos.symbol;
+      const gainPct = pos.unrealizedPlPercent ?? pos.totalChangePercent ?? pos.pnlPercent ?? null;
+      const hasStop = trailingStops && trailingStops[sym];
+      const trailPct = hasStop ? trailingStops[sym].trailPercent : null;
+      const mktVal = pos.marketValue || (pos.shares * parseFloat(String(pos.lastPrice || 0).replace(/[$,]/g, ""))) || 0;
+      positionMap[sym] = { gainPct, hasStop: !!hasStop, trailPct, marketValue: mktVal };
+    }
+  }
+
+  /**
+   * Get trailing stop dot color for a position:
+   * - gray (#64748b): no trailing stop set
+   * - green (#22c55e): room to grow (gain > trailPercent * 2, comfortable margin)
+   * - yellow (#eab308): hold zone (gain is positive but close to stop, could sell)
+   * - red (#ef4444): likely to sell soon (gain < trailPercent, stop is tight)
+   * Returns null if the ticker is not a held position.
+   */
+  const getStopDotColor = (symbol) => {
+    const data = positionMap[symbol];
+    if (!data) return null; // Not a position — no dot
+    if (!data.hasStop) return "#64748b"; // No trailing stop — gray
+
+    const gain = data.gainPct ?? 0;
+    const trail = data.trailPct ?? 2;
+
+    // Red: gain is less than trail% — stop is very close to triggering
+    if (gain <= trail) return "#ef4444";
+    // Yellow: gain is between 1x and 2x trail — could sell
+    if (gain <= trail * 2) return "#eab308";
+    // Green: gain is more than 2x trail — room to grow
+    return "#22c55e";
+  };
 
   if (sortedTickers.length === 0) {
     return e(
@@ -300,15 +375,16 @@ const TickerScoresPanelBase = ({
     };
     const marketStatus = getMarketStatus();
 
-    // Check if full scan ran today
+    // Check if full scan is complete (based on actual count, not just timestamp)
     const getFullScanStatus = () => {
-      if (!tickerStatus?.lastFullScan) return { ran: false, time: null };
-      const lastScan = new Date(tickerStatus.lastFullScan);
-      const today = new Date();
-      const isToday = lastScan.toDateString() === today.toDateString();
+      const evaluated = tickerStatus?.evaluatedToday || 0;
+      const universe = tickerStatus?.universeSize || 0;
+      const allDone = evaluated >= universe && universe > 0;
+      const lastScan = tickerStatus?.lastFullScan ? new Date(tickerStatus.lastFullScan) : null;
       return {
-        ran: isToday,
-        time: isToday ? lastScan.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }) : null
+        ran: allDone,
+        time: allDone && lastScan ? lastScan.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }) : null,
+        count: `${evaluated}/${universe}`
       };
     };
     const fullScanStatus = getFullScanStatus();
@@ -378,11 +454,27 @@ const TickerScoresPanelBase = ({
           Box,
           { flexDirection: "column" },
           e(Text, { color: "#64748b" }, title),
-          e(Text, { color: "#475569", dimColor: true }, `Updated: ${displayTime}`)
+          e(
+            Box,
+            { flexDirection: "row", gap: 1 },
+            e(Text, { color: "#475569", dimColor: true }, `${displayTime}`),
+            tradingStatus && e(Text, { color: "#334155" }, "│"),
+            tradingStatus && e(Text, {
+              color: tradingStatus.mode === "options" ? "#f59e0b" : "#3b82f6"
+            }, tradingStatus.mode || "swing"),
+            tradingStatus && e(Text, {
+              color: tradingStatus.riskLevel === "risky" ? "#ef4444" : "#22c55e"
+            }, ` ${tradingStatus.riskLevel || "conservative"}`)
+          )
         ),
         e(
           Box,
           { flexDirection: "row", gap: 1, alignItems: "center" },
+          // SPY % for market context
+          spyChange !== null && e(Text, {
+            color: spyPositive ? "#22c55e" : "#ef4444"
+          }, `SPY ${spyChange >= 0 ? "+" : ""}${spyChange?.toFixed(1) || 0}%`),
+          spyChange !== null && e(Text, { color: "#334155" }, "│"),
           e(Text, { color: top3Count > 0 ? "#22c55e" : "#475569" },
             top3Count > 0 ? `${top3Count} buy` : "0 buy"),
           e(StatusDot, {
@@ -391,10 +483,22 @@ const TickerScoresPanelBase = ({
           })
         )
       ),
+      // Mini view column headers
+      e(
+        Box,
+        { flexDirection: "row", marginBottom: 0 },
+        e(Text, { color: "#475569", width: 3 }, " # "),
+        e(Text, { color: "#475569", width: 6 }, "SYM"),
+        e(Text, { color: "#475569", width: 2 }, ""),
+        e(Text, { color: "#475569", width: 5 }, "SCORE"),
+        e(Text, { color: "#475569", width: 7 }, " SIGNAL"),
+        e(Text, { color: "#475569", width: 8 }, "     AMT")
+      ),
       // Top 4 tickers in mini view
       ...miniTickers.map((ticker, i) => {
         const isTop3 = top3Symbols.has(ticker.symbol);
         const color = getSignalColor(ticker.score);
+        const stopDotColor = getStopDotColor(ticker.symbol);
 
         return e(
           Box,
@@ -408,23 +512,53 @@ const TickerScoresPanelBase = ({
             `${i + 1}.`),
           e(Text, { color: isTop3 ? "#f8fafc" : "#e2e8f0", bold: isTop3, width: 6 },
             ticker.symbol),
+          // Trailing stop dot (only shown for held positions)
+          e(Text, { color: stopDotColor || "#1e293b", width: 2 },
+            stopDotColor ? "●" : " "),
           e(Text, { color, bold: isTop3, width: 5 },
             formatScore(ticker.score)),
           e(Text, { color, width: 7 },
-            ` ${getSignalLabel(ticker.score, isTop3)}`)
+            ` ${getSignalLabel(ticker.score, isTop3)}`),
+          // Position amount (only for held positions)
+          positionMap[ticker.symbol]
+            ? e(Text, { color: "#94a3b8", width: 8 },
+                ` $${formatCompactValue(positionMap[ticker.symbol].marketValue)}`)
+            : e(Text, { width: 8 }, "")
         );
       }),
+      // Trading status line - shows next trade time and last action
+      tradingStatus && e(
+        Box,
+        { flexDirection: "row", gap: 1, marginTop: 1, borderTop: true, borderColor: "#334155", paddingTop: 1 },
+        // Next trade time
+        e(Text, { color: "#64748b" }, "next:"),
+        e(Text, { color: tradingStatus.enabled ? "#3b82f6" : "#475569" },
+          tradingStatus.nextTime || "--:--"),
+        e(Text, { color: "#334155" }, "│"),
+        // Last trade action
+        e(Text, { color: "#64748b" }, "last:"),
+        tradingStatus.lastTrade ? [
+          e(Text, {
+            key: "icon",
+            color: tradingStatus.lastTrade.success ? "#22c55e" : "#ef4444"
+          }, tradingStatus.lastTrade.success ? "✓" : "✗"),
+          e(Text, {
+            key: "msg",
+            color: tradingStatus.lastTrade.success ? "#94a3b8" : "#f87171"
+          }, ` ${tradingStatus.lastTrade.message?.slice(0, 25) || tradingStatus.lastTrade.symbol || "..."}`)
+        ] : e(Text, { color: "#475569" }, "no trades yet")
+      ),
       // Data quality status line - shows Full (800+) and Refresh (150) status
       e(
         Box,
-        { flexDirection: "row", gap: 1, marginTop: 1, borderTop: true, borderColor: "#334155", paddingTop: 1 },
-        // Full scan status (800+ tickers)
+        { flexDirection: "row", gap: 1, marginTop: tradingStatus ? 0 : 1, borderTop: !tradingStatus, borderColor: "#334155", paddingTop: tradingStatus ? 0 : 1 },
+        // Full scan status (based on actual count)
         e(StatusDot, {
           status: fullScanStatus.ran ? "done" : "pending",
           blinking: tickerStatus?.fullScanRunning || false
         }),
         e(Text, { color: fullScanStatus.ran ? "#94a3b8" : "#64748b" },
-          fullScanStatus.ran ? `Full ${fullScanStatus.time}` : "Full"),
+          fullScanStatus.ran ? `Full ${fullScanStatus.time}` : `Full ${fullScanStatus.count}`),
         e(Text, { color: "#334155" }, "│"),
         // Refresh status (150 ticker list)
         e(StatusDot, {

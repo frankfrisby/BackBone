@@ -29,31 +29,84 @@
     "backbone-linkedin": {
       "command": "node",
       "args": ["src/mcp/linkedin-server.js"],
-      "description": "LinkedIn profile and messages",
+      "description": "LinkedIn profile, posts, skills, education, and connections",
       "tools": [
         "get_linkedin_profile",
         "scrape_linkedin_profile",
-        "get_linkedin_messages"
+        "get_linkedin_messages",
+        "get_linkedin_posts",
+        "get_linkedin_skills",
+        "get_linkedin_education",
+        "get_linkedin_connections",
+        "get_contact_profile"
       ]
     },
-    "backbone-email": {
+    "backbone-google": {
       "command": "node",
-      "args": ["src/mcp/email-server.js"],
-      "description": "Email integration (Gmail/Outlook)",
+      "args": ["src/mcp/google-mail-calendar-server.js"],
+      "description": "Unified Google Mail & Calendar (Gmail/Outlook + Google Calendar/Outlook Calendar)",
       "tools": [
         "get_recent_emails",
         "get_unread_count",
-        "search_emails"
-      ]
-    },
-    "backbone-calendar": {
-      "command": "node",
-      "args": ["src/mcp/calendar-server.js"],
-      "description": "Calendar events",
-      "tools": [
+        "search_emails",
+        "get_email_body",
+        "draft_email",
+        "analyze_emails_by_topic",
         "get_today_events",
         "get_upcoming_events",
-        "create_event"
+        "create_event",
+        "update_event",
+        "delete_event"
+      ]
+    },
+    "backbone-contacts": {
+      "command": "node",
+      "args": ["src/mcp/contacts-server.js"],
+      "description": "Contacts directory (LinkedIn, family, friends, coworkers, startup)",
+      "tools": [
+        "add_contact",
+        "get_contacts",
+        "search_contacts",
+        "get_contact_profile",
+        "update_contact",
+        "categorize_contact"
+      ]
+    },
+    "backbone-news": {
+      "command": "node",
+      "args": ["src/mcp/news-server.js"],
+      "description": "News fetching, market summaries, and research with AI analysis",
+      "tools": [
+        "fetch_latest_news",
+        "get_market_summary",
+        "research_topic",
+        "get_news_for_beliefs",
+        "correlate_news_with_portfolio"
+      ]
+    },
+    "backbone-life": {
+      "command": "node",
+      "args": ["src/mcp/life-server.js"],
+      "description": "Life management — goals, beliefs, backlog, life scores, thinking engine",
+      "tools": [
+        "get_goals",
+        "get_beliefs",
+        "get_backlog",
+        "get_life_scores",
+        "add_goal",
+        "add_belief",
+        "get_thesis",
+        "trigger_thinking_cycle"
+      ]
+    },
+    "backbone-projects": {
+      "command": "node",
+      "args": ["src/mcp/projects-server.js"],
+      "description": "Project workspace creation and management",
+      "tools": [
+        "create_project",
+        "list_projects",
+        "create_project_action"
       ]
     }
   },

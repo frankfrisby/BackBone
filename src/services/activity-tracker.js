@@ -216,7 +216,7 @@ class ActivityTracker extends EventEmitter {
         cycleCount: this.cycleCount
       }, null, 2));
     } catch (err) {
-      // Ignore save errors
+      console.error("Failed to save activity log:", err.message);
     }
   }
 
@@ -231,6 +231,7 @@ class ActivityTracker extends EventEmitter {
         this.cycleCount = data.cycleCount || 0;
       }
     } catch (err) {
+      console.error("Failed to load activity log:", err.message);
       this.activities = [];
       this.cycleCount = 0;
     }

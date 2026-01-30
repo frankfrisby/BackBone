@@ -38,7 +38,9 @@ const VIEW_MODES = {
  * - ouraHistory: Oura history data
  * - tickers: Array of ticker data with scores
  * - tickerStatus: Status of ticker fetching { refreshing, lastRefresh, error, scanCount, scanDone }
+ * - tradingStatus: Trading status { enabled, nextTime, lastTrade, mode, riskLevel }
  * - projects: Array of project data
+ * - currentWorkingProject: Name/ID of project currently being worked on by engine
  * - uiClock: Timestamp for ticker panel updates
  * - userName: User's display name
  * - aiHealthResponse: AI-generated health insight (when model is ready)
@@ -50,11 +52,17 @@ const LeftColumnBase = ({
   ouraHistory,
   tickers = [],
   tickerStatus = null,
+  tradingStatus = null,
   projects = [],
+  currentWorkingProject = null,
   uiClock,
   userName = null,
   aiHealthResponse = null,
   privateMode = false,
+  spyPositive = null,
+  spyChange = null,
+  positions = [],
+  trailingStops = {},
 }) => {
   // Use coordinated updates for frequently changing data (like activity narrator pattern)
   const lifeScores = getLifeScores();
@@ -78,7 +86,7 @@ const LeftColumnBase = ({
     return [...tickers]
       .filter((t) => typeof t.score === "number")
       .sort((a, b) => b.score - a.score)
-      .slice(0, viewMode === VIEW_MODES.MINIMAL ? 3 : viewMode === VIEW_MODES.ADVANCED ? 20 : 10);
+      .slice(0, viewMode === VIEW_MODES.MINIMAL ? 4 : viewMode === VIEW_MODES.ADVANCED ? 20 : 10);
   }, [tickers, viewMode]);
 
   return e(
@@ -117,18 +125,24 @@ const LeftColumnBase = ({
       tickers: topTickers,
       title: "Ticker Scores",
       viewMode: viewMode,
-      maxItems: viewMode === VIEW_MODES.MINIMAL ? 3 : viewMode === VIEW_MODES.ADVANCED ? 20 : 10,
+      maxItems: viewMode === VIEW_MODES.MINIMAL ? 4 : viewMode === VIEW_MODES.ADVANCED ? 20 : 10,
       compact: viewMode === VIEW_MODES.MINIMAL,
       timestamp: uiClock,
       tickerStatus: tickerStatus,
+      tradingStatus: tradingStatus,
+      spyPositive: spyPositive,
+      spyChange: spyChange,
+      positions: positions,
+      trailingStops: trailingStops,
     }),
 
-    // Projects Panel (only in advanced mode)
+    // Projects Panel (only in advanced mode) - shows top 3 by status
     viewMode === VIEW_MODES.ADVANCED &&
       e(ProjectsPanel, {
-        projects: projects?.slice(0, 3) || [],
-        title: "Active Projects",
+        projects: projects || [],
+        title: "Projects",
         maxItems: 3,
+        currentWorkingProject,
       })
   );
 };
@@ -160,6 +174,20 @@ const areLeftColumnPropsEqual = (prevProps, nextProps) => {
   if (prevProps.aiHealthResponse !== nextProps.aiHealthResponse) return false;
 
   if (prevProps.privateMode !== nextProps.privateMode) return false;
+
+  // Compare trading status
+  if (prevProps.tradingStatus?.nextTime !== nextProps.tradingStatus?.nextTime) return false;
+  if (prevProps.tradingStatus?.lastTrade?.timestamp !== nextProps.tradingStatus?.lastTrade?.timestamp) return false;
+
+  // Compare SPY data
+  if (prevProps.spyPositive !== nextProps.spyPositive) return false;
+  if (prevProps.spyChange !== nextProps.spyChange) return false;
+
+  // Compare positions and trailing stops (for stop dots)
+  if ((prevProps.positions?.length || 0) !== (nextProps.positions?.length || 0)) return false;
+  const prevStops = Object.keys(prevProps.trailingStops || {}).length;
+  const nextStops = Object.keys(nextProps.trailingStops || {}).length;
+  if (prevStops !== nextStops) return false;
 
   return true;
 };

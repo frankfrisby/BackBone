@@ -29,10 +29,9 @@ if (!fs.existsSync(DATA_DIR)) {
 // Google Configuration
 // ============================================================================
 
-// These would be set via environment or config
-// Users need to create OAuth credentials at https://console.cloud.google.com/
-const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
-const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || "";
+// Read at call time so Firebase remote config has a chance to set them
+const getGoogleClientId = () => process.env.GOOGLE_CLIENT_ID || "";
+const getGoogleClientSecret = () => process.env.GOOGLE_CLIENT_SECRET || "";
 const GOOGLE_REDIRECT_URI = `http://localhost:${OAUTH_PORT}/callback/google`;
 
 const GOOGLE_SCOPES = [
@@ -150,12 +149,12 @@ export const getConfiguredProviders = () => {
  * Generate Google OAuth URL
  */
 export const getGoogleAuthUrl = () => {
-  if (!GOOGLE_CLIENT_ID) {
+  if (!getGoogleClientId()) {
     return null;
   }
 
   const params = new URLSearchParams({
-    client_id: GOOGLE_CLIENT_ID,
+    client_id: getGoogleClientId(),
     redirect_uri: GOOGLE_REDIRECT_URI,
     response_type: "code",
     scope: GOOGLE_SCOPES,
@@ -193,8 +192,8 @@ const exchangeGoogleCode = async (code) => {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
-      client_id: GOOGLE_CLIENT_ID,
-      client_secret: GOOGLE_CLIENT_SECRET,
+      client_id: getGoogleClientId(),
+      client_secret: getGoogleClientSecret(),
       code,
       grant_type: "authorization_code",
       redirect_uri: GOOGLE_REDIRECT_URI
@@ -247,8 +246,8 @@ export const refreshGoogleToken = async () => {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
-      client_id: GOOGLE_CLIENT_ID,
-      client_secret: GOOGLE_CLIENT_SECRET,
+      client_id: getGoogleClientId(),
+      client_secret: getGoogleClientSecret(),
       refresh_token: tokens.refresh_token,
       grant_type: "refresh_token"
     })
@@ -716,6 +715,63 @@ export const disconnectProvider = (provider) => {
   }
   if (provider === "microsoft" && fs.existsSync(MICROSOFT_TOKEN_FILE)) {
     fs.unlinkSync(MICROSOFT_TOKEN_FILE);
+  }
+};
+
+/**
+ * Start background token auto-refresh.
+ * Checks every 30 minutes; refreshes if token expires within 10 minutes.
+ * Also does an initial check on startup.
+ */
+let tokenRefreshInterval = null;
+export const startTokenAutoRefresh = () => {
+  if (tokenRefreshInterval) return; // Already running
+
+  const checkAndRefresh = async () => {
+    // Google
+    try {
+      const gTokens = loadGoogleTokens();
+      if (gTokens?.refresh_token && gTokens?.savedAt) {
+        const savedAt = new Date(gTokens.savedAt).getTime();
+        const expiresIn = (gTokens.expires_in || 3600) * 1000;
+        const expiresAt = savedAt + expiresIn;
+        const tenMinutes = 10 * 60 * 1000;
+        if (Date.now() > expiresAt - tenMinutes) {
+          await refreshGoogleToken();
+        }
+      }
+    } catch {
+      // Silently fail — next check will retry
+    }
+
+    // Microsoft
+    try {
+      const mTokens = loadMicrosoftTokens();
+      if (mTokens?.refresh_token && mTokens?.savedAt) {
+        const savedAt = new Date(mTokens.savedAt).getTime();
+        const expiresIn = (mTokens.expires_in || 3600) * 1000;
+        const expiresAt = savedAt + expiresIn;
+        const tenMinutes = 10 * 60 * 1000;
+        if (Date.now() > expiresAt - tenMinutes) {
+          await refreshMicrosoftToken();
+        }
+      }
+    } catch {
+      // Silently fail
+    }
+  };
+
+  // Initial check after 10 seconds (let Firebase config load first)
+  setTimeout(checkAndRefresh, 10000);
+
+  // Then every 30 minutes
+  tokenRefreshInterval = setInterval(checkAndRefresh, 30 * 60 * 1000);
+};
+
+export const stopTokenAutoRefresh = () => {
+  if (tokenRefreshInterval) {
+    clearInterval(tokenRefreshInterval);
+    tokenRefreshInterval = null;
   }
 };
 

@@ -96,10 +96,9 @@ const DEFAULT_JOBS = [
     id: "linkedin-sync",
     name: "LinkedIn Sync",
     shortName: "LinkedIn",
-    description: "Sync LinkedIn profile and connections",
-    frequency: JOB_FREQUENCY.WEEKLY,
-    dayOfWeek: DAYS_OF_WEEK.MONDAY,
-    time: "09:00",
+    description: "Daily sync of LinkedIn profile, posts, skills, and education",
+    frequency: JOB_FREQUENCY.DAILY,
+    time: "08:00",
     enabled: true,
     handler: "runLinkedInSync"
   },
@@ -112,6 +111,36 @@ const DEFAULT_JOBS = [
     time: "07:00",
     enabled: true,
     handler: "runHealthReview"
+  },
+  {
+    id: "news-morning",
+    name: "Morning News Analysis",
+    shortName: "News AM",
+    description: "Fetch and analyze news to generate AI thinking triggers",
+    frequency: JOB_FREQUENCY.DAILY,
+    time: "07:30",
+    enabled: true,
+    handler: "runNewsFetch"
+  },
+  {
+    id: "news-midday",
+    name: "Midday News Analysis",
+    shortName: "News PM",
+    description: "Midday news check for market updates",
+    frequency: JOB_FREQUENCY.DAILY,
+    time: "12:30",
+    enabled: true,
+    handler: "runNewsFetch"
+  },
+  {
+    id: "news-evening",
+    name: "Evening News Analysis",
+    shortName: "News Eve",
+    description: "Evening news wrap-up and overnight prep",
+    frequency: JOB_FREQUENCY.DAILY,
+    time: "18:30",
+    enabled: true,
+    handler: "runNewsFetch"
   },
   {
     id: "weekly-summary",

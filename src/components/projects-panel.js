@@ -5,20 +5,35 @@ const e = React.createElement;
 
 // Project status colors
 const STATUS_COLORS = {
-  active: "#22c55e",
-  paused: "#eab308",
-  blocked: "#ef4444",
-  completed: "#8b5cf6",
-  planning: "#3b82f6"
+  working: "#f59e0b",  // Amber - currently being worked on by engine
+  active: "#22c55e",   // Green - active project
+  onhold: "#64748b",   // Gray - on hold
+  paused: "#eab308",   // Yellow - paused
+  blocked: "#ef4444",  // Red - blocked
+  completed: "#8b5cf6", // Purple - done
+  planning: "#3b82f6"  // Blue - planning
 };
 
 // Project status icons
 const STATUS_ICONS = {
-  active: "\u25B6",   // Play
-  paused: "\u25A0",   // Pause
-  blocked: "\u25CF",  // Dot
+  working: "\u26A1",   // Lightning bolt - currently working
+  active: "\u25B6",    // Play
+  onhold: "\u23F8",    // Pause bars
+  paused: "\u25A0",    // Square
+  blocked: "\u25CF",   // Dot
   completed: "\u2713", // Check
-  planning: "\u25CB"  // Circle
+  planning: "\u25CB"   // Circle
+};
+
+// Status display labels
+const STATUS_LABELS = {
+  working: "WORKING",
+  active: "Active",
+  onhold: "On Hold",
+  paused: "Paused",
+  blocked: "Blocked",
+  completed: "Done",
+  planning: "Planning"
 };
 
 /**
@@ -37,14 +52,53 @@ const ProgressBar = ({ progress = 0, width = 8, color = "#22c55e" }) => {
   );
 };
 
+// Status priority for sorting (lower = higher priority)
+const STATUS_PRIORITY = {
+  working: 0,
+  active: 1,
+  onhold: 2,
+  paused: 3,
+  blocked: 4,
+  planning: 5,
+  completed: 6
+};
+
 /**
- * Projects Panel - Shows 1-5 active projects with progress
+ * Projects Panel - Shows top 3 projects by status (working > active > on hold)
  */
-export const ProjectsPanel = ({ projects = [], title = "Projects", maxItems = 5 }) => {
-  // Filter to show only active/in-progress projects
-  const activeProjects = projects
-    .filter(p => p.status !== "completed" || p.showCompleted)
+export const ProjectsPanel = ({ projects = [], title = "Projects", maxItems = 3, currentWorkingProject = null }) => {
+  // Mark the currently working project
+  const projectsWithWorkingStatus = projects.map(p => ({
+    ...p,
+    status: (currentWorkingProject && currentWorkingProject !== "analyzing" &&
+             (p.name === currentWorkingProject || p.id === currentWorkingProject ||
+              p.name?.includes(currentWorkingProject) || currentWorkingProject.includes(p.name)))
+      ? "working"
+      : (p.status || "active")
+  }));
+
+  // If engine is analyzing but no specific project, add a virtual "analyzing" entry
+  const showAnalyzingEntry = currentWorkingProject === "analyzing" &&
+    !projectsWithWorkingStatus.some(p => p.status === "working");
+
+  // Filter out completed, sort by priority, take top 3
+  // Build the list of projects to show
+  let activeProjects = projectsWithWorkingStatus
+    .filter(p => p.status !== "completed")
+    .sort((a, b) => {
+      const priorityA = STATUS_PRIORITY[a.status] ?? 99;
+      const priorityB = STATUS_PRIORITY[b.status] ?? 99;
+      return priorityA - priorityB;
+    })
     .slice(0, maxItems);
+
+  // Add analyzing entry at top if engine is working but no specific project detected
+  if (showAnalyzingEntry) {
+    activeProjects = [
+      { id: "_analyzing", name: "Analyzing...", status: "working" },
+      ...activeProjects.slice(0, maxItems - 1)
+    ];
+  }
 
   // Empty state - all projects achieved or none exist
   if (activeProjects.length === 0) {
@@ -112,24 +166,25 @@ export const ProjectsPanel = ({ projects = [], title = "Projects", maxItems = 5 
         const status = project.status || "active";
         const color = STATUS_COLORS[status] || "#64748b";
         const icon = STATUS_ICONS[status] || "\u25CF";
-        const progress = project.progress || 0;
-        const pct = Math.round(progress * 100);
-        const name = (project.name || project.title || `Project ${i + 1}`).slice(0, 14);
+        const statusLabel = STATUS_LABELS[status] || status;
+        const name = (project.name || project.title || `Project ${i + 1}`).slice(0, 18);
 
         return e(
           Box,
-          { key: project.id || i, flexDirection: "row", justifyContent: "space-between" },
-          // Left: status icon + name
+          { key: project.id || i, flexDirection: "column", marginBottom: i < activeProjects.length - 1 ? 1 : 0 },
+          // Row 1: icon + name
           e(
             Box,
-            { flexDirection: "row", width: 17 },
+            { flexDirection: "row" },
             e(Text, { color }, icon + " "),
-            e(Text, { color: "#94a3b8" }, name)
+            e(Text, { color: status === "working" ? "#f59e0b" : "#e2e8f0", bold: status === "working" }, name)
           ),
-          // Center: progress bar
-          e(ProgressBar, { progress, width: 6, color }),
-          // Right: percentage
-          e(Text, { color: "#475569" }, `${String(pct).padStart(3)}%`)
+          // Row 2: status label
+          e(
+            Box,
+            { paddingLeft: 2 },
+            e(Text, { color, dimColor: status !== "working" }, statusLabel)
+          )
         );
       })
     )

@@ -17,23 +17,47 @@ const fetchJson = async (url, options) => {
 };
 
 /**
- * Load keys from config file as fallback
+ * Load config from config file
  */
-const loadKeysFromConfigFile = () => {
+const loadFullConfigFile = () => {
   try {
     const configPath = path.join(process.cwd(), "data", "alpaca-config.json");
     if (fs.existsSync(configPath)) {
-      const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
-      // Check if keys are real (not placeholders)
-      const key = config.apiKey && !config.apiKey.includes("PASTE") ? config.apiKey : null;
-      const secret = config.apiSecret && !config.apiSecret.includes("PASTE") ? config.apiSecret : null;
-      const mode = config.mode || "paper";
-      return { key, secret, mode };
+      return JSON.parse(fs.readFileSync(configPath, "utf-8"));
     }
   } catch (error) {
     // Silently fail
   }
+  return {};
+};
+
+/**
+ * Load keys from config file as fallback
+ */
+const loadKeysFromConfigFile = () => {
+  try {
+    const config = loadFullConfigFile();
+    // Check if keys are real (not placeholders)
+    const key = config.apiKey && !config.apiKey.includes("PASTE") ? config.apiKey : null;
+    const secret = config.apiSecret && !config.apiSecret.includes("PASTE") ? config.apiSecret : null;
+    const mode = config.mode || "paper";
+    return { key, secret, mode };
+  } catch (error) {
+    // Silently fail
+  }
   return { key: null, secret: null, mode: "paper" };
+};
+
+/**
+ * Get trading strategy and risk settings
+ * Returns: { strategy: "swing"|"options", risk: "conservative"|"risky" }
+ */
+export const getTradingSettings = () => {
+  const config = loadFullConfigFile();
+  return {
+    strategy: config.strategy || "swing",
+    risk: config.risk || "conservative"
+  };
 };
 
 export const getAlpacaConfig = () => {
@@ -138,6 +162,7 @@ export const submitOrder = async (config, order) => {
 
   if (order.limit_price) body.limit_price = String(order.limit_price);
   if (order.stop_price) body.stop_price = String(order.stop_price);
+  if (order.trail_percent) body.trail_percent = String(order.trail_percent);
 
   const response = await fetch(`${config.baseUrl}/v2/orders`, {
     method: "POST",
@@ -241,9 +266,18 @@ export const closeAllPositions = async (config) => {
  */
 export const getAsset = async (config, symbol) => {
   try {
-    const data = await fetchJson(`${config.baseUrl}/v2/assets/${encodeURIComponent(symbol)}`, {
+    const response = await fetch(`${config.baseUrl}/v2/assets/${encodeURIComponent(symbol)}`, {
       headers: buildHeaders(config)
     });
+    if (response.status === 404) {
+      // Definitively not found — truly invalid
+      return null;
+    }
+    if (!response.ok) {
+      // Rate limit, server error, etc. — don't assume invalid
+      return { symbol, tradable: true, _uncertain: true };
+    }
+    const data = await response.json();
     return {
       symbol: data.symbol,
       name: data.name,
@@ -255,7 +289,8 @@ export const getAsset = async (config, symbol) => {
       assetClass: data.class
     };
   } catch {
-    return null;
+    // Network error — don't assume invalid
+    return { symbol, tradable: true, _uncertain: true };
   }
 };
 

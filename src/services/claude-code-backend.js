@@ -271,9 +271,15 @@ export class ClaudeCodeBackend extends EventEmitter {
         args.push("--continue");
       }
 
-      // Tool permissions
+      // Tool permissions (include MCP servers)
       if (task.allowedTools && task.allowedTools.length > 0) {
-        args.push("--allowedTools", task.allowedTools.join(","));
+        const mcpPrefixes = [
+          "mcp__backbone-google", "mcp__backbone-linkedin", "mcp__backbone-contacts",
+          "mcp__backbone-news", "mcp__backbone-life", "mcp__backbone-health",
+          "mcp__backbone-trading", "mcp__backbone-projects",
+        ];
+        const allTools = [...task.allowedTools, ...mcpPrefixes];
+        args.push("--allowedTools", allTools.join(","));
       }
 
       // Cost/turn limits
@@ -580,12 +586,26 @@ export class ClaudeCodeBackend extends EventEmitter {
       // Build command args
       const args = ["-p"];
 
+      // MCP server tool prefixes
+      const mcpTools = [
+        "mcp__backbone-google",
+        "mcp__backbone-linkedin",
+        "mcp__backbone-contacts",
+        "mcp__backbone-news",
+        "mcp__backbone-life",
+        "mcp__backbone-health",
+        "mcp__backbone-trading",
+        "mcp__backbone-projects",
+      ];
+
       // Add allowed tools if specified
       if (task.allowedTools) {
-        args.push("--allowedTools", task.allowedTools.join(","));
+        const allTools = [...task.allowedTools, ...mcpTools];
+        args.push("--allowedTools", allTools.join(","));
       } else {
-        // Default safe tools
-        args.push("--allowedTools", "Read,Glob,Grep,WebFetch,WebSearch");
+        // Default safe tools + MCP servers
+        const defaultTools = ["Read", "Glob", "Grep", "WebFetch", "WebSearch", ...mcpTools];
+        args.push("--allowedTools", defaultTools.join(","));
       }
 
       // Add file context for file update operations

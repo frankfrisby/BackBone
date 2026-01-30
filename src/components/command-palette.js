@@ -105,7 +105,7 @@ const CommandPaletteBase = ({
     // Header with title and count
     e(
       Box,
-      { flexDirection: "row", justifyContent: "space-between", marginBottom: 1 },
+      { flexDirection: "row", justifyContent: "space-between", marginBottom: 1, width: "100%" },
       e(
         Box,
         { flexDirection: "row", gap: 1 },
@@ -115,18 +115,22 @@ const CommandPaletteBase = ({
       e(Text, { color: "#475569" }, `${normalizedItems.length} ${countLabel}`)
     ),
     // Separator line
-    e(Text, { color: "#334155" }, "─".repeat(50)),
+    e(Box, { width: "100%" }, e(Text, { color: "#334155" }, "─".repeat(120))),
     // Command items
     ...visibleItems.map((item, index) => {
       const isActive = index === activeIndex;
       const cmdColor = getCommandColor(item.value);
       const icon = getCommandIcon(item.value);
 
+      // Find the longest label for consistent padding
+      const maxLabelLen = Math.max(...visibleItems.map(i => i.label.length), 14);
+
       return e(
         Box,
         {
           key: item.value,
           flexDirection: "row",
+          width: "100%",
           backgroundColor: isActive ? "#1e293b" : undefined,
           paddingX: 1,
           marginTop: index === 0 ? 1 : 0
@@ -147,7 +151,7 @@ const CommandPaletteBase = ({
         e(
           Text,
           { color: isActive ? "#f8fafc" : "#e2e8f0", bold: isActive },
-          item.label.padEnd(14)
+          item.label.padEnd(maxLabelLen + 2)
         ),
         // Recommended badge
         item.recommended &&
@@ -156,11 +160,15 @@ const CommandPaletteBase = ({
             { color: "#a78bfa" },
             "★ "
           ),
-        // Description (dimmer)
+        // Description (dimmer, takes remaining space)
         e(
-          Text,
-          { color: isActive ? "#94a3b8" : "#64748b" },
-          item.description
+          Box,
+          { flexGrow: 1 },
+          e(
+            Text,
+            { color: isActive ? "#94a3b8" : "#64748b", wrap: "truncate" },
+            item.description
+          )
         )
       );
     }),

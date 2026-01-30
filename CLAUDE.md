@@ -133,6 +133,7 @@ data/                  — User data, settings, activity logs, goal definitions
   tickers-cache.json   — Stock ticker data
   trades-log.json      — Trading history
   life-scores.json     — Life dimension scores
+  role-models.json     — Top 5 role models, matching scores, history of changes
   user-settings.json   — User preferences
   user-skills/         — Custom user-defined skills (index.json + .md files)
   spreadsheets/        — Excel spreadsheets for persistent data tracking (.xlsx files)
@@ -174,6 +175,7 @@ These are detailed instruction files in `skills/`. Read the relevant file when h
 - **pdf-document**: PDF Document Creation — generate and manipulate PDF files
 - **powerpoint-presentation**: PowerPoint Presentation Creation — create slide decks
 - **rare-earth-resources**: Rare Earth Materials & Resources — supply chain, mineral analysis
+- **role-model**: Role Model Discovery — identify top 5 people who best represent who the user is becoming based on LinkedIn, beliefs, goals, and interests. Re-evaluates weekly or after profile/belief updates
 - **sms-messaging**: SMS Messaging — send and manage text messages
 - **social-media**: Social Media Integration — posting, analytics, management
 - **task-automation**: Task Automation — automate repetitive workflows

@@ -79,6 +79,7 @@ class AppStore extends EventEmitter {
         alpacaStatus: "Not connected",
         alpacaMode: "paper",
         personalCapitalData: null,
+        trailingStops: {},
       },
       [STATE_SLICES.TICKERS]: {
         tickers: [],
@@ -94,6 +95,13 @@ class AppStore extends EventEmitter {
           lastFullScan: null,      // Last full 800+ ticker scan timestamp
           updateHistory: [],       // Array of update timestamps for today (for 2hr gap check)
         },
+        tradingStatus: {
+          enabled: true,
+          nextTime: null,          // Next trade evaluation time (e.g., "10:30am")
+          mode: "swing",           // "swing" or "options"
+          riskLevel: "conservative", // "conservative" or "risky"
+          lastTrade: null,         // { success, symbol, action, message, timestamp }
+        },
       },
       [STATE_SLICES.CHAT]: {
         messages: [],
@@ -101,6 +109,7 @@ class AppStore extends EventEmitter {
         streamingText: "",
         actionStreamingText: "",
         actionStreamingTitle: "",
+        cliStreaming: false,
         currentModelInfo: null,
       },
       [STATE_SLICES.ENGINE]: {
@@ -120,6 +129,7 @@ class AppStore extends EventEmitter {
       },
       [STATE_SLICES.PROJECTS]: {
         projects: [],
+        currentWorkingProject: null,
       },
       [STATE_SLICES.OVERLAYS]: {
         showTestRunner: false,
@@ -266,6 +276,7 @@ class AppStore extends EventEmitter {
         streamingText: "",
         actionStreamingText: "",
         actionStreamingTitle: "",
+        cliStreaming: false,
         currentModelInfo: null,
       },
       [STATE_SLICES.OVERLAYS]: {

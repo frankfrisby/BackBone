@@ -403,6 +403,9 @@ export const getAlpacaSetupTabs = (currentConfig = {}, handlers = {}) => {
   const keyPreview = currentConfig.apiKey ? `••••${currentConfig.apiKey.slice(-4)}` : null;
   const secretPreview = currentConfig.apiSecret ? `••••${currentConfig.apiSecret.slice(-4)}` : null;
   const hasKeys = keyPreview && secretPreview;
+  const pendingKeyPreview = currentConfig.pendingKey ? `••••${currentConfig.pendingKey.slice(-4)}` : null;
+  const pendingSecretPreview = currentConfig.pendingSecret ? `••••${currentConfig.pendingSecret.slice(-4)}` : null;
+  const hasPendingKeys = pendingKeyPreview && pendingSecretPreview;
 
   return [
     {
@@ -437,24 +440,24 @@ export const getAlpacaSetupTabs = (currentConfig = {}, handlers = {}) => {
       onSelect: handlers.onStrategySelect
     },
     {
-      key: "getKeys",
-      label: "Get Keys",
-      type: "action",
-      description: mode === "paper"
-        ? "Step 1: Opens Alpaca dashboard to get your API keys"
-        : "Step 1: Opens Alpaca LIVE dashboard to get your API keys",
-      actionLabel: "open Alpaca dashboard",
-      onAction: handlers.onOpenAlpaca
+      key: "apiKey",
+      label: "API Key",
+      type: "input",
+      description: hasKeys
+        ? `Current key: ${keyPreview}\n\nEnter new API Key ID to change (from Alpaca dashboard):`
+        : "Enter your Alpaca API Key ID (from Alpaca dashboard):",
+      placeholder: "PK...",
+      onInput: handlers.onKeyInput
     },
     {
-      key: "pasteKeys",
-      label: "Paste Keys",
-      type: "action",
+      key: "apiSecret",
+      label: "Secret",
+      type: "input",
       description: hasKeys
-        ? `Current: Key ${keyPreview}, Secret ${secretPreview}\n\nStep 2: Opens a file - paste your keys there and SAVE`
-        : "Step 2: Opens a file where you can paste your keys.\nJust paste and save - much easier than typing!",
-      actionLabel: "open keys file",
-      onAction: handlers.onOpenKeysFile
+        ? `Current secret: ${secretPreview}\n\nEnter new Secret Key to change:`
+        : "Enter your Alpaca Secret Key:",
+      placeholder: "Your secret key...",
+      onInput: handlers.onSecretInput
     },
     {
       key: "connect",
@@ -462,9 +465,11 @@ export const getAlpacaSetupTabs = (currentConfig = {}, handlers = {}) => {
       type: "action",
       confirm: true,
       completeOnAction: true,
-      description: hasKeys
-        ? "Step 3: Test connection and finish setup."
-        : "Step 3: First paste your keys in the file, then connect.",
+      description: hasPendingKeys
+        ? `Ready to connect with new keys:\n  Key: ${pendingKeyPreview}\n  Secret: ${pendingSecretPreview}\n\nPress Enter to test and save.`
+        : hasKeys
+          ? `Connected with: Key ${keyPreview}\n\nPress Enter to reconnect or enter new keys above.`
+          : "Enter your API Key and Secret above first.",
       actionLabel: "connect to Alpaca"
     }
   ];

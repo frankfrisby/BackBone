@@ -54,7 +54,7 @@ export const loadFirebaseConfig = () => {
       return JSON.parse(fs.readFileSync(FIREBASE_CONFIG_PATH, "utf-8"));
     }
   } catch (error) {
-    // Ignore
+    console.error("Failed to load Firebase config file:", error.message);
   }
 
   // Use default BACKBONE Firebase config

@@ -16,16 +16,28 @@ import os from "os";
 import { getClaudeCodeBackend, TASK_STATUS } from "./claude-code-backend.js";
 import { isClaudeCodeInstalled, isClaudeCodeLoggedIn, getClaudeCodeStatus } from "./claude-code-cli.js";
 
+// MCP server tool prefixes — allows all tools from BACKBONE MCP servers
+const MCP_TOOLS = [
+  "mcp__backbone-google",
+  "mcp__backbone-linkedin",
+  "mcp__backbone-contacts",
+  "mcp__backbone-news",
+  "mcp__backbone-life",
+  "mcp__backbone-health",
+  "mcp__backbone-trading",
+  "mcp__backbone-projects",
+];
+
 // Tool permission levels
 export const TOOL_PERMISSION = {
   // Always allowed - read-only, safe operations
-  SAFE: ["Read", "Glob", "Grep", "WebFetch", "WebSearch", "Task"],
+  SAFE: ["Read", "Glob", "Grep", "WebFetch", "WebSearch", "Task", ...MCP_TOOLS],
   // Allowed with auto-approve in autonomous mode
-  AUTO_APPROVE: ["Read", "Glob", "Grep", "WebFetch", "WebSearch", "Task", "Write", "Edit"],
+  AUTO_APPROVE: ["Read", "Glob", "Grep", "WebFetch", "WebSearch", "Task", "Write", "Edit", ...MCP_TOOLS],
   // Dangerous - require explicit approval or full autonomy mode
   DANGEROUS: ["Bash", "Write", "Edit", "NotebookEdit"],
   // All tools
-  ALL: ["Read", "Glob", "Grep", "WebFetch", "WebSearch", "Task", "Write", "Edit", "Bash", "NotebookEdit"]
+  ALL: ["Read", "Glob", "Grep", "WebFetch", "WebSearch", "Task", "Write", "Edit", "Bash", "NotebookEdit", ...MCP_TOOLS]
 };
 
 // Execution modes

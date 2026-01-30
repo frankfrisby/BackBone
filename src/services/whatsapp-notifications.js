@@ -285,7 +285,8 @@ class WhatsAppNotifications extends EventEmitter {
   }
 
   /**
-   * Send daily morning brief
+   * Send daily morning brief via WhatsApp
+   * Produces a clean, concise message the user is happy to see when they open their phone
    */
   async sendMorningBrief(brief) {
     const today = new Date().toISOString().split("T")[0];
@@ -295,47 +296,47 @@ class WhatsAppNotifications extends EventEmitter {
       return { success: false, error: "Already sent today", duplicate: true };
     }
 
-    const {
-      greeting,
-      weather,
-      calendar,
-      priorities,
-      portfolio,
-      health
-    } = brief;
+    const { greeting, weather, calendar, priorities, portfolio, health } = brief;
 
-    let message = `${greeting || "Good morning!"}\n\n`;
+    let message = greeting || "Good morning!";
 
-    if (weather) {
-      message += `🌤️ ${weather}\n\n`;
+    // Health — one tight line
+    if (health && (health.sleepScore || health.readiness)) {
+      const parts = [];
+      if (health.sleepScore) parts.push(`Sleep ${health.sleepScore}`);
+      if (health.readiness) parts.push(`Readiness ${health.readiness}`);
+      message += `\n\n${parts.join(" · ")}`;
     }
 
+    // Calendar — compact list
     if (calendar && calendar.length > 0) {
-      message += `📅 Today's Schedule:\n`;
+      message += "\n\n";
       calendar.slice(0, 3).forEach(event => {
-        message += `• ${event.time}: ${event.title}\n`;
+        message += `${event.time} ${event.title}\n`;
       });
-      message += "\n";
     }
 
+    // Priorities — numbered, no header bloat
     if (priorities && priorities.length > 0) {
-      message += `🎯 Top Priorities:\n`;
+      message += "\n";
       priorities.slice(0, 3).forEach((p, i) => {
         message += `${i + 1}. ${p}\n`;
       });
-      message += "\n";
     }
 
+    // Portfolio — top movers or summary
     if (portfolio) {
-      const sign = portfolio.change >= 0 ? "+" : "";
-      message += `💼 Portfolio: ${sign}${portfolio.changePercent.toFixed(2)}% (${sign}$${portfolio.change.toFixed(2)})\n`;
+      if (portfolio.topMovers && portfolio.topMovers.length > 0) {
+        message += `\n${portfolio.topMovers.join(" | ")}`;
+      } else if (portfolio.changePercent != null) {
+        const sign = portfolio.changePercent >= 0 ? "+" : "";
+        message += `\nPortfolio ${sign}${portfolio.changePercent.toFixed(1)}%`;
+      }
     }
 
-    if (health) {
-      message += `💤 Sleep: ${health.sleepScore || "N/A"} | ❤️ Readiness: ${health.readiness || "N/A"}\n`;
+    if (weather) {
+      message += `\n\n${weather}`;
     }
-
-    message += "\nReply with questions or updates!";
 
     const result = await this.send(NOTIFICATION_TYPE.MORNING_BRIEF, message, {
       identifier: `morning_${today}`,

@@ -266,6 +266,31 @@ const SmartGoalsPanelBase = ({
       const tracker = getGoalTracker();
       const allGoals = tracker.getAll();
 
+      // Reactivate completed goals whose project is still active/working
+      try {
+        const projectManager = getProjectManager();
+        const projects = projectManager.listProjects();
+        const activeProjectNames = new Set(
+          projects
+            .filter(p => {
+              const s = (p.status || "").toLowerCase();
+              return s.includes("active") || s.includes("progress") || s.includes("working");
+            })
+            .map(p => p.name.toLowerCase())
+        );
+
+        for (const goal of allGoals) {
+          if (goal.status === "completed" && goal.project) {
+            const goalProjectName = goal.project.toLowerCase();
+            if (activeProjectNames.has(goalProjectName)) {
+              tracker.reopenGoal(goal.id);
+            }
+          }
+        }
+      } catch (e) {
+        // Project manager not available, skip reactivation
+      }
+
       // Sort: active/on-hold first, then by priority; exclude completed from panel
       const sortedGoals = [...allGoals]
         .filter(g => g.status !== "completed")

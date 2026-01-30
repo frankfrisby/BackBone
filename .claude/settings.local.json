@@ -115,7 +115,8 @@
       "Bash(cmd /c \"if exist C:\\\\Users\\\\frank\\\\Documents\\\\backbone_ref echo EXISTS\")",
       "Bash(cmd /c \"if not exist C:\\\\Users\\\\frank\\\\Documents\\\\backbone_ref echo NOTFOUND\")",
       "WebFetch(domain:dev.to)",
-      "WebFetch(domain:medium.com)"
+      "WebFetch(domain:medium.com)",
+      "Bash(del \"C:\\\\Users\\\\frank\\\\Documents\\\\agi_engine\\\\backbone\\\\test-brief.mjs\")"
     ]
   },
   "enabledMcpjsonServers": [

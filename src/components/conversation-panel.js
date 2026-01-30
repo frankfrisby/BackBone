@@ -223,7 +223,7 @@ const ConversationPanelBase = ({ messages, isLoading, streamingText, actionStrea
         paddingY: 1,
         overflow: "hidden",
         width: "100%",
-        height: 12
+        height: 15
       },
       e(
         Box,
@@ -248,7 +248,7 @@ const ConversationPanelBase = ({ messages, isLoading, streamingText, actionStrea
   // Show messages with scroll support
   // scrollOffset=0 means latest messages, higher values scroll back in history
   const isStreaming = streamingText || actionStreamingText;
-  const maxVisible = isStreaming ? 1 : 3;
+  const maxVisible = isStreaming ? 1 : 4;
   const endIdx = messages.length - scrollOffset;
   const startIdx = Math.max(0, endIdx - maxVisible);
   const visibleMessages = messages.slice(startIdx, Math.max(startIdx + maxVisible, endIdx));
@@ -261,7 +261,7 @@ const ConversationPanelBase = ({ messages, isLoading, streamingText, actionStrea
       paddingY: 1,
       overflow: "hidden",
       width: "100%",
-      height: 12
+      height: 15
     },
     e(
       Box,

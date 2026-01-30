@@ -313,6 +313,25 @@ export class GoalTracker extends EventEmitter {
   }
 
   /**
+   * Reopen a completed goal (set status back to active)
+   * Used when a project linked to this goal is reopened/reactivated
+   */
+  reopenGoal(goalId) {
+    const goal = this.getById(goalId);
+    if (!goal) return null;
+    if (goal.status !== GOAL_STATUS.COMPLETED) return goal; // Only reopen completed goals
+
+    goal.status = GOAL_STATUS.ACTIVE;
+    goal.updatedAt = new Date().toISOString();
+    delete goal.completedAt;
+    this.save();
+
+    this.emit("goal-reopened", goal);
+    this.emit("status-updated", goal);
+    return goal;
+  }
+
+  /**
    * Delete a goal
    */
   deleteGoal(goalId) {

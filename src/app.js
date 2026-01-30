@@ -201,7 +201,6 @@ import { getClaudeCodeMonitor } from "./services/claude-code-monitor.js";
 import { getStartupEngine } from "./services/startup-engine.js";
 import { getClaudeEngine } from "./services/claude-engine.js";
 import { startRealtimeSync, stopRealtimeSync, isAuthenticated as isFirestoreAuthenticated, pushTickers } from "./services/firestore-sync.js";
-
 // Initialize Claude Code connection monitor
 console.log("[App] Initializing Claude Code monitor...");
 const _claudeCodeMonitor = getClaudeCodeMonitor();
@@ -440,6 +439,108 @@ const App = ({ updateConsoleTitle }) => {
     }
   }, [stdout]);
 
+  // Build morning brief from live data sources for both conversation + WhatsApp
+  const buildMorningBrief = () => {
+    try {
+      const now = new Date();
+      const dayName = now.toLocaleDateString("en-US", { weekday: "long" });
+      const dateStr = now.toLocaleDateString("en-US", { month: "long", day: "numeric" });
+
+      // Gather health data
+      let health = null;
+      try {
+        const oura = loadOuraData();
+        if (oura?.sleep) {
+          health = {
+            sleepScore: oura.sleep.score || oura.sleep.sleepScore || null,
+            readiness: oura.readiness?.score || null
+          };
+        }
+      } catch (e) { /* no health data */ }
+
+      // Gather active goals
+      const priorities = [];
+      try {
+        const goals = getGoalTracker().getActive();
+        goals.slice(0, 3).forEach(g => {
+          priorities.push(g.title.length > 50 ? g.title.slice(0, 47) + "..." : g.title);
+        });
+      } catch (e) { /* no goals */ }
+
+      // Gather calendar events
+      let calendar = [];
+      try {
+        const events = getUpcomingEvents(3);
+        calendar = events.map(ev => ({
+          time: new Date(ev.start).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }),
+          title: (ev.summary || ev.subject || "Event").slice(0, 40)
+        }));
+      } catch (e) { /* no calendar */ }
+
+      // Gather portfolio snapshot
+      let portfolio = null;
+      try {
+        const cachePath = path.join(process.cwd(), "data", "tickers-cache.json");
+        if (fs.existsSync(cachePath)) {
+          const cache = JSON.parse(fs.readFileSync(cachePath, "utf-8"));
+          const tickers = cache.tickers || [];
+          if (tickers.length > 0) {
+            const movers = [...tickers]
+              .filter(t => t.changePercent != null)
+              .sort((a, b) => Math.abs(b.changePercent) - Math.abs(a.changePercent))
+              .slice(0, 3);
+            if (movers.length > 0) {
+              const avgChange = movers.reduce((s, t) => s + (t.changePercent || 0), 0) / movers.length;
+              portfolio = {
+                change: 0,
+                changePercent: avgChange,
+                topMovers: movers.map(t => `${t.symbol} ${t.changePercent >= 0 ? "+" : ""}${t.changePercent.toFixed(1)}%`)
+              };
+            }
+          }
+        }
+      } catch (e) { /* no portfolio */ }
+
+      // Skip if nothing to report
+      if (!health && priorities.length === 0 && calendar.length === 0 && !portfolio) {
+        return null;
+      }
+
+      const greeting = `Good morning! Here's your ${dayName}, ${dateStr} brief.`;
+
+      // Build clean conversation text
+      let conversationText = `MORNING BRIEFING — ${dayName}, ${dateStr}\n\n`;
+      if (health) {
+        conversationText += `Sleep: ${health.sleepScore || "—"} | Readiness: ${health.readiness || "—"}\n\n`;
+      }
+      if (calendar.length > 0) {
+        conversationText += "Today:\n";
+        calendar.forEach(ev => { conversationText += `  ${ev.time} — ${ev.title}\n`; });
+        conversationText += "\n";
+      }
+      if (priorities.length > 0) {
+        conversationText += "Focus:\n";
+        priorities.forEach((p, i) => { conversationText += `  ${i + 1}. ${p}\n`; });
+        conversationText += "\n";
+      }
+      if (portfolio) {
+        conversationText += "Markets: " + portfolio.topMovers.join(", ") + "\n";
+      }
+
+      return {
+        greeting,
+        health,
+        calendar,
+        priorities,
+        portfolio,
+        conversationText
+      };
+    } catch (e) {
+      console.error("[MorningBrief] Build failed:", e.message);
+      return null;
+    }
+  };
+
   // Initialize app: load remote config from Firebase, then show main app
   useEffect(() => {
     const init = async () => {
@@ -492,6 +593,77 @@ const App = ({ updateConsoleTitle }) => {
           console.log("[Cron] News fetch skipped (too recent)");
         }
       });
+      cronManager.on("run:runMorningBriefing", async () => {
+        try {
+          const brief = buildMorningBrief();
+          if (!brief) return;
+
+          // Inject into conversation panel
+          setMessages(prev => [...prev, {
+            role: "assistant",
+            content: brief.conversationText,
+            timestamp: new Date()
+          }]);
+
+          // Send clean version to WhatsApp
+          try {
+            await whatsappNotifications.sendMorningBrief(brief);
+          } catch (e) {
+            console.error("[Cron] WhatsApp morning brief failed:", e.message);
+          }
+
+          // Track that briefing was sent today
+          const briefingStatePath = path.join(process.cwd(), "data", "last-briefing.json");
+          fs.writeFileSync(briefingStatePath, JSON.stringify({
+            lastSentDate: new Date().toISOString().split("T")[0],
+            sentAt: new Date().toISOString()
+          }, null, 2));
+          console.log("[Cron] Morning briefing sent");
+        } catch (e) {
+          console.error("[Cron] Morning briefing failed:", e.message);
+        }
+      });
+
+      // Startup catch-up: send morning briefing if missed today
+      try {
+        const today = new Date().toISOString().split("T")[0];
+        const briefingStatePath = path.join(process.cwd(), "data", "last-briefing.json");
+        let lastSentDate = null;
+        if (fs.existsSync(briefingStatePath)) {
+          const state = JSON.parse(fs.readFileSync(briefingStatePath, "utf-8"));
+          lastSentDate = state.lastSentDate;
+        }
+        if (lastSentDate !== today) {
+          const now = new Date();
+          const hour = now.getHours();
+          // Only auto-send if it's after 8:30 (the scheduled time) and before midnight
+          if (hour >= 9) {
+            const brief = buildMorningBrief();
+            if (brief) {
+              setMessages(prev => [...prev, {
+                role: "assistant",
+                content: brief.conversationText,
+                timestamp: new Date()
+              }]);
+
+              // Send to WhatsApp
+              try {
+                await whatsappNotifications.sendMorningBrief(brief);
+              } catch (e) {
+                // Silent - WhatsApp may not be configured
+              }
+
+              fs.writeFileSync(briefingStatePath, JSON.stringify({
+                lastSentDate: today,
+                sentAt: new Date().toISOString()
+              }, null, 2));
+              console.log("[App] Startup catch-up: morning briefing sent");
+            }
+          }
+        }
+      } catch (e) {
+        console.error("[App] Startup briefing check failed:", e.message);
+      }
 
       // Run API health check to verify tokens are available
       // This clears quota exceeded state if tokens were added
@@ -6494,13 +6666,45 @@ Folder: ${result.action.id}`,
                 psych = pct > 0 ? -psych : psych;
               }
 
-              // Estimate MACD contribution
+              // Estimate MACD contribution using slope when available
               let macdAdj = 0;
-              if (t.macd?.histogram != null) {
+              let macdMethod = "value";
+              if (t.macd?.histogramArray && t.macd.histogramArray.length >= 6) {
+                // Slope-based: direction of histogram matters, not value
+                const ha = t.macd.histogramArray;
+                const pts = [];
+                ha.forEach((v, idx) => { if (v != null) pts.push({ x: 5 - idx, y: v }); });
+                if (pts.length >= 3) {
+                  const n = pts.length;
+                  const xM = pts.reduce((s, p) => s + p.x, 0) / n;
+                  const yM = pts.reduce((s, p) => s + p.y, 0) / n;
+                  let num = 0, den = 0;
+                  for (const p of pts) { num += (p.x - xM) * (p.y - yM); den += (p.x - xM) ** 2; }
+                  if (den !== 0) {
+                    const slope = -(num / den);
+                    const dir = Math.abs(slope) > 0.01 ? (slope > 0 ? 1 : -1) : 0;
+                    const mag = Math.min(1, Math.abs(slope) * 10);
+                    let raw = dir * mag;
+                    // Position-in-range factor
+                    if (t.macd.macdLine != null && t.macd.macdLineMin != null && t.macd.macdLineMax != null) {
+                      const range = t.macd.macdLineMax - t.macd.macdLineMin;
+                      if (range > 0) {
+                        const pos = (t.macd.macdLine - t.macd.macdLineMin) / range;
+                        const posFactor = 1 - Math.abs(pos - 0.5) * 1.2;
+                        raw *= Math.max(0.3, Math.min(1.0, posFactor));
+                      }
+                    }
+                    macdAdj = Math.max(-2.5, Math.min(2.5, raw * 2.5));
+                    macdMethod = "slope";
+                  }
+                }
+              }
+              if (macdMethod === "value" && t.macd?.histogram != null) {
+                // Fallback: simple histogram value (legacy)
                 const hist = t.macd.histogram;
-                if (hist > 0.5) macdAdj = Math.min(1, hist / 2) * 2.5;
-                else if (hist < -0.5) macdAdj = Math.max(-1, hist / 2) * 2.5;
-                else macdAdj = (hist / 0.5) * 0.5 * 2.5;
+                if (hist > 0.5) macdAdj = Math.min(1, hist / 2) * 1.5;
+                else if (hist < -0.5) macdAdj = Math.max(-1, hist / 2) * 1.5;
+                else macdAdj = (hist / 0.5) * 0.5 * 1.5;
               }
 
               // Volume score estimate
@@ -6528,7 +6732,7 @@ Folder: ${result.action.id}`,
               }
 
               content += `\n${i + 1}. ${t.symbol} (${t.name?.substring(0, 25) || ""})\n`;
-              content += `   MACD: ${t.macd?.macd?.toFixed(2) || "N/A"} | Signal: ${t.macd?.signal?.toFixed(2) || "N/A"} | Hist: ${t.macd?.histogram?.toFixed(2) || "N/A"} → Adj: ${macdAdj >= 0 ? "+" : ""}${macdAdj.toFixed(2)}\n`;
+              content += `   MACD: ${t.macd?.macd?.toFixed(2) || "N/A"} | Signal: ${t.macd?.signal?.toFixed(2) || "N/A"} | Hist: ${t.macd?.histogram?.toFixed(2) || "N/A"} → Adj: ${macdAdj >= 0 ? "+" : ""}${macdAdj.toFixed(2)} (${macdMethod})\n`;
               content += `   RSI: ${t.rsi || "N/A"} ${t.rsi && t.rsi < 30 ? "(OVERSOLD)" : t.rsi && t.rsi > 70 ? "(OVERBOUGHT)" : ""}\n`;
               content += `   Volume: ${sigma.toFixed(2)}σ → Score: ${volScore >= 0 ? "+" : ""}${volScore.toFixed(2)}\n`;
               content += `   PricePos: ${pricePosLabel} → Score: ${detailPricePos >= 0 ? "+" : ""}${detailPricePos.toFixed(2)} (×1.25 = ${(detailPricePos * 1.25) >= 0 ? "+" : ""}${(detailPricePos * 1.25).toFixed(2)})\n`;
@@ -7493,17 +7697,57 @@ Folder: ${result.action.id}`,
         return;
       }
 
-      // /morning - Morning Briefing
-      if (resolved === "/morning" || resolved === "/briefing") {
-        const briefing = getMorningBriefing();
-        setMessages((prev) => [
-          ...prev,
-          {
+      // /morning - Morning Briefing (show in conversation)
+      // /morning test - Build + send to WhatsApp as a test
+      if (resolved === "/morning" || resolved === "/briefing" || resolved === "/morning test" || resolved === "/briefing test") {
+        const isTest = resolved.includes("test");
+        const brief = buildMorningBrief();
+
+        if (!brief) {
+          setMessages((prev) => [...prev, {
             role: "assistant",
-            content: briefing,
+            content: "No data available for morning brief right now (no health, goals, calendar, or market data).",
             timestamp: new Date()
-          }
-        ]);
+          }]);
+          setLastAction("Morning briefing (empty)");
+          return;
+        }
+
+        // Always show in conversation
+        setMessages((prev) => [...prev, {
+          role: "assistant",
+          content: brief.conversationText,
+          timestamp: new Date()
+        }]);
+
+        // If test mode, also send to WhatsApp
+        if (isTest) {
+          (async () => {
+            try {
+              const result = await whatsappNotifications.sendMorningBrief(brief);
+              if (result.success) {
+                setMessages((prev) => [...prev, {
+                  role: "assistant",
+                  content: "Sent to WhatsApp.",
+                  timestamp: new Date()
+                }]);
+              } else {
+                setMessages((prev) => [...prev, {
+                  role: "assistant",
+                  content: `WhatsApp send failed: ${result.error || "unknown error"}`,
+                  timestamp: new Date()
+                }]);
+              }
+            } catch (e) {
+              setMessages((prev) => [...prev, {
+                role: "assistant",
+                content: `WhatsApp error: ${e.message}`,
+                timestamp: new Date()
+              }]);
+            }
+          })();
+        }
+
         setLastAction("Morning briefing");
         return;
       }
@@ -9327,15 +9571,39 @@ Folder: ${result.action.id}`,
           // Dots: gray=pending, gray-blink=working, green=complete, red=failed
           e(SmartGoalsPanel, { autoGenerate: true, privateMode }),
 
-          // Outcomes (from narrator) - 10-15 word descriptions, up to 2 lines each
+          // Outcomes: completed goals + narrator observations
           e(
             Box,
             { flexDirection: "column", marginTop: 1, flexGrow: 1 },
             e(Text, { color: "#64748b" }, "Outcomes:"),
+            // Completed goals shown as green dots
+            ...(() => {
+              try {
+                const completedGoals = getGoalTracker().getAll().filter(g => g.status === "completed");
+                return completedGoals.slice(0, 3).map((goal, i) => {
+                  const projectName = goal.project || goal.projectName || goal.category || "";
+                  const label = projectName ? `${goal.title} (${projectName})` : goal.title;
+                  return e(
+                    Box,
+                    { key: `cg-${i}`, flexDirection: "row", marginBottom: 1 },
+                    e(Text, { color: "#22c55e" }, "●  "),
+                    e(Text, { color: "#22c55e", wrap: "wrap" }, label.slice(0, 80))
+                  );
+                });
+              } catch (err) {
+                return [];
+              }
+            })(),
+            // Narrator observations
             ...(() => {
               const data = activityNarrator.getDisplayData();
               const observations = data.observations || [];
               if (observations.length === 0) {
+                // Only show empty state if no completed goals either
+                try {
+                  const hasCompleted = getGoalTracker().getAll().some(g => g.status === "completed");
+                  if (hasCompleted) return [];
+                } catch (err) { /* ignore */ }
                 return [e(Text, { key: "no-obs", color: "#475569", dimColor: true }, "  No outcomes yet")];
               }
               return observations.slice(0, maxOutcomesToShow).map((obs, i) => {

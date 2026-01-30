@@ -302,11 +302,17 @@ const calculateEMA = (prices, period) => {
 };
 
 /**
- * Calculate MACD
+ * Calculate MACD with histogram array for slope-based scoring
+ *
+ * Returns histogramArray (last 6 values) so score-engine can use
+ * slope analysis instead of raw histogram value. This fixes the
+ * inversion bug where a peaked positive histogram scored as bullish
+ * when it actually means momentum is fading (bearish).
  */
 const calculateMACD = (bars) => {
+  const nullResult = { macd: null, signal: null, histogram: null, trend: "neutral", histogramArray: null, macdLine: null, macdLineMin: null, macdLineMax: null };
   if (!bars || bars.length < 35) {
-    return { macd: null, signal: null, histogram: null, trend: "neutral" };
+    return nullResult;
   }
 
   const closes = bars.map(b => b.close);
@@ -314,19 +320,46 @@ const calculateMACD = (bars) => {
   const longEMA = calculateEMA(closes, 26);
 
   if (!shortEMA || !longEMA) {
-    return { macd: null, signal: null, histogram: null, trend: "neutral" };
+    return nullResult;
   }
 
   const macd = shortEMA - longEMA;
+
+  // Build MACD line history and track min/max for position-in-range factor
   const macdHistory = [];
+  let macdMin = Infinity, macdMax = -Infinity;
   for (let i = 26; i <= closes.length; i++) {
     const s = calculateEMA(closes.slice(0, i), 12);
     const l = calculateEMA(closes.slice(0, i), 26);
-    if (s && l) macdHistory.push(s - l);
+    if (s && l) {
+      const val = s - l;
+      macdHistory.push(val);
+      macdMin = Math.min(macdMin, val);
+      macdMax = Math.max(macdMax, val);
+    }
   }
 
   const signal = macdHistory.length >= 9 ? calculateEMA(macdHistory, 9) : macd;
   const histogram = macd - signal;
+
+  // Build histogram history for slope analysis
+  const histogramHistory = [];
+  for (let i = 9; i <= macdHistory.length; i++) {
+    const signalVal = calculateEMA(macdHistory.slice(0, i), 9);
+    if (signalVal !== null) {
+      histogramHistory.push(macdHistory[i - 1] - signalVal);
+    }
+  }
+
+  // Last 6 histogram values for slope-based scoring
+  // This enables score-engine to detect direction (rising vs falling)
+  // instead of just using the raw value (which is inverted at peaks)
+  let histogramArray = null;
+  if (histogramHistory.length >= 6) {
+    histogramArray = histogramHistory.slice(-6);
+  } else if (histogramHistory.length > 0) {
+    histogramArray = [...Array(6 - histogramHistory.length).fill(null), ...histogramHistory];
+  }
 
   let trend = "neutral";
   if (macd > signal && histogram > 0) trend = "bullish";
@@ -336,7 +369,11 @@ const calculateMACD = (bars) => {
     macd: Math.round(macd * 100) / 100,
     signal: Math.round(signal * 100) / 100,
     histogram: Math.round(histogram * 100) / 100,
-    trend
+    trend,
+    histogramArray,
+    macdLine: macd,
+    macdLineMin: macdMin !== Infinity ? macdMin : null,
+    macdLineMax: macdMax !== -Infinity ? macdMax : null
   };
 };
 
@@ -466,15 +503,47 @@ const calculatePsychological = (percentChange) => {
 };
 
 /**
- * Calculate MACD adjustment score (-1.5 to +1.5)
- * Reduced from reference (-2.5 to +2.5) since we lack multi-timeframe analysis
+ * Calculate MACD adjustment score (-2.5 to +2.5)
+ * Uses slope-based analysis on histogram array when available.
  *
- * Without the sophisticated 15d/5d/2d weighted analysis from reference,
- * we use a simpler histogram-based approach with reduced weight.
+ * Key insight: histogram VALUE and histogram DIRECTION are different signals.
+ * A large positive histogram that has peaked means momentum is FADING (bearish),
+ * not bullish. The slope of the histogram tells us the true direction:
+ * - Rising histogram (positive slope) = momentum building = bullish
+ * - Falling histogram (negative slope) = momentum fading = bearish
+ *
+ * Falls back to simple histogram scoring only when histogramArray is unavailable.
  */
 const calculateMACDScore = (macdData) => {
   if (!macdData || macdData.histogram === null) return 0;
 
+  // Slope-based analysis when histogram array is available
+  if (macdData.histogramArray && macdData.histogramArray.length >= 6) {
+    const slopeResult = calculateHistogramSlope(macdData.histogramArray);
+
+    if (slopeResult.isValid) {
+      const dirMultiplier = slopeResult.direction === "positive" ? 1 :
+                            slopeResult.direction === "negative" ? -1 : 0;
+      const scaledMag = Math.min(1, slopeResult.magnitude * 10);
+      let rawAdj = dirMultiplier * scaledMag;
+
+      // Apply position-in-range factor if MACD line range is available
+      // Rewards mid-range positions, reduces score at extremes
+      if (macdData.macdLine != null && macdData.macdLineMin != null && macdData.macdLineMax != null) {
+        const range = macdData.macdLineMax - macdData.macdLineMin;
+        if (range > 0) {
+          const pos = (macdData.macdLine - macdData.macdLineMin) / range; // 0 to 1
+          // Peak factor: highest at mid-range (0.5), lowest at extremes (0 or 1)
+          const posFactor = 1 - Math.abs(pos - 0.5) * 1.2;
+          rawAdj *= Math.max(0.3, Math.min(1.0, posFactor));
+        }
+      }
+
+      return Math.max(-2.5, Math.min(2.5, rawAdj * 2.5));
+    }
+  }
+
+  // Fallback: simple histogram-based scoring (no slope data available)
   const { histogram, macd, signal, trend } = macdData;
 
   let score = 0;
@@ -493,8 +562,60 @@ const calculateMACDScore = (macdData) => {
     score -= 0.25;
   }
 
-  // Reduced weight: 1.5 instead of 2.5 since we lack multi-timeframe analysis
+  // Reduced weight for fallback since we lack slope data
   return Math.max(-1.5, Math.min(1.5, score * 1.5));
+};
+
+/**
+ * Calculate histogram slope via linear regression
+ * Determines if the histogram is rising (bullish) or falling (bearish)
+ *
+ * @param {(number|null)[]} histArray - Last 6 histogram values [day5..day0]
+ * @returns {{slope: number, direction: string, magnitude: number, isValid: boolean}}
+ */
+const calculateHistogramSlope = (histArray) => {
+  if (!histArray || histArray.length !== 6) {
+    return { slope: 0, direction: "neutral", magnitude: 0, isValid: false };
+  }
+
+  // Filter nulls and build valid data points
+  const points = [];
+  histArray.forEach((val, idx) => {
+    if (val !== null && val !== undefined) {
+      points.push({ x: 5 - idx, y: val }); // x: 5=oldest, 0=newest
+    }
+  });
+
+  if (points.length < 3) {
+    return { slope: 0, direction: "neutral", magnitude: 0, isValid: false };
+  }
+
+  // Linear regression
+  const n = points.length;
+  const xMean = points.reduce((s, p) => s + p.x, 0) / n;
+  const yMean = points.reduce((s, p) => s + p.y, 0) / n;
+
+  let num = 0, den = 0;
+  for (const p of points) {
+    const dx = p.x - xMean;
+    const dy = p.y - yMean;
+    num += dx * dy;
+    den += dx * dx;
+  }
+
+  if (den === 0) {
+    return { slope: 0, direction: "neutral", magnitude: 0, isValid: false };
+  }
+
+  // Invert so positive slope = histogram rising = bullish
+  const slope = -(num / den);
+
+  let direction = "neutral";
+  if (Math.abs(slope) > 0.01) {
+    direction = slope > 0 ? "positive" : "negative";
+  }
+
+  return { slope, direction, magnitude: Math.abs(slope), isValid: true };
 };
 
 /**

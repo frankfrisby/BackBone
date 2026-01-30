@@ -3956,8 +3956,8 @@ Execute this task and provide concrete results.`);
               fullScanRunning: result.fullScanRunning || false,
               scanProgress: result.scanProgress || 0,
               scanTotal: result.scanTotal || 0,
-              evaluatedToday: result.tickers.filter(t => isTickerToday(t.lastEvaluated)).length,
-              universeSize: result.tickers.length || TICKER_UNIVERSE.length,
+              evaluatedToday: result.evaluatedToday ?? result.tickers.filter(t => isTickerToday(t.lastEvaluated)).length,
+              universeSize: result.universeSize || TICKER_UNIVERSE.length,
               updateHistory,
             };
           });

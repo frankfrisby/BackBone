@@ -564,9 +564,22 @@ export const runClaudeCodeStreaming = async (prompt, options = {}) => {
   const modelToUse = options.model || getCurrentModelInUse();
   const isUsingFallback = modelToUse === FALLBACK_MODEL;
 
-  // Build args with model selection
-  // Use plain --print mode - stream-json requires --verbose which has issues
-  const args = ["--model", modelToUse, "--print"];
+  // Build args with model selection, stream-json for structured output, and permissions bypass
+  const mcpTools = [
+    "mcp__backbone-google", "mcp__backbone-linkedin", "mcp__backbone-contacts",
+    "mcp__backbone-news", "mcp__backbone-life", "mcp__backbone-health",
+    "mcp__backbone-trading", "mcp__backbone-projects",
+  ];
+  const allowedTools = [
+    "Read", "Glob", "Grep", "WebFetch", "WebSearch", "Task",
+    "Write", "Edit", "Bash", ...mcpTools
+  ];
+  const args = [
+    "--model", modelToUse, "--print",
+    "--verbose", "--output-format", "stream-json",
+    "--dangerously-skip-permissions",
+    "--allowedTools", allowedTools.join(",")
+  ];
 
   console.log(`[ClaudeCodeCLI] Spawning: claude --model ${modelToUse} --print`);
   console.log(`[ClaudeCodeCLI] Prompt length: ${prompt.length} chars`);
@@ -594,42 +607,62 @@ export const runClaudeCodeStreaming = async (prompt, options = {}) => {
   let rateLimitDetected = false;
 
   let fullOutput = "";
-  const pendingActions = new Map();
+  let lineBuffer = "";
 
-  // Parse text output for tool calls
-  const parseOutput = (text) => {
-    fullOutput += text;
-
-    // Detect tool calls (format varies, this handles common patterns)
-    const toolPatterns = [
-      /\[TOOL\]\s*(\w+)\((.*?)\)/g,
-      /Running:\s*(\w+)\s*\((.*?)\)/g,
-      /◆\s*(\w+)\((.*?)\)/g,
-      /●\s*(\w+)\((.*?)\)/g
-    ];
-
-    for (const pattern of toolPatterns) {
-      let match;
-      while ((match = pattern.exec(text)) !== null) {
-        const tool = { tool: match[1], input: match[2], timestamp: Date.now() };
-        emitter.emit("tool", tool);
+  // Parse a stream-json line and emit structured events
+  const processStreamLine = (line) => {
+    if (!line.trim()) return;
+    try {
+      const msg = JSON.parse(line);
+      switch (msg.type) {
+        case "assistant": {
+          const text = msg.message?.content?.[0]?.text || "";
+          if (text) {
+            fullOutput = text;
+            emitter.emit("data", text);
+          }
+          break;
+        }
+        case "tool_use": {
+          const tool = msg.tool?.name || msg.name || "unknown";
+          const input = JSON.stringify(msg.tool?.input || msg.input || {}).slice(0, 200);
+          emitter.emit("tool", { tool, input, timestamp: Date.now() });
+          emitter.emit("data", `[Tool] ${tool}: ${input}\n`);
+          break;
+        }
+        case "tool_result": {
+          const content = typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content || "").slice(0, 300);
+          emitter.emit("data", content + "\n");
+          break;
+        }
+        case "result": {
+          const resultText = msg.result || "";
+          if (resultText) fullOutput = resultText;
+          break;
+        }
       }
+    } catch {
+      // Not JSON — emit as raw text
+      fullOutput += line;
+      emitter.emit("data", line);
     }
-
-    emitter.emit("data", text);
   };
 
   proc.stdout.on("data", (data) => {
-    const text = data.toString();
-    console.log(`[ClaudeCodeCLI] stdout: ${text.slice(0, 100)}${text.length > 100 ? "..." : ""}`);
+    const chunk = data.toString();
 
     // Check for rate limit in output
-    if (!rateLimitDetected && isRateLimitError(text)) {
+    if (!rateLimitDetected && isRateLimitError(chunk)) {
       rateLimitDetected = true;
       console.log(`[ClaudeCodeCLI] Rate limit detected in stdout`);
     }
 
-    parseOutput(text);
+    lineBuffer += chunk;
+    const lines = lineBuffer.split("\n");
+    lineBuffer = lines.pop() || "";
+    for (const line of lines) {
+      processStreamLine(line);
+    }
   });
 
   proc.stderr.on("data", (data) => {
@@ -646,6 +679,8 @@ export const runClaudeCodeStreaming = async (prompt, options = {}) => {
   });
 
   proc.on("close", (code) => {
+    // Process any remaining buffered line
+    if (lineBuffer.trim()) processStreamLine(lineBuffer);
     console.log(`[ClaudeCodeCLI] Process closed with code: ${code}`);
 
     // If rate limit detected and we were using Opus, retry with Sonnet

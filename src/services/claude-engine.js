@@ -36,9 +36,9 @@ class ClaudeEngine extends EventEmitter {
     this.currentBackend = null;
     this.currentStartTime = null;
     this.currentLogPath = null;
-    this.triedCodexFallback = false;
+    this.triedRetry = false;
     this.lastRunCompletedAt = null;
-    this.lastCodexRateLimitAt = null;
+    this.lastRateLimitAt = null;
     this.lastLogSize = 0;
   }
 
@@ -101,14 +101,6 @@ class ClaudeEngine extends EventEmitter {
     try {
       updateProjects({ currentWorkingProject: projectName });
     } catch (e) {}
-  }
-
-  async isCodexAvailable() {
-    return new Promise((resolve) => {
-      exec("codex --version", { timeout: 5000 }, (err) => {
-        resolve(!err);
-      });
-    });
   }
 
   /**
@@ -280,7 +272,7 @@ Start by reading engine-work-log.md to see recent work, then update the priority
     }
 
     if (!backendOverride) {
-      this.triedCodexFallback = false;
+      this.triedRetry = false;
     }
 
     const now = Date.now();
@@ -294,12 +286,11 @@ Start by reading engine-work-log.md to see recent work, then update the priority
     }
 
     const status = await getClaudeCodeStatus();
-    const codexAvailable = await this.isCodexAvailable();
-    const backend = backendOverride || (status.ready ? "claude" : (codexAvailable ? "codex" : null));
+    const backend = backendOverride || (status.ready ? "claude" : null);
 
     if (!backend) {
-      this.emit("status", "No CLI available (Claude Code or Codex)");
-      return { success: false, reason: "No CLI available" };
+      this.emit("status", "Claude Code CLI not ready — check installation");
+      return { success: false, reason: "Claude Code CLI not ready" };
     }
 
     this.ensureWorkFile();
@@ -309,11 +300,11 @@ Start by reading engine-work-log.md to see recent work, then update the priority
     this.currentStartTime = Date.now();
 
     const narrator = getActivityNarrator();
-    narrator.setState("WORKING", backend === "claude" ? "Claude terminal open" : "Codex terminal open");
+    narrator.setState("WORKING", "Claude terminal open");
     narrator.setGoal("Working in terminal window");
     narrator.setClaudeCodeActive(true, "working");
 
-    this.emit("status", backend === "claude" ? "Opening Claude terminal..." : "Opening Codex terminal...");
+    this.emit("status", "Opening Claude terminal...");
     this.emit("started");
 
     // Mark that we're starting work (will detect specific project later)
@@ -324,7 +315,7 @@ Start by reading engine-work-log.md to see recent work, then update the priority
 
     // Write prompt to a temp file to avoid cmd.exe quoting/newline issues
     const promptPath = path.join(os.tmpdir(), `backbone-cli-prompt-${Date.now()}.txt`);
-    const logPath = path.join(os.tmpdir(), `backbone-cli-log-${backend}-${Date.now()}.txt`);
+    const logPath = path.join(os.tmpdir(), `backbone-cli-log-claude-${Date.now()}.txt`);
     this.currentLogPath = logPath;
     this.lastLogSize = 0;
     fs.writeFileSync(promptPath, prompt, "utf-8");
@@ -333,18 +324,15 @@ Start by reading engine-work-log.md to see recent work, then update the priority
 
     // Create a batch script that runs CLI and then pauses briefly so user can see result
     const batchContent = `@echo off
-title BACKBONE ${backend === "claude" ? "Claude" : "Codex"}
+title BACKBONE Claude
 cd /d "${cwd}"
 echo.
 echo ========================================
-echo BACKBONE ${backend === "claude" ? "Claude" : "Codex"} Engine
+echo BACKBONE Claude Engine
 echo ========================================
 echo.
-echo Running ${backend === "claude" ? "Claude Code CLI" : "Codex CLI"}...
-${backend === "claude"
-  ? `type "${promptPath}" | "${CLAUDE_CMD}" --print --verbose --output-format stream-json --dangerously-skip-permissions --allowedTools "Read,Glob,Grep,WebFetch,WebSearch,Task,Write,Edit,Bash,mcp__backbone-google,mcp__backbone-linkedin,mcp__backbone-contacts,mcp__backbone-news,mcp__backbone-life,mcp__backbone-health,mcp__backbone-trading,mcp__backbone-projects" > "${logPath}" 2>&1`
-  : `codex exec --dangerously-bypass-approvals-and-sandbox "Read memory/current-work.md and do the work described there. Update the file when done." > "${logPath}" 2>&1`
-}
+echo Running Claude Code CLI...
+type "${promptPath}" | "${CLAUDE_CMD}" --print --verbose --output-format stream-json --dangerously-skip-permissions --allowedTools "Read,Glob,Grep,WebFetch,WebSearch,Task,Write,Edit,Bash,mcp__backbone-google,mcp__backbone-linkedin,mcp__backbone-contacts,mcp__backbone-news,mcp__backbone-life,mcp__backbone-health,mcp__backbone-trading,mcp__backbone-projects" > "${logPath}" 2>&1
 echo.
 echo ========================================
 echo Work complete. Window closing in 5 seconds...
@@ -355,7 +343,7 @@ timeout /t 5
 `;
 
     // Write batch file
-    const batchPath = path.join(os.tmpdir(), `backbone-cli-work-${backend}.bat`);
+    const batchPath = path.join(os.tmpdir(), `backbone-cli-work-claude.bat`);
     fs.writeFileSync(batchPath, batchContent);
 
     // Open a new visible terminal window in background (behind BACKBONE) and track PID
@@ -410,7 +398,7 @@ Write-Output $p.Id
       const pid = parseInt(String(stdout || "").trim(), 10);
       if (Number.isFinite(pid)) {
         this.currentPid = pid;
-        this.emit("status", `${backend === "claude" ? "Claude" : "Codex"} terminal PID: ${pid}`);
+        this.emit("status", `Claude terminal PID: ${pid}`);
       } else {
         this.currentPid = null;
       }
@@ -446,17 +434,15 @@ Write-Output $p.Id
         } catch {}
       }
 
-      if (backend === "codex" && rateLimited) {
-        this.lastCodexRateLimitAt = Date.now();
+      if (rateLimited) {
+        this.lastRateLimitAt = Date.now();
       }
-
-      const codexRateLimitedRecently = this.lastCodexRateLimitAt && (Date.now() - this.lastCodexRateLimitAt) < 10 * 60 * 1000;
 
       if (currentContent !== initialContent) {
         this.emit("status", "Work complete - files updated");
         this.emit("complete", { success: true, workStatus: currentContent });
       } else if (reason === "process-exited") {
-        this.emit("status", `${this.currentBackend === "codex" ? "Codex" : "Claude"} terminal closed`);
+        this.emit("status", "Claude terminal closed");
         this.emit("complete", { success: true, reason: "process-exited" });
       } else {
         this.emit("status", "Timeout - check terminal");
@@ -480,9 +466,9 @@ Write-Output $p.Id
         (logTail ? `### CLI Output (tail)\n\n\`\`\`\n${logTail}\n\`\`\`\n` : "");
       this.appendEngineLog(logEntry);
 
-      // If Claude hit rate limit, wait and retry Claude
-      if (!this.triedCodexFallback && rateLimited && backend === "claude") {
-        this.triedCodexFallback = true;
+      // If Claude hit rate limit, wait and retry
+      if (!this.triedRetry && rateLimited) {
+        this.triedRetry = true;
         this.emit("status", "Claude rate-limited - retrying in 2 minutes");
         setTimeout(() => {
           if (!this.isRunning) this.start("claude");
@@ -490,9 +476,9 @@ Write-Output $p.Id
         return;
       }
 
-      // If Claude exited immediately, retry Claude (not Codex) after a delay
-      if (!this.triedCodexFallback && quickExit && backend === "claude") {
-        this.triedCodexFallback = true;
+      // If Claude exited immediately, retry after a delay
+      if (!this.triedRetry && quickExit) {
+        this.triedRetry = true;
         this.emit("status", "Claude exited quickly - retrying in 30s");
         setTimeout(() => {
           if (!this.isRunning) this.start("claude");
@@ -540,10 +526,9 @@ Write-Output $p.Id
         } catch {}
       }
 
-      // If Claude hasn't produced any output in 60s, retry Claude
+      // If Claude hasn't produced any output in 60s, retry
       if (
-        backend === "claude" &&
-        !this.triedCodexFallback &&
+        !this.triedRetry &&
         elapsed > 60 * 1000
       ) {
         let logEmpty = true;
@@ -556,8 +541,8 @@ Write-Output $p.Id
         if (!logEmpty) {
           return;
         }
-        this.triedCodexFallback = true;
-        this.emit("status", "Claude stalled >60s - restarting Claude");
+        this.triedRetry = true;
+        this.emit("status", "Claude stalled >60s - restarting");
         if (this.currentPid) {
           exec(`taskkill /T /F /PID ${this.currentPid}`, { windowsHide: true }, () => {});
           this.currentPid = null;

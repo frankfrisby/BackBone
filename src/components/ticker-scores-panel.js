@@ -366,10 +366,14 @@ const TickerScoresPanelBase = ({
     );
   }
 
-  // Minimal/compact view - show 4 tickers with full run & update status
+  // Minimal/compact view - show tickers with positions prioritized
   if (viewMode === "minimal" || compact) {
-    // Override to show 4 tickers in mini view (not 5)
-    const miniTickers = sortedTickers.slice(0, 4);
+    // Build mini list: start with top 4 scored, then inject any held positions not already shown
+    const topScored = sortedTickers.slice(0, 4);
+    const topSymbols = new Set(topScored.map(t => t.symbol));
+    // Find held positions that aren't in top 4 (so their dots/amounts are visible)
+    const heldNotShown = sortedTickers.filter(t => positionMap[t.symbol] && !topSymbols.has(t.symbol));
+    const miniTickers = [...topScored, ...heldNotShown];
 
     // Calculate market status for indicator
     const getMarketStatus = () => {
@@ -500,7 +504,7 @@ const TickerScoresPanelBase = ({
         e(Text, { color: "#475569", width: 7 }, " SIGNAL"),
         e(Text, { color: "#475569", width: 8 }, "     AMT")
       ),
-      // Top 4 tickers in mini view
+      // Top scored tickers + held positions
       ...miniTickers.map((ticker, i) => {
         const isTop3 = top3Symbols.has(ticker.symbol);
         const color = getSignalColor(ticker.score);

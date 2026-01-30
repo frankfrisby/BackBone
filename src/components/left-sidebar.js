@@ -1,4 +1,4 @@
-import React, { memo, useMemo } from "react";
+import React, { memo } from "react";
 import { useAppStoreMultiple, STATE_SLICES } from "../hooks/useAppStore.js";
 import { LeftColumn } from "./left-column.js";
 
@@ -22,16 +22,11 @@ const LeftSidebarBase = () => {
   const portfolio = state[STATE_SLICES.PORTFOLIO] || {};
 
   // Extract SPY data for market context
-  const spyData = useMemo(() => {
-    const tickerList = tickers.tickers || [];
-    const spy = tickerList.find(t => t.symbol === "SPY");
-    if (!spy) return { spyPositive: null, spyChange: null };
-    const change = spy.changePercent ?? spy.change ?? 0;
-    return {
-      spyPositive: change >= 0,
-      spyChange: change,
-    };
-  }, [tickers.tickers]);
+  const tickerList = tickers.tickers || [];
+  const spy = tickerList.find(t => t.symbol === "SPY");
+  const spyData = spy
+    ? { spyPositive: (spy.changePercent ?? spy.change ?? 0) >= 0, spyChange: spy.changePercent ?? spy.change ?? 0 }
+    : { spyPositive: null, spyChange: null };
 
   return e(LeftColumn, {
     viewMode: ui.viewMode,

@@ -1,15 +1,40 @@
 {
-  "name": "backbone",
+  "name": "backbone-engine",
   "version": "3.0.0",
   "description": "Autonomous life management CLI powered by Claude AI",
-  "main": "index.js",
+  "main": "bin/backbone.js",
   "type": "module",
   "bin": {
     "backbone": "bin/backbone.js"
   },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "os": [
+    "win32",
+    "darwin",
+    "linux"
+  ],
+  "files": [
+    "bin/",
+    "src/",
+    "skills/",
+    "scripts/setup.js",
+    "scripts/postinstall.js",
+    "scripts/create-shortcut.ps1",
+    "installer/",
+    "backbone.bat",
+    ".env.example",
+    "CLAUDE.md",
+    "LICENSE"
+  ],
   "scripts": {
     "start": "node bin/backbone.js",
+    "setup": "node scripts/setup.js",
+    "postinstall": "node scripts/postinstall.js",
+    "prestart": "node scripts/prestart.js",
     "test": "node tests/autonomous-system.test.js",
+    "test:setup": "node tests/setup.test.js",
     "server": "node src/server.js",
     "yahoo": "node src/server/yahoo-finance-server.js",
     "linkedin": "node scripts/scrape-linkedin.js",
@@ -37,12 +62,17 @@
     ],
     "outputPath": "dist"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/frankfrisby/BackBone.git"
+  },
   "keywords": [
     "cli",
     "ai",
     "life",
     "productivity",
-    "claude"
+    "claude",
+    "backbone"
   ],
   "author": "",
   "license": "ISC",

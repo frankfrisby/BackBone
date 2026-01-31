@@ -2,7 +2,7 @@
   "name": "backbone",
   "version": "3.0.0",
   "description": "Autonomous life management CLI powered by Claude AI",
-  "main": "index.js",
+  "main": "bin/backbone.js",
   "type": "module",
   "bin": {
     "backbone": "bin/backbone.js"
@@ -18,24 +18,9 @@
     "icon": "node scripts/create-icon.js",
     "shortcut": "powershell -ExecutionPolicy Bypass -File scripts/create-shortcut.ps1",
     "mcp:projects": "node src/mcp/projects-server.js",
-    "build": "pkg . --targets node20-win-x64 --output dist/BackBone.exe",
-    "build:all": "pkg . --targets node20-win-x64,node20-macos-x64,node20-linux-x64 --out-path dist/",
+    "build": "node scripts/build-portable.js",
+    "build:slim": "node scripts/build-portable.js --no-node",
     "installer": "npm run build && iscc installer/backbone-setup.iss"
-  },
-  "pkg": {
-    "scripts": [
-      "src/**/*.js",
-      "bin/**/*.js",
-      "scripts/**/*.js"
-    ],
-    "assets": [
-      "skills/**/*",
-      "data/**/*"
-    ],
-    "targets": [
-      "node20-win-x64"
-    ],
-    "outputPath": "dist"
   },
   "keywords": [
     "cli",
@@ -71,6 +56,7 @@
   },
   "devDependencies": {
     "@yao-pkg/pkg": "^6.12.0",
+    "esbuild": "^0.27.2",
     "zig": "^0.3.0"
   }
 }

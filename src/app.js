@@ -5703,6 +5703,135 @@ Folder: ${result.action.id}`,
         return;
       }
 
+      // /call - Vapi AI phone call
+      if (resolved === "/call" || resolved.startsWith("/call ")) {
+        const subCommand = resolved.split(" ").slice(1).join(" ").trim();
+
+        if (subCommand === "status") {
+          try {
+            const { getVapiService } = await import("./services/vapi-service.js");
+            const vapi = getVapiService();
+            const status = vapi.getCallStatus();
+            if (!status.active) {
+              setMessages((prev) => [
+                ...prev,
+                { role: "assistant", content: "No active call.", timestamp: new Date() }
+              ]);
+            } else {
+              const transcriptText = status.transcript.length > 0
+                ? status.transcript.map(t => `  ${t.role}: ${t.text}`).join("\n")
+                : "  (no transcript yet)";
+              const tasksText = Object.keys(status.backgroundTasks).length > 0
+                ? Object.entries(status.backgroundTasks).map(([id, t]) => `  ${id}: ${t.status} — ${t.description}`).join("\n")
+                : "  (none)";
+              setMessages((prev) => [
+                ...prev,
+                {
+                  role: "assistant",
+                  content: `**Active Call**\nID: ${status.call.id}\nStatus: ${status.call.status}\nTunnel: ${status.tunnelUrl}\n\n**Transcript:**\n${transcriptText}\n\n**Background Tasks:**\n${tasksText}`,
+                  timestamp: new Date()
+                }
+              ]);
+            }
+            setLastAction("Call status displayed");
+          } catch (err) {
+            setMessages((prev) => [
+              ...prev,
+              { role: "assistant", content: `Call status error: ${err.message}`, timestamp: new Date() }
+            ]);
+          }
+          return;
+        }
+
+        if (subCommand === "end") {
+          try {
+            const { getVapiService } = await import("./services/vapi-service.js");
+            const vapi = getVapiService();
+            await vapi.endCall();
+            setMessages((prev) => [
+              ...prev,
+              { role: "assistant", content: "Call ended.", timestamp: new Date() }
+            ]);
+            setLastAction("Call ended");
+          } catch (err) {
+            setMessages((prev) => [
+              ...prev,
+              { role: "assistant", content: `End call error: ${err.message}`, timestamp: new Date() }
+            ]);
+          }
+          return;
+        }
+
+        // Default: /call or /call start — initiate call
+        setMessages((prev) => [
+          ...prev,
+          { role: "assistant", content: "Initiating phone call via Vapi...", timestamp: new Date() }
+        ]);
+
+        try {
+          const { getVapiService } = await import("./services/vapi-service.js");
+          const vapi = getVapiService();
+
+          vapi.removeAllListeners();
+
+          vapi.on("tunnel-ready", ({ url }) => {
+            setMessages((prev) => [
+              ...prev,
+              { role: "assistant", content: `Tunnel ready: ${url}`, timestamp: new Date() }
+            ]);
+          });
+
+          vapi.on("call-started", ({ callId }) => {
+            setMessages((prev) => [
+              ...prev,
+              { role: "assistant", content: `Phone is ringing... (call ${callId})`, timestamp: new Date() }
+            ]);
+          });
+
+          vapi.on("transcript", ({ role, text }) => {
+            setMessages((prev) => [
+              ...prev,
+              { role: "assistant", content: `[${role}]: ${text}`, timestamp: new Date() }
+            ]);
+          });
+
+          vapi.on("call-ended", ({ reason }) => {
+            setMessages((prev) => [
+              ...prev,
+              { role: "assistant", content: `Call ended (${reason}).`, timestamp: new Date() }
+            ]);
+          });
+
+          vapi.on("call-failed", ({ error }) => {
+            setMessages((prev) => [
+              ...prev,
+              { role: "assistant", content: `Call failed: ${error}`, timestamp: new Date() }
+            ]);
+          });
+
+          vapi.on("task-completed", ({ taskId, result }) => {
+            setMessages((prev) => [
+              ...prev,
+              { role: "assistant", content: `Background task ${taskId} completed: ${result}`, timestamp: new Date() }
+            ]);
+          });
+
+          await vapi.initialize();
+          await vapi.callUser();
+          setLastAction("Vapi call initiated");
+        } catch (err) {
+          const msg = err.message.includes("not configured")
+            ? `Vapi not configured.\n\n**Setup:**\n1. Create Firestore doc \`config/config_vapi\` with:\n   - privateKey: vapi_sk_...\n   - publicKey: vapi_pk_...\n   - phoneNumberId: phn_...\n   - userPhoneNumber: +1XXXXXXXXXX\n2. Install ngrok: https://ngrok.com/download\n3. Install SDK: npm install @vapi-ai/server-sdk\n4. Start server: npm run server`
+            : `Call failed: ${err.message}`;
+          setMessages((prev) => [
+            ...prev,
+            { role: "assistant", content: msg, timestamp: new Date() }
+          ]);
+          setLastAction("Call failed");
+        }
+        return;
+      }
+
       // /thesis - View current thesis, beliefs, and projects
       if (resolved === "/thesis" || resolved.startsWith("/thesis ")) {
         const thinkingEngine = thinkingEngineRef.current || getThinkingEngine();
@@ -6408,18 +6537,18 @@ Folder: ${result.action.id}`,
         return;
       }
 
-      // /run stock sweep - Full 800+ ticker sweep
+      // /run stock sweep - Full 800+ ticker sweep (always force-restarts from scratch)
       if (resolved === "/run stock sweep") {
         setMessages((prev) => [
           ...prev,
-          { role: "assistant", content: "Starting full stock sweep (800+ tickers)...", timestamp: new Date() }
+          { role: "assistant", content: "Force-starting full stock sweep — recalculating all tickers from scratch...", timestamp: new Date() }
         ]);
         try {
-          const result = await triggerFullScan();
+          const result = await triggerFullScan(true);
           if (result.success !== false) {
             setMessages((prev) => [
               ...prev,
-              { role: "assistant", content: "Full sweep started. Evaluating 800+ tickers in background.", timestamp: new Date() }
+              { role: "assistant", content: `Sweep ${result.force ? "restarted" : "started"}. Evaluating all ${TICKER_UNIVERSE.length || "800+"} tickers in background.`, timestamp: new Date() }
             ]);
             setTickerStatus(prev => ({ ...prev, fullScanRunning: true }));
           } else {

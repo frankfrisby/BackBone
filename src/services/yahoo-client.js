@@ -145,15 +145,20 @@ export const refreshTickers = async () => {
 };
 
 /**
- * Trigger a full scan of all CORE_TICKERS on the server
+ * Trigger a full scan of all TICKER_UNIVERSE on the server
+ * @param {boolean} force - If true, aborts any running scan, clears all lastEvaluated, and restarts from scratch
  */
-export const triggerFullScan = async () => {
+export const triggerFullScan = async (force = false) => {
   try {
     if (!(await isServerRunning())) {
       await startServer();
     }
 
-    const response = await fetch(`${SERVER_URL}/api/full-scan`, { method: "POST" });
+    const response = await fetch(`${SERVER_URL}/api/full-scan`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ force })
+    });
     if (response.ok) {
       const data = await response.json();
       return data;

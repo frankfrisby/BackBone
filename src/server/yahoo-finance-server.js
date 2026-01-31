@@ -24,6 +24,9 @@ let tickerCache = {
   scanTotal: 0
 };
 
+// Flag to signal a running full scan to abort (used by force-restart)
+let scanAbortFlag = false;
+
 const YAHOO_FINANCE_BASE = "https://query1.finance.yahoo.com/v8/finance";
 const YAHOO_CHART_BASE = "https://query1.finance.yahoo.com/v8/finance/chart";
 const REFRESH_INTERVAL = 180000; // 3 minutes
@@ -930,12 +933,40 @@ app.post("/api/refresh", async (req, res) => {
 });
 
 // Full scan - scans ALL TICKER_UNIVERSE (800+ real symbols, returns immediately, runs in background)
-app.post("/api/full-scan", (req, res) => {
-  if (tickerCache.fullScanRunning) {
+// Pass { force: true } in body to abort any running scan, clear all lastEvaluated, and restart from scratch
+app.post("/api/full-scan", async (req, res) => {
+  const force = req.body && req.body.force === true;
+
+  if (tickerCache.fullScanRunning && !force) {
     return res.json({ success: true, message: "Full scan already running" });
   }
 
-  res.json({ success: true, message: `Full scan started for ${TICKER_UNIVERSE.length} tickers` });
+  // If force and a scan is running, abort it first
+  if (tickerCache.fullScanRunning && force) {
+    console.log("[Full scan] Force restart requested — aborting current scan...");
+    scanAbortFlag = true;
+    // Wait for the running scan to stop (check every 200ms, max 10s)
+    const deadline = Date.now() + 10000;
+    while (tickerCache.fullScanRunning && Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, 200));
+    }
+    if (tickerCache.fullScanRunning) {
+      console.log("[Full scan] Warning: previous scan did not stop in time, forcing state reset");
+      tickerCache.fullScanRunning = false;
+    }
+    scanAbortFlag = false;
+  }
+
+  // If force, clear all lastEvaluated so every ticker gets re-evaluated
+  if (force) {
+    console.log(`[Full scan] Force mode — clearing lastEvaluated on all ${tickerCache.tickers.length} cached tickers`);
+    for (const ticker of tickerCache.tickers) {
+      delete ticker.lastEvaluated;
+    }
+    tickerCache.lastFullScan = null;
+  }
+
+  res.json({ success: true, message: `Full scan ${force ? "restarted" : "started"} for ${TICKER_UNIVERSE.length} tickers`, force });
   runFullScan();
 });
 
@@ -1025,7 +1056,15 @@ const runFullScan = async () => {
 
     // Fetch in batches of 5
     let evaluated = 0;
+    let aborted = false;
     for (let i = 0; i < needsEval.length; i += 5) {
+      // Check abort flag (set by force-restart)
+      if (scanAbortFlag) {
+        console.log(`[Full scan] Abort requested after ${evaluated}/${needsEval.length} tickers — stopping`);
+        aborted = true;
+        break;
+      }
+
       const batch = needsEval.slice(i, i + 5);
       const batchQuotes = await Promise.all(batch.map(fetchQuoteFromChart));
 
@@ -1061,13 +1100,17 @@ const runFullScan = async () => {
       }
     }
 
-    // Rebuild sorted list from all tickers
+    // Rebuild sorted list from all tickers (save progress even if aborted)
     const allTickers = Array.from(existingMap.values()).sort((a, b) => b.score - a.score);
     tickerCache.tickers = allTickers;
     tickerCache.lastUpdate = new Date().toISOString();
-    tickerCache.lastFullScan = new Date().toISOString();
 
-    console.log(`[${new Date().toISOString()}] FULL SCAN complete — ${allTickers.length} total tickers (${evaluated} newly evaluated). Top: ${allTickers[0]?.symbol} (${allTickers[0]?.score})`);
+    if (aborted) {
+      console.log(`[${new Date().toISOString()}] FULL SCAN aborted — saved ${evaluated} partial results. ${allTickers.length} total tickers in cache.`);
+    } else {
+      tickerCache.lastFullScan = new Date().toISOString();
+      console.log(`[${new Date().toISOString()}] FULL SCAN complete — ${allTickers.length} total tickers (${evaluated} newly evaluated). Top: ${allTickers[0]?.symbol} (${allTickers[0]?.score})`);
+    }
 
     // Persist
     const dataDir = path.join(process.cwd(), "data");

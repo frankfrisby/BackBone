@@ -9175,13 +9175,13 @@ Folder: ${result.action.id}`,
 
       // Data completeness bar — shown only in MINIMAL view
       if (data.viewMode === VIEW_MODES.MINIMAL) {
-        const dc = data.dataCompleteness || { percentage: 0, count: 0, total: 12 };
+        const dc = data.dataCompleteness || { percentage: 0 };
         const pct = dc.percentage;
         const barWidth = 10;
         const filled = Math.round((pct / 100) * barWidth);
         const empty = barWidth - filled;
-        const barColor = pct >= 75 ? "#22c55e" : pct >= 50 ? "#eab308" : "#ef4444";
-        rightSegments.push({ text: "Profile ", color: "#64748b" });
+        const barColor = pct >= 75 ? "#22c55e" : pct >= 40 ? "#eab308" : "#ef4444";
+        rightSegments.push({ text: "Knowledge ", color: "#64748b" });
         if (filled > 0) rightSegments.push({ text: "█".repeat(filled), color: barColor });
         if (empty > 0) rightSegments.push({ text: "░".repeat(empty), color: "#334155" });
         rightSegments.push({ text: ` ${pct}%`, color: barColor });

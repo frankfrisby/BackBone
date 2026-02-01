@@ -55,39 +55,234 @@ const ROLE_MODELS_PATH = path.join(DATA_DIR, "person-match-cache.json");
 const PROFILE_SECTIONS_PATH = path.join(DATA_DIR, "profile-sections.json");
 const LINKEDIN_PROFILE_PATH = path.join(DATA_DIR, "linkedin-profile.json");
 
-// Data sources for completeness scoring (12 total)
-const DATA_COMPLETENESS_SOURCES = [
-  { path: path.join(DATA_DIR, "linkedin-profile.json"), minSize: 100 },
-  { path: path.join(DATA_DIR, "core-beliefs.json"), minSize: 50 },
-  { path: path.join(DATA_DIR, "goals.json"), minSize: 50 },
-  { path: path.join(DATA_DIR, "oura-data.json"), minSize: 50 },
-  { path: path.join(DATA_DIR, "tickers-cache.json"), minSize: 50 },
-  { path: path.join(DATA_DIR, "trades-log.json"), minSize: 50 },
-  { path: path.join(MEMORY_DIR, "profile.md"), minSize: 50 },
-  { path: path.join(MEMORY_DIR, "thesis.md"), minSize: 50 },
-  { path: path.join(MEMORY_DIR, "portfolio.md"), minSize: 50 },
-  { path: path.join(MEMORY_DIR, "health.md"), minSize: 50 },
-  { path: path.join(DATA_DIR, "backlog.json"), minSize: 50 },
-  { path: path.join(DATA_DIR, "life-scores.json"), minSize: 20 }
-];
-
 /**
- * Calculate data completeness score (0-100%)
- * Checks 12 data sources — 1 point each if file exists with meaningful content
+ * Knowledge Depth Score — measures how much the AI actually knows
+ *
+ * This is NOT "do files exist?" — it measures content richness across every
+ * domain the AI is building intelligence about. A new user might sit at 6%
+ * for weeks. The ceiling is ~95% because there's always more to learn.
+ *
+ * 13 domains, each scored 0-10 based on content depth.
+ * Total = sum / 130, capped at 95%.
  */
+
+/** Safe JSON read, returns null on failure */
+function _readJsonSafe(filePath) {
+  try {
+    if (fs.existsSync(filePath)) return JSON.parse(fs.readFileSync(filePath, "utf-8"));
+  } catch {}
+  return null;
+}
+
+/** File size in bytes, 0 if missing */
+function _fileSize(filePath) {
+  try {
+    if (fs.existsSync(filePath)) return fs.statSync(filePath).size;
+  } catch {}
+  return 0;
+}
+
+/** Count directories inside a path */
+function _countDirs(dirPath) {
+  try {
+    if (!fs.existsSync(dirPath)) return 0;
+    return fs.readdirSync(dirPath, { withFileTypes: true }).filter(d => d.isDirectory() && !d.name.startsWith(".")).length;
+  } catch {}
+  return 0;
+}
+
 function calculateDataCompleteness() {
-  let count = 0;
-  for (const source of DATA_COMPLETENESS_SOURCES) {
+  const scores = {};
+
+  // 1. PROFILE — LinkedIn data + profile sections + memory summary
+  {
+    let s = 0;
+    const linkedIn = _readJsonSafe(path.join(DATA_DIR, "linkedin-profile.json"));
+    const sections = _readJsonSafe(path.join(DATA_DIR, "profile-sections.json"));
+    const profileMd = _fileSize(path.join(MEMORY_DIR, "profile.md"));
+    if (linkedIn) s += _fileSize(path.join(DATA_DIR, "linkedin-profile.json")) > 5000 ? 3 : 1;
+    if (sections) {
+      const filled = Object.keys(sections).filter(k => k !== "metadata" && sections[k] && Object.keys(sections[k]).length > 2).length;
+      s += Math.min(4, filled); // up to 4 for rich sections
+    }
+    if (profileMd > 2000) s += 3; else if (profileMd > 500) s += 2; else if (profileMd > 100) s += 1;
+    scores.profile = Math.min(10, s);
+  }
+
+  // 2. GOALS — active goals, goals with plans, goal directories
+  {
+    let s = 0;
+    const goals = _readJsonSafe(path.join(DATA_DIR, "goals.json"));
+    const goalDirs = _countDirs(path.join(DATA_DIR, "goals"));
+    if (goals?.goals) {
+      const active = goals.goals.filter(g => g.status === "active").length;
+      const withTasks = goals.goals.filter(g => g.tasks?.length > 0).length;
+      s += Math.min(3, active);         // up to 3 for active goals
+      s += Math.min(2, withTasks);       // up to 2 for goals with tasks
+      s += Math.min(2, Math.floor(goals.goals.length / 3)); // up to 2 for total goals
+    }
+    s += Math.min(3, Math.floor(goalDirs / 3)); // up to 3 for goal directories with plans
+    scores.goals = Math.min(10, s);
+  }
+
+  // 3. BELIEFS — core beliefs defined
+  {
+    const beliefs = _readJsonSafe(BELIEFS_PATH);
+    const count = beliefs?.beliefs?.length || 0;
+    scores.beliefs = count >= 5 ? 10 : count >= 3 ? 7 : count >= 1 ? 4 : 0;
+  }
+
+  // 4. FINANCIALS — trades, positions, portfolio memory
+  {
+    let s = 0;
+    const trades = _readJsonSafe(path.join(DATA_DIR, "trades-log.json"));
+    const tickers = _fileSize(path.join(DATA_DIR, "tickers-cache.json"));
+    const portfolioMd = _fileSize(path.join(MEMORY_DIR, "portfolio.md"));
+    if (trades) {
+      const tradeCount = Array.isArray(trades) ? trades.length : (trades.trades?.length || 0);
+      s += tradeCount >= 20 ? 3 : tradeCount >= 5 ? 2 : tradeCount >= 1 ? 1 : 0;
+    }
+    s += tickers > 500000 ? 3 : tickers > 100000 ? 2 : tickers > 10000 ? 1 : 0;
+    s += portfolioMd > 2000 ? 3 : portfolioMd > 500 ? 2 : portfolioMd > 100 ? 1 : 0;
+    scores.financials = Math.min(10, s + (tickers > 0 ? 1 : 0));
+  }
+
+  // 5. HEALTH — Oura data depth + health memory
+  {
+    let s = 0;
+    const ouraSize = _fileSize(path.join(DATA_DIR, "oura-data.json"));
+    const healthMd = _fileSize(path.join(MEMORY_DIR, "health.md"));
+    // Oura data: 8MB for 3 days is very rich per-day, but history matters too
+    s += ouraSize > 5000000 ? 4 : ouraSize > 1000000 ? 3 : ouraSize > 100000 ? 2 : ouraSize > 0 ? 1 : 0;
+    s += healthMd > 3000 ? 3 : healthMd > 1000 ? 2 : healthMd > 100 ? 1 : 0;
+    // Check for multiple days of history
+    const oura = _readJsonSafe(path.join(DATA_DIR, "oura-data.json"));
+    const histLen = oura?.history?.length || 0;
+    s += histLen >= 14 ? 3 : histLen >= 7 ? 2 : histLen >= 3 ? 1 : 0;
+    scores.health = Math.min(10, s);
+  }
+
+  // 6. MARKETS — tickers tracked, market analysis project
+  {
+    let s = 0;
+    const tickers = _readJsonSafe(path.join(DATA_DIR, "tickers-cache.json"));
+    const tickerCount = tickers ? Object.keys(tickers).length : 0;
+    s += tickerCount >= 500 ? 3 : tickerCount >= 100 ? 2 : tickerCount >= 10 ? 1 : 0;
+    const marketProject = _fileSize(path.join(PROJECTS_DIR, "market-analysis", "PROJECT.md"));
+    s += marketProject > 20000 ? 4 : marketProject > 5000 ? 3 : marketProject > 1000 ? 2 : marketProject > 0 ? 1 : 0;
+    const tickersMd = _fileSize(path.join(MEMORY_DIR, "tickers.md"));
+    s += tickersMd > 2000 ? 3 : tickersMd > 500 ? 2 : tickersMd > 100 ? 1 : 0;
+    scores.markets = Math.min(10, s);
+  }
+
+  // 7. DISASTER / RISK — disaster planning project depth
+  {
+    const projectMd = _fileSize(path.join(PROJECTS_DIR, "disaster-planning", "PROJECT.md"));
+    const threatFile = _fileSize(path.join(PROJECTS_DIR, "disaster-planning", "research", "threat-assessments.json"));
+    let s = 0;
+    s += projectMd > 30000 ? 5 : projectMd > 10000 ? 3 : projectMd > 2000 ? 2 : projectMd > 0 ? 1 : 0;
+    s += threatFile > 5000 ? 3 : threatFile > 1000 ? 2 : threatFile > 0 ? 1 : 0;
+    s += (projectMd > 0 && threatFile > 0) ? 2 : 0; // bonus for both existing
+    scores.disaster = Math.min(10, s);
+  }
+
+  // 8. CONTACTS / RELATIONSHIPS — contacts, role models, social
+  {
+    let s = 0;
+    const roleModels = _readJsonSafe(path.join(DATA_DIR, "role-models.json"));
+    if (roleModels?.topMatches?.length || roleModels?.models?.length) s += 3;
+    else if (roleModels) s += 1;
+    const socialMd = _fileSize(path.join(MEMORY_DIR, "social.md"));
+    s += socialMd > 1000 ? 3 : socialMd > 100 ? 1 : 0;
+    // Check for contacts data
+    const contactsSize = _fileSize(path.join(DATA_DIR, "contacts.json"));
+    s += contactsSize > 5000 ? 3 : contactsSize > 500 ? 2 : contactsSize > 0 ? 1 : 0;
+    scores.contacts = Math.min(10, s);
+  }
+
+  // 9. PROJECTS — breadth and depth of project work
+  {
+    const projectCount = _countDirs(PROJECTS_DIR);
+    let substantial = 0;
     try {
-      if (fs.existsSync(source.path)) {
-        const stat = fs.statSync(source.path);
-        if (stat.size >= source.minSize) {
-          count++;
+      if (fs.existsSync(PROJECTS_DIR)) {
+        const dirs = fs.readdirSync(PROJECTS_DIR, { withFileTypes: true }).filter(d => d.isDirectory() && !d.name.startsWith("."));
+        for (const d of dirs) {
+          const mdSize = _fileSize(path.join(PROJECTS_DIR, d.name, "PROJECT.md"));
+          if (mdSize > 3000) substantial++;
         }
       }
     } catch {}
+    let s = 0;
+    s += projectCount >= 15 ? 3 : projectCount >= 8 ? 2 : projectCount >= 3 ? 1 : 0;
+    s += substantial >= 5 ? 4 : substantial >= 3 ? 3 : substantial >= 1 ? 2 : 0;
+    s += Math.min(3, Math.floor(substantial / 2)); // extra depth bonus
+    scores.projects = Math.min(10, s);
   }
-  return { count, total: DATA_COMPLETENESS_SOURCES.length, percentage: Math.round((count / DATA_COMPLETENESS_SOURCES.length) * 100) };
+
+  // 10. BACKLOG — ideas pipeline fullness
+  {
+    const backlog = _readJsonSafe(BACKLOG_PATH);
+    const itemCount = backlog?.items?.length || 0;
+    const graduated = backlog?.stats?.totalGraduated || 0;
+    let s = 0;
+    s += itemCount >= 50 ? 4 : itemCount >= 20 ? 3 : itemCount >= 10 ? 2 : itemCount >= 3 ? 1 : 0;
+    s += graduated >= 10 ? 3 : graduated >= 5 ? 2 : graduated >= 1 ? 1 : 0;
+    s += itemCount > 0 ? Math.min(3, Math.floor(backlog.items.filter(i => i.impactScore >= 60).length / 2)) : 0;
+    scores.backlog = Math.min(10, s);
+  }
+
+  // 11. LIFE SCORES — how many dimensions assessed, history depth
+  {
+    const lifeScores = _readJsonSafe(path.join(DATA_DIR, "life-scores.json"));
+    let s = 0;
+    if (lifeScores) {
+      const dims = Object.keys(lifeScores).filter(k => k !== "lastUpdated" && k !== "history" && k !== "overall");
+      const nonZero = dims.filter(k => {
+        const v = lifeScores[k];
+        return (typeof v === "number" ? v : v?.score || 0) > 0;
+      }).length;
+      s += nonZero >= 5 ? 4 : nonZero >= 3 ? 2 : nonZero >= 1 ? 1 : 0;
+      const histLen = lifeScores.history?.length || 0;
+      s += histLen >= 20 ? 3 : histLen >= 10 ? 2 : histLen >= 3 ? 1 : 0;
+      s += dims.length >= 6 ? 3 : dims.length >= 4 ? 2 : dims.length >= 2 ? 1 : 0;
+    }
+    scores.lifeScores = Math.min(10, s);
+  }
+
+  // 12. THESIS / FOCUS — thinking engine output quality
+  {
+    let s = 0;
+    const thesisMd = _fileSize(THESIS_PATH);
+    s += thesisMd > 3000 ? 4 : thesisMd > 1000 ? 3 : thesisMd > 300 ? 2 : thesisMd > 0 ? 1 : 0;
+    const thinkingLog = _readJsonSafe(THINKING_LOG_PATH);
+    const cycleCount = thinkingLog?.cycles?.length || 0;
+    s += cycleCount >= 20 ? 3 : cycleCount >= 10 ? 2 : cycleCount >= 3 ? 1 : 0;
+    const insightCount = thinkingLog?.insights?.length || 0;
+    s += insightCount >= 10 ? 3 : insightCount >= 5 ? 2 : insightCount >= 1 ? 1 : 0;
+    scores.thesis = Math.min(10, s);
+  }
+
+  // 13. NEWS / RESEARCH — memory summaries depth
+  {
+    let s = 0;
+    const goalsMd = _fileSize(path.join(MEMORY_DIR, "goals.md"));
+    s += goalsMd > 3000 ? 3 : goalsMd > 1000 ? 2 : goalsMd > 100 ? 1 : 0;
+    const integrationsMd = _fileSize(path.join(MEMORY_DIR, "integrations.md"));
+    s += integrationsMd > 1000 ? 2 : integrationsMd > 100 ? 1 : 0;
+    const engineLog = _fileSize(path.join(MEMORY_DIR, "engine-work-log.md"));
+    s += engineLog > 100000 ? 5 : engineLog > 50000 ? 4 : engineLog > 10000 ? 3 : engineLog > 1000 ? 2 : engineLog > 0 ? 1 : 0;
+    scores.research = Math.min(10, s);
+  }
+
+  // Total: sum of all domain scores out of 130, capped at 95%
+  const domains = Object.keys(scores);
+  const total = domains.reduce((sum, k) => sum + scores[k], 0);
+  const maxPossible = domains.length * 10; // 130
+  const rawPercentage = Math.round((total / maxPossible) * 100);
+  const percentage = Math.min(95, rawPercentage); // never 100%
+
+  return { scores, total, maxPossible, percentage };
 }
 
 /**

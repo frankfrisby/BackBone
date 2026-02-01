@@ -208,15 +208,16 @@ console.log("[App] Initializing Claude Code monitor...");
 const _claudeCodeMonitor = getClaudeCodeMonitor();
 _claudeCodeMonitor.start();
 
-// Initialize and start Claude Engine - this is the main autonomous worker
-// It reads memory/current-work.md to pick up where it left off
-console.log("[App] Starting Claude Engine...");
+// Initialize Claude Engine (does NOT auto-start — user types /engine start)
 const _claudeEngine = getClaudeEngine();
-// Start after 3 seconds to let UI render
-setTimeout(() => {
-  console.log("[App] Claude Engine starting work...");
-  _claudeEngine.start();
-}, 3000);
+{
+  const _engineStatus = _claudeEngine.getStatus();
+  if (_engineStatus.lastRunMinutesAgo !== null) {
+    console.log(`[App] Claude Engine last ran ${_engineStatus.lastRunMinutesAgo} min ago${_engineStatus.cooldown ? ` (cooldown ${_engineStatus.cooldownRemainingMin} min)` : ""}`);
+  } else {
+    console.log("[App] Claude Engine initialized — type /engine start to begin");
+  }
+}
 
 // Life Management Engine imports
 import { getLifeManagementEngine, LIFE_AREAS } from "./services/life-management-engine.js";
@@ -6369,13 +6370,30 @@ Folder: ${result.action.id}`,
         const claudeEngine = getClaudeEngine();
         const status = claudeEngine.getStatus();
 
-        if (resolved === "/engine start" || resolved === "/idle on" || resolved === "/idle work" || resolved === "/idle force") {
+        const isForce = resolved === "/engine start!" || resolved === "/idle force";
+        const isStart = resolved === "/engine start" || resolved === "/idle on" || resolved === "/idle work" || isForce;
+
+        if (isStart) {
           if (status.isRunning) {
             setMessages((prev) => [
               ...prev,
               { role: "assistant", content: "Claude Engine is already running. Output is streaming to ENGINE panel.", timestamp: new Date() }
             ]);
             return;
+          }
+
+          // If in cooldown and not forcing, show message with override hint
+          if (status.cooldown && !isForce) {
+            setMessages((prev) => [
+              ...prev,
+              { role: "assistant", content: `Engine ran ${status.lastRunMinutesAgo} min ago — cooldown has ${status.cooldownRemainingMin} min left.\n\nUse \`/engine start!\` to force start now.`, timestamp: new Date() }
+            ]);
+            return;
+          }
+
+          // Force past cooldown if needed
+          if (isForce && status.cooldown) {
+            claudeEngine.lastRunCompletedAt = null;
           }
 
           setMessages((prev) => [
@@ -6405,14 +6423,22 @@ Folder: ${result.action.id}`,
           return;
         }
 
-        // Default: show status
-        let content = `## Claude Engine Status\n\n`;
-        content += `**Status:** ${status.isRunning ? "🔄 Running" : "○ Stopped"}\n`;
-        content += `**Output length:** ${status.outputLength} chars\n`;
-
-        if (status.lastOutput) {
-          content += `\n### Recent Output\n\`\`\`\n${status.lastOutput.slice(-300)}\n\`\`\`\n`;
+        // Default: show status with how-to
+        let content = `## Claude Engine\n\n`;
+        content += `**Status:** ${status.isRunning ? "Running" : "Stopped"}\n`;
+        if (status.lastRunMinutesAgo !== null) {
+          content += `**Last ran:** ${status.lastRunMinutesAgo} min ago\n`;
+        } else {
+          content += `**Last ran:** never\n`;
         }
+        if (status.cooldown) {
+          content += `**Cooldown:** ${status.cooldownRemainingMin} min remaining\n`;
+        }
+        content += `**Runs completed:** ${status.workCount}\n`;
+        content += `\n### Commands\n`;
+        content += `- \`/engine start\` — Start the engine\n`;
+        content += `- \`/engine start!\` — Force start (skip cooldown)\n`;
+        content += `- \`/engine stop\` — Stop the engine\n`;
 
         setMessages((prev) => [
           ...prev,

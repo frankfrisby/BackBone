@@ -18,14 +18,37 @@ import { getClaudeCodeStatus } from "./claude-code-cli.js";
 import { getActivityNarrator } from "./activity-narrator.js";
 import { updateProjects } from "./app-store.js";
 
+const DATA_DIR = path.join(process.cwd(), "data");
 const MEMORY_DIR = path.join(process.cwd(), "memory");
 const CURRENT_WORK_FILE = path.join(MEMORY_DIR, "current-work.md");
 const ENGINE_LOG_FILE = path.join(MEMORY_DIR, "engine-work-log.md");
+const ENGINE_STATE_FILE = path.join(DATA_DIR, "claude-engine-state.json");
+
+// Cooldown: 1 hour between runs
+const ENGINE_COOLDOWN_MS = 60 * 60 * 1000;
 
 // Claude CLI path
 const CLAUDE_CMD = process.platform === "win32"
   ? path.join(os.homedir(), "AppData", "Roaming", "npm", "claude.cmd")
   : "claude";
+
+/** Read persisted engine state from disk */
+function loadEngineState() {
+  try {
+    if (fs.existsSync(ENGINE_STATE_FILE)) {
+      return JSON.parse(fs.readFileSync(ENGINE_STATE_FILE, "utf-8"));
+    }
+  } catch {}
+  return {};
+}
+
+/** Save engine state to disk */
+function saveEngineState(state) {
+  try {
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(ENGINE_STATE_FILE, JSON.stringify(state, null, 2));
+  } catch {}
+}
 
 class ClaudeEngine extends EventEmitter {
   constructor() {
@@ -37,9 +60,12 @@ class ClaudeEngine extends EventEmitter {
     this.currentStartTime = null;
     this.currentLogPath = null;
     this.triedRetry = false;
-    this.lastRunCompletedAt = null;
     this.lastRateLimitAt = null;
     this.lastLogSize = 0;
+
+    // Restore last run time from disk so cooldown persists across restarts
+    const saved = loadEngineState();
+    this.lastRunCompletedAt = saved.lastRunCompletedAt ? new Date(saved.lastRunCompletedAt).getTime() : null;
   }
 
   isRateLimitOutput(text) {
@@ -384,13 +410,11 @@ Start by reading engine-work-log.md to see recent work, then update the priority
     }
 
     const now = Date.now();
-    if (this.lastRunCompletedAt && now - this.lastRunCompletedAt < 10 * 60 * 1000) {
-      const waitMs = 10 * 60 * 1000 - (now - this.lastRunCompletedAt);
-      this.emit("status", `Cooling down for ${Math.ceil(waitMs / 1000)}s before next run`);
-      setTimeout(() => {
-        if (!this.isRunning) this.start(backendOverride);
-      }, waitMs);
-      return { success: false, reason: "Cooldown" };
+    if (this.lastRunCompletedAt && now - this.lastRunCompletedAt < ENGINE_COOLDOWN_MS) {
+      const waitMs = ENGINE_COOLDOWN_MS - (now - this.lastRunCompletedAt);
+      const waitMin = Math.ceil(waitMs / 60000);
+      this.emit("status", `Ran ${Math.round((now - this.lastRunCompletedAt) / 60000)} min ago — cooldown ${waitMin} min remaining. Use /engine start to override.`);
+      return { success: false, reason: "Cooldown", waitMs };
     }
 
     const status = await getClaudeCodeStatus();
@@ -566,6 +590,9 @@ Write-Output $p.Id
       this.lastRunCompletedAt = Date.now();
       this.lastLogSize = 0;
 
+      // Persist so cooldown survives app restarts
+      saveEngineState({ lastRunCompletedAt: new Date(this.lastRunCompletedAt).toISOString() });
+
       const logEntry = `\n## ${new Date().toISOString()}\n` +
         `**Backend:** ${backend}\n` +
         `**Result:** ${reason || (currentContent !== initialContent ? "updated" : "unknown")}\n\n` +
@@ -701,11 +728,28 @@ Write-Output $p.Id
   /**
    * Get status
    */
+  /** How long ago the engine last ran (ms), or null if never */
+  getTimeSinceLastRun() {
+    if (!this.lastRunCompletedAt) return null;
+    return Date.now() - this.lastRunCompletedAt;
+  }
+
+  /** Whether the engine is within the 1-hour cooldown window */
+  isInCooldown() {
+    const elapsed = this.getTimeSinceLastRun();
+    return elapsed !== null && elapsed < ENGINE_COOLDOWN_MS;
+  }
+
   getStatus() {
+    const timeSince = this.getTimeSinceLastRun();
     return {
       isRunning: this.isRunning,
       workCount: this.workCount,
-      currentWorkFile: this.readWorkStatus()
+      currentWorkFile: this.readWorkStatus(),
+      lastRunCompletedAt: this.lastRunCompletedAt ? new Date(this.lastRunCompletedAt).toISOString() : null,
+      lastRunMinutesAgo: timeSince !== null ? Math.round(timeSince / 60000) : null,
+      cooldown: this.isInCooldown(),
+      cooldownRemainingMin: this.isInCooldown() ? Math.ceil((ENGINE_COOLDOWN_MS - timeSince) / 60000) : 0
     };
   }
 }

@@ -197,7 +197,7 @@ import { fetchAndAnalyzeNews, shouldFetchNews } from "./services/news-service.js
 import { isEmailConfigured, syncEmailCalendar, getEmailSummary, getUpcomingEvents, startTokenAutoRefresh, startOAuthFlow as startEmailOAuth } from "./services/email-calendar-service.js";
 import { getPersonalCapitalService } from "./services/personal-capital.js";
 import { getPlaidService, isPlaidConfigured, syncPlaidData } from "./services/plaid-service.js";
-import { getThinkingEngine } from "./services/thinking-engine.js";
+import { getThinkingEngine, calculateDataCompleteness } from "./services/thinking-engine.js";
 import { getIdleProcessor } from "./services/idle-processor.js";
 import { getClaudeCodeMonitor } from "./services/claude-code-monitor.js";
 import { getStartupEngine } from "./services/startup-engine.js";
@@ -1324,6 +1324,14 @@ const App = ({ updateConsoleTitle, updateState }) => {
   // WhatsApp poll countdown state
   const [whatsappPollCountdown, setWhatsappPollCountdown] = useState(null);
   const [whatsappPollingMode, setWhatsappPollingMode] = useState("idle");
+
+  // Data completeness (cached, refreshed every 60s)
+  const dataCompletenessRef = useRef(calculateDataCompleteness());
+  useEffect(() => {
+    const refresh = () => { dataCompletenessRef.current = calculateDataCompleteness(); };
+    const interval = setInterval(refresh, 60000);
+    return () => clearInterval(interval);
+  }, []);
 
   // ===== AI BRAIN - Real AI-driven decision engine =====
   const aiBrain = useMemo(() => getAIBrain(), []);
@@ -8982,7 +8990,8 @@ Folder: ${result.action.id}`,
       isMedium,
       viewMode,
       firebaseUserDisplay,
-      connectionStatuses
+      connectionStatuses,
+      dataCompleteness: dataCompletenessRef.current
     };
   }, [
     terminalWidth,
@@ -9137,6 +9146,22 @@ Folder: ${result.action.id}`,
       }
 
       const rightSegments = [];
+
+      // Data completeness bar — shown only in MINIMAL view
+      if (data.viewMode === VIEW_MODES.MINIMAL) {
+        const dc = data.dataCompleteness || { percentage: 0, count: 0, total: 12 };
+        const pct = dc.percentage;
+        const barWidth = 10;
+        const filled = Math.round((pct / 100) * barWidth);
+        const empty = barWidth - filled;
+        const barColor = pct >= 75 ? "#22c55e" : pct >= 50 ? "#eab308" : "#ef4444";
+        rightSegments.push({ text: "Profile ", color: "#64748b" });
+        if (filled > 0) rightSegments.push({ text: "█".repeat(filled), color: barColor });
+        if (empty > 0) rightSegments.push({ text: "░".repeat(empty), color: "#334155" });
+        rightSegments.push({ text: ` ${pct}%`, color: barColor });
+        rightSegments.push({ text: " | ", color: "#1e293b" });
+      }
+
       services.forEach((service, idx) => {
         const connected = statuses[service.key]?.connected || false;
         rightSegments.push({

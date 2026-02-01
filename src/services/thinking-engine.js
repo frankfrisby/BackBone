@@ -286,16 +286,18 @@ function calculateDataCompleteness() {
 }
 
 /**
- * Get adaptive cycle interval based on data completeness
- * < 50% data → 15 min (aggressive, building profile)
- * 50-75% data → 30 min (moderate, data filling in)
- * 75%+ data → 60 min (mature, maintenance mode)
+ * Get adaptive cycle interval based on knowledge depth
+ *   < 10%  → 15 min  (brand new, aggressive data collection)
+ *  10-25%  → 30 min  (early, still building foundation)
+ *  25-50%  → 60 min  (growing, moderate pace)
+ *    50%+  → 120 min (mature, maintenance)
  */
 function getAdaptiveCycleInterval() {
   const { percentage } = calculateDataCompleteness();
-  if (percentage < 50) return 15 * 60 * 1000;  // 15 minutes
-  if (percentage < 75) return 30 * 60 * 1000;  // 30 minutes
-  return 60 * 60 * 1000;                        // 60 minutes
+  if (percentage < 10) return 15 * 60 * 1000;   // 15 minutes
+  if (percentage < 25) return 30 * 60 * 1000;   // 30 minutes
+  if (percentage < 50) return 60 * 60 * 1000;   // 1 hour
+  return 2 * 60 * 60 * 1000;                     // 2 hours
 }
 
 // Backlog graduation thresholds

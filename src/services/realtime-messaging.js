@@ -518,6 +518,7 @@ export class RealtimeMessaging extends EventEmitter {
       replyTo: options.replyTo || null,
       metadata: options.metadata || {},
       error: options.error || null,
+      sendToWhatsApp: options.sendToWhatsApp || false,
       createdAt: new Date().toISOString(),
       fromAI: true
     };

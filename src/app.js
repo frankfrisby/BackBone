@@ -85,6 +85,7 @@ import { getSkillsCatalog, getUserSkillContent } from "./services/skills-loader.
 import { getSkillsLoader } from "./services/skills-loader.js";
 import { listSpreadsheets, readSpreadsheet, createSpreadsheet } from "./services/excel-manager.js";
 import { backupToFirebase, restoreFromFirebase, getBackupStatus } from "./services/firebase-storage.js";
+import { forceUpdate, checkVersion, consumeUpdateState } from "./services/auto-updater.js";
 import { loadProfileSections, updateFromLinkedIn, updateFromHealth, updateFromPortfolio, getProfileSectionDisplay, getProfileOverview, PROFILE_SECTIONS } from "./services/profile-sections.js";
 import { getGitHubConfig, getGitHubStatus } from "./services/github.js";
 import { openUrl } from "./services/open-url.js";
@@ -133,7 +134,8 @@ import { TestRunnerPanel } from "./components/test-runner-panel.js";
 import { SettingsPanel } from "./components/settings-panel.js";
 import { LinkedInDataViewer } from "./components/linkedin-data-viewer.js";
 import { DisasterOverlay } from "./components/disaster-overlay.js";
-import { loadUserSettings, saveUserSettings, updateSettings as updateUserSettings, updateSetting, getModelConfig, isProviderConfigured, getAppName } from "./services/user-settings.js";
+import { loadUserSettings, saveUserSettings, updateSettings as updateUserSettings, updateSetting, getModelConfig, isProviderConfigured, getAppName, DEFAULT_SETTINGS } from "./services/user-settings.js";
+import { archiveCurrentProfile, restoreProfile, hasArchivedProfile, listProfiles as listArchivedProfiles } from "./services/profile-manager.js";
 import { hasValidCredentials as hasCodexCredentials } from "./services/codex-oauth.js";
 import { loadFineTuningConfig, saveFineTuningConfig, runFineTuningPipeline, queryFineTunedModel } from "./services/fine-tuning.js";
 import { monitorAndTrade, loadConfig as loadTradingConfig, setTradingEnabled } from "./services/auto-trader.js";
@@ -226,6 +228,8 @@ import { getFirebaseMessaging } from "./services/firebase-messaging.js";
 import { getRealtimeMessaging } from "./services/realtime-messaging.js";
 import { getUnifiedMessageLog, MESSAGE_CHANNEL } from "./services/unified-message-log.js";
 import { getWhatsAppNotifications } from "./services/whatsapp-notifications.js";
+import { classifyMessage } from "./services/message-classifier.js";
+import { selectChannel, routeResponse, CHANNEL } from "./services/response-router.js";
 
 // Engine state and new panels
 import { getEngineStateManager, ENGINE_STATUS } from "./services/engine-state.js";
@@ -337,7 +341,110 @@ const isTickerToday = (timestamp) => {
   return ts >= tickerDayStart;
 };
 
-const App = ({ updateConsoleTitle }) => {
+/**
+ * Handle complex WhatsApp messages via Claude Code CLI
+ * Builds a WhatsApp-optimized prompt, executes with full MCP tool access,
+ * and extracts the final response. Falls back to aiBrain.chat() on failure.
+ */
+async function _handleComplexWhatsApp(userMessage, userId, aiBrain) {
+  const COMPLEX_TIMEOUT = 120000; // 2 minutes
+
+  try {
+    const executor = getClaudeCodeExecutor();
+    const isReady = await executor.isReady();
+
+    if (!isReady) {
+      console.log("[App] Claude Code not ready, falling back to aiBrain.chat()");
+      const response = await aiBrain.chat(userMessage, { userId, channel: "whatsapp" });
+      return response.content;
+    }
+
+    const prompt = _buildWhatsAppCLIPrompt(userMessage);
+
+    // Execute with timeout
+    const result = await Promise.race([
+      executor.execute({
+        id: `whatsapp_${Date.now()}`,
+        title: `WhatsApp: ${userMessage.substring(0, 50)}`,
+        executionPlan: { prompt, workDir: process.cwd(), timeout: COMPLEX_TIMEOUT }
+      }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), COMPLEX_TIMEOUT))
+    ]);
+
+    if (result.success && result.output) {
+      const extracted = _extractFinalResponse(result.output);
+      if (extracted && extracted.length > 10) {
+        return extracted;
+      }
+    }
+
+    // Fallback if execution didn't produce usable output
+    console.log("[App] Claude Code output not usable, falling back to aiBrain.chat()");
+    const response = await aiBrain.chat(userMessage, { userId, channel: "whatsapp" });
+    return response.content;
+
+  } catch (error) {
+    console.error("[App] Complex WhatsApp handler error:", error.message);
+    const response = await aiBrain.chat(userMessage, { userId, channel: "whatsapp" });
+    return response.content;
+  }
+}
+
+/**
+ * Build a WhatsApp-optimized prompt for Claude Code CLI
+ */
+function _buildWhatsAppCLIPrompt(userMessage) {
+  return `You are BACKBONE AI responding to a WhatsApp message. You have access to all MCP tools (trading, health, news, contacts, calendar, etc.) and can read memory files from the data/ and memory/ directories.
+
+USER MESSAGE: "${userMessage}"
+
+INSTRUCTIONS:
+1. Read relevant memory/data files for context (memory/profile.md, memory/portfolio.md, memory/health.md, data/goals.json, etc.)
+2. Use MCP tools to get real-time data if needed (get_positions, get_health_summary, fetch_latest_news, etc.)
+3. Respond with a clear, concise answer optimized for WhatsApp (under 1500 characters)
+4. Use short paragraphs, bullet points where helpful
+5. Be conversational but informative — this is a phone message, not a report
+
+Your final output should be ONLY the response message to send to the user. No explanations of your process.`;
+}
+
+/**
+ * Extract the final response from Claude Code execution output
+ * Looks for the last text block that isn't a tool call or system message
+ */
+function _extractFinalResponse(output) {
+  if (!output) return null;
+
+  // If output is JSON (stream-json format), try to parse the last assistant message
+  const lines = output.split("\n").filter(Boolean);
+  let lastAssistantText = "";
+
+  for (const line of lines) {
+    try {
+      const parsed = JSON.parse(line);
+      if (parsed.type === "assistant" && parsed.message?.content) {
+        // Extract text blocks from content array
+        const textBlocks = Array.isArray(parsed.message.content)
+          ? parsed.message.content.filter(b => b.type === "text").map(b => b.text).join("\n")
+          : typeof parsed.message.content === "string" ? parsed.message.content : "";
+        if (textBlocks) lastAssistantText = textBlocks;
+      }
+      // Also check for result type
+      if (parsed.type === "result" && parsed.result) {
+        return typeof parsed.result === "string" ? parsed.result : JSON.stringify(parsed.result);
+      }
+    } catch {
+      // Not JSON, accumulate as plain text
+      if (line.trim() && !line.startsWith("[") && !line.startsWith("Running")) {
+        lastAssistantText = line;
+      }
+    }
+  }
+
+  return lastAssistantText || output.substring(output.length - 1500);
+}
+
+const App = ({ updateConsoleTitle, updateState }) => {
   // Pre-render phase: render main view first (invisible) to set terminal rows, then show splash
   const [preRenderPhase, setPreRenderPhase] = useState(true);
   const [isInitializing, setIsInitializing] = useState(true);
@@ -688,6 +795,40 @@ const App = ({ updateConsoleTitle }) => {
         // Silent fail - AI matching will fall back to algorithm
       }
 
+      // Spawn second terminal with QR code if mobile app not connected yet
+      try {
+        const startupSettings = loadUserSettings();
+        if (!startupSettings.mobileAppInstalled) {
+          const qrScript = path.join(process.cwd(), "scripts", "show-connect-qr.js");
+          if (fs.existsSync(qrScript)) {
+            if (process.platform === "win32") {
+              // Windows: check for Windows Terminal (wt) first for side-by-side split
+              const isWindowsTerminal = process.env.WT_SESSION || process.env.WT_PROFILE_ID;
+              if (isWindowsTerminal) {
+                spawn("wt", ["-w", "0", "sp", "-s", "0.3", "node", qrScript], {
+                  detached: true,
+                  stdio: "ignore"
+                }).unref();
+              } else {
+                spawn("cmd", ["/c", "start", "BACKBONE Connect", "node", qrScript], {
+                  detached: true,
+                  stdio: "ignore",
+                  shell: true
+                }).unref();
+              }
+            } else {
+              // macOS/Linux: open new terminal
+              spawn("node", [qrScript], {
+                detached: true,
+                stdio: "ignore"
+              }).unref();
+            }
+          }
+        }
+      } catch {
+        // Silent fail — QR window is non-critical
+      }
+
       // Phase 1: Pre-render main view (invisible) to set terminal rows based on content
       // Emit resize event immediately to capture terminal size
       if (process.stdout.emit) {
@@ -717,6 +858,18 @@ const App = ({ updateConsoleTitle }) => {
     };
     init();
   }, [nudgeStdoutSize]);
+
+  // Show post-update notification if we just restarted after an auto-update
+  useEffect(() => {
+    if (!isInitializing && updateState) {
+      const msg = `## Updated to v${updateState.newVersion}\n\n` +
+        `Previous version: v${updateState.previousVersion}\n` +
+        (updateState.changelog ? `\n**Changelog:**\n${updateState.changelog}\n` : "") +
+        `\nUpdated at ${new Date(updateState.updatedAt).toLocaleString()}`;
+      setMessages((prev) => [...prev, { role: "assistant", content: msg, timestamp: new Date() }]);
+      setLastAction(`Updated to v${updateState.newVersion}`);
+    }
+  }, [isInitializing]);
 
   const resizeTimersRef = useRef([]);
   const mainViewTimersRef = useRef([]);
@@ -993,14 +1146,18 @@ const App = ({ updateConsoleTitle }) => {
       }
     }
   });
-  const handleLogout = useCallback(() => {
+  const handleLogout = useCallback(async () => {
+    // Archive current profile before signing out
+    try {
+      const result = await archiveCurrentProfile();
+      if (result.success) {
+        setLastAction(`Profile archived for ${result.uid}`);
+      }
+    } catch (err) {
+      console.error("[logout] Archive failed:", err.message);
+    }
     signOutFirebase();
-    const currentSettings = loadUserSettings();
-    updateUserSettings({
-      firebaseUser: null,
-      onboardingComplete: false,
-      connections: { ...currentSettings.connections, google: false }
-    });
+    saveUserSettings({ ...DEFAULT_SETTINGS });
     syncUserSettings();
     pauseUpdatesRef.current = true;
     setPauseUpdates(true);
@@ -1243,7 +1400,7 @@ const App = ({ updateConsoleTitle }) => {
         // Initialize WhatsApp notifications
         await whatsappNotifications.initialize(firebaseUser.uid);
 
-        // Set up message handler - process WhatsApp messages like chat
+        // Set up message handler — classify, route, and respond
         realtimeMessaging.setMessageHandler(async (message) => {
           // Log to unified message log
           unifiedMessageLog.addUserMessage(message.content, MESSAGE_CHANNEL.WHATSAPP, {
@@ -1259,29 +1416,57 @@ const App = ({ updateConsoleTitle }) => {
             channel: "whatsapp"
           }]);
 
-          // Process with AI brain (same as chat)
+          // Classify the message
+          const classification = classifyMessage(message.content);
+          console.log(`[App] WhatsApp message classified: ${classification.type} (${classification.confidence}) — ${classification.reason}`);
+
           try {
-            const response = await aiBrain.chat(message.content, {
-              userId: firebaseUser.uid,
-              channel: "whatsapp"
-            });
+            let responseContent;
+
+            if (classification.type === "quick") {
+              // ── QUICK PATH: aiBrain.chat() → fast response ──
+              const response = await aiBrain.chat(message.content, {
+                userId: firebaseUser.uid,
+                channel: "whatsapp"
+              });
+              responseContent = response.content;
+
+            } else {
+              // ── COMPLEX PATH: ack → Claude Code CLI → full response ──
+              // Send immediate acknowledgment
+              await whatsappNotifications.sendAIResponse(
+                "Got it, working on that now...",
+                MESSAGE_CHANNEL.WHATSAPP
+              );
+
+              responseContent = await _handleComplexWhatsApp(message.content, firebaseUser.uid, aiBrain);
+            }
 
             // Log AI response
-            unifiedMessageLog.addAssistantMessage(response.content, MESSAGE_CHANNEL.WHATSAPP);
+            unifiedMessageLog.addAssistantMessage(responseContent, MESSAGE_CHANNEL.WHATSAPP);
 
             // Add to conversation
             setMessages(prev => [...prev, {
               role: "assistant",
-              content: response.content,
+              content: responseContent,
               timestamp: new Date(),
-              channel: "whatsapp",
-              modelInfo: response.modelInfo
+              channel: "whatsapp"
             }]);
 
-            // Send response back via WhatsApp
-            await whatsappNotifications.sendAIResponse(response.content, MESSAGE_CHANNEL.WHATSAPP);
+            // Route via best channel
+            const routing = selectChannel(responseContent, {
+              userMessage: message.content,
+              userId: firebaseUser.uid
+            });
 
-            return { content: response.content, type: "ai" };
+            console.log(`[App] Routing response via ${routing.channel} — ${routing.reason}`);
+
+            await routeResponse(responseContent, routing.channel, {
+              chunks: routing.chunks,
+              userId: firebaseUser.uid
+            });
+
+            return { content: responseContent, type: "ai" };
           } catch (err) {
             console.error("[App] WhatsApp message handler error:", err.message);
             return { content: "Sorry, I encountered an error.", type: "system" };
@@ -1302,6 +1487,43 @@ const App = ({ updateConsoleTitle }) => {
     const timer = setTimeout(initMessaging, 2000);
     return () => clearTimeout(timer);
   }, [firebaseUser?.uid, showOnboarding, realtimeMessaging, whatsappNotifications, unifiedMessageLog, aiBrain]);
+
+  // ===== PROACTIVE ENGINE → EXTERNAL CHANNELS =====
+  // Route proactive notifications to WhatsApp / Vapi / Push based on urgency
+  const proactiveWiredRef = useRef(false);
+  useEffect(() => {
+    if (proactiveWiredRef.current) return;
+    if (!firebaseUser?.uid) return;
+
+    const handleProactiveNotification = async (notification) => {
+      try {
+        const routing = selectChannel(notification.message, {
+          isProactive: true,
+          notificationType: notification.type,
+          priority: notification.type === "urgent" ? 4 : 2,
+          userId: firebaseUser.uid
+        });
+
+        console.log(`[App] Proactive notification → ${routing.channel} (${routing.reason})`);
+
+        await routeResponse(notification.message, routing.channel, {
+          chunks: routing.chunks,
+          userId: firebaseUser.uid,
+          pushTitle: "BACKBONE Alert"
+        });
+      } catch (err) {
+        console.error("[App] Proactive notification routing error:", err.message);
+      }
+    };
+
+    proactiveEngine.on("notification", handleProactiveNotification);
+    proactiveWiredRef.current = true;
+
+    return () => {
+      proactiveEngine.removeListener("notification", handleProactiveNotification);
+      proactiveWiredRef.current = false;
+    };
+  }, [firebaseUser?.uid, proactiveEngine]);
 
   // Update poll countdown every second
   useEffect(() => {
@@ -4485,6 +4707,27 @@ Execute this task and provide concrete results.`);
         return;
       }
 
+      if (resolved === "/profiles") {
+        const profiles = listArchivedProfiles();
+        if (profiles.length === 0) {
+          setMessages((prev) => [
+            ...prev,
+            { role: "assistant", content: "No archived profiles found.", timestamp: new Date() }
+          ]);
+        } else {
+          const lines = profiles.map((p, i) => {
+            const date = p.archivedAt ? new Date(p.archivedAt).toLocaleDateString() : "unknown";
+            return `${i + 1}. ${p.name || "Unknown"} (${p.email || p.uid}) — archived ${date}`;
+          });
+          setMessages((prev) => [
+            ...prev,
+            { role: "assistant", content: `Archived Profiles:\n\n${lines.join("\n")}`, timestamp: new Date() }
+          ]);
+        }
+        setLastAction("Listed profiles");
+        return;
+      }
+
       if (resolved === "/connect") {
         const prompts = getConnectionPrompts(getSocialConfig());
         const promptText = prompts.length > 0
@@ -4525,6 +4768,49 @@ Execute this task and provide concrete results.`);
           setMessages((prev) => [
             ...prev,
             { role: "assistant", content: `Google email connection failed: ${err.message}`, timestamp: new Date() }
+          ]);
+        }
+        return;
+      }
+
+      // Connect phone — show QR code to install PWA for push notifications
+      if (resolved === "/connect phone") {
+        setLastAction("Connecting phone");
+        try {
+          const qrcode = await import("qrcode-terminal");
+          const pwaUrl = "https://backboneai.web.app";
+
+          // Generate QR code as string
+          const qrString = await new Promise((resolve) => {
+            qrcode.default.generate(pwaUrl, { small: true }, (code) => resolve(code));
+          });
+
+          setMessages((prev) => [
+            ...prev,
+            {
+              role: "assistant",
+              content: [
+                "Scan this QR code with your phone to install BACKBONE:\n",
+                qrString,
+                `\nOr visit: ${pwaUrl}`,
+                "\nSteps:",
+                "1. Scan QR code or open URL on your phone",
+                "2. Sign in with Google",
+                "3. Tap \"Enable Notifications\"",
+                "4. Tap \"Add to Home Screen\"",
+                "\nYou'll receive push notifications for morning briefs, trades, and goal updates."
+              ].join("\n"),
+              timestamp: new Date()
+            }
+          ]);
+        } catch (err) {
+          setMessages((prev) => [
+            ...prev,
+            {
+              role: "assistant",
+              content: `Install BACKBONE on your phone:\n\nVisit: https://backboneai.web.app\n\n1. Sign in with Google\n2. Enable Notifications\n3. Add to Home Screen\n\n(qrcode-terminal not available: ${err.message})`,
+              timestamp: new Date()
+            }
           ]);
         }
         return;
@@ -8188,6 +8474,61 @@ Folder: ${result.action.id}`,
         return;
       }
 
+      // /update - Auto-update
+      if (resolved === "/update check") {
+        setMessages((prev) => [...prev, { role: "assistant", content: "Checking for updates...", timestamp: new Date() }]);
+        setLastAction("Checking for updates...");
+        (async () => {
+          try {
+            const info = await checkVersion();
+            let display = "## Update Check\n\n";
+            display += `**Current version:** v${info.current}\n`;
+            if (info.latest) {
+              display += `**Latest version:** v${info.latest}\n`;
+              if (info.updateAvailable) {
+                display += `**Status:** Update available!\n`;
+                if (info.sizeBytes) display += `**Size:** ${(info.sizeBytes / 1024 / 1024).toFixed(1)} MB\n`;
+                if (info.releaseDate) display += `**Released:** ${new Date(info.releaseDate).toLocaleString()}\n`;
+                if (info.changelog) display += `\n**Changelog:**\n${info.changelog}\n`;
+                display += `\nRun \`/update\` to download and install.`;
+              } else {
+                display += `**Status:** Up to date`;
+              }
+            } else {
+              display += `**Status:** Could not reach update server`;
+            }
+            setMessages((prev) => [...prev, { role: "assistant", content: display, timestamp: new Date() }]);
+          } catch (err) {
+            setMessages((prev) => [...prev, { role: "assistant", content: `Update check failed: ${err.message}`, timestamp: new Date() }]);
+          }
+        })();
+        return;
+      }
+
+      if (resolved === "/update") {
+        setMessages((prev) => [...prev, { role: "assistant", content: "Checking for updates and installing if available...", timestamp: new Date() }]);
+        setLastAction("Updating...");
+        (async () => {
+          try {
+            const result = await forceUpdate((msg) => {
+              setLastAction(msg);
+            });
+            if (!result.updated && !result.error) {
+              setMessages((prev) => [...prev, { role: "assistant", content: "Already on the latest version.", timestamp: new Date() }]);
+              setLastAction("Up to date");
+            } else if (result.error) {
+              setMessages((prev) => [...prev, { role: "assistant", content: `Update failed: ${result.error}`, timestamp: new Date() }]);
+              setLastAction("Update failed");
+            }
+            // If update succeeded, process.exit(0) was called — we won't reach here
+          } catch (err) {
+            setMessages((prev) => [...prev, { role: "assistant", content: `Update failed: ${err.message}`, timestamp: new Date() }]);
+            setLastAction("Update failed");
+          }
+        })();
+        return;
+      }
+
       // /backup - Firebase Storage Backup
       if (resolved === "/backup" || resolved === "/backup status") {
         const status = getBackupStatus();
@@ -9057,6 +9398,17 @@ Folder: ${result.action.id}`,
           setPauseUpdates(false);
           setLastAction("Setup complete!");
           // Restore terminal title (Backbone · [User])
+          restoreBaseTitle();
+        },
+        onProfileRestored: (user) => {
+          // Profile restored from archive — skip onboarding entirely
+          process.stdout.write("\x1b[2J\x1b[1;1H");
+          setShowOnboarding(false);
+          pauseUpdatesRef.current = false;
+          setPauseUpdates(false);
+          setFirebaseUser(user);
+          syncUserSettings();
+          setLastAction(`Profile restored for ${user.name || user.email}`);
           restoreBaseTitle();
         }
       })

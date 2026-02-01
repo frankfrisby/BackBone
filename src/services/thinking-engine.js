@@ -55,7 +55,53 @@ const ROLE_MODELS_PATH = path.join(DATA_DIR, "person-match-cache.json");
 const PROFILE_SECTIONS_PATH = path.join(DATA_DIR, "profile-sections.json");
 const LINKEDIN_PROFILE_PATH = path.join(DATA_DIR, "linkedin-profile.json");
 
-const CYCLE_INTERVAL = 15 * 60 * 1000; // 15 minutes
+// Data sources for completeness scoring (12 total)
+const DATA_COMPLETENESS_SOURCES = [
+  { path: path.join(DATA_DIR, "linkedin-profile.json"), minSize: 100 },
+  { path: path.join(DATA_DIR, "core-beliefs.json"), minSize: 50 },
+  { path: path.join(DATA_DIR, "goals.json"), minSize: 50 },
+  { path: path.join(DATA_DIR, "oura-data.json"), minSize: 50 },
+  { path: path.join(DATA_DIR, "tickers-cache.json"), minSize: 50 },
+  { path: path.join(DATA_DIR, "trades-log.json"), minSize: 50 },
+  { path: path.join(MEMORY_DIR, "profile.md"), minSize: 50 },
+  { path: path.join(MEMORY_DIR, "thesis.md"), minSize: 50 },
+  { path: path.join(MEMORY_DIR, "portfolio.md"), minSize: 50 },
+  { path: path.join(MEMORY_DIR, "health.md"), minSize: 50 },
+  { path: path.join(DATA_DIR, "backlog.json"), minSize: 50 },
+  { path: path.join(DATA_DIR, "life-scores.json"), minSize: 20 }
+];
+
+/**
+ * Calculate data completeness score (0-100%)
+ * Checks 12 data sources — 1 point each if file exists with meaningful content
+ */
+function calculateDataCompleteness() {
+  let count = 0;
+  for (const source of DATA_COMPLETENESS_SOURCES) {
+    try {
+      if (fs.existsSync(source.path)) {
+        const stat = fs.statSync(source.path);
+        if (stat.size >= source.minSize) {
+          count++;
+        }
+      }
+    } catch {}
+  }
+  return { count, total: DATA_COMPLETENESS_SOURCES.length, percentage: Math.round((count / DATA_COMPLETENESS_SOURCES.length) * 100) };
+}
+
+/**
+ * Get adaptive cycle interval based on data completeness
+ * < 50% data → 15 min (aggressive, building profile)
+ * 50-75% data → 30 min (moderate, data filling in)
+ * 75%+ data → 60 min (mature, maintenance mode)
+ */
+function getAdaptiveCycleInterval() {
+  const { percentage } = calculateDataCompleteness();
+  if (percentage < 50) return 15 * 60 * 1000;  // 15 minutes
+  if (percentage < 75) return 30 * 60 * 1000;  // 30 minutes
+  return 60 * 60 * 1000;                        // 60 minutes
+}
 
 // Backlog graduation thresholds
 const GRADUATION_THRESHOLD = 75; // Impact score needed to become a goal
@@ -711,21 +757,42 @@ class ThinkingEngine extends EventEmitter {
   start() {
     if (this.isRunning) return;
     this.isRunning = true;
-    console.log("[ThinkingEngine] Started - will run every 15 minutes");
+
+    const interval = getAdaptiveCycleInterval();
+    const { percentage } = calculateDataCompleteness();
+    console.log(`[ThinkingEngine] Started — data completeness ${percentage}%, interval ${interval / 60000} min`);
 
     // Run first cycle after a short delay
     setTimeout(() => this.runCycle(), 10000);
 
-    // Schedule recurring cycles
-    this.cycleTimer = setInterval(() => this.runCycle(), CYCLE_INTERVAL);
+    // Schedule with adaptive re-scheduling (setTimeout so interval can change each cycle)
+    this._scheduleNextCycle();
     this.emit("started");
+  }
+
+  /** Schedule the next cycle using setTimeout so the interval adapts */
+  _scheduleNextCycle() {
+    if (!this.isRunning) return;
+
+    if (this.cycleTimer) {
+      clearTimeout(this.cycleTimer);
+      this.cycleTimer = null;
+    }
+
+    const interval = getAdaptiveCycleInterval();
+    this.currentInterval = interval;
+
+    this.cycleTimer = setTimeout(async () => {
+      await this.runCycle();
+      this._scheduleNextCycle(); // re-schedule with potentially new interval
+    }, interval);
   }
 
   stop() {
     if (!this.isRunning) return;
     this.isRunning = false;
     if (this.cycleTimer) {
-      clearInterval(this.cycleTimer);
+      clearTimeout(this.cycleTimer);
       this.cycleTimer = null;
     }
     console.log("[ThinkingEngine] Stopped");
@@ -1020,11 +1087,15 @@ ${result.insight || "No specific insight this cycle."}
 
   getStatus() {
     const backlog = loadBacklog();
+    const dataCompleteness = calculateDataCompleteness();
+    const interval = getAdaptiveCycleInterval();
     return {
       isRunning: this.isRunning,
       cycleCount: this.cycleCount,
       lastCycle: this.lastCycle,
-      nextCycleIn: this.cycleTimer ? CYCLE_INTERVAL : null,
+      nextCycleIn: this.cycleTimer ? (this.currentInterval || interval) : null,
+      intervalMinutes: interval / 60000,
+      dataCompleteness,
       backlogStats: {
         total: backlog.items.length,
         highImpact: backlog.items.filter(i => i.impactScore >= GRADUATION_THRESHOLD).length,
@@ -1123,4 +1194,5 @@ export const getThinkingEngine = () => {
   return engineInstance;
 };
 
+export { calculateDataCompleteness, getAdaptiveCycleInterval };
 export default ThinkingEngine;

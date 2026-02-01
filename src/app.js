@@ -6241,6 +6241,53 @@ Folder: ${result.action.id}`,
       }
 
       // /backlog - View and manage the backlog of ideas
+      // /knowledge - Show AI knowledge depth breakdown across all domains
+      if (resolved === "/knowledge" || resolved === "/knowledge breakdown") {
+        const dc = calculateDataCompleteness();
+        const pct = dc.percentage;
+        const barColor = pct >= 75 ? "green" : pct >= 40 ? "yellow" : "red";
+
+        const domainLabels = {
+          profile: "Profile",
+          goals: "Goals",
+          beliefs: "Beliefs",
+          financials: "Financials",
+          health: "Health",
+          markets: "Markets",
+          disaster: "Disaster",
+          contacts: "Contacts",
+          projects: "Projects",
+          backlog: "Backlog",
+          lifeScores: "Life Scores",
+          thesis: "Thesis",
+          research: "Research"
+        };
+
+        let content = `## Knowledge Depth — ${pct}%\n\n`;
+        const overallFilled = Math.round((pct / 100) * 20);
+        const overallEmpty = 20 - overallFilled;
+        content += `${"█".repeat(overallFilled)}${"░".repeat(overallEmpty)} **${pct}%**\n\n`;
+        content += `| Domain | Score | Depth |\n|--------|-------|-------|\n`;
+
+        for (const [key, score] of Object.entries(dc.scores)) {
+          const label = domainLabels[key] || key;
+          const filled = score;
+          const empty = 10 - score;
+          const bar = "█".repeat(filled) + "░".repeat(empty);
+          content += `| ${label} | ${score}/10 | ${bar} |\n`;
+        }
+
+        content += `\n**Total:** ${dc.total}/${dc.maxPossible} points across ${Object.keys(dc.scores).length} domains\n`;
+        content += `\nThe AI is always learning. 95% is peak — there is always more to discover.`;
+
+        setMessages((prev) => [
+          ...prev,
+          { role: "assistant", content, timestamp: new Date() }
+        ]);
+        setLastAction("Knowledge breakdown");
+        return;
+      }
+
       if (resolved === "/backlog" || resolved.startsWith("/backlog ")) {
         const thinkingEngine = thinkingEngineRef.current || getThinkingEngine();
         const parts = resolved.split(" ").filter(Boolean);

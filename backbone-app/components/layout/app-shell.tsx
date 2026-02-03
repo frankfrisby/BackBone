@@ -1,24 +1,28 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { useBackbone, type Panel } from "@/lib/backbone-context";
+import { useBackbone } from "@/lib/backbone-context";
 import { ChatPanel } from "@/components/chat/chat-panel";
 import { ChatInput } from "@/components/chat/chat-input";
 import { ViewContainer } from "@/components/views/view-container";
 import { TabPanel } from "@/components/tabs/tab-panel";
-import { onAuthStateChange } from "@/lib/firebase";
 import {
   MessageSquare,
-  LayoutGrid,
-  User as UserIcon,
   Wifi,
   WifiOff,
 } from "lucide-react";
+import { User } from "firebase/auth";
 
-export function AppShell() {
+interface AppShellProps {
+  user: User;
+}
+
+export function AppShell({ user }: AppShellProps) {
   const { state, sendMessage, setPanel, connectToBackbone } = useBackbone();
-  const { hasQueried, currentPanel, connectionStatus, transport } = state;
+  const { hasQueried, connectionStatus, transport } = state;
   const [isMobile, setIsMobile] = useState(false);
+  const [showChat, setShowChat] = useState(false);
+  const [showSidebar, setShowSidebar] = useState(false);
   const touchStartX = useRef(0);
   const touchStartY = useRef(0);
 
@@ -30,17 +34,24 @@ export function AppShell() {
     return () => window.removeEventListener("resize", check);
   }, []);
 
-  // Connect to backbone when auth ready
+  // Connect to backbone when mounted
   useEffect(() => {
-    const unsubscribe = onAuthStateChange((user) => {
-      if (user) {
-        connectToBackbone(user.uid);
-      }
-    });
-    return () => unsubscribe();
-  }, [connectToBackbone]);
+    connectToBackbone(user.uid);
+  }, [connectToBackbone, user.uid]);
 
-  // Swipe handling for mobile
+  // Close overlays on escape
+  useEffect(() => {
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setShowChat(false);
+        setShowSidebar(false);
+      }
+    };
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, []);
+
+  // Swipe handling for mobile overlays
   const handleTouchStart = (e: React.TouchEvent) => {
     touchStartX.current = e.touches[0].clientX;
     touchStartY.current = e.touches[0].clientY;
@@ -49,58 +60,84 @@ export function AppShell() {
   const handleTouchEnd = (e: React.TouchEvent) => {
     const deltaX = e.changedTouches[0].clientX - touchStartX.current;
     const deltaY = e.changedTouches[0].clientY - touchStartY.current;
-
     if (Math.abs(deltaX) < 60 || Math.abs(deltaY) > Math.abs(deltaX)) return;
 
-    const panels: Panel[] = ["chat", "view", "tabs"];
-    const currentIdx = panels.indexOf(currentPanel);
-
-    if (deltaX > 0 && currentIdx > 0) {
-      setPanel(panels[currentIdx - 1]);
-    } else if (deltaX < 0 && currentIdx < panels.length - 1) {
-      setPanel(panels[currentIdx + 1]);
+    if (deltaX > 0) {
+      // Swipe right → show chat or close sidebar
+      if (showSidebar) {
+        setShowSidebar(false);
+      } else if (!showChat) {
+        setShowChat(true);
+      }
+    } else {
+      // Swipe left → show sidebar or close chat
+      if (showChat) {
+        setShowChat(false);
+      } else if (!showSidebar) {
+        setShowSidebar(true);
+      }
     }
   };
 
-  // ── Welcome Screen (before first query) ────────────────────
+  // Connection badge
+  const ConnectionBadge = () => (
+    <div className="flex items-center gap-1.5 text-xs">
+      {connectionStatus === "connected" ? (
+        <>
+          <Wifi className="h-3 w-3 text-green-500" />
+          <span className="text-green-500 hidden sm:inline">Connected</span>
+          <span className="text-neutral-600 hidden sm:inline">({transport})</span>
+        </>
+      ) : connectionStatus === "connecting" ? (
+        <>
+          <div className="h-2.5 w-2.5 rounded-full bg-yellow-500 pulse-dot" />
+          <span className="text-yellow-500 hidden sm:inline">Connecting...</span>
+        </>
+      ) : (
+        <>
+          <WifiOff className="h-3 w-3 text-neutral-600" />
+          <span className="text-neutral-500 hidden sm:inline">Offline</span>
+        </>
+      )}
+    </div>
+  );
+
+  // ── Welcome Screen (before first query) ─────────────────────
 
   if (!hasQueried) {
     return (
       <div className="h-screen w-screen bg-black flex flex-col">
-        {/* Connection indicator */}
-        <div className="absolute top-4 right-4 flex items-center gap-2 text-xs text-neutral-500">
-          {connectionStatus === "connected" ? (
-            <>
-              <Wifi className="h-3 w-3 text-green-500" />
-              <span className="text-green-500">Connected</span>
-              <span className="text-neutral-600">via {transport}</span>
-            </>
-          ) : connectionStatus === "connecting" ? (
-            <>
-              <div className="h-3 w-3 rounded-full bg-yellow-500 pulse-dot" />
-              <span className="text-yellow-500">Connecting...</span>
-            </>
-          ) : (
-            <>
-              <WifiOff className="h-3 w-3 text-neutral-600" />
-              <span>Offline</span>
-            </>
+        {/* Top bar */}
+        <div className="flex items-center justify-between px-4 py-3">
+          <ConnectionBadge />
+          {isMobile && (
+            <button onClick={() => setShowSidebar(true)}>
+              {user.photoURL ? (
+                <img
+                  src={user.photoURL}
+                  alt=""
+                  className="h-7 w-7 rounded-full"
+                  referrerPolicy="no-referrer"
+                />
+              ) : (
+                <div className="h-7 w-7 rounded-full bg-neutral-800 border border-neutral-700" />
+              )}
+            </button>
           )}
         </div>
 
         {/* Center content */}
         <div className="flex-1 flex flex-col items-center justify-center px-6">
-          {/* Logo */}
-          <div className="h-16 w-16 rounded-2xl bg-neutral-900 border border-neutral-700 flex items-center justify-center mb-6">
-            <span className="text-2xl font-bold text-orange-500">B</span>
-          </div>
-
+          <img
+            src="/logo-dark.png"
+            alt="BACKBONE"
+            className="h-20 w-20 rounded-2xl mb-6"
+          />
           <h1 className="text-2xl font-semibold text-neutral-100 mb-2">
             BACKBONE
           </h1>
           <p className="text-neutral-500 text-sm mb-8 text-center max-w-md">
-            Your life optimization engine. Ask about your portfolio, health,
-            goals, or anything else.
+            Your life optimization engine
           </p>
 
           {/* Suggestion pills */}
@@ -110,14 +147,13 @@ export function AppShell() {
               "How did I sleep?",
               "What are my goals?",
               "Show trading signals",
-              "Call BACKBONE",
-            ].map((suggestion) => (
+            ].map((s) => (
               <button
-                key={suggestion}
-                onClick={() => sendMessage(suggestion)}
+                key={s}
+                onClick={() => sendMessage(s)}
                 className="px-4 py-2 rounded-full bg-neutral-900 border border-neutral-700 text-neutral-300 text-sm hover:bg-neutral-800 hover:border-neutral-600 transition-colors"
               >
-                {suggestion}
+                {s}
               </button>
             ))}
           </div>
@@ -127,130 +163,163 @@ export function AppShell() {
         <div className="p-4 pb-safe">
           <ChatInput onSend={sendMessage} disabled={state.isProcessing} />
         </div>
+
+        {/* Right sidebar overlay on welcome screen (mobile) */}
+        {isMobile && (
+          <>
+            <div
+              className={`fixed inset-0 bg-black/60 z-40 transition-opacity duration-300 ${
+                showSidebar
+                  ? "opacity-100"
+                  : "opacity-0 pointer-events-none"
+              }`}
+              onClick={() => setShowSidebar(false)}
+            />
+            <div
+              className={`fixed inset-y-0 right-0 w-[80%] bg-neutral-950 border-l border-neutral-800 z-50 transform transition-transform duration-300 ease-out ${
+                showSidebar ? "translate-x-0" : "translate-x-full"
+              }`}
+            >
+              <TabPanel
+                user={user}
+                onClose={() => setShowSidebar(false)}
+              />
+            </div>
+          </>
+        )}
       </div>
     );
   }
 
-  // ── Main 3-Panel Layout ────────────────────────────────────
+  // ── Mobile Layout (after first query) ───────────────────────
 
   if (isMobile) {
     return (
       <div
-        className="h-screen w-screen bg-black flex flex-col overflow-hidden"
+        className="h-screen w-screen bg-black flex flex-col overflow-hidden animate-fade-in"
         onTouchStart={handleTouchStart}
         onTouchEnd={handleTouchEnd}
       >
-        {/* Panel indicator */}
-        <div className="flex items-center justify-center gap-4 pt-3 pb-1 px-4">
-          {/* Connection */}
-          <div className="absolute left-4 top-3">
-            {connectionStatus === "connected" ? (
-              <Wifi className="h-3.5 w-3.5 text-green-500" />
-            ) : (
-              <WifiOff className="h-3.5 w-3.5 text-neutral-600" />
-            )}
-          </div>
-
-          {(["chat", "view", "tabs"] as Panel[]).map((panel) => (
-            <button
-              key={panel}
-              onClick={() => setPanel(panel)}
-              className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs transition-colors ${
-                currentPanel === panel
-                  ? "bg-neutral-800 text-neutral-100"
-                  : "text-neutral-500"
-              }`}
-            >
-              {panel === "chat" && <MessageSquare className="h-3 w-3" />}
-              {panel === "view" && <LayoutGrid className="h-3 w-3" />}
-              {panel === "tabs" && <UserIcon className="h-3 w-3" />}
-              <span className="capitalize">{panel === "tabs" ? "Tabs" : panel}</span>
-            </button>
-          ))}
-        </div>
-
-        {/* Panel content */}
-        <div className="flex-1 overflow-hidden relative">
-          <div
-            className="flex h-full panel-transition"
-            style={{
-              transform: `translateX(${
-                currentPanel === "chat"
-                  ? "0"
-                  : currentPanel === "view"
-                  ? "-100%"
-                  : "-200%"
-              })`,
-              width: "300%",
-            }}
+        {/* Top bar */}
+        <div className="h-12 flex items-center justify-between px-4 border-b border-neutral-800 flex-shrink-0">
+          <button
+            onClick={() => setShowChat(true)}
+            className="h-8 w-8 flex items-center justify-center rounded-lg text-neutral-400 hover:bg-neutral-800 transition-colors"
           >
-            <div className="w-1/3 h-full overflow-hidden">
-              <ChatPanel />
-            </div>
-            <div className="w-1/3 h-full overflow-hidden">
-              <ViewContainer />
-            </div>
-            <div className="w-1/3 h-full overflow-hidden">
-              <TabPanel />
-            </div>
+            <MessageSquare className="h-4 w-4" />
+          </button>
+
+          <img
+            src="/logo-dark.png"
+            alt="BACKBONE"
+            className="h-7 w-7 rounded-md"
+          />
+
+          <button onClick={() => setShowSidebar(true)}>
+            {user.photoURL ? (
+              <img
+                src={user.photoURL}
+                alt=""
+                className="h-7 w-7 rounded-full"
+                referrerPolicy="no-referrer"
+              />
+            ) : (
+              <div className="h-7 w-7 rounded-full bg-neutral-800 border border-neutral-700" />
+            )}
+          </button>
+        </div>
+
+        {/* Main view */}
+        <div className="flex-1 overflow-hidden">
+          <ViewContainer />
+        </div>
+
+        {/* Bottom input */}
+        <div className="p-3 pb-safe border-t border-neutral-800 flex-shrink-0">
+          <ChatInput onSend={sendMessage} disabled={state.isProcessing} />
+        </div>
+
+        {/* ── Chat overlay from left ─────────────────────────── */}
+        <div
+          className={`fixed inset-0 bg-black/60 z-40 transition-opacity duration-300 ${
+            showChat ? "opacity-100" : "opacity-0 pointer-events-none"
+          }`}
+          onClick={() => setShowChat(false)}
+        />
+        <div
+          className={`fixed inset-y-0 left-0 w-[85%] bg-neutral-950 border-r border-neutral-800 z-50 transform transition-transform duration-300 ease-out flex flex-col ${
+            showChat ? "translate-x-0" : "-translate-x-full"
+          }`}
+        >
+          <ChatPanel />
+          <div className="p-3 border-t border-neutral-800">
+            <ChatInput
+              onSend={(msg) => {
+                sendMessage(msg);
+                setShowChat(false);
+              }}
+              disabled={state.isProcessing}
+            />
           </div>
         </div>
 
-        {/* Bottom input - always visible */}
-        <div className="p-3 pb-safe border-t border-neutral-800">
-          <ChatInput onSend={sendMessage} disabled={state.isProcessing} />
+        {/* ── Right sidebar overlay (80%) ────────────────────── */}
+        <div
+          className={`fixed inset-0 bg-black/60 z-40 transition-opacity duration-300 ${
+            showSidebar ? "opacity-100" : "opacity-0 pointer-events-none"
+          }`}
+          onClick={() => setShowSidebar(false)}
+        />
+        <div
+          className={`fixed inset-y-0 right-0 w-[80%] bg-neutral-950 border-l border-neutral-800 z-50 transform transition-transform duration-300 ease-out ${
+            showSidebar ? "translate-x-0" : "translate-x-full"
+          }`}
+        >
+          <TabPanel
+            user={user}
+            onClose={() => setShowSidebar(false)}
+          />
         </div>
       </div>
     );
   }
 
-  // ── Desktop Layout ─────────────────────────────────────────
+  // ── Desktop Layout ──────────────────────────────────────────
 
   return (
-    <div className="h-screen w-screen bg-black flex flex-col">
+    <div className="h-screen w-screen bg-black flex flex-col animate-fade-in">
       {/* Top bar */}
       <div className="h-10 flex items-center justify-between px-4 border-b border-neutral-800">
         <div className="flex items-center gap-3">
-          <span className="text-sm font-semibold text-orange-500">BACKBONE</span>
+          <img
+            src="/logo-dark.png"
+            alt="BACKBONE"
+            className="h-6 w-6 rounded"
+          />
+          <span className="text-sm font-semibold text-neutral-100">
+            BACKBONE
+          </span>
         </div>
-        <div className="flex items-center gap-2 text-xs">
-          {connectionStatus === "connected" ? (
-            <>
-              <Wifi className="h-3 w-3 text-green-500" />
-              <span className="text-green-500">Connected</span>
-              <span className="text-neutral-600">({transport})</span>
-            </>
-          ) : connectionStatus === "connecting" ? (
-            <>
-              <div className="h-2 w-2 rounded-full bg-yellow-500 pulse-dot" />
-              <span className="text-yellow-500">Connecting...</span>
-            </>
-          ) : (
-            <>
-              <WifiOff className="h-3 w-3 text-neutral-600" />
-              <span className="text-neutral-500">Offline</span>
-            </>
-          )}
-        </div>
+        <ConnectionBadge />
       </div>
 
       {/* 3-column layout */}
       <div className="flex-1 flex overflow-hidden">
-        {/* Left - Chat */}
+        {/* Left — Chat */}
         <div className="w-80 border-r border-neutral-800 flex flex-col bg-neutral-950">
           <div className="flex-1 overflow-hidden">
             <ChatPanel />
           </div>
         </div>
 
-        {/* Center - Dynamic View */}
+        {/* Center — Dynamic View */}
         <div className="flex-1 flex flex-col overflow-hidden">
           <ViewContainer />
         </div>
 
-        {/* Right - Profile + Tabs */}
+        {/* Right — Profile + Tabs */}
         <div className="w-72 border-l border-neutral-800 flex flex-col bg-neutral-950">
-          <TabPanel />
+          <TabPanel user={user} />
         </div>
       </div>
 

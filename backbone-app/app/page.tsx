@@ -12,14 +12,13 @@ export default function HomePage() {
   const router = useRouter();
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChange((user) => {
-      setUser(user);
+    const unsubscribe = onAuthStateChange((u) => {
+      setUser(u);
       setLoading(false);
-      if (!user) {
+      if (!u) {
         router.push("/auth/login");
       }
     });
-
     return () => unsubscribe();
   }, [router]);
 
@@ -27,9 +26,11 @@ export default function HomePage() {
     return (
       <div className="h-screen w-screen bg-black flex items-center justify-center">
         <div className="flex flex-col items-center gap-4">
-          <div className="h-12 w-12 rounded-xl bg-neutral-900 border border-neutral-700 flex items-center justify-center">
-            <span className="text-lg font-bold text-orange-500">B</span>
-          </div>
+          <img
+            src="/logo-dark.png"
+            alt="BACKBONE"
+            className="h-12 w-12 rounded-xl"
+          />
           <div className="flex gap-1">
             <div className="w-1.5 h-1.5 bg-neutral-500 rounded-full typing-dot" />
             <div className="w-1.5 h-1.5 bg-neutral-500 rounded-full typing-dot" />
@@ -40,9 +41,7 @@ export default function HomePage() {
     );
   }
 
-  if (!user) {
-    return null;
-  }
+  if (!user) return null;
 
-  return <AppShell />;
+  return <AppShell user={user} />;
 }

@@ -28,9 +28,11 @@ export default function LoginPage() {
       <div className="w-full max-w-sm">
         {/* Logo */}
         <div className="flex flex-col items-center mb-10">
-          <div className="h-20 w-20 rounded-2xl bg-neutral-900 border border-neutral-700 flex items-center justify-center mb-4">
-            <span className="text-4xl font-bold text-orange-500">B</span>
-          </div>
+          <img
+            src="/logo-dark.png"
+            alt="BACKBONE"
+            className="h-24 w-24 rounded-2xl mb-4"
+          />
           <h1 className="text-3xl font-bold text-neutral-100">BACKBONE</h1>
           <p className="text-neutral-500 text-sm mt-1">
             Life optimization engine

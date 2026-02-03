@@ -4,6 +4,7 @@ import { EventEmitter } from "events";
 import { sendMessage } from "./claude.js";
 import { getActivityTracker } from "./activity-tracker.js";
 import { developPlan, initPlanFields, getUnplannedGoals } from "./goal-planner.js";
+import { getSkillGapDetector } from "./skill-gap-detector.js";
 
 /**
  * Thinking Engine - The brain that actually thinks and acts
@@ -1266,7 +1267,20 @@ ${result.insight || "No specific insight this cycle."}
         }
       }
 
-      // 10. Log the cycle
+      // 10. Run skill gap detection (Jarvis-style capability expansion)
+      try {
+        tracker.setState("analyzing", "Detecting skill gaps...");
+        const skillGapDetector = getSkillGapDetector();
+        const gapResult = await skillGapDetector.processGaps();
+        if (gapResult.skillsCreated > 0 || gapResult.serversCreated > 0) {
+          tracker.action("WRITE", `skill-gap-detector: ${gapResult.skillsCreated} skills, ${gapResult.serversCreated} MCP servers`);
+          console.log(`[ThinkingEngine] Skill gaps processed: ${gapResult.gaps} gaps found, ${gapResult.skillsCreated} skills created, ${gapResult.serversCreated} MCP servers created`);
+        }
+      } catch (gapError) {
+        console.error("[ThinkingEngine] Skill gap detection error:", gapError.message);
+      }
+
+      // 11. Log the cycle
       const cycleLog = {
         cycle: this.cycleCount,
         timestamp: new Date().toISOString(),

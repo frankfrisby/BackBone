@@ -18,6 +18,7 @@ import { runClaudeCodeStreaming, getClaudeCodeStatus } from "./claude-code-cli.j
 import { getActivityTracker } from "./activity-tracker.js";
 import { getActivityNarrator } from "./activity-narrator.js";
 import { getThinkingEngine } from "./thinking-engine.js";
+import { getSkillGapDetector } from "./skill-gap-detector.js";
 
 const DATA_DIR = path.join(process.cwd(), "data");
 const MEMORY_DIR = path.join(process.cwd(), "memory");
@@ -41,6 +42,7 @@ const WORK_TYPES = {
   CONNECT: "connect", // Find connections between items
   PRUNE: "prune", // Clean up stale/irrelevant items
   PLAN: "plan", // Develop plans for unplanned goals
+  SKILL_GAP: "skill_gap", // Detect and create missing skills/MCP servers
 };
 
 function readJson(filePath) {
@@ -264,6 +266,24 @@ class IdleProcessor extends EventEmitter {
         item: goalToPlan,
         context: { profile, thesis },
       };
+    }
+
+    // Check if skill gap analysis is needed (every 2 hours max)
+    try {
+      const detector = getSkillGapDetector();
+      const gapData = detector.getDisplayData();
+      const lastAnalysis = gapData.lastAnalysis ? new Date(gapData.lastAnalysis).getTime() : 0;
+      const hoursSinceAnalysis = (Date.now() - lastAnalysis) / (1000 * 60 * 60);
+      if (hoursSinceAnalysis > 2 && goalsData.goals.filter(g => g.status === "active").length > 0) {
+        console.log("[IdleProcessor] Skill gap analysis needed (last: " + (hoursSinceAnalysis > 999 ? "never" : Math.round(hoursSinceAnalysis) + "h ago") + ")");
+        return {
+          type: WORK_TYPES.SKILL_GAP,
+          item: { title: "Skill Gap Analysis", id: "skill-gap-detection" },
+          context: { profile, thesis },
+        };
+      }
+    } catch (err) {
+      console.log(`[IdleProcessor] Skill gap check failed: ${err.message}`);
     }
 
     if (backlog.items.length === 0) {
@@ -749,6 +769,28 @@ Don't dismiss items with high impact scores unless clearly outdated.
 
 Be conservative. Only prune what's clearly stale.`;
 
+      case WORK_TYPES.SKILL_GAP:
+        return `${baseContext}
+
+TASK: Analyze current goals and projects to detect missing skills and tools.
+
+Read data/goals.json to see active goals and their tasks.
+Read data/user-skills/index.json to see existing user skills.
+Read .mcp.json to see existing MCP servers.
+
+Then determine if any goals require capabilities the system doesn't have yet.
+
+For each gap found:
+1. Create a user skill markdown file in data/user-skills/<slug>.md following the standard skill format
+2. Update data/user-skills/index.json to register the new skill
+3. If the gap requires an execution tool (API call, data processing), generate an MCP server in src/mcp/
+4. Register new MCP servers in .mcp.json
+
+Focus on HIGH-IMPACT, UNIVERSAL capabilities (not one-off tasks).
+Create at most 2 skills and 1 MCP server per cycle.
+
+Be decisive. Analyze, create what's needed, then stop.`;
+
       case WORK_TYPES.PLAN:
         return `${baseContext}
 
@@ -815,6 +857,8 @@ Do quality work, then stop.`;
         return "Cleaning up stale backlog items";
       case WORK_TYPES.PLAN:
         return `Planning goal: ${workItem.item?.title}`;
+      case WORK_TYPES.SKILL_GAP:
+        return "Analyzing skill gaps and building capabilities";
       default:
         return "Processing backlog";
     }

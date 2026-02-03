@@ -195,6 +195,25 @@ export const triggerFullScan = async (force = false) => {
 };
 
 /**
+ * Clear the ticker blacklist so the full universe is scanned again
+ */
+export const clearBlacklist = async () => {
+  try {
+    if (!(await isServerRunning())) {
+      await startServer();
+    }
+
+    const response = await fetch(`${SERVER_URL}/api/clear-blacklist`, { method: "POST" });
+    if (response.ok) {
+      return await response.json();
+    }
+    return { success: false, error: "Server error" };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+};
+
+/**
  * Get server status
  */
 export const getServerStatus = async () => {

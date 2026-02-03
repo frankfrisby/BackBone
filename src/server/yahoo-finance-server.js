@@ -31,13 +31,23 @@ let scanAbortFlag = false;
 
 const BLACKLIST_PATH = path.join(process.cwd(), "data", "ticker-blacklist.json");
 let tickerBlacklist = new Set();
+// Track consecutive failures per ticker (requires 3 failures to blacklist)
+const failureCounts = new Map();
+const BLACKLIST_FAILURE_THRESHOLD = 3;
 
 const loadBlacklist = () => {
   try {
     if (fs.existsSync(BLACKLIST_PATH)) {
       const data = JSON.parse(fs.readFileSync(BLACKLIST_PATH, "utf-8"));
       if (Array.isArray(data)) {
-        tickerBlacklist = new Set(data);
+        // Never load CORE_TICKERS into blacklist — they must always be scanned
+        const coreSet = new Set(CORE_TICKERS);
+        tickerBlacklist = new Set(data.filter(sym => !coreSet.has(sym)));
+        const removed = data.length - tickerBlacklist.size;
+        if (removed > 0) {
+          console.log(`[Blacklist] Restored ${removed} core tickers that were incorrectly blacklisted`);
+          saveBlacklist();
+        }
       }
     }
   } catch {
@@ -55,12 +65,39 @@ const saveBlacklist = () => {
   }
 };
 
+const clearBlacklist = () => {
+  const count = tickerBlacklist.size;
+  tickerBlacklist.clear();
+  failureCounts.clear();
+  saveBlacklist();
+  console.log(`[Blacklist] Cleared ${count} entries — full universe restored`);
+  return count;
+};
+
 const getActiveUniverse = () => TICKER_UNIVERSE.filter(sym => !tickerBlacklist.has(sym));
 
 const blacklistTicker = (symbol, reason = "no_quote") => {
   if (!symbol || tickerBlacklist.has(symbol)) return;
+
+  // NEVER blacklist core tickers — they should always be scanned
+  const coreSet = new Set(CORE_TICKERS);
+  if (coreSet.has(symbol)) {
+    console.log(`[Blacklist] Skipping ${symbol} — core ticker (reason: ${reason})`);
+    return;
+  }
+
+  // Require multiple consecutive failures before permanent blacklisting
+  const failures = (failureCounts.get(symbol) || 0) + 1;
+  failureCounts.set(symbol, failures);
+
+  if (failures < BLACKLIST_FAILURE_THRESHOLD) {
+    console.log(`[Blacklist] ${symbol} failure ${failures}/${BLACKLIST_FAILURE_THRESHOLD} (${reason}) — not yet blacklisted`);
+    return;
+  }
+
   tickerBlacklist.add(symbol);
-  console.warn(`[Blacklist] ${symbol} removed from universe (${reason})`);
+  failureCounts.delete(symbol);
+  console.warn(`[Blacklist] ${symbol} removed from universe after ${BLACKLIST_FAILURE_THRESHOLD} failures (${reason})`);
   // Remove from cache so counts align
   tickerCache.tickers = tickerCache.tickers.filter(t => t.symbol !== symbol);
   saveBlacklist();
@@ -1075,9 +1112,10 @@ app.post("/api/full-scan", async (req, res) => {
     scanAbortFlag = false;
   }
 
-  // If force, clear all lastEvaluated so every ticker gets re-evaluated
+  // If force, clear blacklist and all lastEvaluated so every ticker gets re-evaluated
   if (force) {
-    console.log(`[Full scan] Force mode — clearing lastEvaluated on all ${tickerCache.tickers.length} cached tickers`);
+    const cleared = clearBlacklist();
+    console.log(`[Full scan] Force mode — cleared ${cleared} blacklist entries, clearing lastEvaluated on all ${tickerCache.tickers.length} cached tickers`);
     for (const ticker of tickerCache.tickers) {
       delete ticker.lastEvaluated;
     }
@@ -1085,7 +1123,7 @@ app.post("/api/full-scan", async (req, res) => {
   }
 
   const activeUniverse = getActiveUniverse();
-  res.json({ success: true, message: `Full scan ${force ? "restarted" : "started"} for ${activeUniverse.length} tickers`, force });
+  res.json({ success: true, message: `Full scan ${force ? "restarted (blacklist cleared)" : "started"} for ${activeUniverse.length} tickers`, force });
   runFullScan();
 });
 
@@ -1096,8 +1134,17 @@ app.get("/health", (req, res) => {
     lastUpdate: tickerCache.lastUpdate,
     tickerCount: tickerCache.tickers.length,
     fullScanRunning: tickerCache.fullScanRunning,
-    lastFullScan: tickerCache.lastFullScan
+    lastFullScan: tickerCache.lastFullScan,
+    blacklistCount: tickerBlacklist.size,
+    activeUniverseCount: getActiveUniverse().length,
+    totalUniverseCount: TICKER_UNIVERSE.length
   });
+});
+
+// Clear blacklist endpoint
+app.post("/api/clear-blacklist", (req, res) => {
+  const cleared = clearBlacklist();
+  res.json({ success: true, cleared, activeUniverse: getActiveUniverse().length });
 });
 
 // Shutdown endpoint (used to restart server on CLI startup)

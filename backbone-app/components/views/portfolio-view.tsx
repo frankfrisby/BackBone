@@ -2,7 +2,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { formatCurrency, formatPercentage } from "@/lib/utils";
-import { TrendingUp, TrendingDown, ArrowUpRight, ArrowDownRight } from "lucide-react";
+import { ArrowUpRight, ArrowDownRight } from "lucide-react";
 
 interface PortfolioViewProps {
   data?: any;
@@ -49,12 +49,11 @@ export function PortfolioView({ data, isLive }: PortfolioViewProps) {
   const p = portfolio || data?.portfolio;
   const pos = positions || data?.positions || [];
 
-  // Show skeleton while loading
   if (!p) {
     return (
-      <div className="h-full overflow-auto p-5 space-y-4">
-        <div className="skeleton h-40 rounded-2xl" />
-        <div className="skeleton h-20 rounded-2xl" />
+      <div className="h-full overflow-auto p-5 space-y-3">
+        <div className="skeleton h-44 rounded-2xl" />
+        <div className="skeleton h-24 rounded-2xl" />
         <div className="skeleton h-20 rounded-2xl" />
         <div className="skeleton h-20 rounded-2xl" />
       </div>
@@ -66,99 +65,104 @@ export function PortfolioView({ data, isLive }: PortfolioViewProps) {
 
   return (
     <div className="h-full overflow-auto no-scrollbar">
-      {/* Hero section - Robinhood style */}
-      <div className="px-5 pt-6 pb-4">
-        <p className="text-xs text-neutral-500 uppercase tracking-wide mb-1">
-          Total Portfolio Value
+      {/* Hero */}
+      <div
+        className={`px-6 pt-8 pb-5 ${
+          isPositive ? "gradient-card-green" : "gradient-card-red"
+        }`}
+      >
+        <p className="text-[11px] text-neutral-500 uppercase tracking-widest font-medium mb-1.5">
+          Portfolio Value
         </p>
-        <div className="text-4xl font-bold text-neutral-100 tracking-tight">
+        <div className="text-[42px] font-bold text-white tracking-value leading-none tabular-nums">
           {formatCurrency(p.equity || 0)}
         </div>
 
-        {/* P&L Row */}
-        <div className="flex items-center gap-3 mt-2">
+        <div className="flex items-center gap-4 mt-3">
           <div
-            className={`flex items-center gap-1 text-sm font-medium ${
-              isPositive ? "text-green-500 glow-green" : "text-red-500 glow-red"
+            className={`flex items-center gap-1 text-[13px] font-semibold ${
+              isPositive ? "text-green-400" : "text-red-400"
             }`}
           >
             {isPositive ? (
-              <ArrowUpRight className="h-4 w-4" />
+              <ArrowUpRight className="h-3.5 w-3.5" />
             ) : (
-              <ArrowDownRight className="h-4 w-4" />
+              <ArrowDownRight className="h-3.5 w-3.5" />
             )}
-            {formatCurrency(Math.abs(p.totalPL || 0))} (
-            {formatPercentage(p.totalPLPercent || 0)})
+            <span className="tabular-nums">
+              {formatCurrency(Math.abs(p.totalPL || 0))}
+            </span>
+            <span className="text-neutral-500 font-normal ml-0.5">
+              ({formatPercentage(p.totalPLPercent || 0)})
+            </span>
           </div>
-          <span className="text-xs text-neutral-600">All time</span>
-        </div>
-
-        {/* Day P&L */}
-        <div className="flex items-center gap-3 mt-1">
-          <div
-            className={`flex items-center gap-1 text-xs ${
-              dayPositive ? "text-green-500" : "text-red-500"
-            }`}
-          >
-            {dayPositive ? (
-              <TrendingUp className="h-3 w-3" />
-            ) : (
-              <TrendingDown className="h-3 w-3" />
-            )}
-            {formatCurrency(Math.abs(p.dayPL || 0))} today
-          </div>
+          <span className="text-[11px] text-neutral-600">all time</span>
         </div>
       </div>
 
-      {/* Chart placeholder */}
-      <div className="px-5 mb-4">
-        <div className="h-32 rounded-xl bg-neutral-900 border border-neutral-800 flex items-center justify-center">
-          <div className="flex items-end gap-0.5 h-16">
-            {Array.from({ length: 30 }).map((_, i) => (
+      {/* Chart */}
+      <div className="px-5 py-4">
+        <div className="h-28 card-surface flex items-end justify-center gap-px px-4 pb-4 pt-2 overflow-hidden">
+          {Array.from({ length: 40 }).map((_, i) => {
+            const height = 15 + Math.random() * 85;
+            const opacity = 0.2 + (i / 40) * 0.8;
+            return (
               <div
                 key={i}
-                className={`w-1.5 rounded-full ${
-                  isPositive ? "bg-green-500/30" : "bg-red-500/30"
-                }`}
+                className="flex-1 rounded-full animate-fade-up"
                 style={{
-                  height: `${20 + Math.random() * 80}%`,
-                  opacity: 0.3 + (i / 30) * 0.7,
+                  height: `${height}%`,
+                  opacity,
+                  backgroundColor: isPositive
+                    ? "rgba(34, 197, 94, 0.4)"
+                    : "rgba(239, 68, 68, 0.4)",
+                  animationDelay: `${i * 15}ms`,
                 }}
               />
-            ))}
-          </div>
+            );
+          })}
         </div>
       </div>
 
-      {/* Stats row */}
-      <div className="px-5 mb-4 grid grid-cols-2 gap-3">
-        <div className="bg-neutral-900 rounded-xl p-3 border border-neutral-800">
-          <p className="text-xs text-neutral-500">Buying Power</p>
-          <p className="text-lg font-semibold text-neutral-100 mt-0.5">
+      {/* Stats */}
+      <div className="px-5 pb-4 grid grid-cols-2 gap-2.5">
+        <div className="card-surface px-4 py-3.5">
+          <p className="text-[10px] text-neutral-600 uppercase tracking-wider font-medium">
+            Buying Power
+          </p>
+          <p className="text-[18px] font-semibold text-white mt-1 tabular-nums tracking-tight">
             {formatCurrency(p.buyingPower || 0)}
           </p>
         </div>
-        <div className="bg-neutral-900 rounded-xl p-3 border border-neutral-800">
-          <p className="text-xs text-neutral-500">Day P&L</p>
+        <div className="card-surface px-4 py-3.5">
+          <p className="text-[10px] text-neutral-600 uppercase tracking-wider font-medium">
+            Today
+          </p>
           <p
-            className={`text-lg font-semibold mt-0.5 ${
-              dayPositive ? "text-green-500" : "text-red-500"
+            className={`text-[18px] font-semibold mt-1 tabular-nums tracking-tight ${
+              dayPositive ? "text-green-400" : "text-red-400"
             }`}
           >
+            {dayPositive ? "+" : ""}
             {formatCurrency(p.dayPL || 0)}
           </p>
         </div>
       </div>
 
       {/* Positions */}
-      <div className="px-5 pb-6">
-        <h3 className="text-xs text-neutral-500 uppercase tracking-wide mb-3">
-          Positions ({pos.length})
-        </h3>
-        <div className="space-y-2">
+      <div className="px-5 pb-8">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-[11px] text-neutral-500 uppercase tracking-widest font-medium">
+            Positions
+          </h3>
+          <span className="text-[11px] text-neutral-600 tabular-nums">
+            {pos.length}
+          </span>
+        </div>
+        <div className="space-y-1.5">
           {pos.length === 0 ? (
-            <div className="bg-neutral-900 rounded-xl p-4 border border-neutral-800 text-center">
-              <p className="text-sm text-neutral-500">No positions</p>
+            <div className="card-surface p-5 text-center">
+              <p className="text-[13px] text-neutral-600">No open positions</p>
             </div>
           ) : (
             pos.map((position: any) => {
@@ -166,32 +170,33 @@ export function PortfolioView({ data, isLive }: PortfolioViewProps) {
               return (
                 <div
                   key={position.symbol}
-                  className="bg-neutral-900 rounded-xl p-3.5 border border-neutral-800 flex items-center justify-between"
+                  className="card-interactive flex items-center justify-between px-4 py-3.5"
                 >
                   <div>
                     <div className="flex items-center gap-2">
-                      <span className="text-sm font-semibold text-neutral-100">
+                      <span className="text-[14px] font-semibold text-white">
                         {position.symbol}
                       </span>
-                      <span className="text-xs text-neutral-600">
+                      <span className="text-[11px] text-neutral-600 tabular-nums">
                         {position.qty} shares
                       </span>
                     </div>
-                    <div className="text-xs text-neutral-500 mt-0.5">
+                    <p className="text-[11px] text-neutral-600 mt-0.5 tabular-nums">
                       Avg {formatCurrency(position.avgEntryPrice || 0)}
-                    </div>
+                    </p>
                   </div>
                   <div className="text-right">
-                    <div className="text-sm font-medium text-neutral-100">
+                    <p className="text-[14px] font-medium text-white tabular-nums">
                       {formatCurrency(position.currentPrice || 0)}
-                    </div>
-                    <div
-                      className={`text-xs font-medium ${
-                        posPositive ? "text-green-500" : "text-red-500"
+                    </p>
+                    <p
+                      className={`text-[12px] font-medium tabular-nums ${
+                        posPositive ? "text-green-400" : "text-red-400"
                       }`}
                     >
+                      {posPositive ? "+" : ""}
                       {formatPercentage(position.unrealizedPLPercent || 0)}
-                    </div>
+                    </p>
                   </div>
                 </div>
               );
@@ -200,11 +205,13 @@ export function PortfolioView({ data, isLive }: PortfolioViewProps) {
         </div>
       </div>
 
-      {/* Live indicator */}
+      {/* Live badge */}
       {isLive && (
-        <div className="fixed bottom-20 right-4 flex items-center gap-1.5 bg-neutral-900/90 border border-neutral-700 rounded-full px-3 py-1">
+        <div className="fixed bottom-20 right-4 flex items-center gap-2 glass rounded-full px-3.5 py-1.5">
           <div className="h-1.5 w-1.5 rounded-full bg-green-500 pulse-dot" />
-          <span className="text-[10px] text-neutral-400">Live</span>
+          <span className="text-[10px] text-neutral-400 font-medium">
+            Live
+          </span>
         </div>
       )}
     </div>

@@ -19,13 +19,13 @@ async function fetchEvents() {
   }
 }
 
-const timeColors = [
-  "border-l-orange-500",
-  "border-l-green-500",
-  "border-l-blue-500",
-  "border-l-purple-500",
-  "border-l-yellow-500",
-  "border-l-pink-500",
+const accentColors = [
+  { border: "border-l-orange-500", bg: "bg-orange-500/10", dot: "bg-orange-500" },
+  { border: "border-l-green-500", bg: "bg-green-500/10", dot: "bg-green-500" },
+  { border: "border-l-blue-500", bg: "bg-blue-500/10", dot: "bg-blue-500" },
+  { border: "border-l-purple-500", bg: "bg-purple-500/10", dot: "bg-purple-500" },
+  { border: "border-l-yellow-500", bg: "bg-yellow-500/10", dot: "bg-yellow-500" },
+  { border: "border-l-pink-500", bg: "bg-pink-500/10", dot: "bg-pink-500" },
 ];
 
 function formatTime(dateStr: string) {
@@ -48,7 +48,11 @@ function formatDateHeader(dateStr: string) {
 
     if (d.toDateString() === today.toDateString()) return "Today";
     if (d.toDateString() === tomorrow.toDateString()) return "Tomorrow";
-    return d.toLocaleDateString([], { weekday: "long", month: "short", day: "numeric" });
+    return d.toLocaleDateString([], {
+      weekday: "long",
+      month: "short",
+      day: "numeric",
+    });
   } catch {
     return dateStr;
   }
@@ -62,7 +66,6 @@ export function CalendarView({ data }: CalendarViewProps) {
 
   const evts = events || data?.events || [];
 
-  // Generate mock events if none available
   const displayEvents =
     evts.length > 0
       ? evts
@@ -109,101 +112,105 @@ export function CalendarView({ data }: CalendarViewProps) {
     grouped[dateKey].push(evt);
   }
 
-  // Current time indicator
   const now = new Date();
-  const currentHour = now.getHours();
-  const timeSlots = Array.from({ length: 12 }, (_, i) => i + 7); // 7am-6pm
 
   return (
     <div className="h-full overflow-auto no-scrollbar">
-      {/* Header */}
-      <div className="px-5 pt-6 pb-4">
-        <div className="flex items-center gap-2 mb-1">
-          <Calendar className="h-5 w-5 text-orange-500" />
-          <h2 className="text-lg font-semibold text-neutral-100">Schedule</h2>
+      {/* Hero Header */}
+      <div className="px-6 pt-8 pb-6 gradient-hero">
+        <div className="flex items-center gap-2.5 mb-1">
+          <div className="h-9 w-9 rounded-xl bg-orange-500/10 flex items-center justify-center">
+            <Calendar className="h-4 w-4 text-orange-500" />
+          </div>
+          <div>
+            <h2 className="text-[15px] font-semibold text-white tracking-tight">
+              Schedule
+            </h2>
+            <p className="text-[11px] text-neutral-600">
+              {now.toLocaleDateString([], {
+                weekday: "long",
+                month: "long",
+                day: "numeric",
+              })}
+            </p>
+          </div>
         </div>
-        <p className="text-xs text-neutral-500">
-          {new Date().toLocaleDateString([], {
-            weekday: "long",
-            month: "long",
-            day: "numeric",
-          })}
-        </p>
       </div>
 
-      {/* Time indicator */}
-      <div className="px-5 mb-4">
-        <div className="bg-neutral-900 rounded-xl p-3 border border-neutral-800">
-          <div className="flex items-center gap-2">
-            <Clock className="h-4 w-4 text-orange-500" />
-            <span className="text-sm text-neutral-300">
+      {/* Current Time Card */}
+      <div className="px-5 mb-5">
+        <div className="card-elevated px-4 py-3 flex items-center gap-3">
+          <div className="h-8 w-8 rounded-xl bg-orange-500/10 flex items-center justify-center">
+            <Clock className="h-3.5 w-3.5 text-orange-500" />
+          </div>
+          <div>
+            <span className="text-[14px] font-semibold text-white tabular-nums">
               {now.toLocaleTimeString([], {
                 hour: "2-digit",
                 minute: "2-digit",
               })}
             </span>
-            <span className="text-xs text-neutral-600">
-              {displayEvents.length} events today
+            <span className="text-[11px] text-neutral-600 ml-2">
+              {displayEvents.length} event{displayEvents.length !== 1 ? "s" : ""} today
             </span>
           </div>
         </div>
       </div>
 
-      {/* Events */}
+      {/* Events by date */}
       {Object.entries(grouped).map(([dateKey, dateEvents]) => (
         <div key={dateKey} className="px-5 mb-5">
-          <h3 className="text-xs text-neutral-500 uppercase tracking-wide mb-3">
+          <h3 className="text-[11px] text-neutral-500 uppercase tracking-widest font-medium mb-3">
             {formatDateHeader(dateEvents[0]?.startTime)}
           </h3>
 
-          <div className="space-y-2">
+          <div className="space-y-1.5">
             {dateEvents.map((evt: any, idx: number) => {
               const isPast =
                 new Date(evt.endTime || evt.startTime) < now;
               const isNow =
                 new Date(evt.startTime) <= now &&
                 new Date(evt.endTime || evt.startTime) >= now;
+              const accent = accentColors[idx % accentColors.length];
 
               return (
                 <div
                   key={evt.id || idx}
-                  className={`bg-neutral-900 rounded-xl p-3.5 border-l-2 ${
-                    timeColors[idx % timeColors.length]
-                  } border border-neutral-800 ${
-                    isPast ? "opacity-50" : ""
-                  } ${isNow ? "ring-1 ring-orange-500/30" : ""}`}
+                  className={`card-interactive border-l-2 ${accent.border} px-4 py-3.5 ${
+                    isPast ? "opacity-40" : ""
+                  } ${isNow ? "ring-1 ring-orange-500/20" : ""}`}
                 >
                   <div className="flex items-start justify-between">
                     <div className="flex-1">
                       <h4
-                        className={`text-sm font-medium ${
-                          isPast ? "text-neutral-500" : "text-neutral-100"
+                        className={`text-[13px] font-medium ${
+                          isPast ? "text-neutral-500" : "text-white"
                         }`}
                       >
                         {evt.title}
                       </h4>
-                      <div className="flex items-center gap-3 mt-1">
-                        <span className="text-xs text-neutral-500">
+                      <div className="flex items-center gap-3 mt-1.5">
+                        <span className="text-[11px] text-neutral-500 tabular-nums">
                           {formatTime(evt.startTime)}
                           {evt.endTime && ` - ${formatTime(evt.endTime)}`}
                         </span>
                       </div>
                       {evt.location && (
-                        <div className="flex items-center gap-1 mt-1">
+                        <div className="flex items-center gap-1.5 mt-1.5">
                           {evt.isVirtual ? (
                             <Video className="h-3 w-3 text-neutral-600" />
                           ) : (
                             <MapPin className="h-3 w-3 text-neutral-600" />
                           )}
-                          <span className="text-xs text-neutral-600">
+                          <span className="text-[11px] text-neutral-600">
                             {evt.location}
                           </span>
                         </div>
                       )}
                     </div>
                     {isNow && (
-                      <span className="text-[10px] text-orange-500 bg-orange-500/10 px-2 py-0.5 rounded-full">
-                        NOW
+                      <span className="text-[10px] font-semibold text-orange-400 bg-orange-500/10 px-2.5 py-0.5 rounded-full uppercase tracking-wider">
+                        Now
                       </span>
                     )}
                   </div>
@@ -216,9 +223,11 @@ export function CalendarView({ data }: CalendarViewProps) {
 
       {/* Empty state */}
       {displayEvents.length === 0 && (
-        <div className="px-5 py-10 text-center">
-          <Calendar className="h-8 w-8 text-neutral-700 mx-auto mb-2" />
-          <p className="text-sm text-neutral-500">No events scheduled</p>
+        <div className="px-5 py-16 text-center">
+          <div className="h-12 w-12 rounded-2xl bg-[#111] border border-[#1a1a1a] flex items-center justify-center mx-auto mb-3">
+            <Calendar className="h-5 w-5 text-neutral-600" />
+          </div>
+          <p className="text-[13px] text-neutral-500">No events scheduled</p>
         </div>
       )}
     </div>

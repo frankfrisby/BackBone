@@ -8,6 +8,10 @@ import { ViewContainer } from "@/components/views/view-container";
 import { TabPanel } from "@/components/tabs/tab-panel";
 import {
   MessageSquare,
+  TrendingUp,
+  Activity,
+  Target,
+  BarChart3,
   Wifi,
   WifiOff,
 } from "lucide-react";
@@ -26,7 +30,6 @@ export function AppShell({ user }: AppShellProps) {
   const touchStartX = useRef(0);
   const touchStartY = useRef(0);
 
-  // Detect mobile
   useEffect(() => {
     const check = () => setIsMobile(window.innerWidth < 768);
     check();
@@ -34,12 +37,10 @@ export function AppShell({ user }: AppShellProps) {
     return () => window.removeEventListener("resize", check);
   }, []);
 
-  // Connect to backbone when mounted
   useEffect(() => {
     connectToBackbone(user.uid);
   }, [connectToBackbone, user.uid]);
 
-  // Close overlays on escape
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
@@ -51,7 +52,6 @@ export function AppShell({ user }: AppShellProps) {
     return () => window.removeEventListener("keydown", handleKey);
   }, []);
 
-  // Swipe handling for mobile overlays
   const handleTouchStart = (e: React.TouchEvent) => {
     touchStartX.current = e.touches[0].clientX;
     touchStartY.current = e.touches[0].clientY;
@@ -63,135 +63,149 @@ export function AppShell({ user }: AppShellProps) {
     if (Math.abs(deltaX) < 60 || Math.abs(deltaY) > Math.abs(deltaX)) return;
 
     if (deltaX > 0) {
-      // Swipe right → show chat or close sidebar
-      if (showSidebar) {
-        setShowSidebar(false);
-      } else if (!showChat) {
-        setShowChat(true);
-      }
+      if (showSidebar) setShowSidebar(false);
+      else if (!showChat) setShowChat(true);
     } else {
-      // Swipe left → show sidebar or close chat
-      if (showChat) {
-        setShowChat(false);
-      } else if (!showSidebar) {
-        setShowSidebar(true);
-      }
+      if (showChat) setShowChat(false);
+      else if (!showSidebar) setShowSidebar(true);
     }
   };
 
-  // Connection badge
-  const ConnectionBadge = () => (
-    <div className="flex items-center gap-1.5 text-xs">
-      {connectionStatus === "connected" ? (
-        <>
-          <Wifi className="h-3 w-3 text-green-500" />
-          <span className="text-green-500 hidden sm:inline">Connected</span>
-          <span className="text-neutral-600 hidden sm:inline">({transport})</span>
-        </>
-      ) : connectionStatus === "connecting" ? (
-        <>
-          <div className="h-2.5 w-2.5 rounded-full bg-yellow-500 pulse-dot" />
-          <span className="text-yellow-500 hidden sm:inline">Connecting...</span>
-        </>
-      ) : (
-        <>
-          <WifiOff className="h-3 w-3 text-neutral-600" />
-          <span className="text-neutral-500 hidden sm:inline">Offline</span>
-        </>
-      )}
-    </div>
-  );
+  // ── Connection Badge ─────────────────────────────────────────
 
-  // ── Welcome Screen (before first query) ─────────────────────
-
-  if (!hasQueried) {
-    return (
-      <div className="h-screen w-screen bg-black flex flex-col">
-        {/* Top bar */}
-        <div className="flex items-center justify-between px-4 py-3">
-          <ConnectionBadge />
-          {isMobile && (
-            <button onClick={() => setShowSidebar(true)}>
-              {user.photoURL ? (
-                <img
-                  src={user.photoURL}
-                  alt=""
-                  className="h-7 w-7 rounded-full"
-                  referrerPolicy="no-referrer"
-                />
-              ) : (
-                <div className="h-7 w-7 rounded-full bg-neutral-800 border border-neutral-700" />
-              )}
-            </button>
+  const ConnectionBadge = ({ compact }: { compact?: boolean }) => {
+    if (connectionStatus === "connected") {
+      return (
+        <div className="flex items-center gap-1.5">
+          <div className="h-1.5 w-1.5 rounded-full bg-green-500" />
+          {!compact && (
+            <span className="text-[11px] text-neutral-500 tabular-nums">
+              {transport}
+            </span>
           )}
         </div>
+      );
+    }
+    if (connectionStatus === "connecting") {
+      return (
+        <div className="flex items-center gap-1.5">
+          <div className="h-1.5 w-1.5 rounded-full bg-yellow-500 pulse-dot" />
+          {!compact && (
+            <span className="text-[11px] text-yellow-500/70">connecting</span>
+          )}
+        </div>
+      );
+    }
+    return (
+      <div className="flex items-center gap-1.5">
+        <WifiOff className="h-3 w-3 text-neutral-700" />
+        {!compact && (
+          <span className="text-[11px] text-neutral-600">offline</span>
+        )}
+      </div>
+    );
+  };
 
-        {/* Center content */}
+  // ── Sidebar Overlay (shared between welcome + main) ──────────
+
+  const SidebarOverlay = () => (
+    <>
+      <div
+        className={`fixed inset-0 bg-black/70 z-40 transition-opacity duration-300 ${
+          showSidebar ? "opacity-100" : "opacity-0 pointer-events-none"
+        }`}
+        style={{ backdropFilter: showSidebar ? "blur(4px)" : "none" }}
+        onClick={() => setShowSidebar(false)}
+      />
+      <div
+        className={`fixed inset-y-0 right-0 w-[80%] bg-[#0a0a0a] border-l border-[#1a1a1a] z-50 transform transition-transform duration-300 ${
+          showSidebar ? "translate-x-0" : "translate-x-full"
+        }`}
+        style={{ transitionTimingFunction: "var(--ease-spring)" }}
+      >
+        <TabPanel user={user} onClose={() => setShowSidebar(false)} />
+      </div>
+    </>
+  );
+
+  // ── Welcome Screen ───────────────────────────────────────────
+
+  if (!hasQueried) {
+    const suggestions = [
+      { icon: TrendingUp, label: "Portfolio", query: "Show my portfolio" },
+      { icon: Activity, label: "Health", query: "How did I sleep?" },
+      { icon: Target, label: "Goals", query: "What are my goals?" },
+      { icon: BarChart3, label: "Trading", query: "Show trading signals" },
+    ];
+
+    return (
+      <div className="h-screen w-screen bg-black flex flex-col gradient-hero">
+        {/* Top */}
+        <div className="flex items-center justify-between px-5 pt-4 pb-2 pt-safe">
+          <ConnectionBadge />
+          <button
+            onClick={() => setShowSidebar(true)}
+            className="active:scale-95 transition-transform"
+          >
+            {user.photoURL ? (
+              <img
+                src={user.photoURL}
+                alt=""
+                className="h-8 w-8 rounded-full ring-1 ring-[#222]"
+                referrerPolicy="no-referrer"
+              />
+            ) : (
+              <div className="h-8 w-8 rounded-full bg-[#111] border border-[#222] flex items-center justify-center text-xs text-neutral-400">
+                {(user.displayName || "U")[0]}
+              </div>
+            )}
+          </button>
+        </div>
+
+        {/* Center hero */}
         <div className="flex-1 flex flex-col items-center justify-center px-6">
-          <img
-            src="/logo-dark.png"
-            alt="BACKBONE"
-            className="h-20 w-20 rounded-2xl mb-6"
-          />
-          <h1 className="text-2xl font-semibold text-neutral-100 mb-2">
+          <div className="relative mb-8">
+            <img
+              src="/logo-dark.png"
+              alt="BACKBONE"
+              className="h-[72px] w-[72px] rounded-[20px]"
+            />
+            <div className="absolute inset-0 rounded-[20px] ring-1 ring-white/[0.06]" />
+          </div>
+
+          <h1 className="text-[28px] font-bold text-white tracking-tight mb-2">
             BACKBONE
           </h1>
-          <p className="text-neutral-500 text-sm mb-8 text-center max-w-md">
+          <p className="text-[15px] text-neutral-500 mb-10 text-center max-w-xs leading-relaxed">
             Your life optimization engine
           </p>
 
-          {/* Suggestion pills */}
-          <div className="flex flex-wrap gap-2 justify-center mb-8 max-w-lg">
-            {[
-              "Show my portfolio",
-              "How did I sleep?",
-              "What are my goals?",
-              "Show trading signals",
-            ].map((s) => (
+          {/* Suggestion cards */}
+          <div className="grid grid-cols-2 gap-2.5 w-full max-w-sm mb-6">
+            {suggestions.map((s) => (
               <button
-                key={s}
-                onClick={() => sendMessage(s)}
-                className="px-4 py-2 rounded-full bg-neutral-900 border border-neutral-700 text-neutral-300 text-sm hover:bg-neutral-800 hover:border-neutral-600 transition-colors"
+                key={s.label}
+                onClick={() => sendMessage(s.query)}
+                className="card-interactive flex items-center gap-3 px-4 py-3.5 text-left active:scale-[0.98]"
               >
-                {s}
+                <s.icon className="h-4 w-4 text-neutral-500 flex-shrink-0" />
+                <span className="text-[13px] text-neutral-300">{s.label}</span>
               </button>
             ))}
           </div>
         </div>
 
         {/* Bottom input */}
-        <div className="p-4 pb-safe">
+        <div className="px-4 pb-4 pb-safe">
           <ChatInput onSend={sendMessage} disabled={state.isProcessing} />
         </div>
 
-        {/* Right sidebar overlay on welcome screen (mobile) */}
-        {isMobile && (
-          <>
-            <div
-              className={`fixed inset-0 bg-black/60 z-40 transition-opacity duration-300 ${
-                showSidebar
-                  ? "opacity-100"
-                  : "opacity-0 pointer-events-none"
-              }`}
-              onClick={() => setShowSidebar(false)}
-            />
-            <div
-              className={`fixed inset-y-0 right-0 w-[80%] bg-neutral-950 border-l border-neutral-800 z-50 transform transition-transform duration-300 ease-out ${
-                showSidebar ? "translate-x-0" : "translate-x-full"
-              }`}
-            >
-              <TabPanel
-                user={user}
-                onClose={() => setShowSidebar(false)}
-              />
-            </div>
-          </>
-        )}
+        {isMobile && <SidebarOverlay />}
       </div>
     );
   }
 
-  // ── Mobile Layout (after first query) ───────────────────────
+  // ── Mobile Main Layout ───────────────────────────────────────
 
   if (isMobile) {
     return (
@@ -200,31 +214,39 @@ export function AppShell({ user }: AppShellProps) {
         onTouchStart={handleTouchStart}
         onTouchEnd={handleTouchEnd}
       >
-        {/* Top bar */}
-        <div className="h-12 flex items-center justify-between px-4 border-b border-neutral-800 flex-shrink-0">
+        {/* Top bar — glass effect */}
+        <div className="h-12 flex items-center justify-between px-4 border-b border-[#1a1a1a] flex-shrink-0 glass">
           <button
             onClick={() => setShowChat(true)}
-            className="h-8 w-8 flex items-center justify-center rounded-lg text-neutral-400 hover:bg-neutral-800 transition-colors"
+            className="h-8 w-8 flex items-center justify-center rounded-xl text-neutral-500 hover:text-neutral-300 hover:bg-[#1a1a1a] transition-all active:scale-90"
           >
-            <MessageSquare className="h-4 w-4" />
+            <MessageSquare className="h-[18px] w-[18px]" />
           </button>
 
-          <img
-            src="/logo-dark.png"
-            alt="BACKBONE"
-            className="h-7 w-7 rounded-md"
-          />
+          <div className="flex items-center gap-2">
+            <img
+              src="/logo-dark.png"
+              alt="BACKBONE"
+              className="h-6 w-6 rounded-md"
+            />
+            <ConnectionBadge compact />
+          </div>
 
-          <button onClick={() => setShowSidebar(true)}>
+          <button
+            onClick={() => setShowSidebar(true)}
+            className="active:scale-95 transition-transform"
+          >
             {user.photoURL ? (
               <img
                 src={user.photoURL}
                 alt=""
-                className="h-7 w-7 rounded-full"
+                className="h-7 w-7 rounded-full ring-1 ring-[#222]"
                 referrerPolicy="no-referrer"
               />
             ) : (
-              <div className="h-7 w-7 rounded-full bg-neutral-800 border border-neutral-700" />
+              <div className="h-7 w-7 rounded-full bg-[#111] border border-[#1f1f1f] flex items-center justify-center text-[10px] text-neutral-400">
+                {(user.displayName || "U")[0]}
+              </div>
             )}
           </button>
         </div>
@@ -235,24 +257,26 @@ export function AppShell({ user }: AppShellProps) {
         </div>
 
         {/* Bottom input */}
-        <div className="p-3 pb-safe border-t border-neutral-800 flex-shrink-0">
+        <div className="px-3 py-2.5 pb-safe border-t border-[#1a1a1a] flex-shrink-0">
           <ChatInput onSend={sendMessage} disabled={state.isProcessing} />
         </div>
 
-        {/* ── Chat overlay from left ─────────────────────────── */}
+        {/* ── Chat overlay from left ───────────────────────── */}
         <div
-          className={`fixed inset-0 bg-black/60 z-40 transition-opacity duration-300 ${
+          className={`fixed inset-0 bg-black/70 z-40 transition-opacity duration-300 ${
             showChat ? "opacity-100" : "opacity-0 pointer-events-none"
           }`}
+          style={{ backdropFilter: showChat ? "blur(4px)" : "none" }}
           onClick={() => setShowChat(false)}
         />
         <div
-          className={`fixed inset-y-0 left-0 w-[85%] bg-neutral-950 border-r border-neutral-800 z-50 transform transition-transform duration-300 ease-out flex flex-col ${
+          className={`fixed inset-y-0 left-0 w-[85%] bg-[#0a0a0a] border-r border-[#1a1a1a] z-50 transform transition-transform duration-300 flex flex-col ${
             showChat ? "translate-x-0" : "-translate-x-full"
           }`}
+          style={{ transitionTimingFunction: "var(--ease-spring)" }}
         >
           <ChatPanel />
-          <div className="p-3 border-t border-neutral-800">
+          <div className="px-3 py-2.5 border-t border-[#1a1a1a]">
             <ChatInput
               onSend={(msg) => {
                 sendMessage(msg);
@@ -263,40 +287,24 @@ export function AppShell({ user }: AppShellProps) {
           </div>
         </div>
 
-        {/* ── Right sidebar overlay (80%) ────────────────────── */}
-        <div
-          className={`fixed inset-0 bg-black/60 z-40 transition-opacity duration-300 ${
-            showSidebar ? "opacity-100" : "opacity-0 pointer-events-none"
-          }`}
-          onClick={() => setShowSidebar(false)}
-        />
-        <div
-          className={`fixed inset-y-0 right-0 w-[80%] bg-neutral-950 border-l border-neutral-800 z-50 transform transition-transform duration-300 ease-out ${
-            showSidebar ? "translate-x-0" : "translate-x-full"
-          }`}
-        >
-          <TabPanel
-            user={user}
-            onClose={() => setShowSidebar(false)}
-          />
-        </div>
+        <SidebarOverlay />
       </div>
     );
   }
 
-  // ── Desktop Layout ──────────────────────────────────────────
+  // ── Desktop Layout ───────────────────────────────────────────
 
   return (
     <div className="h-screen w-screen bg-black flex flex-col animate-fade-in">
       {/* Top bar */}
-      <div className="h-10 flex items-center justify-between px-4 border-b border-neutral-800">
+      <div className="h-11 flex items-center justify-between px-5 border-b border-[#141414]">
         <div className="flex items-center gap-3">
           <img
             src="/logo-dark.png"
             alt="BACKBONE"
-            className="h-6 w-6 rounded"
+            className="h-6 w-6 rounded-md"
           />
-          <span className="text-sm font-semibold text-neutral-100">
+          <span className="text-[13px] font-semibold text-neutral-200 tracking-tight">
             BACKBONE
           </span>
         </div>
@@ -306,26 +314,26 @@ export function AppShell({ user }: AppShellProps) {
       {/* 3-column layout */}
       <div className="flex-1 flex overflow-hidden">
         {/* Left — Chat */}
-        <div className="w-80 border-r border-neutral-800 flex flex-col bg-neutral-950">
+        <div className="w-80 border-r border-[#141414] flex flex-col bg-[#050505]">
           <div className="flex-1 overflow-hidden">
             <ChatPanel />
           </div>
         </div>
 
-        {/* Center — Dynamic View */}
+        {/* Center — View */}
         <div className="flex-1 flex flex-col overflow-hidden">
           <ViewContainer />
         </div>
 
         {/* Right — Profile + Tabs */}
-        <div className="w-72 border-l border-neutral-800 flex flex-col bg-neutral-950">
+        <div className="w-72 border-l border-[#141414] flex flex-col bg-[#050505]">
           <TabPanel user={user} />
         </div>
       </div>
 
       {/* Bottom input */}
-      <div className="p-3 border-t border-neutral-800">
-        <div className="max-w-3xl mx-auto">
+      <div className="px-4 py-2.5 border-t border-[#141414]">
+        <div className="max-w-2xl mx-auto">
           <ChatInput onSend={sendMessage} disabled={state.isProcessing} />
         </div>
       </div>

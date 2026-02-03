@@ -23,30 +23,28 @@ function ScoreRing({
   score,
   color,
   size = 80,
+  strokeWidth = 4,
 }: {
   score: number;
   color: string;
   size?: number;
+  strokeWidth?: number;
 }) {
-  const radius = (size - 8) / 2;
+  const radius = (size - strokeWidth * 2) / 2;
   const circumference = 2 * Math.PI * radius;
   const strokeDashoffset = circumference - (score / 100) * circumference;
 
   return (
     <div className="relative" style={{ width: size, height: size }}>
-      <svg
-        width={size}
-        height={size}
-        className="transform -rotate-90"
-      >
+      <svg width={size} height={size} className="transform -rotate-90">
         <circle
           cx={size / 2}
           cy={size / 2}
           r={radius}
           fill="none"
           stroke="currentColor"
-          strokeWidth="4"
-          className="text-neutral-800"
+          strokeWidth={strokeWidth}
+          className="text-[#1a1a1a]"
         />
         <circle
           cx={size / 2}
@@ -54,15 +52,26 @@ function ScoreRing({
           r={radius}
           fill="none"
           stroke={color}
-          strokeWidth="4"
+          strokeWidth={strokeWidth}
           strokeLinecap="round"
           strokeDasharray={circumference}
           strokeDashoffset={strokeDashoffset}
-          className="transition-all duration-1000 ease-out"
+          className="ring-animated"
+          style={
+            {
+              "--ring-circumference": circumference,
+              filter: `drop-shadow(0 0 6px ${color}40)`,
+            } as React.CSSProperties
+          }
         />
       </svg>
       <div className="absolute inset-0 flex items-center justify-center">
-        <span className="text-lg font-bold text-neutral-100">{score}</span>
+        <span
+          className="font-bold text-white tabular-nums"
+          style={{ fontSize: size * 0.24 }}
+        >
+          {score}
+        </span>
       </div>
     </div>
   );
@@ -86,85 +95,114 @@ export function HealthView({ data }: HealthViewProps) {
 
   if (!hasData) {
     return (
-      <div className="h-full overflow-auto p-5 space-y-4">
-        <div className="skeleton h-48 rounded-2xl" />
+      <div className="h-full overflow-auto p-5 space-y-3">
+        <div className="skeleton h-52 rounded-2xl" />
         <div className="skeleton h-32 rounded-2xl" />
-        <div className="skeleton h-32 rounded-2xl" />
+        <div className="skeleton h-24 rounded-2xl" />
       </div>
     );
   }
 
+  const readinessLabel =
+    readiness >= 80
+      ? "Optimal"
+      : readiness >= 60
+      ? "Good"
+      : readiness >= 40
+      ? "Fair"
+      : "Rest";
+
   return (
     <div className="h-full overflow-auto no-scrollbar">
       {/* Readiness Hero */}
-      <div className="px-5 pt-6 pb-4 flex flex-col items-center">
-        <ScoreRing score={readiness} color="#eab308" size={100} />
-        <div className="flex items-center gap-1.5 mt-3">
+      <div className="px-6 pt-8 pb-6 flex flex-col items-center gradient-hero">
+        <ScoreRing score={readiness} color="#eab308" size={120} strokeWidth={5} />
+        <div className="flex items-center gap-2 mt-4">
           <Zap className="h-4 w-4 text-yellow-500" />
-          <span className="text-sm font-medium text-neutral-300">
+          <span className="text-[15px] font-semibold text-white">
             Readiness
           </span>
         </div>
-        <p className="text-xs text-neutral-500 mt-1">
-          {readiness >= 80
-            ? "Great day ahead"
-            : readiness >= 60
-            ? "Take it easy"
-            : "Rest recommended"}
-        </p>
+        <p className="text-[13px] text-neutral-500 mt-1">{readinessLabel}</p>
       </div>
 
       {/* Score cards */}
-      <div className="px-5 grid grid-cols-2 gap-3 mb-4">
-        <div className="bg-neutral-900 rounded-xl p-4 border border-neutral-800 flex flex-col items-center">
-          <ScoreRing score={sleep} color="#3b82f6" size={64} />
-          <div className="flex items-center gap-1 mt-2">
-            <Moon className="h-3 w-3 text-blue-500" />
-            <span className="text-xs text-neutral-400">Sleep</span>
+      <div className="px-5 grid grid-cols-2 gap-2.5 -mt-2">
+        <div className="card-elevated p-5 flex flex-col items-center">
+          <ScoreRing score={sleep} color="#3b82f6" size={72} />
+          <div className="flex items-center gap-1.5 mt-3">
+            <Moon className="h-3 w-3 text-blue-400" />
+            <span className="text-[12px] text-neutral-400 font-medium">
+              Sleep
+            </span>
           </div>
-          <span className="text-xs text-neutral-500 mt-0.5">
-            {sleepDuration ? `${sleepDuration}h` : "—"}
-          </span>
+          {sleepDuration > 0 && (
+            <span className="text-[11px] text-neutral-600 mt-0.5 tabular-nums">
+              {sleepDuration}h
+            </span>
+          )}
         </div>
 
-        <div className="bg-neutral-900 rounded-xl p-4 border border-neutral-800 flex flex-col items-center">
-          <ScoreRing score={activity} color="#22c55e" size={64} />
-          <div className="flex items-center gap-1 mt-2">
-            <Activity className="h-3 w-3 text-green-500" />
-            <span className="text-xs text-neutral-400">Activity</span>
+        <div className="card-elevated p-5 flex flex-col items-center">
+          <ScoreRing score={activity} color="#22c55e" size={72} />
+          <div className="flex items-center gap-1.5 mt-3">
+            <Activity className="h-3 w-3 text-green-400" />
+            <span className="text-[12px] text-neutral-400 font-medium">
+              Activity
+            </span>
           </div>
         </div>
       </div>
 
       {/* Vitals */}
-      <div className="px-5 pb-6">
-        <h3 className="text-xs text-neutral-500 uppercase tracking-wide mb-3">
+      <div className="px-5 pt-5 pb-8">
+        <h3 className="text-[11px] text-neutral-500 uppercase tracking-widest font-medium mb-3">
           Vitals
         </h3>
-        <div className="space-y-2">
+        <div className="space-y-1.5">
           {hrv > 0 && (
-            <div className="bg-neutral-900 rounded-xl p-3.5 border border-neutral-800 flex items-center justify-between">
+            <div className="card-interactive flex items-center justify-between px-4 py-3.5">
               <div className="flex items-center gap-3">
-                <div className="h-8 w-8 rounded-lg bg-purple-500/10 flex items-center justify-center">
-                  <Activity className="h-4 w-4 text-purple-500" />
+                <div className="h-9 w-9 rounded-xl bg-purple-500/10 flex items-center justify-center">
+                  <Activity className="h-4 w-4 text-purple-400" />
                 </div>
-                <span className="text-sm text-neutral-300">HRV</span>
+                <div>
+                  <p className="text-[13px] text-neutral-300 font-medium">
+                    HRV
+                  </p>
+                  <p className="text-[10px] text-neutral-600">
+                    Heart Rate Variability
+                  </p>
+                </div>
               </div>
-              <span className="text-sm font-medium text-neutral-100">
-                {hrv} ms
+              <span className="text-[16px] font-semibold text-white tabular-nums">
+                {hrv}
+                <span className="text-[11px] text-neutral-500 font-normal ml-0.5">
+                  ms
+                </span>
               </span>
             </div>
           )}
           {rhr > 0 && (
-            <div className="bg-neutral-900 rounded-xl p-3.5 border border-neutral-800 flex items-center justify-between">
+            <div className="card-interactive flex items-center justify-between px-4 py-3.5">
               <div className="flex items-center gap-3">
-                <div className="h-8 w-8 rounded-lg bg-red-500/10 flex items-center justify-center">
-                  <Heart className="h-4 w-4 text-red-500" />
+                <div className="h-9 w-9 rounded-xl bg-red-500/10 flex items-center justify-center">
+                  <Heart className="h-4 w-4 text-red-400" />
                 </div>
-                <span className="text-sm text-neutral-300">Resting HR</span>
+                <div>
+                  <p className="text-[13px] text-neutral-300 font-medium">
+                    Resting HR
+                  </p>
+                  <p className="text-[10px] text-neutral-600">
+                    Heart Rate
+                  </p>
+                </div>
               </div>
-              <span className="text-sm font-medium text-neutral-100">
-                {rhr} bpm
+              <span className="text-[16px] font-semibold text-white tabular-nums">
+                {rhr}
+                <span className="text-[11px] text-neutral-500 font-normal ml-0.5">
+                  bpm
+                </span>
               </span>
             </div>
           )}

@@ -76,55 +76,65 @@ export function TabPanel({ user, onClose }: TabPanelProps) {
     onClose?.();
   };
 
-  // ── Profile Detail View ─────────────────────────────────────
-
   return (
     <div className="h-full relative overflow-hidden">
-      {/* Main sidebar content */}
+      {/* ── Main Sidebar ──────────────────────────────────────── */}
       <div
-        className={`h-full flex flex-col absolute inset-0 transition-transform duration-300 ease-out ${
+        className={`h-full flex flex-col absolute inset-0 transition-transform duration-300 ${
           showProfile ? "-translate-x-full" : "translate-x-0"
         }`}
+        style={{ transitionTimingFunction: "var(--ease-spring)" }}
       >
         {/* Profile button */}
-        <div className="px-4 py-4 border-b border-neutral-800">
+        <div className="px-4 py-4 border-b border-[#1a1a1a]">
           <button
             onClick={() => setShowProfile(true)}
-            className="w-full flex items-center gap-3 group"
+            className="w-full flex items-center gap-3 group active:scale-[0.98] transition-transform"
           >
             {user.photoURL ? (
               <img
                 src={user.photoURL}
                 alt=""
-                className="h-10 w-10 rounded-full flex-shrink-0"
+                className="h-10 w-10 rounded-full flex-shrink-0 ring-1 ring-[#222]"
                 referrerPolicy="no-referrer"
               />
             ) : (
-              <div className="h-10 w-10 rounded-full bg-neutral-800 border border-neutral-700 flex-shrink-0" />
+              <div className="h-10 w-10 rounded-full bg-[#111] border border-[#1f1f1f] flex items-center justify-center flex-shrink-0">
+                <span className="text-[14px] text-neutral-400 font-medium">
+                  {(user.displayName || "U")[0]}
+                </span>
+              </div>
             )}
             <div className="flex-1 min-w-0 text-left">
-              <p className="text-sm font-medium text-neutral-200 truncate">
+              <p className="text-[13px] font-semibold text-neutral-200 truncate">
                 {user.displayName || "User"}
               </p>
-              <p className="text-xs text-neutral-500">BACKBONE Pro</p>
+              <p className="text-[11px] text-neutral-600">BACKBONE Pro</p>
             </div>
-            <ChevronRight className="h-4 w-4 text-neutral-500 group-hover:text-neutral-300 transition-colors flex-shrink-0" />
+            <ChevronRight className="h-4 w-4 text-neutral-600 group-hover:text-neutral-400 transition-colors flex-shrink-0" />
           </button>
         </div>
 
         {/* Tabs list */}
         <div className="flex-1 overflow-y-auto no-scrollbar">
           <div className="px-4 py-3">
-            <h3 className="text-xs text-neutral-500 uppercase tracking-wide mb-2">
-              Views ({tabs.length})
-            </h3>
+            <div className="flex items-center justify-between mb-2.5">
+              <h3 className="text-[11px] text-neutral-500 uppercase tracking-widest font-medium">
+                Views
+              </h3>
+              <span className="text-[11px] text-neutral-600 tabular-nums">
+                {tabs.length}
+              </span>
+            </div>
 
             {tabs.length === 0 ? (
-              <div className="py-6 text-center">
-                <p className="text-xs text-neutral-600">No saved views yet</p>
+              <div className="py-8 text-center">
+                <p className="text-[11px] text-neutral-700">
+                  No saved views yet
+                </p>
               </div>
             ) : (
-              <div className="space-y-1">
+              <div className="space-y-0.5">
                 {tabs.map((tab) => {
                   const isActive = activeTab?.id === tab.id;
                   const icon = viewIcons[tab.viewType || tab.type] || (
@@ -134,25 +144,25 @@ export function TabPanel({ user, onClose }: TabPanelProps) {
                   return (
                     <div
                       key={tab.id}
-                      className={`group flex items-center gap-2.5 px-3 py-2 rounded-lg cursor-pointer transition-colors ${
+                      className={`group flex items-center gap-2.5 px-3 py-2.5 rounded-xl cursor-pointer transition-all duration-200 ${
                         isActive
-                          ? "bg-neutral-800 text-neutral-100"
-                          : "text-neutral-400 hover:bg-neutral-900 hover:text-neutral-200"
+                          ? "bg-[#1a1a1a] text-white"
+                          : "text-neutral-400 hover:bg-[#111] hover:text-neutral-200"
                       }`}
                       onClick={() => handleTabClick(tab)}
                     >
                       <div
                         className={`flex-shrink-0 ${
-                          isActive ? "text-orange-500" : "text-neutral-500"
+                          isActive ? "text-orange-500" : "text-neutral-600"
                         }`}
                       >
                         {icon}
                       </div>
                       <div className="flex-1 min-w-0">
-                        <p className="text-xs font-medium truncate">
+                        <p className="text-[12px] font-medium truncate">
                           {tab.title}
                         </p>
-                        <p className="text-[10px] text-neutral-600">
+                        <p className="text-[10px] text-neutral-700 tabular-nums">
                           {new Date(tab.createdAt).toLocaleTimeString([], {
                             hour: "2-digit",
                             minute: "2-digit",
@@ -167,10 +177,10 @@ export function TabPanel({ user, onClose }: TabPanelProps) {
                           e.stopPropagation();
                           handleDelete(tab.id);
                         }}
-                        className={`flex-shrink-0 h-5 w-5 flex items-center justify-center rounded transition-colors ${
+                        className={`flex-shrink-0 h-6 w-6 flex items-center justify-center rounded-lg transition-all ${
                           confirmDelete === tab.id
-                            ? "bg-red-500/20 text-red-500"
-                            : "opacity-0 group-hover:opacity-100 text-neutral-600 hover:text-neutral-400"
+                            ? "bg-red-500/10 text-red-400"
+                            : "opacity-0 group-hover:opacity-100 text-neutral-700 hover:text-neutral-400 hover:bg-[#1a1a1a]"
                         }`}
                       >
                         {confirmDelete === tab.id ? (
@@ -188,7 +198,7 @@ export function TabPanel({ user, onClose }: TabPanelProps) {
         </div>
 
         {/* Quick actions */}
-        <div className="px-4 py-3 border-t border-neutral-800">
+        <div className="px-4 py-3 border-t border-[#1a1a1a]">
           <div className="grid grid-cols-3 gap-1.5">
             {[
               {
@@ -202,92 +212,117 @@ export function TabPanel({ user, onClose }: TabPanelProps) {
               <button
                 key={item.label}
                 onClick={() => handleQuickAction(item.query)}
-                className="flex flex-col items-center gap-1 py-2 rounded-lg text-neutral-500 hover:bg-neutral-800 hover:text-neutral-300 transition-colors"
+                className="flex flex-col items-center gap-1.5 py-2.5 rounded-xl text-neutral-600 hover:bg-[#111] hover:text-neutral-400 transition-all active:scale-95"
               >
                 <item.icon className="h-4 w-4" />
-                <span className="text-[10px]">{item.label}</span>
+                <span className="text-[10px] font-medium">{item.label}</span>
               </button>
             ))}
           </div>
         </div>
       </div>
 
-      {/* Profile detail panel (slides in from right) */}
+      {/* ── Profile Detail Panel ──────────────────────────────── */}
       <div
-        className={`h-full flex flex-col absolute inset-0 bg-neutral-950 transition-transform duration-300 ease-out ${
+        className={`h-full flex flex-col absolute inset-0 bg-black transition-transform duration-300 ${
           showProfile ? "translate-x-0" : "translate-x-full"
         }`}
+        style={{ transitionTimingFunction: "var(--ease-spring)" }}
       >
         {/* Back header */}
-        <div className="px-4 py-4 border-b border-neutral-800 flex items-center gap-3">
+        <div className="px-4 py-4 border-b border-[#1a1a1a] flex items-center gap-3">
           <button
             onClick={() => setShowProfile(false)}
-            className="h-8 w-8 flex items-center justify-center rounded-lg text-neutral-400 hover:bg-neutral-800 transition-colors"
+            className="h-8 w-8 flex items-center justify-center rounded-xl text-neutral-500 hover:bg-[#111] hover:text-neutral-300 transition-all active:scale-90"
           >
             <ChevronLeft className="h-5 w-5" />
           </button>
-          <h2 className="text-sm font-semibold text-neutral-200">Profile</h2>
+          <h2 className="text-[13px] font-semibold text-neutral-200 tracking-wide">
+            Profile
+          </h2>
         </div>
 
-        {/* User info */}
-        <div className="px-6 py-6 flex flex-col items-center border-b border-neutral-800">
+        {/* User info hero */}
+        <div className="px-6 py-8 flex flex-col items-center border-b border-[#1a1a1a] gradient-hero">
           {user.photoURL ? (
             <img
               src={user.photoURL}
               alt=""
-              className="h-20 w-20 rounded-full mb-3"
+              className="h-20 w-20 rounded-full mb-4 ring-2 ring-[#222]"
               referrerPolicy="no-referrer"
             />
           ) : (
-            <div className="h-20 w-20 rounded-full bg-neutral-800 border border-neutral-700 mb-3 flex items-center justify-center">
-              <span className="text-2xl text-neutral-500">
+            <div className="h-20 w-20 rounded-full bg-[#111] border border-[#1f1f1f] mb-4 flex items-center justify-center">
+              <span className="text-[28px] text-neutral-500 font-medium">
                 {(user.displayName || "U")[0]}
               </span>
             </div>
           )}
-          <p className="text-lg font-semibold text-neutral-100">
+          <p className="text-[18px] font-semibold text-white tracking-tight">
             {user.displayName || "User"}
           </p>
-          <p className="text-xs text-neutral-500 mt-1">{user.email}</p>
+          <p className="text-[12px] text-neutral-500 mt-1">{user.email}</p>
         </div>
 
         {/* Info items */}
-        <div className="flex-1 px-4 py-4 space-y-1 overflow-y-auto no-scrollbar">
-          <div className="flex items-center gap-3 px-3 py-3 rounded-lg hover:bg-neutral-900 transition-colors">
-            <Mail className="h-4 w-4 text-neutral-500 flex-shrink-0" />
-            <div className="min-w-0">
-              <p className="text-[10px] text-neutral-500 uppercase">Email</p>
-              <p className="text-sm text-neutral-200 truncate">{user.email}</p>
+        <div className="flex-1 px-4 py-4 space-y-0.5 overflow-y-auto no-scrollbar">
+          {[
+            {
+              icon: Mail,
+              label: "Email",
+              value: user.email || "N/A",
+              color: "text-blue-400",
+              bg: "bg-blue-500/10",
+            },
+            {
+              icon: Shield,
+              label: "Account",
+              value: "BACKBONE Pro",
+              color: "text-orange-400",
+              bg: "bg-orange-500/10",
+            },
+            {
+              icon: Settings,
+              label: "User ID",
+              value: `${user.uid.slice(0, 16)}...`,
+              color: "text-neutral-400",
+              bg: "bg-[#1a1a1a]",
+              mono: true,
+            },
+          ].map((item) => (
+            <div
+              key={item.label}
+              className="flex items-center gap-3 px-3 py-3.5 rounded-xl hover:bg-[#111] transition-colors"
+            >
+              <div
+                className={`h-9 w-9 rounded-xl ${item.bg} flex items-center justify-center flex-shrink-0`}
+              >
+                <item.icon className={`h-4 w-4 ${item.color}`} />
+              </div>
+              <div className="min-w-0">
+                <p className="text-[10px] text-neutral-600 uppercase tracking-wider">
+                  {item.label}
+                </p>
+                <p
+                  className={`text-[13px] text-neutral-200 truncate ${
+                    item.mono ? "font-mono" : ""
+                  }`}
+                >
+                  {item.value}
+                </p>
+              </div>
             </div>
-          </div>
-          <div className="flex items-center gap-3 px-3 py-3 rounded-lg hover:bg-neutral-900 transition-colors">
-            <Shield className="h-4 w-4 text-neutral-500 flex-shrink-0" />
-            <div>
-              <p className="text-[10px] text-neutral-500 uppercase">Account</p>
-              <p className="text-sm text-neutral-200">BACKBONE Pro</p>
-            </div>
-          </div>
-          <div className="flex items-center gap-3 px-3 py-3 rounded-lg hover:bg-neutral-900 transition-colors">
-            <Settings className="h-4 w-4 text-neutral-500 flex-shrink-0" />
-            <div>
-              <p className="text-[10px] text-neutral-500 uppercase">
-                User ID
-              </p>
-              <p className="text-sm text-neutral-200 font-mono truncate">
-                {user.uid.slice(0, 16)}...
-              </p>
-            </div>
-          </div>
+          ))}
         </div>
 
         {/* Sign out */}
-        <div className="px-4 py-4 border-t border-neutral-800">
+        <div className="px-4 py-4 border-t border-[#1a1a1a]">
           <button
             onClick={handleSignOut}
-            className="w-full flex items-center justify-center gap-2 py-3 rounded-xl bg-neutral-900 border border-neutral-700 text-red-400 hover:bg-red-950/30 hover:border-red-900/50 transition-colors"
+            className="w-full flex items-center justify-center gap-2.5 py-3.5 rounded-2xl bg-[#111] border border-[#1f1f1f] text-red-400 hover:bg-red-950/20 hover:border-red-900/30 transition-all active:scale-[0.98]"
           >
             <LogOut className="h-4 w-4" />
-            <span className="text-sm font-medium">Sign Out</span>
+            <span className="text-[13px] font-semibold">Sign Out</span>
           </button>
         </div>
       </div>

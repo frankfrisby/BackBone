@@ -30,11 +30,9 @@ export function VapiCallView() {
       });
       if (resp.ok) {
         setCallState("active");
-        // Start duration timer
         const interval = setInterval(() => {
           setDuration((d) => d + 1);
         }, 1000);
-        // Store interval for cleanup
         (window as any).__vapiInterval = interval;
       } else {
         setCallState("idle");
@@ -66,27 +64,25 @@ export function VapiCallView() {
   };
 
   return (
-    <div className="h-full flex flex-col">
+    <div className="h-full flex flex-col gradient-hero">
       {/* Call UI */}
-      <div className="flex-1 flex flex-col items-center justify-center">
+      <div className="flex-1 flex flex-col items-center justify-center px-6">
         {/* Avatar / Visual */}
-        <div className="relative mb-6">
+        <div className="relative mb-8">
           <div
-            className={`h-24 w-24 rounded-full flex items-center justify-center ${
+            className={`h-28 w-28 rounded-full flex items-center justify-center transition-all duration-500 ${
               callState === "active"
                 ? "bg-green-500/10 border-2 border-green-500/30"
                 : callState === "connecting"
                 ? "bg-yellow-500/10 border-2 border-yellow-500/30"
-                : "bg-neutral-800 border-2 border-neutral-700"
+                : "bg-[#111] border-2 border-[#1f1f1f]"
             }`}
           >
-            <Phone
-              className={`h-8 w-8 ${
-                callState === "active"
-                  ? "text-green-500"
-                  : callState === "connecting"
-                  ? "text-yellow-500 animate-pulse"
-                  : "text-neutral-500"
+            <img
+              src="/logo-dark.png"
+              alt="B"
+              className={`h-12 w-12 rounded-xl ${
+                callState === "connecting" ? "animate-pulse" : ""
               }`}
             />
           </div>
@@ -94,16 +90,16 @@ export function VapiCallView() {
           {/* Ripple effect when active */}
           {callState === "active" && (
             <>
-              <div className="absolute inset-0 rounded-full border-2 border-green-500/20 animate-ping" />
+              <div className="absolute inset-0 rounded-full border-2 border-green-500/20 pulse-ring" />
               <div
-                className="absolute inset-0 rounded-full border border-green-500/10 animate-ping"
-                style={{ animationDelay: "0.5s" }}
+                className="absolute inset-0 rounded-full border border-green-500/10 pulse-ring"
+                style={{ animationDelay: "0.7s" }}
               />
             </>
           )}
         </div>
 
-        <h2 className="text-lg font-semibold text-neutral-100 mb-1">
+        <h2 className="text-[18px] font-semibold text-white tracking-tight mb-1">
           {callState === "idle"
             ? "BACKBONE Voice"
             : callState === "connecting"
@@ -114,54 +110,62 @@ export function VapiCallView() {
         </h2>
 
         {callState === "active" && (
-          <p className="text-sm text-green-500 font-mono">
+          <p className="text-[15px] text-green-400 font-mono tabular-nums">
             {formatDuration(duration)}
           </p>
         )}
 
         {callState === "idle" && (
-          <p className="text-xs text-neutral-500 text-center max-w-xs mt-1">
+          <p className="text-[13px] text-neutral-500 text-center max-w-[240px] mt-1 leading-relaxed">
             Start a voice conversation with your BACKBONE assistant
+          </p>
+        )}
+
+        {callState === "ended" && (
+          <p className="text-[13px] text-neutral-600 mt-1">
+            Tap to call again
           </p>
         )}
       </div>
 
       {/* Transcript */}
       {transcript.length > 0 && (
-        <div className="mx-5 mb-4 bg-neutral-900 rounded-xl border border-neutral-800 max-h-48 overflow-y-auto p-3">
+        <div className="mx-5 mb-4 card-surface max-h-48 overflow-y-auto no-scrollbar p-4">
           {transcript.map((t, i) => (
-            <div key={i} className="mb-2 last:mb-0">
+            <div key={i} className="mb-2.5 last:mb-0">
               <span
-                className={`text-xs font-medium ${
-                  t.role === "user" ? "text-neutral-400" : "text-orange-500"
+                className={`text-[10px] font-semibold uppercase tracking-wider ${
+                  t.role === "user" ? "text-neutral-500" : "text-orange-500"
                 }`}
               >
                 {t.role === "user" ? "You" : "BACKBONE"}
               </span>
-              <p className="text-xs text-neutral-300 mt-0.5">{t.text}</p>
+              <p className="text-[12px] text-neutral-300 mt-0.5 leading-relaxed">
+                {t.text}
+              </p>
             </div>
           ))}
         </div>
       )}
 
       {/* Call controls */}
-      <div className="px-5 py-6 flex items-center justify-center gap-4">
+      <div className="px-5 py-8 flex items-center justify-center gap-5">
         {callState === "idle" || callState === "ended" ? (
           <button
             onClick={startCall}
-            className="h-14 w-14 rounded-full bg-green-500 flex items-center justify-center hover:bg-green-400 transition-colors"
+            className="h-16 w-16 rounded-full bg-green-500 flex items-center justify-center hover:bg-green-400 transition-all active:scale-90 shadow-lg shadow-green-500/20"
           >
-            <Phone className="h-6 w-6 text-black" />
+            <Phone className="h-7 w-7 text-black" />
           </button>
         ) : (
           <>
             {/* Mute */}
             <button
               onClick={() => setIsMuted(!isMuted)}
-              className={`h-12 w-12 rounded-full flex items-center justify-center transition-colors ${
+              className={`h-14 w-14 rounded-full flex items-center justify-center transition-all active:scale-90 ${
                 isMuted
-                  ? "bg-red-500/20 text-red-500"
-                  : "bg-neutral-800 text-neutral-300 hover:bg-neutral-700"
+                  ? "bg-red-500/10 text-red-400 border border-red-500/20"
+                  : "bg-[#111] text-neutral-300 border border-[#1f1f1f] hover:bg-[#1a1a1a]"
               }`}
             >
               {isMuted ? (
@@ -174,18 +178,18 @@ export function VapiCallView() {
             {/* End call */}
             <button
               onClick={endCall}
-              className="h-14 w-14 rounded-full bg-red-500 flex items-center justify-center hover:bg-red-400 transition-colors"
+              className="h-16 w-16 rounded-full bg-red-500 flex items-center justify-center hover:bg-red-400 transition-all active:scale-90 shadow-lg shadow-red-500/20"
             >
-              <PhoneOff className="h-6 w-6 text-white" />
+              <PhoneOff className="h-7 w-7 text-white" />
             </button>
 
             {/* Speaker */}
             <button
               onClick={() => setIsSpeakerOn(!isSpeakerOn)}
-              className={`h-12 w-12 rounded-full flex items-center justify-center transition-colors ${
+              className={`h-14 w-14 rounded-full flex items-center justify-center transition-all active:scale-90 ${
                 !isSpeakerOn
-                  ? "bg-neutral-700 text-neutral-400"
-                  : "bg-neutral-800 text-neutral-300 hover:bg-neutral-700"
+                  ? "bg-[#1a1a1a] text-neutral-500 border border-[#222]"
+                  : "bg-[#111] text-neutral-300 border border-[#1f1f1f] hover:bg-[#1a1a1a]"
               }`}
             >
               {isSpeakerOn ? (

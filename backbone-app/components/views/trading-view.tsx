@@ -3,11 +3,10 @@
 import { useQuery } from "@tanstack/react-query";
 import { formatCurrency, formatPercentage } from "@/lib/utils";
 import {
-  TrendingUp,
-  TrendingDown,
   ArrowUpRight,
   ArrowDownRight,
   BarChart3,
+  Zap,
 } from "lucide-react";
 
 interface TradingViewProps {
@@ -39,6 +38,36 @@ async function fetchPositions() {
   }
 }
 
+function ScoreBar({ score }: { score: number }) {
+  const color =
+    score >= 70
+      ? "bg-green-500"
+      : score >= 40
+      ? "bg-yellow-500"
+      : "bg-red-500";
+  return (
+    <div className="flex items-center gap-2">
+      <div className="flex-1 h-1 bg-[#1a1a1a] rounded-full overflow-hidden">
+        <div
+          className={`h-full rounded-full ${color} transition-all duration-700`}
+          style={{ width: `${score}%` }}
+        />
+      </div>
+      <span
+        className={`text-[12px] font-semibold tabular-nums ${
+          score >= 70
+            ? "text-green-400"
+            : score >= 40
+            ? "text-yellow-400"
+            : "text-red-400"
+        }`}
+      >
+        {score}
+      </span>
+    </div>
+  );
+}
+
 export function TradingView({ data, isLive }: TradingViewProps) {
   const { data: signals } = useQuery({
     queryKey: ["signals"],
@@ -55,78 +84,84 @@ export function TradingView({ data, isLive }: TradingViewProps) {
   const sigs = signals || data?.signals || [];
   const pos = positions || data?.positions || [];
 
+  if (!signals && !data) {
+    return (
+      <div className="h-full overflow-auto p-5 space-y-3">
+        <div className="skeleton h-32 rounded-2xl" />
+        <div className="skeleton h-24 rounded-2xl" />
+        <div className="skeleton h-24 rounded-2xl" />
+        <div className="skeleton h-24 rounded-2xl" />
+      </div>
+    );
+  }
+
   return (
     <div className="h-full overflow-auto no-scrollbar">
-      {/* Header */}
-      <div className="px-5 pt-6 pb-4">
-        <div className="flex items-center gap-2 mb-1">
-          <BarChart3 className="h-5 w-5 text-orange-500" />
-          <h2 className="text-lg font-semibold text-neutral-100">Trading</h2>
+      {/* Hero Header */}
+      <div className="px-6 pt-8 pb-6 gradient-hero">
+        <div className="flex items-center gap-2.5 mb-1">
+          <div className="h-9 w-9 rounded-xl bg-orange-500/10 flex items-center justify-center">
+            <BarChart3 className="h-4 w-4 text-orange-500" />
+          </div>
+          <div>
+            <h2 className="text-[15px] font-semibold text-white tracking-tight">
+              Trading Signals
+            </h2>
+            <p className="text-[11px] text-neutral-600">
+              Real-time analysis & positions
+            </p>
+          </div>
         </div>
-        <p className="text-xs text-neutral-500">
-          Real-time signals and positions
-        </p>
       </div>
 
-      {/* Signals */}
-      <div className="px-5 mb-5">
-        <h3 className="text-xs text-neutral-500 uppercase tracking-wide mb-3">
+      {/* Active Signals */}
+      <div className="px-5 pb-5">
+        <h3 className="text-[11px] text-neutral-500 uppercase tracking-widest font-medium mb-3">
           Active Signals
         </h3>
+
         {sigs.length === 0 ? (
-          <div className="bg-neutral-900 rounded-xl p-4 border border-neutral-800">
-            <div className="flex items-center gap-3">
-              <div className="h-10 w-10 rounded-xl bg-neutral-800 flex items-center justify-center">
-                <BarChart3 className="h-5 w-5 text-neutral-600" />
-              </div>
-              <div>
-                <p className="text-sm text-neutral-400">No active signals</p>
-                <p className="text-xs text-neutral-600">
-                  Signals will appear when conditions are met
-                </p>
-              </div>
+          <div className="card-surface p-6 flex flex-col items-center">
+            <div className="h-12 w-12 rounded-2xl bg-[#1a1a1a] flex items-center justify-center mb-3">
+              <Zap className="h-5 w-5 text-neutral-600" />
             </div>
+            <p className="text-[13px] text-neutral-500">No active signals</p>
+            <p className="text-[11px] text-neutral-700 mt-0.5">
+              Signals appear when conditions are met
+            </p>
           </div>
         ) : (
-          <div className="space-y-2">
+          <div className="space-y-1.5">
             {sigs.map((signal: any, i: number) => (
-              <div
-                key={i}
-                className="bg-neutral-900 rounded-xl p-3.5 border border-neutral-800"
-              >
-                <div className="flex items-center justify-between mb-2">
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-semibold text-neutral-100">
+              <div key={i} className="card-interactive px-4 py-3.5">
+                <div className="flex items-center justify-between mb-2.5">
+                  <div className="flex items-center gap-2.5">
+                    <span className="text-[14px] font-semibold text-white">
                       {signal.symbol}
                     </span>
                     <span
-                      className={`text-xs font-medium px-2 py-0.5 rounded-full ${
+                      className={`text-[10px] font-semibold px-2 py-0.5 rounded-full uppercase tracking-wider ${
                         signal.action === "buy"
-                          ? "bg-green-500/10 text-green-500"
+                          ? "bg-green-500/10 text-green-400"
                           : signal.action === "sell"
-                          ? "bg-red-500/10 text-red-500"
-                          : "bg-neutral-700 text-neutral-400"
+                          ? "bg-red-500/10 text-red-400"
+                          : "bg-[#1a1a1a] text-neutral-500"
                       }`}
                     >
-                      {signal.action?.toUpperCase()}
+                      {signal.action}
                     </span>
                   </div>
-                  <div className="text-right">
-                    <div
-                      className={`text-sm font-medium ${
-                        signal.score >= 70
-                          ? "text-green-500"
-                          : signal.score >= 40
-                          ? "text-yellow-500"
-                          : "text-red-500"
-                      }`}
-                    >
-                      {signal.score}/100
-                    </div>
-                  </div>
+                  {signal.price && (
+                    <span className="text-[13px] font-medium text-neutral-300 tabular-nums">
+                      {formatCurrency(signal.price)}
+                    </span>
+                  )}
                 </div>
+                <ScoreBar score={signal.score || 0} />
                 {signal.reason && (
-                  <p className="text-xs text-neutral-500">{signal.reason}</p>
+                  <p className="text-[11px] text-neutral-600 mt-2 leading-relaxed">
+                    {signal.reason}
+                  </p>
                 )}
               </div>
             ))}
@@ -134,15 +169,21 @@ export function TradingView({ data, isLive }: TradingViewProps) {
         )}
       </div>
 
-      {/* Positions */}
-      <div className="px-5 pb-6">
-        <h3 className="text-xs text-neutral-500 uppercase tracking-wide mb-3">
-          Open Positions ({pos.length})
-        </h3>
-        <div className="space-y-2">
+      {/* Open Positions */}
+      <div className="px-5 pb-8">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-[11px] text-neutral-500 uppercase tracking-widest font-medium">
+            Positions
+          </h3>
+          <span className="text-[11px] text-neutral-600 tabular-nums">
+            {pos.length}
+          </span>
+        </div>
+
+        <div className="space-y-1.5">
           {pos.length === 0 ? (
-            <div className="bg-neutral-900 rounded-xl p-4 border border-neutral-800 text-center">
-              <p className="text-sm text-neutral-500">No open positions</p>
+            <div className="card-surface p-5 text-center">
+              <p className="text-[13px] text-neutral-600">No open positions</p>
             </div>
           ) : (
             pos.map((position: any) => {
@@ -150,43 +191,46 @@ export function TradingView({ data, isLive }: TradingViewProps) {
               return (
                 <div
                   key={position.symbol}
-                  className="bg-neutral-900 rounded-xl p-3.5 border border-neutral-800"
+                  className="card-interactive flex items-center justify-between px-4 py-3.5"
                 >
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-3">
-                      <div
-                        className={`h-8 w-8 rounded-lg flex items-center justify-center ${
-                          isPos ? "bg-green-500/10" : "bg-red-500/10"
-                        }`}
-                      >
-                        {isPos ? (
-                          <ArrowUpRight className="h-4 w-4 text-green-500" />
-                        ) : (
-                          <ArrowDownRight className="h-4 w-4 text-red-500" />
-                        )}
-                      </div>
-                      <div>
-                        <div className="text-sm font-semibold text-neutral-100">
+                  <div className="flex items-center gap-3">
+                    <div
+                      className={`h-9 w-9 rounded-xl flex items-center justify-center ${
+                        isPos ? "bg-green-500/10" : "bg-red-500/10"
+                      }`}
+                    >
+                      {isPos ? (
+                        <ArrowUpRight className="h-4 w-4 text-green-400" />
+                      ) : (
+                        <ArrowDownRight className="h-4 w-4 text-red-400" />
+                      )}
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-[14px] font-semibold text-white">
                           {position.symbol}
-                        </div>
-                        <div className="text-xs text-neutral-500">
-                          {position.qty} @ {formatCurrency(position.avgEntryPrice || 0)}
-                        </div>
+                        </span>
+                        <span className="text-[11px] text-neutral-600 tabular-nums">
+                          {position.qty} shares
+                        </span>
                       </div>
+                      <p className="text-[11px] text-neutral-600 mt-0.5 tabular-nums">
+                        Avg {formatCurrency(position.avgEntryPrice || 0)}
+                      </p>
                     </div>
-                    <div className="text-right">
-                      <div className="text-sm font-medium text-neutral-100">
-                        {formatCurrency(position.marketValue || 0)}
-                      </div>
-                      <div
-                        className={`text-xs font-medium ${
-                          isPos ? "text-green-500" : "text-red-500"
-                        }`}
-                      >
-                        {formatCurrency(position.unrealizedPL || 0)} (
-                        {formatPercentage(position.unrealizedPLPercent || 0)})
-                      </div>
-                    </div>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-[14px] font-medium text-white tabular-nums">
+                      {formatCurrency(position.marketValue || position.currentPrice || 0)}
+                    </p>
+                    <p
+                      className={`text-[12px] font-medium tabular-nums ${
+                        isPos ? "text-green-400" : "text-red-400"
+                      }`}
+                    >
+                      {isPos ? "+" : ""}
+                      {formatPercentage(position.unrealizedPLPercent || 0)}
+                    </p>
                   </div>
                 </div>
               );
@@ -195,11 +239,13 @@ export function TradingView({ data, isLive }: TradingViewProps) {
         </div>
       </div>
 
-      {/* Live indicator */}
+      {/* Live badge */}
       {isLive && (
-        <div className="fixed bottom-20 right-4 flex items-center gap-1.5 bg-neutral-900/90 border border-neutral-700 rounded-full px-3 py-1">
+        <div className="fixed bottom-20 right-4 flex items-center gap-2 glass rounded-full px-3.5 py-1.5">
           <div className="h-1.5 w-1.5 rounded-full bg-green-500 pulse-dot" />
-          <span className="text-[10px] text-neutral-400">Live</span>
+          <span className="text-[10px] text-neutral-400 font-medium">
+            Live
+          </span>
         </div>
       )}
     </div>

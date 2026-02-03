@@ -18,18 +18,34 @@ export function ChatPanel() {
   return (
     <div className="h-full flex flex-col">
       {/* Header */}
-      <div className="px-4 py-3 border-b border-neutral-800">
-        <h2 className="text-sm font-medium text-neutral-300">Chat</h2>
+      <div className="px-5 py-3.5 border-b border-[#1a1a1a]">
+        <h2 className="text-[13px] font-semibold text-neutral-300 tracking-wide uppercase">
+          Messages
+        </h2>
       </div>
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto no-scrollbar px-3 py-3" ref={scrollRef}>
+      <div
+        className="flex-1 overflow-y-auto no-scrollbar px-4 py-4"
+        ref={scrollRef}
+      >
         {messages.length === 0 ? (
           <div className="flex items-center justify-center h-full">
-            <p className="text-neutral-600 text-sm">No messages yet</p>
+            <div className="text-center">
+              <div className="h-10 w-10 rounded-full bg-[#111] border border-[#1f1f1f] flex items-center justify-center mx-auto mb-3">
+                <img
+                  src="/logo-dark.png"
+                  alt="B"
+                  className="h-5 w-5 rounded"
+                />
+              </div>
+              <p className="text-neutral-600 text-[13px]">
+                Start a conversation
+              </p>
+            </div>
           </div>
         ) : (
-          <div className="space-y-1">
+          <div className="space-y-3">
             {messages.map((msg) => (
               <MessageBubble
                 key={msg.id}
@@ -39,7 +55,9 @@ export function ChatPanel() {
                 viewTabId={msg.viewTabId}
                 onViewClick={() => {
                   if (msg.viewTabId) {
-                    const tab = state.tabs.find((t) => t.id === msg.viewTabId);
+                    const tab = state.tabs.find(
+                      (t) => t.id === msg.viewTabId
+                    );
                     if (tab) {
                       setPanel("view");
                     }
@@ -48,13 +66,19 @@ export function ChatPanel() {
               />
             ))}
             {isProcessing && (
-              <div className="flex items-center gap-2 py-2 px-3">
-                <div className="flex gap-1">
+              <div className="flex items-center gap-2.5 py-2 px-1">
+                <div className="h-7 w-7 rounded-full overflow-hidden flex-shrink-0">
+                  <img
+                    src="/logo-dark.png"
+                    alt="B"
+                    className="h-full w-full object-cover"
+                  />
+                </div>
+                <div className="flex gap-1.5 px-3 py-2">
                   <div className="w-1.5 h-1.5 bg-neutral-500 rounded-full typing-dot" />
                   <div className="w-1.5 h-1.5 bg-neutral-500 rounded-full typing-dot" />
                   <div className="w-1.5 h-1.5 bg-neutral-500 rounded-full typing-dot" />
                 </div>
-                <span className="text-xs text-neutral-500">Thinking...</span>
               </div>
             )}
           </div>

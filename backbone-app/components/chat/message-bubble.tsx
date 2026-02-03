@@ -1,10 +1,11 @@
-import { cn } from "@/lib/utils";
+"use client";
+
 import { ExternalLink } from "lucide-react";
 
 interface MessageBubbleProps {
   role: "user" | "assistant";
   content: string;
-  timestamp?: number;
+  timestamp: number;
   viewTabId?: string;
   onViewClick?: () => void;
 }
@@ -20,61 +21,59 @@ export function MessageBubble({
 
   return (
     <div
-      className={cn(
-        "flex gap-2 py-1.5",
-        isUser ? "flex-row-reverse" : "flex-row"
-      )}
+      className={`flex gap-2.5 animate-fade-up ${
+        isUser ? "justify-end" : "justify-start"
+      }`}
     >
-      {/* Avatar */}
-      <div
-        className={cn(
-          "h-6 w-6 rounded-lg flex items-center justify-center text-xs font-medium flex-shrink-0 mt-0.5",
-          isUser
-            ? "bg-neutral-700 text-neutral-300"
-            : "bg-orange-500/20 text-orange-500"
-        )}
-      >
-        {isUser ? "U" : "B"}
-      </div>
+      {/* Assistant avatar */}
+      {!isUser && (
+        <div className="flex-shrink-0 mt-1">
+          <div className="h-7 w-7 rounded-full overflow-hidden">
+            <img
+              src="/logo-dark.png"
+              alt="B"
+              className="h-full w-full object-cover"
+            />
+          </div>
+        </div>
+      )}
 
-      {/* Message */}
       <div
-        className={cn(
-          "flex flex-col gap-1 max-w-[85%]",
-          isUser ? "items-end" : "items-start"
-        )}
+        className={`max-w-[80%] ${isUser ? "items-end" : "items-start"}`}
       >
+        {/* Bubble */}
         <div
-          className={cn(
-            "rounded-2xl px-3.5 py-2 text-sm",
+          className={`px-3.5 py-2.5 text-[14px] leading-relaxed ${
             isUser
-              ? "bg-neutral-800 text-neutral-100"
-              : "bg-neutral-900 text-neutral-200"
-          )}
+              ? "bg-orange-500 text-black rounded-2xl rounded-br-md"
+              : "text-neutral-200 rounded-2xl rounded-bl-md"
+          }`}
         >
-          <p className="whitespace-pre-wrap leading-relaxed">{content}</p>
-
-          {/* View link */}
-          {viewTabId && !isUser && (
-            <button
-              onClick={onViewClick}
-              className="mt-2 flex items-center gap-1.5 text-xs text-orange-500 hover:text-orange-400 transition-colors"
-            >
-              <ExternalLink className="h-3 w-3" />
-              View generated
-            </button>
-          )}
+          {content}
         </div>
 
-        {/* Timestamp */}
-        {timestamp && (
-          <span className="text-[10px] text-neutral-600 px-1">
-            {new Date(timestamp).toLocaleTimeString([], {
-              hour: "2-digit",
-              minute: "2-digit",
-            })}
-          </span>
+        {/* View link */}
+        {viewTabId && onViewClick && (
+          <button
+            onClick={onViewClick}
+            className="mt-1.5 flex items-center gap-1.5 text-[11px] text-orange-500/80 hover:text-orange-500 transition-colors"
+          >
+            <ExternalLink className="h-3 w-3" />
+            <span>View generated</span>
+          </button>
         )}
+
+        {/* Timestamp */}
+        <p
+          className={`text-[10px] text-neutral-600 mt-1 tabular-nums ${
+            isUser ? "text-right" : "text-left"
+          }`}
+        >
+          {new Date(timestamp).toLocaleTimeString([], {
+            hour: "2-digit",
+            minute: "2-digit",
+          })}
+        </p>
       </div>
     </div>
   );

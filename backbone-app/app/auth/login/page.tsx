@@ -24,25 +24,30 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="min-h-screen w-full bg-black flex items-center justify-center p-4">
-      <div className="w-full max-w-sm">
+    <div className="min-h-screen w-full bg-black flex items-center justify-center p-6 gradient-hero">
+      <div className="w-full max-w-sm animate-fade-up">
         {/* Logo */}
-        <div className="flex flex-col items-center mb-10">
-          <img
-            src="/logo-dark.png"
-            alt="BACKBONE"
-            className="h-24 w-24 rounded-2xl mb-4"
-          />
-          <h1 className="text-3xl font-bold text-neutral-100">BACKBONE</h1>
-          <p className="text-neutral-500 text-sm mt-1">
+        <div className="flex flex-col items-center mb-12">
+          <div className="relative mb-6">
+            <img
+              src="/logo-dark.png"
+              alt="BACKBONE"
+              className="h-[80px] w-[80px] rounded-[22px]"
+            />
+            <div className="absolute inset-0 rounded-[22px] ring-1 ring-white/[0.06]" />
+          </div>
+          <h1 className="text-[32px] font-bold text-white tracking-tight">
+            BACKBONE
+          </h1>
+          <p className="text-[14px] text-neutral-500 mt-1.5">
             Life optimization engine
           </p>
         </div>
 
         {/* Login card */}
-        <div className="bg-neutral-900 border border-neutral-700 rounded-2xl p-6 space-y-5">
+        <div className="card-elevated p-6 space-y-5">
           {error && (
-            <div className="p-3 rounded-lg bg-red-950/40 border border-red-900/50 text-red-400 text-sm">
+            <div className="p-3.5 rounded-xl bg-red-950/30 border border-red-900/30 text-red-400 text-[13px]">
               {error}
             </div>
           )}
@@ -50,12 +55,14 @@ export default function LoginPage() {
           <button
             onClick={handleGoogleSignIn}
             disabled={isLoading}
-            className="w-full flex items-center justify-center gap-3 px-4 py-3 rounded-xl bg-neutral-800 border border-neutral-700 text-neutral-100 hover:bg-neutral-700 hover:border-neutral-600 transition-colors disabled:opacity-50"
+            className="w-full flex items-center justify-center gap-3 px-4 py-3.5 rounded-xl bg-[#1a1a1a] border border-[#222] text-white hover:bg-[#222] hover:border-[#2a2a2a] transition-all disabled:opacity-50 active:scale-[0.98]"
           >
             {isLoading ? (
-              <div className="flex items-center gap-2">
-                <div className="h-4 w-4 border-2 border-neutral-400 border-t-transparent rounded-full animate-spin" />
-                <span className="text-sm">Signing in...</span>
+              <div className="flex items-center gap-2.5">
+                <div className="h-4 w-4 border-2 border-neutral-500 border-t-transparent rounded-full animate-spin" />
+                <span className="text-[13px] text-neutral-400">
+                  Signing in...
+                </span>
               </div>
             ) : (
               <>
@@ -77,12 +84,14 @@ export default function LoginPage() {
                     d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"
                   />
                 </svg>
-                <span className="text-sm font-medium">Sign in with Google</span>
+                <span className="text-[13px] font-semibold">
+                  Sign in with Google
+                </span>
               </>
             )}
           </button>
 
-          <p className="text-xs text-center text-neutral-600">
+          <p className="text-[11px] text-center text-neutral-700">
             Secure authentication via Firebase
           </p>
         </div>

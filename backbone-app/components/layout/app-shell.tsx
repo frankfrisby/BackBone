@@ -6,14 +6,16 @@ import { ChatPanel } from "@/components/chat/chat-panel";
 import { ChatInput } from "@/components/chat/chat-input";
 import { ViewContainer } from "@/components/views/view-container";
 import { TabPanel } from "@/components/tabs/tab-panel";
+import { InstallPrompt } from "@/components/pwa/install-prompt";
+import { NotificationBanner } from "@/components/pwa/notification-banner";
 import {
   MessageSquare,
   TrendingUp,
   Activity,
   Target,
   BarChart3,
-  Wifi,
   WifiOff,
+  SquarePen,
 } from "lucide-react";
 import { User } from "firebase/auth";
 
@@ -22,13 +24,14 @@ interface AppShellProps {
 }
 
 export function AppShell({ user }: AppShellProps) {
-  const { state, sendMessage, setPanel, connectToBackbone } = useBackbone();
+  const { state, sendMessage, setPanel, connectToBackbone, resetSession } = useBackbone();
   const { hasQueried, connectionStatus, transport } = state;
   const [isMobile, setIsMobile] = useState(false);
   const [showChat, setShowChat] = useState(false);
   const [showSidebar, setShowSidebar] = useState(false);
   const touchStartX = useRef(0);
   const touchStartY = useRef(0);
+  const prevActiveTabId = useRef<string | null>(null);
 
   useEffect(() => {
     const check = () => setIsMobile(window.innerWidth < 768);
@@ -40,6 +43,15 @@ export function AppShell({ user }: AppShellProps) {
   useEffect(() => {
     connectToBackbone(user.uid);
   }, [connectToBackbone, user.uid]);
+
+  // Auto-close chat when a new view tab appears
+  useEffect(() => {
+    const newId = state.activeTab?.id || null;
+    if (newId && newId !== prevActiveTabId.current && showChat) {
+      setShowChat(false);
+    }
+    prevActiveTabId.current = newId;
+  }, [state.activeTab?.id, showChat]);
 
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
@@ -69,6 +81,19 @@ export function AppShell({ user }: AppShellProps) {
       if (showChat) setShowChat(false);
       else if (!showSidebar) setShowSidebar(true);
     }
+  };
+
+  // ── Handlers ────────────────────────────────────────────────
+
+  const handleSendWithChat = (msg: string) => {
+    if (isMobile) setShowChat(true);
+    sendMessage(msg);
+  };
+
+  const handleNew = () => {
+    resetSession();
+    setShowChat(false);
+    setShowSidebar(false);
   };
 
   // ── Connection Badge ─────────────────────────────────────────
@@ -200,6 +225,8 @@ export function AppShell({ user }: AppShellProps) {
           <ChatInput onSend={sendMessage} disabled={state.isProcessing} />
         </div>
 
+        <InstallPrompt />
+        <NotificationBanner />
         {isMobile && <SidebarOverlay />}
       </div>
     );
@@ -216,12 +243,20 @@ export function AppShell({ user }: AppShellProps) {
       >
         {/* Top bar — glass effect */}
         <div className="h-12 flex items-center justify-between px-4 border-b border-[#1a1a1a] flex-shrink-0 glass">
-          <button
-            onClick={() => setShowChat(true)}
-            className="h-8 w-8 flex items-center justify-center rounded-xl text-neutral-500 hover:text-neutral-300 hover:bg-[#1a1a1a] transition-all active:scale-90"
-          >
-            <MessageSquare className="h-[18px] w-[18px]" />
-          </button>
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => setShowChat(true)}
+              className="h-8 w-8 flex items-center justify-center rounded-xl text-neutral-500 hover:text-neutral-300 hover:bg-[#1a1a1a] transition-all active:scale-90"
+            >
+              <MessageSquare className="h-[18px] w-[18px]" />
+            </button>
+            <button
+              onClick={handleNew}
+              className="h-8 w-8 flex items-center justify-center rounded-xl text-neutral-500 hover:text-neutral-300 hover:bg-[#1a1a1a] transition-all active:scale-90"
+            >
+              <SquarePen className="h-[18px] w-[18px]" />
+            </button>
+          </div>
 
           <div className="flex items-center gap-2">
             <img
@@ -258,7 +293,7 @@ export function AppShell({ user }: AppShellProps) {
 
         {/* Bottom input */}
         <div className="px-3 py-2.5 pb-safe border-t border-[#1a1a1a] flex-shrink-0">
-          <ChatInput onSend={sendMessage} disabled={state.isProcessing} />
+          <ChatInput onSend={handleSendWithChat} disabled={state.isProcessing} />
         </div>
 
         {/* ── Chat overlay from left ───────────────────────── */}
@@ -287,6 +322,8 @@ export function AppShell({ user }: AppShellProps) {
           </div>
         </div>
 
+        <InstallPrompt />
+        <NotificationBanner />
         <SidebarOverlay />
       </div>
     );
@@ -308,7 +345,16 @@ export function AppShell({ user }: AppShellProps) {
             BACKBONE
           </span>
         </div>
-        <ConnectionBadge />
+        <div className="flex items-center gap-3">
+          <button
+            onClick={handleNew}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-neutral-500 hover:text-neutral-300 hover:bg-[#1a1a1a] transition-all active:scale-95"
+          >
+            <SquarePen className="h-3.5 w-3.5" />
+            <span className="text-[11px] font-medium">New</span>
+          </button>
+          <ConnectionBadge />
+        </div>
       </div>
 
       {/* 3-column layout */}

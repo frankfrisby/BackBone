@@ -69,30 +69,20 @@ export function VapiCallView() {
       <div className="flex-1 flex flex-col items-center justify-center px-6">
         {/* Avatar / Visual */}
         <div className="relative mb-8">
-          <div
-            className={`h-28 w-28 rounded-full flex items-center justify-center transition-all duration-500 ${
-              callState === "active"
-                ? "bg-green-500/10 border-2 border-green-500/30"
-                : callState === "connecting"
-                ? "bg-yellow-500/10 border-2 border-yellow-500/30"
-                : "bg-[#111] border-2 border-[#1f1f1f]"
+          <img
+            src="/logo-dark.png"
+            alt="B"
+            className={`h-20 w-20 rounded-2xl ${
+              callState === "connecting" ? "animate-pulse" : ""
             }`}
-          >
-            <img
-              src="/logo-dark.png"
-              alt="B"
-              className={`h-12 w-12 rounded-xl ${
-                callState === "connecting" ? "animate-pulse" : ""
-              }`}
-            />
-          </div>
+          />
 
           {/* Ripple effect when active */}
           {callState === "active" && (
             <>
-              <div className="absolute inset-0 rounded-full border-2 border-green-500/20 pulse-ring" />
+              <div className="absolute -inset-4 rounded-full border-2 border-white/10 pulse-ring" />
               <div
-                className="absolute inset-0 rounded-full border border-green-500/10 pulse-ring"
+                className="absolute -inset-4 rounded-full border border-white/5 pulse-ring"
                 style={{ animationDelay: "0.7s" }}
               />
             </>
@@ -110,7 +100,7 @@ export function VapiCallView() {
         </h2>
 
         {callState === "active" && (
-          <p className="text-[15px] text-green-400 font-mono tabular-nums">
+          <p className="text-[15px] text-neutral-400 font-mono tabular-nums">
             {formatDuration(duration)}
           </p>
         )}
@@ -153,7 +143,7 @@ export function VapiCallView() {
         {callState === "idle" || callState === "ended" ? (
           <button
             onClick={startCall}
-            className="h-16 w-16 rounded-full bg-green-500 flex items-center justify-center hover:bg-green-400 transition-all active:scale-90 shadow-lg shadow-green-500/20"
+            className="h-16 w-16 rounded-full bg-white flex items-center justify-center hover:bg-neutral-200 transition-all active:scale-90 shadow-lg shadow-white/10"
           >
             <Phone className="h-7 w-7 text-black" />
           </button>
@@ -162,16 +152,12 @@ export function VapiCallView() {
             {/* Mute */}
             <button
               onClick={() => setIsMuted(!isMuted)}
-              className={`h-14 w-14 rounded-full flex items-center justify-center transition-all active:scale-90 ${
-                isMuted
-                  ? "bg-red-500/10 text-red-400 border border-red-500/20"
-                  : "bg-[#111] text-neutral-300 border border-[#1f1f1f] hover:bg-[#1a1a1a]"
-              }`}
+              className="transition-all active:scale-90"
             >
               {isMuted ? (
-                <MicOff className="h-5 w-5" />
+                <MicOff className="h-6 w-6 text-red-400" />
               ) : (
-                <Mic className="h-5 w-5" />
+                <Mic className="h-6 w-6 text-white" />
               )}
             </button>
 
@@ -186,16 +172,12 @@ export function VapiCallView() {
             {/* Speaker */}
             <button
               onClick={() => setIsSpeakerOn(!isSpeakerOn)}
-              className={`h-14 w-14 rounded-full flex items-center justify-center transition-all active:scale-90 ${
-                !isSpeakerOn
-                  ? "bg-[#1a1a1a] text-neutral-500 border border-[#222]"
-                  : "bg-[#111] text-neutral-300 border border-[#1f1f1f] hover:bg-[#1a1a1a]"
-              }`}
+              className="transition-all active:scale-90"
             >
               {isSpeakerOn ? (
-                <Volume2 className="h-5 w-5" />
+                <Volume2 className="h-6 w-6 text-white" />
               ) : (
-                <VolumeX className="h-5 w-5" />
+                <VolumeX className="h-6 w-6 text-neutral-600" />
               )}
             </button>
           </>

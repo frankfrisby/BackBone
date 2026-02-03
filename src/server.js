@@ -110,6 +110,12 @@ if (WebSocketServer) {
         case "calendar":
           result = await handleCalendar();
           break;
+        case "news":
+          result = await handleNews();
+          break;
+        case "videos":
+          result = await handleVideos(payload.query);
+          break;
         default:
           result = { error: `Unknown command: ${command}` };
       }
@@ -258,6 +264,70 @@ app.post("/api/trade", async (req, res) => {
   }
 });
 
+// News
+app.get("/api/news", async (req, res) => {
+  try {
+    const result = await handleNews();
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/news", async (req, res) => {
+  try {
+    const result = await handleNews();
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Videos
+app.get("/api/videos", async (req, res) => {
+  try {
+    const result = await handleVideos(req.query.q);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/videos", async (req, res) => {
+  try {
+    const result = await handleVideos(req.body.query);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Push notification token registration
+app.post("/api/register-push", async (req, res) => {
+  try {
+    const { token } = req.body;
+    if (!token) {
+      res.status(400).json({ error: "Missing FCM token" });
+      return;
+    }
+    // Store token in data directory
+    const tokensPath = path.resolve("data/fcm-tokens.json");
+    let tokens = [];
+    try {
+      if (fs.existsSync(tokensPath)) {
+        tokens = JSON.parse(fs.readFileSync(tokensPath, "utf8"));
+      }
+    } catch { /* ignore */ }
+    if (!tokens.includes(token)) {
+      tokens.push(token);
+      fs.writeFileSync(tokensPath, JSON.stringify(tokens, null, 2));
+    }
+    res.json({ ok: true, registered: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── Handler Functions ────────────────────────────────────────
 
 async function handleChat(message) {
@@ -374,6 +444,41 @@ async function handleCalendar() {
     return events || [];
   } catch {
     return [];
+  }
+}
+
+async function handleNews() {
+  // Try to read cached news first
+  const cachePath = path.resolve("data/news-cache.json");
+  try {
+    if (fs.existsSync(cachePath)) {
+      const cached = JSON.parse(fs.readFileSync(cachePath, "utf8"));
+      const articles = cached.articles || cached.news || [];
+      if (articles.length > 0) {
+        return { articles };
+      }
+    }
+  } catch { /* ignore */ }
+
+  // If no cache, try fetching fresh news
+  try {
+    const { fetchAndAnalyzeNews } = await import("./services/news-service.js");
+    const result = await fetchAndAnalyzeNews();
+    return { articles: result?.articles || result?.news || [] };
+  } catch {
+    return { articles: [] };
+  }
+}
+
+async function handleVideos(query) {
+  try {
+    const { searchYouTube } = await import("./services/youtube-service.js");
+    // Default search based on user interests if no query
+    const searchQuery = query || "AI technology investing 2026";
+    const videos = await searchYouTube(searchQuery, 10);
+    return { videos: videos || [] };
+  } catch {
+    return { videos: [] };
   }
 }
 

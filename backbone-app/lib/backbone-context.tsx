@@ -52,7 +52,8 @@ type Action =
   | { type: "REMOVE_TAB"; tabId: string }
   | { type: "SET_PANEL"; panel: Panel }
   | { type: "SET_HAS_QUERIED" }
-  | { type: "LOAD_CACHED"; tabs: Tab[]; messages: Message[] };
+  | { type: "LOAD_CACHED"; tabs: Tab[]; messages: Message[] }
+  | { type: "RESET" };
 
 // ── View Cache ───────────────────────────────────────────────
 
@@ -138,6 +139,12 @@ function appReducer(state: AppState, action: Action): AppState {
         hasQueried: action.messages.length > 0,
         activeTab: action.tabs[0] || null,
       };
+    case "RESET":
+      return {
+        ...initialState,
+        connectionStatus: state.connectionStatus,
+        transport: state.transport,
+      };
     default:
       return state;
   }
@@ -222,6 +229,32 @@ function classifyQuery(query: string): {
   ) {
     return { viewType: "ticket", title: "Ticket" };
   }
+  if (
+    q.includes("news") ||
+    q.includes("headlines") ||
+    q.includes("latest news") ||
+    q.includes("what's happening")
+  ) {
+    return { viewType: "news", title: "News" };
+  }
+  if (
+    q.includes("video") ||
+    q.includes("videos") ||
+    q.includes("youtube") ||
+    q.includes("watch") ||
+    q.includes("tutorial")
+  ) {
+    return { viewType: "video", title: "Videos" };
+  }
+  if (
+    q.includes("invoice") ||
+    q.includes("receipt") ||
+    q.includes("document") ||
+    q.includes("bill") ||
+    q.includes("statement")
+  ) {
+    return { viewType: "document", title: "Document" };
+  }
 
   return { viewType: null, title: "Chat" };
 }
@@ -235,6 +268,7 @@ interface BackboneContextType {
   setActiveTab: (tab: Tab | null) => void;
   removeTab: (tabId: string) => void;
   connectToBackbone: (userId: string) => Promise<void>;
+  resetSession: () => void;
 }
 
 const BackboneContext = createContext<BackboneContextType | null>(null);
@@ -266,6 +300,46 @@ export function BackboneProvider({ children }: { children: ReactNode }) {
     });
     return () => { unsubscribe(); };
   }, [connection]);
+
+  // Listen for server-pushed messages (AI responses, alerts, trade updates)
+  useEffect(() => {
+    const unsubscribe = connection.onMessage((data: any) => {
+      // Skip pong and auth responses
+      if (data.type === "pong" || data.type === "auth_ok") return;
+
+      // Handle pushed messages
+      if (data.type === "message" || data.content || data.message) {
+        const msg: Message = {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: data.content || data.message || JSON.stringify(data),
+          timestamp: Date.now(),
+        };
+        dispatch({ type: "ADD_MESSAGE", message: msg });
+
+        if (!state.hasQueried) {
+          dispatch({ type: "SET_HAS_QUERIED" });
+        }
+
+        // If the push includes a view, create a tab
+        if (data.viewType) {
+          const tab: Tab = {
+            id: crypto.randomUUID(),
+            type: data.viewType === "call" ? "call" : "view",
+            viewType: data.viewType,
+            title: data.title || data.viewType,
+            data: data.data || null,
+            createdAt: Date.now(),
+            isLive: data.isLive || false,
+          };
+          msg.viewTabId = tab.id;
+          dispatch({ type: "ADD_TAB", tab });
+          dispatch({ type: "SET_PANEL", panel: "view" });
+        }
+      }
+    });
+    return () => { unsubscribe(); };
+  }, [connection, state.hasQueried]);
 
   const connectToBackbone = useCallback(
     async (userId: string) => {
@@ -376,6 +450,14 @@ export function BackboneProvider({ children }: { children: ReactNode }) {
     dispatch({ type: "REMOVE_TAB", tabId });
   }, []);
 
+  const resetSession = useCallback(() => {
+    dispatch({ type: "RESET" });
+    try {
+      localStorage.removeItem(CACHE_KEY);
+      localStorage.removeItem(MSG_CACHE_KEY);
+    } catch { /* ignore */ }
+  }, []);
+
   return (
     <BackboneContext.Provider
       value={{
@@ -385,6 +467,7 @@ export function BackboneProvider({ children }: { children: ReactNode }) {
         setActiveTab,
         removeTab,
         connectToBackbone,
+        resetSession,
       }}
     >
       {children}

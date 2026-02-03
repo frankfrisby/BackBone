@@ -8,6 +8,9 @@ import { TradingView } from "./trading-view";
 import { FinancialView } from "./financial-view";
 import { CalendarView } from "./calendar-view";
 import { TicketView } from "./ticket-view";
+import { NewsView } from "./news-view";
+import { VideoView } from "./video-view";
+import { DocumentView } from "./document-view";
 import { SkeletonView } from "./skeleton-view";
 import { VapiCallView } from "../call/vapi-call";
 import { LayoutGrid } from "lucide-react";
@@ -49,6 +52,12 @@ export function ViewContainer() {
       return <CalendarView data={activeTab.data} />;
     case "ticket":
       return <TicketView data={activeTab.data} />;
+    case "news":
+      return <NewsView data={activeTab.data} />;
+    case "video":
+      return <VideoView data={activeTab.data} />;
+    case "document":
+      return <DocumentView data={activeTab.data} />;
     case "call":
       return <VapiCallView />;
     default:

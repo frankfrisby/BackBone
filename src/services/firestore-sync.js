@@ -16,6 +16,11 @@ const DATA_DIR = path.join(process.cwd(), "data");
 const TICKERS_CACHE_PATH = path.join(DATA_DIR, "tickers-cache.json");
 const PROFILE_PATH = path.join(process.cwd(), "memory", "profile.md");
 const TRADES_LOG_PATH = path.join(DATA_DIR, "trades-log.json");
+const GOALS_PATH = path.join(DATA_DIR, "goals.json");
+const BACKLOG_PATH = path.join(DATA_DIR, "backlog.json");
+const THESIS_PATH = path.join(process.cwd(), "memory", "thesis.md");
+const LIFE_SCORES_PATH = path.join(DATA_DIR, "life-scores.json");
+const PROJECTS_DIR = path.join(process.cwd(), "projects");
 
 // Firestore REST API base URL
 const FIRESTORE_BASE_URL = `https://firestore.googleapis.com/v1/projects/${FIREBASE_CONFIG.projectId}/databases/(default)/documents`;
@@ -248,6 +253,112 @@ export const pushPositions = async (positions = null) => {
 };
 
 /**
+ * Load dashboard data from local files
+ */
+const loadDashboard = () => {
+  const result = { goals: [], backlog: [], thesis: "", projects: [], lifeScores: null };
+
+  try {
+    if (fs.existsSync(GOALS_PATH)) {
+      const data = JSON.parse(fs.readFileSync(GOALS_PATH, "utf-8"));
+      result.goals = (data.goals || []).map(g => ({
+        id: g.id,
+        title: g.title,
+        category: g.category || "",
+        progress: g.progress || 0,
+        status: g.status || "active",
+        urgency: g.urgency || "normal",
+        updatedAt: g.updatedAt || g.extractedAt || ""
+      }));
+    }
+  } catch {}
+
+  try {
+    if (fs.existsSync(BACKLOG_PATH)) {
+      const data = JSON.parse(fs.readFileSync(BACKLOG_PATH, "utf-8"));
+      result.backlog = (data.items || [])
+        .sort((a, b) => (b.impactScore || 0) - (a.impactScore || 0))
+        .slice(0, 30)
+        .map(item => ({
+          id: item.id,
+          title: item.title,
+          category: item.category || "",
+          impactScore: item.impactScore || 0,
+          urgency: item.urgency || "low",
+          source: item.source || "",
+          createdAt: item.createdAt || ""
+        }));
+    }
+  } catch {}
+
+  try {
+    if (fs.existsSync(THESIS_PATH)) {
+      result.thesis = fs.readFileSync(THESIS_PATH, "utf-8");
+    }
+  } catch {}
+
+  try {
+    if (fs.existsSync(PROJECTS_DIR)) {
+      const dirs = fs.readdirSync(PROJECTS_DIR, { withFileTypes: true });
+      for (const dir of dirs) {
+        if (!dir.isDirectory()) continue;
+        const projectMdPath = path.join(PROJECTS_DIR, dir.name, "PROJECT.md");
+        let summary = "";
+        let status = "active";
+        if (fs.existsSync(projectMdPath)) {
+          const content = fs.readFileSync(projectMdPath, "utf-8");
+          // Extract first non-header line as summary
+          const lines = content.split("\n").filter(l => l.trim() && !l.startsWith("#"));
+          summary = (lines[0] || "").substring(0, 200);
+          if (content.toLowerCase().includes("status: completed") || content.toLowerCase().includes("## completed")) {
+            status = "completed";
+          }
+        }
+        result.projects.push({
+          name: dir.name,
+          title: dir.name.replace(/-/g, " ").replace(/\b\w/g, c => c.toUpperCase()),
+          summary,
+          status
+        });
+      }
+    }
+  } catch {}
+
+  try {
+    if (fs.existsSync(LIFE_SCORES_PATH)) {
+      result.lifeScores = JSON.parse(fs.readFileSync(LIFE_SCORES_PATH, "utf-8"));
+    }
+  } catch {}
+
+  return result;
+};
+
+/**
+ * Push dashboard data to Firestore for PWA
+ * Syncs goals, backlog, thesis, projects, life scores
+ */
+export const pushDashboard = async () => {
+  const userId = getUserId();
+  const data = loadDashboard();
+
+  const payload = {
+    goals: data.goals,
+    backlog: data.backlog,
+    thesis: data.thesis,
+    projects: data.projects,
+    lifeScores: data.lifeScores,
+    goalCount: data.goals.length,
+    projectCount: data.projects.length,
+    backlogCount: data.backlog.length,
+    updatedAt: new Date().toISOString()
+  };
+
+  await writeDocument(`users/${userId}/app`, "dashboard", payload);
+  console.log(`[FirestoreSync] Pushed dashboard (${payload.goalCount} goals, ${payload.projectCount} projects, ${payload.backlogCount} backlog)`);
+  return payload;
+};
+
+/**
  * Push all data to Firestore
  */
 export const pushAll = async () => {
@@ -255,6 +366,7 @@ export const pushAll = async () => {
     tickers: null,
     profile: null,
     positions: null,
+    dashboard: null,
     errors: []
   };
 
@@ -274,6 +386,12 @@ export const pushAll = async () => {
     results.positions = await pushPositions();
   } catch (e) {
     results.errors.push(`Positions: ${e.message}`);
+  }
+
+  try {
+    results.dashboard = await pushDashboard();
+  } catch (e) {
+    results.errors.push(`Dashboard: ${e.message}`);
   }
 
   return results;
@@ -324,6 +442,7 @@ export default {
   pushTickers,
   pushProfile,
   pushPositions,
+  pushDashboard,
   pushAll,
   startRealtimeSync,
   stopRealtimeSync,

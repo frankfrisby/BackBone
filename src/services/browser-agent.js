@@ -352,6 +352,7 @@ export class BrowserAgent extends EventEmitter {
       if (startUrl) {
         await this.page.goto(startUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
         await this.page.waitForTimeout(2000);
+        this.emit("navigation", { url: this.page.url(), startUrl });
       }
 
       for (let step = 1; step <= maxIterations; step++) {
@@ -390,7 +391,14 @@ export class BrowserAgent extends EventEmitter {
           runLog.steps.push(stepLog);
           this.actionHistory.push(analysis);
 
-          runLog.result = { success: true, message: analysis.result, steps: step, downloads: this.downloads };
+          runLog.result = {
+            success: true,
+            message: analysis.result,
+            steps: step,
+            downloads: this.downloads,
+            screenshots: this.screenshots,
+            runId: this.runId
+          };
           runLog.completedAt = new Date().toISOString();
           this._saveRunLog(runLog);
 
@@ -404,7 +412,14 @@ export class BrowserAgent extends EventEmitter {
           runLog.steps.push(stepLog);
           this.actionHistory.push(analysis);
 
-          runLog.result = { success: false, error: analysis.reason, steps: step };
+          runLog.result = {
+            success: false,
+            error: analysis.reason,
+            steps: step,
+            downloads: this.downloads,
+            screenshots: this.screenshots,
+            runId: this.runId
+          };
           runLog.completedAt = new Date().toISOString();
           this._saveRunLog(runLog);
 
@@ -432,7 +447,14 @@ export class BrowserAgent extends EventEmitter {
       }
 
       // Max iterations reached
-      runLog.result = { success: false, error: `Max iterations (${maxIterations}) reached`, steps: maxIterations };
+      runLog.result = {
+        success: false,
+        error: `Max iterations (${maxIterations}) reached`,
+        steps: maxIterations,
+        downloads: this.downloads,
+        screenshots: this.screenshots,
+        runId: this.runId
+      };
       runLog.completedAt = new Date().toISOString();
       this._saveRunLog(runLog);
 
@@ -441,7 +463,13 @@ export class BrowserAgent extends EventEmitter {
       return runLog.result;
 
     } catch (err) {
-      runLog.result = { success: false, error: err.message };
+      runLog.result = {
+        success: false,
+        error: err.message,
+        downloads: this.downloads,
+        screenshots: this.screenshots,
+        runId: this.runId
+      };
       runLog.completedAt = new Date().toISOString();
       this._saveRunLog(runLog);
 
@@ -521,9 +549,14 @@ export const runBrowserTask = async (taskDescription, options = {}) => {
   });
 
   // Forward events so callers can listen
-  const events = ["task-started", "step-analysis", "step-executed", "step-error", "download-complete", "task-completed", "task-failed"];
+  const events = ["task-started", "navigation", "step-analysis", "step-executed", "step-error", "download-complete", "task-completed", "task-failed"];
   for (const evt of events) {
     agent.on(evt, (...args) => {
+      if (typeof options.onEvent === "function") {
+        try {
+          options.onEvent(evt, ...args);
+        } catch {}
+      }
       // Log to console for visibility
       if (evt === "step-analysis") {
         const data = args[0];
@@ -541,5 +574,10 @@ export const runBrowserTask = async (taskDescription, options = {}) => {
     });
   }
 
-  return agent.run(taskDescription, options);
+  const result = await agent.run(taskDescription, options);
+  return {
+    ...result,
+    screenshots: agent.screenshots,
+    runId: agent.runId
+  };
 };

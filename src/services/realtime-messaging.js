@@ -24,6 +24,7 @@ import path from "path";
 import https from "https";
 import { EventEmitter } from "events";
 import { trackUserQuery, QUERY_SOURCE } from "./query-tracker.js";
+import { loadFirebaseUser } from "./firebase-auth.js";
 
 const DATA_DIR = path.join(process.cwd(), "data");
 const MESSAGING_STATE_PATH = path.join(DATA_DIR, "realtime-messaging.json");
@@ -203,6 +204,10 @@ export class RealtimeMessaging extends EventEmitter {
     }
 
     this.userId = userId;
+    if (!authToken) {
+      const user = loadFirebaseUser();
+      authToken = user?.idToken || null;
+    }
     this.authToken = authToken;
     this.saveState();
 
@@ -392,17 +397,8 @@ export class RealtimeMessaging extends EventEmitter {
         const messageId = doc.name.split("/").pop();
         const message = parseFirestoreFields(doc.fields);
 
-        // Skip if already processed
-        if (this.processedMessageIds.has(messageId)) {
-          continue;
-        }
-
-        // Skip private messages from showing in app (but still process them)
-        // Private messages have showInApp: false
-        if (message.private === true || message.showInApp === false) {
-          this.processedMessageIds.add(messageId);
-          continue;
-        }
+        const isCompleted = message.status === MESSAGE_STATUS.COMPLETED;
+        const isProcessing = message.status === MESSAGE_STATUS.PROCESSING;
 
         // Skip if not a user message or already completed
         if (message.type !== MESSAGE_TYPE.USER) {
@@ -418,10 +414,13 @@ export class RealtimeMessaging extends EventEmitter {
           this.processedMessageIds.add(messageId);
           continue;
         }
-        if (message.status === MESSAGE_STATUS.COMPLETED ||
-            message.status === MESSAGE_STATUS.PROCESSING) {
+        if (isCompleted || isProcessing) {
+          this.processedMessageIds.add(messageId);
           continue;
         }
+
+        // Private messages should still be processed, but not shown in UI
+        message._silent = message.private === true || message.showInApp === false;
 
         // Found a new message - switch to active polling mode
         this.activatePolling();
@@ -443,7 +442,6 @@ export class RealtimeMessaging extends EventEmitter {
 
     // Mark as processing
     await this.updateMessageStatus(messageId, MESSAGE_STATUS.PROCESSING);
-    this.processedMessageIds.add(messageId);
     this.saveState();
 
     // Update presence to busy
@@ -458,7 +456,9 @@ export class RealtimeMessaging extends EventEmitter {
       });
     }
 
-    this.emit("message-received", { messageId, message });
+    if (!message._silent) {
+      this.emit("message-received", { messageId, message });
+    }
 
     try {
       let response = null;
@@ -474,14 +474,19 @@ export class RealtimeMessaging extends EventEmitter {
       }
 
       // Send the response
-      await this.sendMessage(response.content, {
+      const sent = await this.sendMessage(response.content, {
         type: response.type || MESSAGE_TYPE.AI,
         replyTo: messageId,
         metadata: response.metadata
       });
 
       // Mark original as completed
-      await this.updateMessageStatus(messageId, MESSAGE_STATUS.COMPLETED);
+      await this.updateMessageStatus(messageId, MESSAGE_STATUS.COMPLETED, null, {
+        responseContent: response.content,
+        responseMessageId: sent?.messageId || null
+      });
+      this.processedMessageIds.add(messageId);
+      this.saveState();
 
       this.emit("message-processed", { messageId, response });
 
@@ -490,6 +495,8 @@ export class RealtimeMessaging extends EventEmitter {
 
       // Mark as failed
       await this.updateMessageStatus(messageId, MESSAGE_STATUS.FAILED, error.message);
+      this.processedMessageIds.add(messageId);
+      this.saveState();
 
       // Send error response
       await this.sendMessage("Sorry, I encountered an error processing your message.", {
@@ -549,11 +556,16 @@ export class RealtimeMessaging extends EventEmitter {
   /**
    * Update a message's status
    */
-  async updateMessageStatus(messageId, status, error = null) {
+  async updateMessageStatus(messageId, status, error = null, extraFields = null) {
     try {
-      const updateMask = error
-        ? "updateMask.fieldPaths=status&updateMask.fieldPaths=error&updateMask.fieldPaths=processedAt"
-        : "updateMask.fieldPaths=status&updateMask.fieldPaths=processedAt";
+      const fieldPaths = ["status", "processedAt"];
+      if (error) fieldPaths.push("error");
+      if (extraFields && typeof extraFields === "object") {
+        for (const key of Object.keys(extraFields)) {
+          fieldPaths.push(key);
+        }
+      }
+      const updateMask = fieldPaths.map(p => `updateMask.fieldPaths=${encodeURIComponent(p)}`).join("&");
 
       const url = `${FIRESTORE_BASE_URL}/users/${this.userId}/messages/${messageId}?${updateMask}&key=${FIREBASE_CONFIG.apiKey}`;
 
@@ -564,6 +576,9 @@ export class RealtimeMessaging extends EventEmitter {
 
       if (error) {
         fields.error = { stringValue: error };
+      }
+      if (extraFields && typeof extraFields === "object") {
+        Object.assign(fields, toFirestoreFields(extraFields));
       }
 
       await this.fetchWithAuth(url, {

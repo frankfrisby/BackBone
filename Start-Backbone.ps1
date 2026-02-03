@@ -1,45 +1,72 @@
 # BACKBONE Engine Launcher
-# Opens a properly sized console window and runs the app
+# Runs BACKBONE directly in this window — no second terminal spawned
 
 $scriptPath = Split-Path -Parent $MyInvocation.MyCommand.Path
 
-# Create a new console window with specific size
-$psi = New-Object System.Diagnostics.ProcessStartInfo
-$psi.FileName = "cmd.exe"
-$psi.Arguments = "/c mode con: cols=200 lines=55 & title BACKBONE ENGINE & cd /d `"$scriptPath`" & node bin/backbone.js"
-$psi.UseShellExecute = $true
-$psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Normal
+# ── Singleton check: exit immediately if BACKBONE is already running ──
+$lockFile = Join-Path $scriptPath "data\.backbone.lock"
+if (Test-Path $lockFile) {
+    try {
+        $lockData = Get-Content $lockFile -Raw | ConvertFrom-Json
+        if ($lockData.pid) {
+            $proc = Get-Process -Id $lockData.pid -ErrorAction SilentlyContinue
+            if ($proc -and $proc.ProcessName -match "node") {
+                exit
+            }
+        }
+    } catch {
+        # Corrupt lock — continue
+    }
+}
 
-# Start the process
-$process = [System.Diagnostics.Process]::Start($psi)
+# Also check by window title as fallback (matches both launcher and node-set titles)
+$existingWindow = Get-Process -ErrorAction SilentlyContinue |
+    Where-Object { $_.MainWindowTitle -match "BACKBONE ENGINE" }
+if ($existingWindow -and $existingWindow.Id -ne $PID) {
+    exit
+}
 
-# Wait a moment for window to open, then resize it
-Start-Sleep -Milliseconds 500
+# Set window title and encoding
+$Host.UI.RawUI.WindowTitle = "BACKBONE ENGINE"
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+chcp 65001 | Out-Null
 
-Add-Type @"
+# Enable ANSI escape sequences
+reg add HKCU\Console /v VirtualTerminalLevel /t REG_DWORD /d 1 /f 2>&1 | Out-Null
+
+# Center and size this window immediately
+try {
+    Add-Type @"
 using System;
 using System.Runtime.InteropServices;
 public class Win32 {
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr GetConsoleWindow();
     [DllImport("user32.dll")]
-    public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+    public static extern bool MoveWindow(IntPtr hWnd, int X, int Y, int nWidth, int nHeight, bool bRepaint);
     [DllImport("user32.dll")]
     public static extern int GetSystemMetrics(int nIndex);
 }
 "@
+    $hwnd = [Win32]::GetConsoleWindow()
+    $screenWidth = [Win32]::GetSystemMetrics(0)
+    $screenHeight = [Win32]::GetSystemMetrics(1)
+    $winWidth = 1100
+    $winHeight = 700
+    $x = [Math]::Max(0, [int](($screenWidth - $winWidth) / 2))
+    $y = [Math]::Max(0, [int](($screenHeight - $winHeight) / 2))
+    [Win32]::MoveWindow($hwnd, $x, $y, $winWidth, $winHeight, $true) | Out-Null
+} catch {
+    # Window positioning failed — not critical
+}
 
-# Get screen dimensions
-$screenWidth = [Win32]::GetSystemMetrics(0)
-$screenHeight = [Win32]::GetSystemMetrics(1)
+# Run BACKBONE directly in this window
+Set-Location $scriptPath
+node bin/backbone.js
 
-# Target window size
-$winWidth = 1400
-$winHeight = 800
-
-# Center on screen
-$x = [Math]::Max(0, [int](($screenWidth - $winWidth) / 2))
-$y = [Math]::Max(0, [int](($screenHeight - $winHeight) / 2))
-
-# Get the main window handle and resize
-if ($process.MainWindowHandle -ne [IntPtr]::Zero) {
-    [Win32]::SetWindowPos($process.MainWindowHandle, [IntPtr]::Zero, $x, $y, $winWidth, $winHeight, 0x0040)
+if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne $null) {
+    Write-Host ""
+    Write-Host "  [ERROR] BACKBONE exited with error code $LASTEXITCODE"
+    Write-Host ""
+    Read-Host "Press Enter to exit"
 }

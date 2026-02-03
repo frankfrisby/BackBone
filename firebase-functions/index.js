@@ -25,6 +25,22 @@ admin.initializeApp();
 const db = admin.firestore();
 const messaging = admin.messaging();
 
+const normalizePhone = (value) => {
+  if (!value) return null;
+  const digits = String(value).replace(/[^\d]/g, "");
+  if (!digits) return null;
+  if (digits.length === 10) return `1${digits}`;
+  return digits;
+};
+
+const parseTwilioBody = (req) => {
+  if (req.body && typeof req.body === "object") {
+    return req.body;
+  }
+  const raw = req.rawBody ? req.rawBody.toString("utf8") : String(req.body || "");
+  return Object.fromEntries(new URLSearchParams(raw));
+};
+
 // WhatsApp config from environment
 const WHATSAPP_CONFIG = {
   phoneNumberId: functions.config().whatsapp?.phone_number_id,
@@ -67,7 +83,10 @@ exports.whatsappWebhook = functions.https.onRequest(async (req, res) => {
       // Process incoming messages
       if (value.messages?.[0]) {
         const message = value.messages[0];
-        const from = message.from; // Phone number
+        const from = normalizePhone(message.from); // Phone number
+        if (!from) {
+          return res.status(200).send("OK");
+        }
         const messageId = message.id;
 
         let content = null;
@@ -94,6 +113,9 @@ exports.whatsappWebhook = functions.https.onRequest(async (req, res) => {
           let userId = null;
           if (!userSnapshot.empty) {
             userId = userSnapshot.docs[0].id;
+            if (userSnapshot.size > 1) {
+              console.warn(`[WhatsApp] Multiple users found for ${from}. Using first match ${userId}.`);
+            }
           } else {
             // Create temporary user document for new WhatsApp users
             const newUserRef = await db.collection("users").add({
@@ -218,12 +240,63 @@ exports.sendPushNotification = functions.firestore
 
     // Send notification
     try {
+      const notifTitle = notification.title || "BACKBONE";
+      const notifBody = notification.body || "You have a new message";
+      const notifIcon = notification.icon || "https://backboneai.web.app/icons/icon-192.png";
+      const notifImage = notification.image || undefined;
+      const clickUrl = notification.data?.url || "https://backboneai.web.app";
+
+      // Ensure all data values are strings (FCM requirement)
+      const dataPayload = {};
+      if (notification.data) {
+        for (const [k, v] of Object.entries(notification.data)) {
+          dataPayload[k] = String(v);
+        }
+      }
+      dataPayload.timestamp = new Date().toISOString();
+
       const message = {
         notification: {
-          title: notification.title || "BACKBONE",
-          body: notification.body || "You have a new message"
+          title: notifTitle,
+          body: notifBody,
+          ...(notifImage ? { imageUrl: notifImage } : {})
         },
-        data: notification.data || {},
+        data: dataPayload,
+        android: {
+          priority: "high",
+          notification: {
+            icon: "ic_notification",
+            color: "#f97316",
+            sound: "default",
+            clickAction: clickUrl,
+            ...(notifImage ? { imageUrl: notifImage } : {})
+          }
+        },
+        apns: {
+          payload: {
+            aps: {
+              sound: "default",
+              badge: 1,
+              "mutable-content": 1
+            }
+          },
+          fcmOptions: {
+            image: notifImage || undefined
+          }
+        },
+        webpush: {
+          notification: {
+            title: notifTitle,
+            body: notifBody,
+            icon: notifIcon,
+            ...(notifImage ? { image: notifImage } : {}),
+            badge: notifIcon,
+            data: { url: clickUrl }
+          },
+          fcmOptions: {
+            link: clickUrl
+          }
+        },
         tokens
       };
 
@@ -347,10 +420,18 @@ exports.twilioWhatsAppWebhook = functions.https.onRequest(async (req, res) => {
   }
 
   try {
+    const body = parseTwilioBody(req);
     // Twilio sends form-urlencoded data
-    const from = req.body.From?.replace("whatsapp:", "") || null;
-    let messageBody = req.body.Body || "";
-    const messageSid = req.body.MessageSid || null;
+    const fromRaw = body.From?.replace("whatsapp:", "") || null;
+    const from = normalizePhone(fromRaw);
+    let messageBody = body.Body || "";
+    const messageSid = body.MessageSid || null;
+
+    if (!from) {
+      console.warn("[Twilio] Missing sender number");
+      res.set("Content-Type", "text/xml");
+      return res.status(200).send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
+    }
 
     console.log(`[Twilio] Message from ${from}: ${messageBody}`);
 
@@ -404,6 +485,9 @@ Make sure BACKBONE is running on your computer to receive responses.</Message>
     if (!userSnapshot.empty) {
       userId = userSnapshot.docs[0].id;
       userPrivateMode = userSnapshot.docs[0].data().privateMode || false;
+      if (userSnapshot.size > 1) {
+        console.warn(`[Twilio] Multiple users found for ${from}. Using first match ${userId}.`);
+      }
     } else {
       // Create new user for this phone
       const newUserRef = await db.collection("users").add({
@@ -631,4 +715,286 @@ exports.cleanupOldMessages = functions.pubsub.schedule("0 3 * * *").onRun(async 
 
   console.log("Cleaned up old messages");
   return null;
+});
+
+// ══════════════════════════════════════════════════════════════════
+// Vapi Voice AI Webhook — Permanent server URL for phone calls
+// Set this as your Server URL on your Vapi phone number:
+//   https://us-central1-backboneai.cloudfunctions.net/vapiWebhook
+// ══════════════════════════════════════════════════════════════════
+
+/**
+ * Helper: Read Alpaca config from Firestore
+ */
+const getAlpacaConfig = async () => {
+  try {
+    const doc = await db.collection("config").doc("config_alpaca").get();
+    if (doc.exists) return doc.data();
+  } catch {}
+  return null;
+};
+
+/**
+ * Helper: Call Alpaca API
+ */
+const alpacaFetch = async (path, method = "GET", body = null) => {
+  const config = await getAlpacaConfig();
+  if (!config?.apiKey || !config?.apiSecret) {
+    return { error: "Alpaca not configured in Firestore config/config_alpaca" };
+  }
+  const baseUrl = config.mode === "live"
+    ? "https://api.alpaca.markets"
+    : "https://paper-api.alpaca.markets";
+
+  const opts = {
+    method,
+    headers: {
+      "APCA-API-KEY-ID": config.apiKey,
+      "APCA-API-SECRET-KEY": config.apiSecret,
+      "Content-Type": "application/json"
+    }
+  };
+  if (body) opts.body = JSON.stringify(body);
+
+  const resp = await fetch(`${baseUrl}${path}`, opts);
+  if (!resp.ok) {
+    const err = await resp.text();
+    return { error: `Alpaca ${resp.status}: ${err}` };
+  }
+  return await resp.json();
+};
+
+/**
+ * Execute a Vapi tool call
+ */
+const executeVapiTool = async (toolName, params, userId) => {
+  switch (toolName) {
+    case "get_portfolio": {
+      const acct = await alpacaFetch("/v2/account");
+      if (acct.error) return acct.error;
+      return `Portfolio: Equity $${Number(acct.equity).toLocaleString()}, Buying Power $${Number(acct.buying_power).toLocaleString()}, Day Change $${(Number(acct.equity) - Number(acct.last_equity)).toFixed(2)}`;
+    }
+
+    case "get_positions": {
+      const positions = await alpacaFetch("/v2/positions");
+      if (positions.error) return positions.error;
+      if (!Array.isArray(positions) || positions.length === 0) return "No open positions.";
+      return positions.map(p =>
+        `${p.symbol}: ${p.qty} shares, $${Number(p.market_value).toLocaleString()}, P&L ${(Number(p.unrealized_plpc) * 100).toFixed(1)}%`
+      ).join("; ");
+    }
+
+    case "buy_stock": {
+      const order = await alpacaFetch("/v2/orders", "POST", {
+        symbol: params.symbol?.toUpperCase(),
+        qty: String(params.qty),
+        side: "buy",
+        type: "market",
+        time_in_force: "day"
+      });
+      if (order.error) return `Trade failed: ${order.error}`;
+      return `BUY order placed: ${params.qty} shares of ${params.symbol?.toUpperCase()}, order ID ${order.id}`;
+    }
+
+    case "sell_stock": {
+      const order = await alpacaFetch("/v2/orders", "POST", {
+        symbol: params.symbol?.toUpperCase(),
+        qty: String(params.qty),
+        side: "sell",
+        type: "market",
+        time_in_force: "day"
+      });
+      if (order.error) return `Trade failed: ${order.error}`;
+      return `SELL order placed: ${params.qty} shares of ${params.symbol?.toUpperCase()}, order ID ${order.id}`;
+    }
+
+    case "get_goals": {
+      if (!userId) return "No user context available.";
+      try {
+        const goalsSnap = await db.collection("users").doc(userId)
+          .collection("syncedData").doc("goals").get();
+        if (goalsSnap.exists) {
+          const data = goalsSnap.data();
+          const goals = data.goals || [];
+          const active = goals.filter(g => g.status === "active");
+          if (active.length === 0) return "No active goals.";
+          return active.map(g => `${g.title} (${g.progress || 0}% complete)`).join("; ");
+        }
+      } catch {}
+      return "Goals data not available in cloud. Check the context I was given at call start.";
+    }
+
+    case "get_health_summary": {
+      if (!userId) return "No user context available.";
+      try {
+        const healthSnap = await db.collection("users").doc(userId)
+          .collection("syncedData").doc("health").get();
+        if (healthSnap.exists) {
+          const data = healthSnap.data();
+          const parts = [];
+          if (data.sleepScore) parts.push(`Sleep: ${data.sleepScore}`);
+          if (data.readiness) parts.push(`Readiness: ${data.readiness}`);
+          if (data.activity) parts.push(`Activity: ${data.activity}`);
+          if (parts.length > 0) return parts.join(", ");
+        }
+      } catch {}
+      return "Health data not available in cloud. Check the context I was given at call start.";
+    }
+
+    case "get_life_scores": {
+      if (!userId) return "No user context available.";
+      try {
+        const scoresSnap = await db.collection("users").doc(userId)
+          .collection("syncedData").doc("lifeScores").get();
+        if (scoresSnap.exists) {
+          const data = scoresSnap.data();
+          return Object.entries(data)
+            .filter(([k]) => k !== "updatedAt")
+            .map(([k, v]) => `${k}: ${typeof v === "object" ? v.score || JSON.stringify(v) : v}`)
+            .join(", ");
+        }
+      } catch {}
+      return "Life scores not available in cloud. Check the context I was given at call start.";
+    }
+
+    case "web_search": {
+      return `Web search is not available from the cloud function. I'll use the context I already have, or suggest the user check BACKBONE terminal for: "${params.query}"`;
+    }
+
+    case "send_email": {
+      // Save draft to Firestore for safety
+      if (!userId) return "Cannot save draft without user context.";
+      await db.collection("users").doc(userId).collection("emailDrafts").add({
+        to: params.to,
+        subject: params.subject,
+        body: params.body,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        source: "vapi_call"
+      });
+      return `Email draft saved. To: ${params.to}, Subject: "${params.subject}". Review and send from BACKBONE.`;
+    }
+
+    case "get_calendar_events": {
+      return "Calendar events were included in the call context. Ask me about them directly.";
+    }
+
+    case "run_task": {
+      // Can't run Claude Code from cloud function — log the request
+      if (userId) {
+        await db.collection("users").doc(userId).collection("pendingTasks").add({
+          description: params.description,
+          source: "vapi_call",
+          status: "pending",
+          createdAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+      }
+      return `I've queued that task for BACKBONE to work on: "${params.description}". It will be processed when your local BACKBONE is running.`;
+    }
+
+    default:
+      return `Unknown tool: ${toolName}`;
+  }
+};
+
+/**
+ * POST /vapiWebhook — Vapi server messages handler
+ *
+ * Handles: tool-calls, status-update, transcript, end-of-call-report
+ * Set as Server URL on your Vapi phone number in the dashboard.
+ */
+exports.vapiWebhook = functions.https.onRequest(async (req, res) => {
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "POST only" });
+  }
+
+  try {
+    const message = req.body;
+    const messageType = message?.message?.type || message?.type;
+
+    // Try to resolve userId from the call's customer phone number
+    let userId = null;
+    const customerPhone = message?.message?.customer?.number || message?.call?.customer?.number;
+    if (customerPhone) {
+      // Normalize: strip +, spaces, dashes
+      const normalized = customerPhone.replace(/[\s\-\+]/g, "");
+      try {
+        // Look up by phone number
+        const userSnap = await db.collection("users")
+          .where("whatsappPhone", "==", normalized)
+          .limit(1)
+          .get();
+        if (!userSnap.empty) {
+          userId = userSnap.docs[0].id;
+        }
+      } catch {}
+    }
+
+    // Handle tool-calls
+    if (messageType === "tool-calls") {
+      const toolCalls = message.message?.toolCalls || [];
+      const results = [];
+
+      for (const tc of toolCalls) {
+        const toolName = tc.function?.name || tc.name;
+        let params;
+        try {
+          params = typeof tc.function?.arguments === "string"
+            ? JSON.parse(tc.function.arguments)
+            : tc.function?.arguments || {};
+        } catch {
+          params = {};
+        }
+        const toolCallId = tc.id;
+        const result = await executeVapiTool(toolName, params, userId);
+
+        results.push({
+          toolCallId,
+          result: typeof result === "string" ? result : JSON.stringify(result)
+        });
+      }
+
+      return res.json({ results });
+    }
+
+    // Handle end-of-call-report — save transcript
+    if (messageType === "end-of-call-report") {
+      const report = message.message || message;
+      const callId = report.call?.id || message.call?.id || `call_${Date.now()}`;
+
+      const transcriptData = {
+        callId,
+        duration: report.endedReason ? undefined : report.duration || report.durationSeconds,
+        endedReason: report.endedReason,
+        summary: report.summary,
+        transcript: report.transcript || report.messages || [],
+        recordingUrl: report.recordingUrl,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        customerPhone: customerPhone || null
+      };
+
+      // Save to user's call transcripts if we have a userId
+      if (userId) {
+        await db.collection("users").doc(userId)
+          .collection("callTranscripts").doc(callId).set(transcriptData);
+        console.log(`[Vapi] Call transcript saved for user ${userId}, call ${callId}`);
+      } else {
+        // Save to global collection as fallback
+        await db.collection("callTranscripts").doc(callId).set(transcriptData);
+        console.log(`[Vapi] Call transcript saved globally, call ${callId}`);
+      }
+    }
+
+    // Handle transcript messages — accumulate for real-time if needed
+    if (messageType === "transcript") {
+      // These come in real-time during the call, log for debugging
+      const role = message.message?.role || "unknown";
+      const text = message.message?.transcript || "";
+      console.log(`[Vapi] Transcript (${role}): ${text.substring(0, 100)}`);
+    }
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("[Vapi] Webhook error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
 });

@@ -5,7 +5,7 @@ import { EventEmitter } from "events";
 /**
  * Goal Tracker Service for BACKBONE
  * Manages life goals and progress tracking
- * Focus areas: Finance ($1K→$1M), Health, Family
+ * Goals are user-created or graduated from the backlog via the thinking engine.
  */
 
 const DATA_DIR = path.join(process.cwd(), "data");
@@ -49,76 +49,6 @@ export const CATEGORY_ICONS = {
   [GOAL_CATEGORY.EDUCATION]: "\u2302" // House/graduation
 };
 
-/**
- * Create default goals
- * These are SPECIFIC goals with measurable targets and project names
- */
-const getDefaultGoals = () => ([
-  {
-    id: "goal_finance_1m",
-    title: "Turn $1,000 into $1,000,000 through smart investments by July 2027",
-    category: GOAL_CATEGORY.FINANCE,
-    priority: 1,
-    status: GOAL_STATUS.ACTIVE,
-    milestones: [
-      { target: 10000, label: "$10K", achieved: false },
-      { target: 50000, label: "$50K", achieved: false },
-      { target: 100000, label: "$100K", achieved: false },
-      { target: 500000, label: "$500K", achieved: false },
-      { target: 1000000, label: "$1M", achieved: false }
-    ],
-    currentValue: 1000,
-    startValue: 1000,
-    targetValue: 1000000,
-    unit: "USD",
-    project: "Million Dollar Journey",
-    description: "Grow initial capital through a combination of stock trading, options, and long-term investments",
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString()
-  },
-  {
-    id: "goal_health_optimal",
-    title: "Achieve 85+ Oura sleep score consistently for 30 consecutive days",
-    category: GOAL_CATEGORY.HEALTH,
-    priority: 2,
-    status: GOAL_STATUS.ACTIVE,
-    milestones: [
-      { target: 70, label: "Sleep 70+", achieved: false },
-      { target: 80, label: "Sleep 80+", achieved: false },
-      { target: 85, label: "Sleep 85+", achieved: false },
-      { target: 90, label: "Sleep 90+", achieved: false }
-    ],
-    currentValue: 0,
-    startValue: 0,
-    targetValue: 90,
-    unit: "Oura Sleep Score",
-    project: "Sleep Optimization",
-    description: "Optimize sleep quality through better habits, environment, and tracking",
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString()
-  },
-  {
-    id: "goal_family_time",
-    title: "Spend 14+ hours per week of quality time with family by end of Q1 2026",
-    category: GOAL_CATEGORY.FAMILY,
-    priority: 3,
-    status: GOAL_STATUS.ACTIVE,
-    milestones: [
-      { target: 4, label: "4 hrs/week", achieved: false },
-      { target: 8, label: "8 hrs/week", achieved: false },
-      { target: 14, label: "14 hrs/week", achieved: false },
-      { target: 20, label: "20 hrs/week", achieved: false }
-    ],
-    currentValue: 0,
-    startValue: 0,
-    targetValue: 20,
-    unit: "hours/week",
-    project: "Family First",
-    description: "Prioritize dedicated family time through scheduled activities and reduced work hours",
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString()
-  }
-]);
 
 /**
  * Goal Tracker Class
@@ -132,7 +62,7 @@ export class GoalTracker extends EventEmitter {
 
   /**
    * Load goals from disk
-   * Returns empty array if no goals set - user must set their own goals
+   * Returns empty array if no goals — user creates their own or they graduate from the backlog
    */
   load() {
     try {
@@ -142,17 +72,9 @@ export class GoalTracker extends EventEmitter {
       } else {
         this.goals = [];
       }
-      // Auto-initialize with default goals if none exist
-      if (this.goals.length === 0) {
-        console.log("[GoalTracker] No goals found, initializing defaults...");
-        this.goals = getDefaultGoals();
-        this.save();
-        this.emit("initialized", this.goals);
-      }
     } catch (error) {
       console.error("Failed to load goals:", error.message);
-      this.goals = getDefaultGoals(); // Fallback to defaults on error
-      this.save();
+      this.goals = [];
     }
   }
 
@@ -421,10 +343,10 @@ export class GoalTracker extends EventEmitter {
   }
 
   /**
-   * Reset to default goals
+   * Reset goals (clears all)
    */
   reset() {
-    this.goals = getDefaultGoals();
+    this.goals = [];
     this.save();
     this.emit("reset");
   }

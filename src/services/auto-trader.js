@@ -832,7 +832,8 @@ export const monitorAndTrade = async (tickers, positions = [], marketContext = {
       reason: marketStatus.reason,
       marketOpen: false,
       nextEvaluation: nextEval.nextEval,
-      nextMarketOpen: marketStatus.nextOpen
+      nextMarketOpen: marketStatus.nextOpen,
+      reasoning: [`Market closed: ${marketStatus.reason}`]
     };
   }
 
@@ -853,11 +854,15 @@ export const monitorAndTrade = async (tickers, positions = [], marketContext = {
     sellSignals: [],
     executed: [],
     skipped: [],
-    protected: []
+    protected: [],
+    reasoning: []   // Human-readable explanation of every decision
   };
 
+  // Filter out CVR positions (corporate actions/rights - don't count toward limit)
+  const tradablePositions = positions.filter(p => !p.symbol.includes('CVR'));
+
   // Get current position symbols
-  const positionSymbols = positions.map(p => p.symbol);
+  const positionSymbols = tradablePositions.map(p => p.symbol);
 
   // Sort tickers by score (highest first) and get top 3 qualified for buying
   const sortedTickers = [...tickers]
@@ -872,6 +877,22 @@ export const monitorAndTrade = async (tickers, positions = [], marketContext = {
 
   // Track executed buys for position limit check
   let buyCount = results.executed.filter(t => t.side === "buy").length;
+
+  // --- REASONING: Market context ---
+  results.reasoning.push(`SPY ${spyPositive ? "positive" : "negative"} (${spyChange >= 0 ? "+" : ""}${spyChange.toFixed(2)}%) → buy threshold = ${effectiveBuyThreshold}`);
+  results.reasoning.push(`Positions: ${tradablePositions.length}/${config.maxTotalPositions} (${positionSymbols.join(", ") || "none"})`);
+
+  // Top scorers summary
+  const topSummary = sortedTickers.slice(0, 5).map(t =>
+    `${t.symbol} ${t.score.toFixed(1)}${positionSymbols.includes(t.symbol) ? " (held)" : ""}`
+  ).join(", ");
+  results.reasoning.push(`Top scores: ${topSummary}`);
+
+  if (top3BuyTickers.length > 0) {
+    results.reasoning.push(`Buy candidates (score >= ${effectiveBuyThreshold}): ${top3BuyTickers.join(", ")}`);
+  } else {
+    results.reasoning.push(`No tickers above buy threshold ${effectiveBuyThreshold} — no buys possible`);
+  }
 
   // STEP 0: Trailing stops are handled server-side by Alpaca trailing_stop orders.
   // No client-side polling needed — Alpaca triggers the sell automatically.
@@ -907,8 +928,10 @@ export const monitorAndTrade = async (tickers, positions = [], marketContext = {
 
       if (sellResult.success) {
         results.executed.push(sellResult.trade);
+        results.reasoning.push(`EXECUTED SELL ${drift.symbol}: momentum drift — ${drift.reason}`);
       } else {
         results.skipped.push({ symbol: drift.symbol, reason: sellResult.error });
+        results.reasoning.push(`FAILED SELL ${drift.symbol} (drift): ${sellResult.error}`);
       }
     }
   } catch (error) {
@@ -949,8 +972,10 @@ export const monitorAndTrade = async (tickers, positions = [], marketContext = {
 
         if (sellResult.success) {
           results.executed.push(sellResult.trade);
+          results.reasoning.push(`EXECUTED SELL ${position.symbol}: stagnant (<0.25% range), score ${ticker.score?.toFixed(1)}`);
         } else {
           results.skipped.push({ symbol: position.symbol, reason: sellResult.error });
+          results.reasoning.push(`FAILED SELL ${position.symbol} (stagnant): ${sellResult.error}`);
         }
       }
     }
@@ -985,8 +1010,10 @@ export const monitorAndTrade = async (tickers, positions = [], marketContext = {
 
       if (sellResult.success) {
         results.executed.push(sellResult.trade);
+        results.reasoning.push(`EXECUTED SELL ${ticker.symbol}: ${sellEval.signals.join(", ")}`);
       } else {
         results.skipped.push({ symbol: ticker.symbol, reason: sellResult.error });
+        results.reasoning.push(`FAILED SELL ${ticker.symbol}: ${sellResult.error}`);
       }
     } else if (sellEval.isProtected) {
       results.protected.push({
@@ -994,49 +1021,88 @@ export const monitorAndTrade = async (tickers, positions = [], marketContext = {
         plPercent: sellEval.plPercent,
         score: ticker.score
       });
+      results.reasoning.push(`HOLD ${position.symbol}: protected position (+${sellEval.plPercent.toFixed(1)}%), score ${ticker.score.toFixed(1)}`);
+    } else {
+      // Position held — explain why no sell
+      const plPercent = position ? parseFloat(position.unrealized_plpc || 0) * 100 : 0;
+      results.reasoning.push(`HOLD ${position.symbol}: score ${ticker.score.toFixed(1)} > sell threshold ${config.sellThreshold} (P/L ${plPercent >= 0 ? "+" : ""}${plPercent.toFixed(1)}%)`);
     }
   }
 
   // STEP 2: Evaluate top 3 for buy signals
   for (const ticker of sortedTickers) {
     // Skip if in blacklist
-    if (config.blacklist.includes(ticker.symbol)) continue;
+    if (config.blacklist.includes(ticker.symbol)) {
+      if (ticker.score >= effectiveBuyThreshold) {
+        results.reasoning.push(`SKIP ${ticker.symbol}: blacklisted (score ${ticker.score.toFixed(1)})`);
+      }
+      continue;
+    }
 
     // Skip if not in watchlist (when watchlist is set)
     if (config.watchlist.length > 0 && !config.watchlist.includes(ticker.symbol)) continue;
 
     // Only evaluate if in top 3 and not already holding
     const isTop3 = top3BuyTickers.includes(ticker.symbol);
-    if (!positionSymbols.includes(ticker.symbol) && isTop3) {
-      const buyEval = evaluateBuySignal(ticker, { spyPositive, positions });
-
-      if (buyEval.action === "BUY" || buyEval.action === "EXTREME_BUY") {
-        results.buySignals.push(buyEval);
-
-        // Check position limits (max 2 in BackBoneApp)
-        const currentPositionCount = positions.length - results.executed.filter(t => t.side === "sell").length + buyCount;
-
-        if (currentPositionCount < config.maxTotalPositions) {
-          const buyResult = await executeBuy(
-            ticker.symbol,
-            ticker.price,
-            `${buyEval.isExtreme ? "EXTREME: " : ""}Top ${top3BuyTickers.indexOf(ticker.symbol) + 1}: ${buyEval.signals.join(", ")}`
-          );
-
-          if (buyResult.success) {
-            results.executed.push(buyResult.trade);
-            buyCount++;
-          } else {
-            results.skipped.push({ symbol: ticker.symbol, reason: buyResult.error });
-          }
-        } else {
-          results.skipped.push({
-            symbol: ticker.symbol,
-            reason: `Position limit reached (${currentPositionCount}/${config.maxTotalPositions})`
-          });
-        }
-      }
+    if (positionSymbols.includes(ticker.symbol)) {
+      // Already holding — already explained in sell section
+      continue;
     }
+    if (!isTop3) {
+      // Not in top 3 — skip but note if it was close
+      if (ticker.score >= effectiveBuyThreshold) {
+        results.reasoning.push(`SKIP BUY ${ticker.symbol}: score ${ticker.score.toFixed(1)} qualifies but not in top 3`);
+      }
+      continue;
+    }
+
+    const buyEval = evaluateBuySignal(ticker, { spyPositive, positions });
+
+    if (buyEval.action === "BUY" || buyEval.action === "EXTREME_BUY") {
+      results.buySignals.push(buyEval);
+
+      // Check position limits (max 2 in BackBoneApp)
+      // Use tradablePositions (excludes CVR) for accurate count
+      const currentPositionCount = tradablePositions.length - results.executed.filter(t => t.side === "sell").length + buyCount;
+
+      if (currentPositionCount < config.maxTotalPositions) {
+        const buyResult = await executeBuy(
+          ticker.symbol,
+          ticker.price,
+          `${buyEval.isExtreme ? "EXTREME: " : ""}Top ${top3BuyTickers.indexOf(ticker.symbol) + 1}: ${buyEval.signals.join(", ")}`
+        );
+
+        if (buyResult.success) {
+          results.executed.push(buyResult.trade);
+          results.reasoning.push(`EXECUTED BUY ${ticker.symbol}: ${buyEval.signals.join(", ")}`);
+          buyCount++;
+        } else {
+          results.skipped.push({ symbol: ticker.symbol, reason: buyResult.error });
+          results.reasoning.push(`FAILED BUY ${ticker.symbol}: ${buyResult.error}`);
+        }
+      } else {
+        results.skipped.push({
+          symbol: ticker.symbol,
+          reason: `Position limit reached (${currentPositionCount}/${config.maxTotalPositions})`
+        });
+        results.reasoning.push(`SKIP BUY ${ticker.symbol}: position limit ${currentPositionCount}/${config.maxTotalPositions} (score ${ticker.score.toFixed(1)})`);
+      }
+    } else {
+      results.reasoning.push(`NO BUY ${ticker.symbol}: ${buyEval.signals.join(", ")}`);
+    }
+  }
+
+  // --- REASONING: Final summary ---
+  if (results.executed.length === 0) {
+    const sellCount = results.sellSignals.length;
+    const buyCount2 = results.buySignals.length;
+    if (sellCount === 0 && buyCount2 === 0) {
+      results.reasoning.push("RESULT: No trades — no signals met buy/sell thresholds");
+    } else if (buyCount2 > 0 && results.executed.length === 0) {
+      results.reasoning.push("RESULT: Buy signals detected but execution blocked (position limit, cooldown, or order failed)");
+    }
+  } else {
+    results.reasoning.push(`RESULT: Executed ${results.executed.length} trade(s) — ${results.executed.map(t => `${t.side.toUpperCase()} ${t.symbol}`).join(", ")}`);
   }
 
   return results;

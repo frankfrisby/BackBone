@@ -1,6 +1,8 @@
 import { chromium } from "playwright";
 import fs from "fs";
 import path from "path";
+import Anthropic from "@anthropic-ai/sdk";
+import { runBrowserTask } from "./browser-agent.js";
 import os from "os";
 import fetch from "node-fetch";
 
@@ -23,9 +25,70 @@ const DEFAULT_CHROME_USER_DATA_DIR = "C:\\Users\\frank\\AppData\\Local\\Google\\
 
 // Ensure directories exist
 const ensureDirs = () => {
-  [DATA_DIR, SCREENSHOTS_DIR].forEach(dir => {
+  [DATA_DIR, SCREENSHOTS_DIR, CHROME_PROFILE_DIR].forEach(dir => {
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   });
+};
+
+const buildLaunchOptions = ({ headless, profileDirectory, channel }) => {
+  const options = {
+    headless,
+    args: [
+      `--profile-directory=${profileDirectory}`,
+      "--disable-blink-features=AutomationControlled",
+      "--no-first-run",
+      "--no-default-browser-check",
+      "--disable-infobars"
+    ],
+    viewport: { width: 1280, height: 900 },
+    ignoreDefaultArgs: ["--enable-automation"]
+  };
+
+  if (channel) {
+    options.channel = channel;
+  }
+
+  return options;
+};
+
+const isProfileLockedError = (message = "") => {
+  const text = message.toLowerCase();
+  return text.includes("profile in use") ||
+    text.includes("profile is in use") ||
+    text.includes("singletonlock") ||
+    text.includes("user data directory is already in use");
+};
+
+const isMissingExecutableError = (message = "") => {
+  const text = message.toLowerCase();
+  return text.includes("executable doesn't exist") ||
+    text.includes("executable doesn't exist at") ||
+    text.includes("failed to launch") ||
+    text.includes("chromium") && text.includes("not found");
+};
+
+const launchLinkedInContext = async ({ userDataDir, profileDirectory, headless }) => {
+  const channel = findChromeChannel();
+  const preferred = buildLaunchOptions({ headless, profileDirectory, channel });
+
+  try {
+    return await chromium.launchPersistentContext(userDataDir, preferred);
+  } catch (error) {
+    const message = error?.message || String(error);
+    const fallbackOptions = buildLaunchOptions({ headless, profileDirectory });
+
+    if (isProfileLockedError(message) && userDataDir !== CHROME_PROFILE_DIR) {
+      console.warn("Chrome profile in use. Falling back to app-managed profile.");
+      return await chromium.launchPersistentContext(CHROME_PROFILE_DIR, fallbackOptions);
+    }
+
+    if (isMissingExecutableError(message)) {
+      console.warn("Chrome channel not available. Falling back to bundled Chromium.");
+      return await chromium.launchPersistentContext(userDataDir, fallbackOptions);
+    }
+
+    throw error;
+  }
 };
 
 /**
@@ -66,19 +129,7 @@ export const scrapeLinkedInProfile = async (options = {}) => {
     const profileDirectory = options.profileDirectory || process.env.CHROME_PROFILE_DIRECTORY || "Default";
 
     // Launch with persistent profile to keep login
-    browser = await chromium.launchPersistentContext(userDataDir, {
-      headless,
-      channel: findChromeChannel(),
-      args: [
-        `--profile-directory=${profileDirectory}`,
-        "--disable-blink-features=AutomationControlled",
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--disable-infobars"
-      ],
-      viewport: { width: 1280, height: 900 },
-      ignoreDefaultArgs: ["--enable-automation"]
-    });
+    browser = await launchLinkedInContext({ userDataDir, profileDirectory, headless });
 
     const page = browser.pages()[0] || await browser.newPage();
 
@@ -379,6 +430,140 @@ Extract EVERYTHING visible. If a section is not visible, use null. Be thorough!`
 };
 
 /**
+ * Analyze screenshots with Claude Vision
+ */
+export const analyzeWithClaudeVision = async (screenshotPaths = []) => {
+  if (!screenshotPaths.length) {
+    return { success: false, error: "No screenshots provided" };
+  }
+
+  const apiKey = process.env.ANTHROPIC_API_KEY || process.env.CLAUDE_API_KEY;
+  if (!apiKey) {
+    return { success: false, error: "Missing ANTHROPIC_API_KEY or CLAUDE_API_KEY" };
+  }
+
+  const client = new Anthropic({ apiKey });
+  const pick = screenshotPaths.length <= 4
+    ? screenshotPaths
+    : [
+        screenshotPaths[0],
+        screenshotPaths[Math.floor(screenshotPaths.length / 3)],
+        screenshotPaths[Math.floor((screenshotPaths.length * 2) / 3)],
+        screenshotPaths[screenshotPaths.length - 1]
+      ];
+
+  const images = pick
+    .filter(p => fs.existsSync(p))
+    .map(p => ({
+      type: "image",
+      source: {
+        type: "base64",
+        media_type: "image/png",
+        data: fs.readFileSync(p).toString("base64")
+      }
+    }));
+
+  if (!images.length) {
+    return { success: false, error: "Screenshot files not found" };
+  }
+
+  const prompt = `Extract ALL visible LinkedIn profile information from these screenshots. Merge details across images.
+
+Return ONLY valid JSON in this format:
+{
+  "name": "Full name visible on profile",
+  "headline": "Professional headline/tagline under the name",
+  "location": "City, State/Country",
+  "connections": "Number of connections if visible",
+  "followers": "Number of followers if visible",
+  "about": "The full About/Summary section text if visible",
+  "currentRole": "Current job title from Experience section",
+  "currentCompany": "Current company name",
+  "experience": [
+    {"title": "Job Title", "company": "Company Name", "duration": "Date range", "description": "Role description if visible"}
+  ],
+  "education": [
+    {"school": "School name", "degree": "Degree type", "field": "Field of study", "years": "Date range"}
+  ],
+  "skills": ["skill1", "skill2", "skill3"],
+  "certifications": ["cert1", "cert2"],
+  "languages": ["language1", "language2"],
+  "openToWork": true/false,
+  "isCreator": true/false,
+  "profileStrength": "Profile strength indicator if visible",
+  "summary": "A 2-3 sentence professional summary based on what you see"
+}
+
+If a section is not visible, use null. Return ONLY JSON.`;
+
+  try {
+    const response = await client.messages.create({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 2500,
+      system: "You extract LinkedIn profile data from screenshots. Return ONLY JSON.",
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "text", text: prompt }, ...images]
+        }
+      ]
+    });
+
+    const text = response.content
+      .filter(block => block.type === "text")
+      .map(block => block.text)
+      .join("\n");
+
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      return { success: false, error: "Could not parse response" };
+    }
+
+    return { success: true, profile: JSON.parse(jsonMatch[0]) };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+};
+
+/**
+ * Full LinkedIn update using Claude vision browser agent + screenshot analysis
+ */
+export const updateLinkedInViaBrowserAgent = async (options = {}) => {
+  const task = "Open my LinkedIn profile, scroll through all sections (About, Experience, Education, Skills), and stop once the full profile has been viewed.";
+  const result = await runBrowserTask(task, {
+    startUrl: "https://www.linkedin.com/in/me",
+    maxIterations: options.maxIterations || 14,
+    model: options.model || "claude-sonnet-4-20250514",
+    onEvent: options.onEvent
+  });
+
+  if (!result.success) {
+    return { success: false, error: result.error || "Browser agent failed", screenshots: result.screenshots || [] };
+  }
+
+  const screenshots = result.screenshots || [];
+  const analysis = await analyzeWithClaudeVision(screenshots);
+  if (!analysis.success) {
+    return { success: false, error: analysis.error, screenshots };
+  }
+
+  const payload = {
+    profile: analysis.profile,
+    profileUrl: "https://www.linkedin.com/in/me",
+    connected: true,
+    verified: true,
+    source: "browser-agent",
+    screenshots,
+    capturedAt: new Date().toISOString()
+  };
+
+  ensureDirs();
+  fs.writeFileSync(PROFILE_PATH, JSON.stringify(payload, null, 2));
+
+  return { success: true, ...payload };
+};
+
+/**
  * Full extraction flow
  */
 export const extractLinkedInProfile = async (options = {}) => {
@@ -630,19 +815,7 @@ export const scrapeLinkedInPosts = async (profileUrl, options = {}) => {
     const userDataDir = options.userDataDir || process.env.CHROME_USER_DATA_DIR || DEFAULT_CHROME_USER_DATA_DIR;
     const profileDirectory = options.profileDirectory || process.env.CHROME_PROFILE_DIRECTORY || "Default";
 
-    browser = await chromium.launchPersistentContext(userDataDir, {
-      headless,
-      channel: findChromeChannel(),
-      args: [
-        `--profile-directory=${profileDirectory}`,
-        "--disable-blink-features=AutomationControlled",
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--disable-infobars"
-      ],
-      viewport: { width: 1280, height: 900 },
-      ignoreDefaultArgs: ["--enable-automation"]
-    });
+    browser = await launchLinkedInContext({ userDataDir, profileDirectory, headless });
 
     const page = browser.pages()[0] || await browser.newPage();
 

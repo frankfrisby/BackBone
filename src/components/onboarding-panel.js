@@ -57,7 +57,7 @@ import {
 } from "../services/plaid-service.js";
 import { loadUserSettings, updateSetting, updateSettings } from "../services/user-settings.js";
 import { openUrl } from "../services/open-url.js";
-import { requestPhoneCode, verifyPhoneCode, getPhoneRecord, sendWhatsAppMessage } from "../services/phone-auth.js";
+import { requestPhoneCode, verifyPhoneCode, getPhoneRecord, sendWhatsAppMessage, syncPhoneFromFirestore } from "../services/phone-auth.js";
 import { fetchTwilioConfig } from "../services/firebase-config.js";
 import { getMobileService } from "../services/mobile.js";
 import { startOAuthFlow as startClaudeOAuth, hasValidCredentials as hasClaudeCredentials } from "../services/claude-oauth.js";
@@ -72,6 +72,7 @@ import {
 } from "../services/claude-code-cli.js";
 import { startSetupWizard, stopSetupWizard, getSetupWizard } from "../services/setup-wizard.js";
 import { scrapeLinkedInProfile } from "../services/linkedin-scraper.js";
+import { hasArchivedProfile, restoreProfile } from "../services/profile-manager.js";
 
 const e = React.createElement;
 
@@ -172,6 +173,7 @@ const ONBOARDING_STEPS = [
     description: "Required for notifications and AI messaging"
   },
   { id: "model", label: "AI Model", required: true, description: "Choose your AI assistant" },
+  { id: "mobileApp", label: "Mobile App", required: false, description: "Install PWA for push notifications" },
   { id: "coreGoals", label: "Core Goals", required: true, description: "What matters to you (40+ words)" },
   { id: "linkedin", label: "LinkedIn Profile", required: false, description: "Connect your professional identity" },
   { id: "alpaca", label: "Trading (Alpaca)", required: false, description: "Auto-trading" },
@@ -536,10 +538,29 @@ const PrerequisitesStepWrapper = ({ onComplete, onError }) => {
  * Google Login Step Component
  * Opens browser for Google OAuth sign-in
  */
-const GoogleLoginStep = ({ onComplete, onError, onLogout }) => {
-  const [status, setStatus] = useState("ready"); // ready, waiting, success, error, signed-in
+const GoogleLoginStep = ({ onComplete, onError, onLogout, onProfileRestored }) => {
+  const [status, setStatus] = useState("ready"); // ready, waiting, success, error, signed-in, restoring
   const [message, setMessage] = useState("");
   const [user, setUser] = useState(null);
+
+  // Check for archived profile and either restore or pass through
+  const handleSignInSuccess = useCallback(async (signedInUser) => {
+    if (onProfileRestored && signedInUser?.id && hasArchivedProfile(signedInUser.id)) {
+      setStatus("restoring");
+      setMessage("Restoring your profile...");
+      try {
+        const result = await restoreProfile(signedInUser.id);
+        if (result.success) {
+          onProfileRestored(signedInUser);
+          return;
+        }
+      } catch (err) {
+        console.error("[onboarding] Profile restore failed:", err.message);
+      }
+      // If restore failed, fall through to normal onComplete
+    }
+    onComplete(signedInUser);
+  }, [onComplete, onProfileRestored]);
 
   useEffect(() => {
     const existingUser = getCurrentFirebaseUser();
@@ -548,9 +569,9 @@ const GoogleLoginStep = ({ onComplete, onError, onLogout }) => {
       setStatus("signed-in");
       setMessage(`Signed in as ${existingUser.email}`);
       // Auto-complete after brief delay if already signed in
-      setTimeout(() => onComplete(existingUser), 800);
+      setTimeout(() => handleSignInSuccess(existingUser), 800);
     }
-  }, [onComplete]);
+  }, [handleSignInSuccess]);
 
   const handleSignIn = useCallback(async () => {
     setStatus("waiting");
@@ -563,7 +584,7 @@ const GoogleLoginStep = ({ onComplete, onError, onLogout }) => {
         setUser(result.user);
         setStatus("success");
         setMessage(`Signed in as ${result.user.email}`);
-        setTimeout(() => onComplete(result.user), 1000);
+        setTimeout(() => handleSignInSuccess(result.user), 1000);
       } else {
         setStatus("error");
         setMessage(result.error || "Sign-in failed. Press Enter to retry.");
@@ -574,7 +595,7 @@ const GoogleLoginStep = ({ onComplete, onError, onLogout }) => {
       setMessage(err.message || "Sign-in failed. Press Enter to retry.");
       if (onError) onError(err.message);
     }
-  }, [onComplete, onError]);
+  }, [handleSignInSuccess, onError]);
 
   const handleLogout = useCallback(() => {
     signOutFirebase();
@@ -588,19 +609,30 @@ const GoogleLoginStep = ({ onComplete, onError, onLogout }) => {
     const lower = input.toLowerCase();
     if (status === "signed-in") {
       if (key.return && user) {
-        onComplete(user);
+        handleSignInSuccess(user);
       }
       if (lower === "o") {
         handleLogout();
       }
       return;
     }
+    if (status === "restoring") return; // Don't accept input while restoring
     if (key.return || lower === "l") {
       if (status === "ready" || status === "error") {
         handleSignIn();
       }
     }
   });
+
+  if (status === "restoring") {
+    return e(
+      Box,
+      { flexDirection: "column", paddingX: 1 },
+      e(Text, { color: "#f97316", bold: true }, "Restoring Profile..."),
+      e(Text, { color: "#e2e8f0" }, `Welcome back, ${user?.name || user?.email}!`),
+      e(Text, { color: "#64748b" }, "Loading your data, goals, and settings...")
+    );
+  }
 
   if (status === "success") {
     return e(
@@ -708,19 +740,30 @@ const PhoneVerificationStep = ({ onComplete, onError }) => {
       return;
     }
 
-    const record = getPhoneRecord(userId);
-    if (record?.verification?.verifiedAt) {
-      // Already verified - auto-complete after brief delay
-      setExistingPhone(record.phoneNumber);
-      setPhase("ready");
-      setStatus("verified");
-      setMessage(`Verified: ${record.phoneNumber}`);
-      if (!completedRef.current) {
-        completedRef.current = true;
-        setTimeout(() => onComplete({ existing: true, phone: record.phoneNumber }), 800);
+    const updateFromRecord = (record) => {
+      if (record?.verification?.verifiedAt || record?.verification?.status === "verified") {
+        setExistingPhone(record.phoneNumber);
+        setPhase("ready");
+        setStatus("verified");
+        setMessage(`Verified: ${record.phoneNumber}`);
+        if (!completedRef.current) {
+          completedRef.current = true;
+          setTimeout(() => onComplete({ existing: true, phone: record.phoneNumber }), 800);
+        }
+        return true;
       }
+      return false;
+    };
+
+    const record = getPhoneRecord(userId);
+    if (updateFromRecord(record)) {
       return;
     }
+
+    // If no local record, try Firestore (other machines / web)
+    syncPhoneFromFirestore(userId).then((synced) => {
+      if (updateFromRecord(synced)) return;
+    });
 
     // Not verified - ready to start
     setPhase("ready");
@@ -1035,9 +1078,9 @@ Just reply with a, b, or c - or tell me what's on your mind!`;
  * - Up/Down arrows navigate within current panel
  * - Enter confirms selection
  */
-const ModelSelectionStep = ({ onComplete, onError }) => {
+const ModelSelectionStep = ({ onComplete, onError, onNavigationLockChange, initialProviderId = null, autoOpenProvider = false }) => {
   const [selectedProvider, setSelectedProvider] = useState(0);
-  const [subStep, setSubStep] = useState("select"); // select, api-key, validating, oauth
+  const [subStep, setSubStep] = useState("select"); // select, api-key, validating, oauth, success
   const [activePanel, setActivePanel] = useState("main"); // "main" = gray border, "sub" = orange border
   const [apiKey, setApiKey] = useState("");
   const [apiKeyInput, setApiKeyInput] = useState("");
@@ -1045,6 +1088,7 @@ const ModelSelectionStep = ({ onComplete, onError }) => {
   const [oauthStatus, setOauthStatus] = useState("");
   const fileWatcherRef = useRef(null);
   const proCheckTimeoutRef = useRef(null);
+  const autoOpenedRef = useRef(false);
   const useInlineKeyEntry = isModernTerminal();
 
   // Cache model connection status to avoid expensive sync calls on every render
@@ -1129,6 +1173,22 @@ const ModelSelectionStep = ({ onComplete, onError }) => {
       }
     }
   }, [onComplete, statusLoading, modelStatus]);
+
+  useEffect(() => {
+    if (!autoOpenProvider || autoOpenedRef.current) return;
+    if (!initialProviderId) return;
+    if (isProviderConfigured(initialProviderId)) {
+      autoOpenedRef.current = true;
+      return;
+    }
+    const index = MODEL_OPTIONS.findIndex((opt) => opt.id === initialProviderId);
+    if (index < 0) return;
+    const provider = MODEL_OPTIONS[index];
+    autoOpenedRef.current = true;
+    setSelectedProvider(index);
+    setActivePanel("sub");
+    executeProviderSetup(provider);
+  }, [autoOpenProvider, initialProviderId]);
 
   // Handle Claude Code CLI login (opens terminal)
   const handleClaudeCodeLogin = async () => {
@@ -1273,17 +1333,28 @@ const ModelSelectionStep = ({ onComplete, onError }) => {
         setMessage(`Opening ${provider.label} API key page...`);
         setTimeout(() => openApiKeyInEditor(), 500);
         fileWatcherRef.current = watchApiKeyFile(async (key) => {
-          setSubStep("validating");
-          setMessage("Validating API key...");
-          const result = await validateApiKey(provider.id, key);
-          if (result.valid) {
-            saveApiKeyToEnv(provider.id, key);
-            cleanupApiKeyFile();
-            setMessage("API key validated!");
-            setTimeout(() => onComplete({ provider: provider.id }), 1000);
-          } else {
+          const saveResult = saveApiKeyToEnv(provider.id, key);
+          cleanupApiKeyFile();
+          if (!saveResult.success) {
+            setMessage(`Save failed: ${saveResult.error}`);
             setSubStep("api-key");
-            setMessage(`Invalid key: ${result.error}. Try again.`);
+            return;
+          }
+          setMessage(`API key saved to ${saveResult.envKey}`);
+          setSubStep("success");
+          onComplete({ provider: provider.id });
+          setTimeout(() => {
+            setActivePanel("sub");
+            setSubStep("select");
+          }, 3000);
+
+          try {
+            const result = await validateApiKey(provider.id, key);
+            if (!result.valid) {
+              setMessage(`Key saved, but validation failed: ${result.error}`);
+            }
+          } catch (error) {
+            setMessage(`Key saved, but validation failed: ${error.message}`);
           }
         });
       }
@@ -1351,6 +1422,13 @@ const ModelSelectionStep = ({ onComplete, onError }) => {
       }
     }
   });
+
+  useEffect(() => {
+    const lockNeeded = subStep !== "select" || activePanel === "sub";
+    if (onNavigationLockChange) {
+      onNavigationLockChange(lockNeeded);
+    }
+  }, [subStep, activePanel, onNavigationLockChange]);
 
   // Cleanup watcher on unmount
   useEffect(() => {
@@ -1466,6 +1544,16 @@ const ModelSelectionStep = ({ onComplete, onError }) => {
     );
   }
 
+  if (subStep === "success") {
+    return e(
+      Box,
+      { flexDirection: "column", paddingX: 1 },
+      e(Text, { color: "#e2e8f0", bold: true }, "API Key Saved"),
+      e(Text, { color: "#22c55e" }, message || "API key validated!"),
+      e(Text, { color: "#64748b", dimColor: true }, "Returning to providers...")
+    );
+  }
+
   if (subStep === "api-key" && useInlineKeyEntry) {
     const provider = MODEL_OPTIONS[selectedProvider];
     return e(
@@ -1478,16 +1566,28 @@ const ModelSelectionStep = ({ onComplete, onError }) => {
         onChange: setApiKeyInput,
         mask: "*",
         onSubmit: async (value) => {
-          setSubStep("validating");
-          setMessage("Validating API key...");
-          const result = await validateApiKey(provider.id, value);
-          if (result.valid) {
-            saveApiKeyToEnv(provider.id, value);
-            setMessage("API key validated!");
-            setTimeout(() => onComplete({ provider: provider.id }), 1000);
-          } else {
+          const saveResult = saveApiKeyToEnv(provider.id, value);
+          if (!saveResult.success) {
+            setMessage(`Save failed: ${saveResult.error}`);
             setSubStep("api-key");
-            setMessage(`Invalid key: ${result.error}. Try again.`);
+            return;
+          }
+          setMessage(`API key saved to ${saveResult.envKey}`);
+          setSubStep("success");
+          onComplete({ provider: provider.id });
+          setTimeout(() => {
+            setApiKeyInput("");
+            setActivePanel("sub");
+            setSubStep("select");
+          }, 3000);
+
+          try {
+            const result = await validateApiKey(provider.id, value);
+            if (!result.valid) {
+              setMessage(`Key saved, but validation failed: ${result.error}`);
+            }
+          } catch (error) {
+            setMessage(`Key saved, but validation failed: ${error.message}`);
           }
         }
       }),
@@ -1520,6 +1620,86 @@ const ModelSelectionStep = ({ onComplete, onError }) => {
       e(Text, { color: "#f97316" }, "Waiting for API key...")
     ),
     subStep === "validating" && e(Text, { color: "#f97316" }, "Validating...")
+  );
+};
+
+/**
+ * Mobile App Step Component
+ * Shows QR code to install BACKBONE PWA on phone for push notifications
+ * Optional step - user can skip
+ */
+const MobileAppStep = ({ onComplete, onSkip, onError }) => {
+  const [qrLines, setQrLines] = useState(null);
+  const [status, setStatus] = useState("ready"); // ready, done
+
+  const pwaUrl = "https://backboneai.web.app";
+
+  // Generate QR code on mount
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const qrcode = await import("qrcode-terminal");
+        const code = await new Promise((resolve) => {
+          qrcode.default.generate(pwaUrl, { small: true }, (qr) => resolve(qr));
+        });
+        if (!cancelled) {
+          const lines = code.split("\n");
+          while (lines.length && lines[0].trim() === "") lines.shift();
+          while (lines.length && lines[lines.length - 1].trim() === "") lines.pop();
+          setQrLines(lines);
+        }
+      } catch {
+        if (!cancelled) {
+          setQrLines(null);
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  useInput((input, key) => {
+    const lower = input.toLowerCase();
+    if (lower === "s") {
+      onSkip();
+      return;
+    }
+    if (key.return) {
+      updateSetting("mobileAppInstalled", true);
+      onComplete({ installed: true });
+      return;
+    }
+  });
+
+  if (status === "done") {
+    return e(
+      Box,
+      { flexDirection: "column", paddingX: 1 },
+      e(Text, { color: "#22c55e", bold: true }, "\u2713 Mobile App Configured")
+    );
+  }
+
+  return e(
+    Box,
+    { flexDirection: "column", paddingX: 1 },
+    e(Text, { color: "#e2e8f0", bold: true }, "Install BACKBONE on Your Phone"),
+
+    // QR code (render early to avoid top clipping in small terminals)
+    ...(qrLines
+      ? qrLines.map((line, i) =>
+          e(Text, { key: `qr-${i}`, color: "#ffffff" }, line)
+        )
+      : [e(Text, { key: "qr-loading", color: "#64748b" }, "Generating QR code...")]
+    ),
+
+    e(Text, { color: "#f97316" }, `URL: ${pwaUrl}`),
+    e(Text, { color: "#94a3b8" }, "Steps: open link, sign in, enable notifications, add to home screen."),
+    e(
+      Box,
+      { flexDirection: "row", gap: 2 },
+      e(Text, { color: "#22c55e" }, "[Enter] Done"),
+      e(Text, { color: "#64748b" }, "[S] Skip")
+    )
   );
 };
 
@@ -2704,7 +2884,7 @@ const OptionalSetupStep = ({ step, onComplete, onSkip }) => {
 /**
  * Main Onboarding Panel Component
  */
-export const OnboardingPanel = ({ onComplete, userDisplay = "" }) => {
+export const OnboardingPanel = ({ onComplete, onProfileRestored, userDisplay = "", initialStepId = null, notice = null, modelProviderId = null, autoOpenProvider = false }) => {
   const { exit } = useApp();
 
   // Loading state - shown immediately while checking configurations
@@ -2773,6 +2953,11 @@ export const OnboardingPanel = ({ onComplete, userDisplay = "" }) => {
 
       // Check Core Goals (required - must have 40+ words)
       const settings = loadUserSettings();
+
+      // Check Mobile App (optional) - check if user has PWA/push configured
+      if (settings.mobileAppInstalled) {
+        statuses.mobileApp = "complete";
+      }
       if (settings.coreGoals) {
         const wordCount = settings.coreGoals.trim().split(/\s+/).filter(w => w.length > 0).length;
         if (wordCount >= 40) {
@@ -2808,6 +2993,57 @@ export const OnboardingPanel = ({ onComplete, userDisplay = "" }) => {
     checkConfigurations();
   }, []);
 
+  useEffect(() => {
+    if (loading) return;
+    let cancelled = false;
+
+    const applyStatuses = (googleConnected, phoneVerified) => {
+      if (cancelled) return;
+      setStepStatuses((prev) => {
+        const next = { ...prev };
+        if (googleConnected) {
+          next.google = "complete";
+        } else if (prev.google === "complete") {
+          next.google = "pending";
+        }
+        if (phoneVerified) {
+          next.phone = "complete";
+        } else if (prev.phone === "complete") {
+          next.phone = "pending";
+        }
+        return next;
+      });
+    };
+
+    const refreshConnectionStatus = () => {
+      const firebaseUser = getCurrentFirebaseUser();
+      const settings = loadUserSettings();
+      const settingsGoogle = !!settings?.connections?.google || !!settings?.firebaseUser;
+      const settingsPhone = !!settings?.connections?.phone || !!settings?.phoneNumber;
+
+      const googleConnected = isSignedIn() || !!firebaseUser || settingsGoogle;
+      const localPhoneVerified = firebaseUser
+        ? !!getPhoneRecord(firebaseUser.id)?.verification?.verifiedAt
+        : false;
+
+      applyStatuses(googleConnected, localPhoneVerified || settingsPhone);
+
+      if (firebaseUser?.id) {
+        syncPhoneFromFirestore(firebaseUser.id).then((synced) => {
+          const syncedVerified = !!synced?.verification?.verifiedAt;
+          applyStatuses(googleConnected, syncedVerified || localPhoneVerified || settingsPhone);
+        }).catch(() => {});
+      }
+    };
+
+    refreshConnectionStatus();
+    const interval = setInterval(refreshConnectionStatus, 3000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [loading]);
+
   // Find the first incomplete step to use as default
   const getFirstIncompleteIndex = useCallback((statuses) => {
     // First check required steps
@@ -2834,6 +3070,7 @@ export const OnboardingPanel = ({ onComplete, userDisplay = "" }) => {
   const [errorMessage, setErrorMessage] = useState(null);
   const [wizardActive, setWizardActive] = useState(false);
   const [initialLoadDone, setInitialLoadDone] = useState(false);
+  const [navigationLock, setNavigationLock] = useState(false);
 
   // Set initial step ONLY ONCE when loading completes (not on every status change)
   useEffect(() => {
@@ -2842,6 +3079,28 @@ export const OnboardingPanel = ({ onComplete, userDisplay = "" }) => {
       setInitialLoadDone(true);
     }
   }, [loading, initialLoadDone, stepStatuses, getFirstIncompleteIndex]);
+
+  const getStepIndexById = useCallback((stepId) => {
+    if (!stepId) return -1;
+    return ONBOARDING_STEPS.findIndex((step) => step.id === stepId);
+  }, []);
+
+  useEffect(() => {
+    if (!loading && initialStepId) {
+      const targetIndex = getStepIndexById(initialStepId);
+      if (targetIndex >= 0) {
+        setCurrentStepIndex(targetIndex);
+        setInitialLoadDone(true);
+      }
+    }
+  }, [loading, initialStepId, getStepIndexById]);
+
+  useEffect(() => {
+    const isModelStep = ONBOARDING_STEPS[currentStepIndex]?.id === "model";
+    if (!isModelStep) {
+      setNavigationLock(false);
+    }
+  }, [currentStepIndex]);
 
   // Handle launching the Full Setup wizard in browser
   const handleLaunchWizard = useCallback(async () => {
@@ -2938,6 +3197,19 @@ export const OnboardingPanel = ({ onComplete, userDisplay = "" }) => {
     onComplete();
   }, [onComplete]);
 
+  const handleProfileRestored = useCallback((user) => {
+    // Profile was restored from archive — mark all steps complete and skip onboarding
+    process.stdout.write("\x1b[2J\x1b[1;1H");
+    updateSetting("onboardingComplete", true);
+    updateSetting("firebaseUser", user);
+    updateSetting("connections", { ...loadUserSettings().connections, google: true });
+    if (onProfileRestored) {
+      onProfileRestored(user);
+    } else {
+      onComplete();
+    }
+  }, [onComplete, onProfileRestored]);
+
   // Check if required steps are complete
   const requiredStepsComplete =
     stepStatuses.prerequisites === "complete" &&
@@ -2958,7 +3230,7 @@ export const OnboardingPanel = ({ onComplete, userDisplay = "" }) => {
     // Steps that handle their own up/down navigation (for selecting providers)
     // No steps block main navigation - user can always navigate between steps
     // Individual steps handle their own internal navigation when focused
-    const currentStepNeedsArrows = false;
+    const currentStepNeedsArrows = navigationLock;
 
     // Arrow Up - navigate to previous step (unless current step handles arrows)
     if (key.upArrow && !currentStepNeedsArrows) {
@@ -3023,7 +3295,8 @@ export const OnboardingPanel = ({ onComplete, userDisplay = "" }) => {
         return e(GoogleLoginStep, {
           onComplete: (user) => handleStepComplete("google", user),
           onLogout: () => handleStepLogout("google"),
-          onError: (err) => handleStepError("google", err)
+          onError: (err) => handleStepError("google", err),
+          onProfileRestored: handleProfileRestored
         });
       case "phone":
         return e(PhoneVerificationStep, {
@@ -3033,7 +3306,16 @@ export const OnboardingPanel = ({ onComplete, userDisplay = "" }) => {
       case "model":
         return e(ModelSelectionStep, {
           onComplete: (data) => handleStepComplete("model", data),
-          onError: (err) => handleStepError("model", err)
+          onError: (err) => handleStepError("model", err),
+          onNavigationLockChange: setNavigationLock,
+          initialProviderId: modelProviderId,
+          autoOpenProvider
+        });
+      case "mobileApp":
+        return e(MobileAppStep, {
+          onComplete: (data) => handleStepComplete("mobileApp", data),
+          onSkip: () => handleStepSkip("mobileApp"),
+          onError: (err) => handleStepError("mobileApp", err)
         });
       case "coreGoals":
         return e(CoreGoalsStep, {
@@ -3135,6 +3417,20 @@ export const OnboardingPanel = ({ onComplete, userDisplay = "" }) => {
 
     // Divider
     e(Text, { color: "#334155" }, "\u2500".repeat(110)),
+
+    notice && e(
+      Box,
+      {
+        flexDirection: "column",
+        marginTop: 1,
+        marginBottom: 1,
+        borderStyle: "round",
+        borderColor: "#f59e0b",
+        paddingX: 1
+      },
+      e(Text, { color: "#f59e0b", bold: true }, "Action needed"),
+      e(Text, { color: "#e2e8f0" }, notice)
+    ),
 
     // Main content area
     e(

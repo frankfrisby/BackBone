@@ -84,7 +84,7 @@ export const isTop3Candidate = (score) => {
  * Main scoring formula from BackBoneApp production system
  *
  * Formula:
- * (tech + pred + psych)/2 + (dir × 0.2) + (pos × 0.2) - (days × 0.6)
+* (tech + pred)/2 + psych + (dir ? 0.2) + (pos ? 0.2) - (days ? 0.6) + macdAdj + volumeScore + (pricePos ? 1.25) + (earnings ? 2.0) + movementPenalty
  * + macdAdj + volumeScore + (pricePos × 1.25) + (earnings × 2.0) + movementPenalty
  */
 export const calculateEffectiveScore = (inputs) => {
@@ -96,7 +96,7 @@ export const calculateEffectiveScore = (inputs) => {
   // Legacy parameter format for backwards compatibility
   const {
     technicalScore = 5.0,
-    predictionScore = 5.5,
+    predictionScore = 0.5,
     macdAdjustment = 0,
     volumeScore = 0,
     pricePositionScore = 0,
@@ -108,15 +108,15 @@ export const calculateEffectiveScore = (inputs) => {
     priceMovementPenalty = 0
   } = inputs || {};
 
-  // Apply defaults for 0 values (per BackBoneApp logic)
+  // Apply defaults for 0 values (technical only)
   const adjTechnical = technicalScore === 0 ? 6.0 : technicalScore;
-  const adjPrediction = predictionScore === 0 ? 5.5 : predictionScore;
-
-  // Base score from technical + prediction + psychological
-  const baseScore = (adjTechnical + adjPrediction + psychologicalAdjustment) / 2;
+  const adjPrediction = predictionScore;
+  // Base score from technical + prediction
+  const baseScore = (adjTechnical + adjPrediction) / 2;
 
   // Apply all adjustments with BackBoneApp weights
   const rawScore = baseScore +
+    psychologicalAdjustment +
     Math.max(-1.0, Math.min(1.0, directionalBonus * 0.2)) +
     Math.max(-1.0, Math.min(1.0, positiveBonus * 0.2)) -
     (Math.min(7, timeDecayPenalty) * 0.6) +
@@ -141,56 +141,39 @@ export const calculateEffectiveScore = (inputs) => {
  */
 export const calculateMACDScore = (macdData) => {
   if (!macdData) return 0;
+  const histArray = Array.isArray(macdData.histogramArray) ? macdData.histogramArray.filter(h => h != null) : [];
+  const x = histArray.length >= 6 ? histArray[histArray.length - 6] : (macdData.histogram5dAgo != null ? macdData.histogram5dAgo : null);
+  const y = histArray.length >= 2 ? histArray[histArray.length - 1] : (macdData.histogram != null ? macdData.histogram : null);
+  if (x == null || y == null) return 0;
 
-  // If we have histogram array, use slope-based analysis
-  if (macdData.histogramArray && macdData.histogramArray.length >= 6) {
-    const slopeAnalysis = calculateMacdSlopeAndDirection(macdData.histogramArray);
+  const t = Math.abs(y);
+  const g = Math.max(0.0, -5.0 * (t ** 2) - 2.5 * t + 1.0);
+  let s = Math.sign(y - x) * g;
+  if (x === y) s = 0.0;
+  let score = Math.max(-1.0, Math.min(1.0, s));
 
-    if (slopeAnalysis.isValid) {
-      const directionMultiplier = slopeAnalysis.direction === 'positive' ? 1 :
-                                   slopeAnalysis.direction === 'negative' ? -1 : 0;
-      const scaledMagnitude = Math.min(1, slopeAnalysis.magnitude * 10);
-      const rawMacdAdj = directionMultiplier * scaledMagnitude;
+  const macdLine = macdData.macdLine ?? null;
+  const macdSignal = macdData.signal ?? null;
+  const macdMin60d = macdData.macdLineMin60d ?? null;
+  const macdMax60d = macdData.macdLineMax60d ?? null;
 
-      // Apply position-in-range factor if we have MACD line range data
-      if (macdData.macdLine != null && macdData.macdLineMin != null && macdData.macdLineMax != null) {
-        return calcEffectiveMacdScore(rawMacdAdj, macdData.macdLine, macdData.macdLineMin, macdData.macdLineMax);
+  if (macdLine != null && macdSignal != null && macdMin60d != null && macdMax60d != null) {
+    if (macdLine < 0 && macdSignal < 0 && macdLine > macdSignal) {
+      const denom = Math.abs(macdMin60d);
+      if (denom > 0) {
+        const ratio = Math.max(0, Math.min(1, 1 - (Math.abs(macdLine) / denom)));
+        score = Math.max(0, Math.min(1, ratio));
       }
-
-      return Math.max(-2.5, Math.min(2.5, rawMacdAdj * 2.5));
+    } else if (macdLine > 0 && macdSignal > 0 && macdLine < macdSignal) {
+      const denom = Math.abs(macdMax60d);
+      if (denom > 0) {
+        const ratio = Math.max(0, Math.min(1, 1 - (Math.abs(macdLine) / denom)));
+        score = -Math.max(0, Math.min(1, ratio));
+      }
     }
   }
 
-  // If we have weighted multi-timeframe score
-  if (macdData.weightedScore != null) {
-    return macdData.weightedScore * 2.5;
-  }
-
-  // Fallback to simple histogram-based scoring
-  const { histogram, macd, signal, trend } = macdData;
-
-  if (histogram == null) return 0;
-
-  // Base MACD score from histogram
-  let score = 0;
-
-  // Histogram-based scoring
-  if (histogram > 0.5) {
-    score = Math.min(1, histogram / 2);
-  } else if (histogram < -0.5) {
-    score = Math.max(-1, histogram / 2);
-  } else {
-    score = histogram / 0.5 * 0.5;
-  }
-
-  // Trend confirmation bonus
-  if (trend === "bullish" && macd > signal) {
-    score += 0.25;
-  } else if (trend === "bearish" && macd < signal) {
-    score -= 0.25;
-  }
-
-  return Math.max(-2.5, Math.min(2.5, score * 2.5));
+  return score;
 };
 
 /**
@@ -378,7 +361,7 @@ export const calculateTickerScore = (ticker) => {
   // Build comprehensive inputs for BackBoneApp algorithm
   const inputs = {
     technicalScore,
-    predictionScore: predictionScore || 5.5,
+    predictionScore: 0,
     percentChange: changePercent || change || 0,
     avgDirectional: avgDirectional || 0,
     avgPositive: avgPositive || 0,

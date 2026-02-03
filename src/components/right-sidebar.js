@@ -31,6 +31,7 @@ const RightSidebarBase = () => {
     personalCapitalData: portfolio.personalCapitalData,
     connectionStatuses: connections,
     uiClock: ui.uiClock,
+    tradeAction: portfolio.tradeAction,
   });
 };
 

@@ -49,7 +49,8 @@ const INCLUDE_FILES = [
   "CLAUDE.md",
   "LICENSE",
   "package.json",
-  "backbone.bat",
+  // backbone.bat is NOT included — createLauncher() generates BackBone.bat/cmd
+  // with restart loop and portable Node.js detection (better version)
 ];
 
 // Directories to create (empty) for user data
@@ -118,10 +119,30 @@ function copySourceFiles() {
 function createLauncher() {
   log("Creating launcher...");
 
-  // Windows CMD launcher
+  // Windows CMD launcher with singleton check + restart loop for auto-updates
   const batContent = `@echo off
-title BACKBONE ENGINE
+setlocal EnableDelayedExpansion
 chcp 65001 >nul 2>&1
+
+REM ── Singleton check: exit immediately if BACKBONE is already running ──
+if exist "%~dp0data\\.backbone.lock" (
+  for /f "tokens=2 delims=:," %%a in ('type "%~dp0data\\.backbone.lock" 2^>nul ^| findstr "pid"') do (
+    set "LOCK_PID=%%~a"
+  )
+  if defined LOCK_PID (
+    set "LOCK_PID=!LOCK_PID: =!"
+    tasklist /FI "PID eq !LOCK_PID!" 2>nul | findstr /i "node" >nul 2>&1
+    if not errorlevel 1 (
+      exit
+    )
+  )
+)
+tasklist /FI "WINDOWTITLE eq BACKBONE ENGINE" 2>nul | findstr /i "cmd" >nul 2>&1
+if not errorlevel 1 (
+  exit
+)
+
+title BACKBONE ENGINE
 
 REM Enable ANSI escape sequences
 reg add HKCU\\Console /v VirtualTerminalLevel /t REG_DWORD /d 1 /f >nul 2>&1
@@ -145,8 +166,20 @@ if exist "%~dp0node\\node.exe" (
 REM Set working directory to the BackBone folder
 cd /d "%~dp0"
 
-REM Launch BACKBONE
+REM Launch BACKBONE with restart loop for auto-updates
+:launch
+set "BACKBONE_UPDATED="
 "%NODE_EXE%" bin/backbone.js %*
+
+REM Check if _restart_signal file exists (auto-update applied)
+if exist "%~dp0_restart_signal" (
+  del "%~dp0_restart_signal" >nul 2>&1
+  set "BACKBONE_UPDATED=1"
+  echo [BACKBONE] Update applied, restarting...
+  timeout /t 1 /nobreak >nul
+  goto launch
+)
+
 if errorlevel 1 (
   echo.
   echo [BACKBONE] Exited with error code %errorlevel%
@@ -161,7 +194,7 @@ if errorlevel 1 (
   fs.writeFileSync(path.join(DIST, "BackBone.bat"), batContent);
   ok("BackBone.bat");
 
-  // PowerShell launcher (for terminal users)
+  // PowerShell launcher (for terminal users) with restart loop
   const ps1Content = `#!/usr/bin/env pwsh
 # BACKBONE Engine Launcher
 $ErrorActionPreference = "Stop"
@@ -170,12 +203,23 @@ Set-Location $scriptDir
 
 $nodeExe = if (Test-Path "$scriptDir\\node\\node.exe") { "$scriptDir\\node\\node.exe" } else { "node" }
 
-try {
-    & $nodeExe bin/backbone.js @args
-} catch {
-    Write-Error "BACKBONE failed: $_"
-    Read-Host "Press Enter to exit"
-}
+do {
+    $env:BACKBONE_UPDATED = $null
+    try {
+        & $nodeExe bin/backbone.js @args
+    } catch {
+        Write-Error "BACKBONE failed: $_"
+        Read-Host "Press Enter to exit"
+        break
+    }
+    $restart = Test-Path "$scriptDir\\_restart_signal"
+    if ($restart) {
+        Remove-Item "$scriptDir\\_restart_signal" -Force -ErrorAction SilentlyContinue
+        $env:BACKBONE_UPDATED = "1"
+        Write-Host "[BACKBONE] Update applied, restarting..."
+        Start-Sleep -Seconds 1
+    }
+} while ($restart)
 `;
 
   fs.writeFileSync(path.join(DIST, "BackBone.ps1"), ps1Content);

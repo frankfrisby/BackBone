@@ -8,6 +8,69 @@ import path from "path";
 import App from "../src/app.js";
 import { loadLinkedInProfile } from "../src/services/linkedin-scraper.js";
 import { Writable } from "stream";
+import { checkForUpdates, consumeUpdateState } from "../src/services/auto-updater.js";
+
+// ── Singleton lock — prevent multiple instances ────────────────
+const LOCK_FILE = path.join(process.cwd(), "data", ".backbone.lock");
+
+const acquireLock = () => {
+  try {
+    // Ensure data dir exists
+    const dataDir = path.join(process.cwd(), "data");
+    if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
+
+    // Check if lock file exists and if the process is still alive
+    if (fs.existsSync(LOCK_FILE)) {
+      try {
+        const lockData = JSON.parse(fs.readFileSync(LOCK_FILE, "utf-8"));
+        const pid = lockData.pid;
+
+        // Check if the process is still running
+        if (pid) {
+          try {
+            process.kill(pid, 0); // Signal 0 = check if process exists
+            // Process is still alive — exit silently, no output, no window
+            process.exit(0);
+          } catch {
+            // Process is dead — stale lock, we can take over
+          }
+        }
+      } catch {
+        // Corrupt lock file — overwrite it
+      }
+    }
+
+    // Write our lock
+    fs.writeFileSync(LOCK_FILE, JSON.stringify({
+      pid: process.pid,
+      startedAt: new Date().toISOString()
+    }));
+  } catch {
+    // If we can't write the lock, continue anyway
+  }
+};
+
+const releaseLock = () => {
+  try {
+    if (fs.existsSync(LOCK_FILE)) {
+      const lockData = JSON.parse(fs.readFileSync(LOCK_FILE, "utf-8"));
+      // Only delete if it's our lock
+      if (lockData.pid === process.pid) {
+        fs.unlinkSync(LOCK_FILE);
+      }
+    }
+  } catch {
+    // Best effort
+  }
+};
+
+// Acquire lock before anything else
+acquireLock();
+
+// Release lock on any exit
+process.on("exit", releaseLock);
+process.on("SIGINT", () => { releaseLock(); process.exit(0); });
+process.on("SIGTERM", () => { releaseLock(); process.exit(0); });
 
 // Force color support for Windows terminals
 if (process.platform === "win32") {
@@ -266,12 +329,31 @@ const getAppNameSync = () => {
 
 const appName = getAppNameSync();
 const userName = getUserName();
-setConsoleTitle(userName ? `${appName} · ${userName}` : appName);
+// Title MUST include "BACKBONE ENGINE" — singleton checks in launchers match on this
+setConsoleTitle(userName ? `BACKBONE ENGINE · ${userName}` : "BACKBONE ENGINE");
 
-export const updateConsoleTitle = (name, customAppName = null) => {
-  const titleAppName = customAppName || getAppNameSync();
-  setConsoleTitle(name ? `${titleAppName} · ${name}` : titleAppName);
+export const updateConsoleTitle = (name) => {
+  setConsoleTitle(name ? `BACKBONE ENGINE · ${name}` : "BACKBONE ENGINE");
 };
+
+// --- Auto-update check (silent, before app loads) ---
+// If BACKBONE_UPDATED env var is set, we just restarted after an update — skip check
+if (process.env.BACKBONE_UPDATED !== "1") {
+  try {
+    // Show brief status on the raw terminal before Ink takes over
+    process.stdout.write("\x1b[2J\x1b[H"); // clear + home
+    process.stdout.write("\x1b[90mChecking for updates...\x1b[0m\r");
+    await checkForUpdates({ silent: true });
+    // If we get here, no update was applied (checkForUpdates exits on success)
+    process.stdout.write("\x1b[2K"); // clear the line
+  } catch {
+    // Update check failed — continue normally
+    process.stdout.write("\x1b[2K");
+  }
+}
+
+// Check for post-update notification
+const _updateState = consumeUpdateState();
 
 const stdin = process.stdin;
 if (!stdin.isTTY) {
@@ -280,7 +362,7 @@ if (!stdin.isTTY) {
 }
 
 // Render with optimized settings for smooth updates
-const { unmount, clear } = render(createElement(App, { updateConsoleTitle }), {
+const { unmount, clear } = render(createElement(App, { updateConsoleTitle, updateState: _updateState }), {
   stdin,
   stdout: syncedStdout, // Use synced stdout wrapper for DEC 2026 sync
   exitOnCtrlC: false,

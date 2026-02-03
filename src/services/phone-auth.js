@@ -416,6 +416,47 @@ export const retryVerification = async (userId) => {
 export const getPhoneRecord = (userId) => readData()[userId] || null;
 
 /**
+ * Sync verified phone number from Firestore (if available)
+ */
+export const syncPhoneFromFirestore = async (userId) => {
+  if (!userId) return null;
+  try {
+    const messaging = getRealtimeMessaging();
+    if (!messaging.userId) {
+      await messaging.initialize(userId);
+    }
+    const userDoc = await messaging.getUserDocument();
+    const phone = userDoc?.whatsappPhone;
+    if (!phone) return readData()[userId] || null;
+
+    const record = readData()[userId] || {};
+    if (record?.verification?.status === VERIFICATION_STATUS.VERIFIED) {
+      return record;
+    }
+
+    buildUserRecord(userId, {
+      phoneNumber: phone,
+      verification: {
+        status: VERIFICATION_STATUS.VERIFIED,
+        verifiedAt: new Date().toISOString(),
+        attempts: 0
+      },
+      meta: {
+        ...(record.meta || {}),
+        phoneVerifiedAt: new Date().toISOString(),
+        whatsappEnabled: true,
+        syncedFromFirestore: true
+      }
+    });
+
+    return readData()[userId] || null;
+  } catch (err) {
+    console.warn("[PhoneAuth] Firestore sync failed:", err.message);
+    return readData()[userId] || null;
+  }
+};
+
+/**
  * Check if phone is verified
  */
 export const isPhoneVerified = (userId) => {

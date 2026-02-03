@@ -71,14 +71,14 @@ import { getCloudSyncConfig, syncBackboneState, checkPhoneInput } from "./servic
 import { saveAllMemory } from "./services/memory.js";
 import { getEmailConfig, buildEmailSummary } from "./services/email.js";
 import { getWealthConfig, buildWealthSummary } from "./services/wealth.js";
-import { fetchTickers as fetchYahooTickers, startServer as startYahooServer, isServerRunning, triggerFullScan, refreshTickers } from "./services/yahoo-client.js";
-import { extractLinkedInProfile, scrapeLinkedInProfile, saveLinkedInProfile, loadLinkedInProfile, isProfileIncomplete, refreshAndGenerateLinkedInMarkdown, generateLinkedInMarkdown, scrapeLinkedInPosts } from "./services/linkedin-scraper.js";
+import { fetchTickers as fetchYahooTickers, startServer as startYahooServer, restartServer as restartYahooServer, isServerRunning, triggerFullScan, refreshTickers } from "./services/yahoo-client.js";
+import { extractLinkedInProfile, scrapeLinkedInProfile, saveLinkedInProfile, loadLinkedInProfile, isProfileIncomplete, refreshAndGenerateLinkedInMarkdown, generateLinkedInMarkdown, scrapeLinkedInPosts, updateLinkedInViaBrowserAgent } from "./services/linkedin-scraper.js";
 import { getDataFreshnessChecker } from "./services/data-freshness-checker.js";
 import { getCronManager, JOB_FREQUENCY } from "./services/cron-manager.js";
 import { captureSnapshot as captureLinkedInSnapshot, getHistory as getLinkedInHistory, getPostsHistory as getLinkedInPostsHistory, trackPosts as trackLinkedInPosts } from "./services/linkedin-tracker.js";
 import { loadTradingStatus, saveTradingStatus, buildTradingStatusDisplay, recordTradeAttempt, resetTradingStatus } from "./services/trading-status.js";
 import { deleteAllData, getResetSummary, RESET_STEPS } from "./services/reset.js";
-import { sendMessage as sendMultiAI, getAIStatus, getMultiAIConfig, getCurrentModel, MODELS, TASK_TYPES, isAgenticTask, executeAgenticTask, getAgenticCapabilities } from "./services/multi-ai.js";
+import { sendMessage as sendMultiAI, getAIStatus, getMultiAIConfig, getCurrentModel, MODELS, TASK_TYPES, isAgenticTask, executeAgenticTask } from "./services/multi-ai.js";
 import { formatToolsList, getToolsSummary, enableServer, disableServer } from "./services/mcp-tools.js";
 import { loadActionsQueue, getActionsDisplay, queueAction, startNextAction, completeAction, initializeDefaultActions, ACTION_TYPES } from "./services/actions-engine.js";
 import { getSkillsCatalog, getUserSkillContent } from "./services/skills-loader.js";
@@ -110,6 +110,7 @@ import { getAIBrain } from "./services/ai-brain.js";
 import { getAPIQuotaMonitor, BILLING_URLS } from "./services/api-quota-monitor.js";
 import { QuotaExceededAlert, QuotaWarningBadge } from "./components/quota-exceeded-alert.js";
 import { calculateComprehensiveScore, getSignal, WEIGHT_PROFILES, THRESHOLDS } from "./services/scoring-criteria.js";
+import { calculateMACDScore } from "./services/score-engine.js";
 import { updateChat } from "./services/app-store.js";
 import { getRiskyTickers, fetchAllRiskyK8Filings, getSignificantK8Tickers } from "./services/edgar-k8.js";
 import {
@@ -343,6 +344,49 @@ const isTickerToday = (timestamp) => {
 };
 
 /**
+ * Generate a short (2-4 word) reason why no trade happened this cycle.
+ * Used for the persistent trade status indicator next to "Live".
+ */
+function _getShortTradeReason(result, tickers) {
+  if (!result || !result.monitored) return "Market closed";
+
+  // Check if positions are at max
+  const posCount = result.reasoning?.find(r => r.startsWith("Positions:"));
+  if (posCount && posCount.includes(`/${result.reasoning?.[0]?.includes?.("2") ? "2" : ""}`)) {
+    // Position limit full — check if scores are too low to sell
+  }
+
+  // SPY is down — common reason nothing qualifies
+  if (result.spyPositive === false) {
+    const threshold = result.effectiveBuyThreshold;
+    const topTicker = tickers?.sort?.((a, b) => (b.score || 0) - (a.score || 0))?.[0];
+    if (topTicker && topTicker.score < threshold) {
+      return "SPY down, scores low";
+    }
+    return "SPY is down";
+  }
+
+  // Check buying power / position limits
+  const posLimitSkip = result.skipped?.find(s => s.reason?.includes?.("Position limit"));
+  if (posLimitSkip) return "Positions full";
+
+  // Check cooldown
+  const cooldownSkip = result.skipped?.find(s => s.reason?.includes?.("Cooldown"));
+  if (cooldownSkip) return `${cooldownSkip.symbol} cooldown`;
+
+  // No tickers above threshold
+  if (!result.buySignals || result.buySignals.length === 0) {
+    const topTicker = tickers?.sort?.((a, b) => (b.score || 0) - (a.score || 0))?.[0];
+    if (topTicker) {
+      return `${topTicker.symbol} ${topTicker.score?.toFixed(1)} too low`;
+    }
+    return "Scores too low";
+  }
+
+  return "No signal";
+}
+
+/**
  * Handle complex WhatsApp messages via Claude Code CLI
  * Builds a WhatsApp-optimized prompt, executes with full MCP tool access,
  * and extracts the final response. Falls back to aiBrain.chat() on failure.
@@ -463,6 +507,8 @@ const App = ({ updateConsoleTitle, updateState }) => {
   }, []);
   const [activeCommand, setActiveCommand] = useState("/account");
   const [lastAction, setLastAction] = useState("Ready");
+  // Persistent trade status: { type: "trade"|"no-trade", text: "Bought HIMS", color: "green"|"red" }
+  const [tradeAction, setTradeAction] = useState({ type: "idle", text: "Waiting", color: "dim" });
   const [currentTier, setCurrentTier] = useState(() => getCurrentTier());
   const [privateMode, setPrivateMode] = useState(false);
   const [viewMode, setViewMode] = useState(VIEW_MODES.CORE); // Core is default
@@ -483,7 +529,14 @@ const App = ({ updateConsoleTitle, updateState }) => {
   const initialSettingsRef = useRef(loadUserSettings());
   const [userSettings, setUserSettings] = useState(initialSettingsRef.current);
   const [showOnboarding, setShowOnboarding] = useState(!initialSettingsRef.current.onboardingComplete);
-  const [firebaseUser, setFirebaseUser] = useState(() => initialSettingsRef.current.firebaseUser || getCurrentFirebaseUser());
+  const [onboardingOverride, setOnboardingOverride] = useState({ stepId: null, notice: null, modelProviderId: null, autoOpenProvider: false });
+  const normalizeFirebaseUser = (user) => {
+    if (!user) return null;
+    if (user.uid) return user;
+    if (user.id) return { ...user, uid: user.id };
+    return user;
+  };
+  const [firebaseUser, setFirebaseUser] = useState(() => normalizeFirebaseUser(initialSettingsRef.current.firebaseUser || getCurrentFirebaseUser()));
 
   const getOpenAIModelSource = (modelInfo) => {
     if (!modelInfo) return null;
@@ -533,7 +586,7 @@ const App = ({ updateConsoleTitle, updateState }) => {
   }, [showOnboarding, syncUserSettings]);
 
   useEffect(() => {
-    const latestUser = userSettings?.firebaseUser || getCurrentFirebaseUser();
+    const latestUser = normalizeFirebaseUser(userSettings?.firebaseUser || getCurrentFirebaseUser());
     setFirebaseUser(latestUser);
   }, [userSettings]);
 
@@ -1750,6 +1803,7 @@ const App = ({ updateConsoleTitle, updateState }) => {
       alpacaMode,
       personalCapitalData,
       trailingStops,
+      tradeAction,
     },
     [STATE_SLICES.TICKERS]: {
       tickers,
@@ -3626,9 +3680,9 @@ Execute this task and provide concrete results.`);
 
       // Claude Code CLI is the default for ALL queries
       // Only fall back to API if CLI not available
-      const agenticCaps = await getAgenticCapabilities();
+      const claudeCodeReady = claudeCodeStatus.available;
 
-      if (agenticCaps.claudeCode) {
+      if (claudeCodeReady) {
         // Use Claude Code CLI as the default handler for all queries
         setIsProcessing(true);
         setCliStreaming(true);
@@ -3743,26 +3797,21 @@ Execute this task and provide concrete results.`);
           return;
         }
 
-        // Claude Code CLI returned empty or failed - fall through to API
-        // This can happen for simple conversational queries
-        if (!outputText && !errorText) {
-          // Silent fallback to API for conversational queries
-          // Continue to API section below
-        } else if (!result.success) {
-          // Show error but also try API fallback
-          setMessages((prev) => [
-            ...prev,
-            {
-              role: "system",
-              content: `Claude CLI: ${errorText || "No response"}. Trying API...`,
-              timestamp: new Date()
-            }
-          ]);
-        }
-
-        // Fall through to API fallback - keep last output visible
-        setActionStreamingTitle("Falling back to API");
+        // Claude Code CLI returned empty or failed - do not fall back to API
+        const fallbackMessage = errorText || "Claude Code CLI returned no response.";
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "system",
+            content: `Claude CLI: ${fallbackMessage}`,
+            timestamp: new Date()
+          }
+        ]);
+        setActionStreamingTitle("Claude Code CLI error");
+        setIsProcessing(false);
         setCliStreaming(false);
+        engineState.setStatus("idle");
+        return;
       }
 
       // Fallback: Claude Code CLI not available - use API
@@ -4237,9 +4286,29 @@ Execute this task and provide concrete results.`);
         // Run the auto-trading monitor
         const result = await monitorAndTrade(tickers, portfolio.positions);
 
+        // Log reasoning every cycle to console
+        if (result.reasoning && result.reasoning.length > 0) {
+          const time = new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", timeZone: "America/New_York" });
+          console.log(`\n[AutoTrader ${time} ET] ─── Evaluation ───`);
+          for (const line of result.reasoning) {
+            console.log(`  ${line}`);
+          }
+          console.log("");
+        }
+
         if (result.executed && result.executed.length > 0) {
-          // Trades were executed - refresh portfolio
-          setLastAction(`Auto-trade: ${result.executed.map(t => `${t.side} ${t.symbol}`).join(", ")}`);
+          // Trades were executed — green check, persist until next trade
+          const summary = result.executed.map(t => `${t.side === "buy" ? "Bought" : "Sold"} ${t.symbol}`).join(", ");
+          setTradeAction({ type: "trade", text: summary, color: "green" });
+          setLastAction(`Auto-trade: ${summary}`);
+        } else if (result.monitored) {
+          // No trades — red X with concise reason (max ~3 words)
+          const reason = _getShortTradeReason(result, tickers);
+          setTradeAction(prev => {
+            // If we previously had a trade, keep showing it (persist until next trade)
+            if (prev.type === "trade") return prev;
+            return { type: "no-trade", text: reason, color: "red" };
+          });
         }
       } catch (error) {
         console.error("Auto-trading error:", error.message);
@@ -4276,8 +4345,8 @@ Execute this task and provide concrete results.`);
     let cancelled = false;
 
     const initYahooFinance = async () => {
-      // Start Yahoo Finance server in background
-      await startYahooServer();
+      // Restart Yahoo Finance server to ensure latest code is running
+      await restartYahooServer();
     };
 
     // Helper to check if ticker data actually changed
@@ -4349,6 +4418,10 @@ Execute this task and provide concrete results.`);
               nowISO
             ].slice(-50); // Keep last 50 updates max
 
+            const universeSize = (result.evaluatedToday ?? 0) > 0
+              ? result.evaluatedToday
+              : (result.universeSize || result.tickers.length || TICKER_UNIVERSE.length);
+
             return {
               refreshing: false,
               lastRefresh: nowISO,
@@ -4360,7 +4433,7 @@ Execute this task and provide concrete results.`);
               scanProgress: result.scanProgress || 0,
               scanTotal: result.scanTotal || 0,
               evaluatedToday: result.evaluatedToday ?? result.tickers.filter(t => isTickerToday(t.lastEvaluated)).length,
-              universeSize: result.universeSize || TICKER_UNIVERSE.length,
+              universeSize,
               updateHistory,
             };
           });
@@ -4435,8 +4508,10 @@ Execute this task and provide concrete results.`);
         const result = await fetchYahooTickers();
         if (!result.success) return;
 
-        const todayCount = result.tickers.filter(t => isTickerToday(t.lastEvaluated)).length;
-        const totalCount = result.tickers.length || TICKER_UNIVERSE.length;
+        const todayCount = result.evaluatedToday ?? result.tickers.filter(t => isTickerToday(t.lastEvaluated)).length;
+        const totalCount = todayCount > 0
+          ? todayCount
+          : (result.universeSize || result.tickers.length || TICKER_UNIVERSE.length);
 
         setTickerStatus(prev => {
           const scanRunning = result.fullScanRunning || false;
@@ -7041,17 +7116,21 @@ Folder: ${result.action.id}`,
             const sorted = [...result.tickers].sort((a, b) => (b.score || 0) - (a.score || 0));
             const top = sorted.slice(0, 10);
             let content = "TOP 10 STOCKS\n\n";
-            content += "#   Symbol     Name                    Score  Signal       Price     Change%\n";
+            content += "#   Symbol     Name                    Score  MACDsc  Signal       Price     Change%\n";
             content += "──────────────────────────────────────────────────────────────────────────────\n";
             top.forEach((t, i) => {
               const rank = String(i + 1).padEnd(3);
               const sym = (t.symbol || "").padEnd(10);
               const name = (t.name || t.shortName || "").substring(0, 23).padEnd(23);
               const score = ((t.score || 0).toFixed(1)).padStart(5);
+              const macdRaw = -calculateMACDScore(t.macd);
+              const macdScore = Math.max(-2.5, Math.min(2.5, macdRaw));
+              const macdScoreStr = (macdScore >= 0 ? "+" : "") + macdScore.toFixed(2);
+              const macdPad = macdScoreStr.padStart(6);
               const signal = (t.signal || t.macdTrend || "—").padEnd(12);
               const price = t.price ? ("$" + t.price.toFixed(2)).padStart(9) : "      N/A";
               const change = ((t.changePercent || 0) >= 0 ? "+" : "") + (t.changePercent || 0).toFixed(2) + "%";
-              content += `${rank} ${sym} ${name} ${score}  ${signal} ${price}  ${change}\n`;
+              content += `${rank} ${sym} ${name} ${score}  ${macdPad}  ${signal} ${price}  ${change}\n`;
             });
             content += `\nLast refreshed: ${new Date().toLocaleString()}`;
             setMessages((prev) => [
@@ -7093,7 +7172,7 @@ Folder: ${result.action.id}`,
             content += "═══════════════════════════════════════════════════════════════════════════════\n\n";
 
             // Header row
-            content += "Ticker   Score  Signal    MACD   Vol σ   Psych   PricePos   RSI    Chg%\n";
+            content += "Ticker   Score  Signal    MACD  MACDsc  Vol σ   Psych   PricePos   RSI    Chg%\n";
             content += "───────────────────────────────────────────────────────────────────────────────\n";
 
             top.forEach((t, i) => {
@@ -7104,6 +7183,11 @@ Folder: ${result.action.id}`,
               // MACD histogram
               const macdHist = t.macd?.histogram != null ? (t.macd.histogram >= 0 ? "+" : "") + t.macd.histogram.toFixed(2) : "  N/A";
               const macdStr = macdHist.padStart(6);
+
+              // MACD score (used in score-engine)
+              const macdScore = calculateMACDScore(t.macd);
+              const macdScoreStr = (macdScore >= 0 ? "+" : "") + macdScore.toFixed(2);
+              const macdScorePad = macdScoreStr.padStart(7);
 
               // Volume sigma
               const volSigma = t.volumeSigma != null ? t.volumeSigma.toFixed(2) : "N/A";
@@ -7145,7 +7229,7 @@ Folder: ${result.action.id}`,
               const change = ((t.changePercent || 0) >= 0 ? "+" : "") + (t.changePercent || 0).toFixed(2) + "%";
               const changeStr = change.padStart(7);
 
-              content += `${sym} ${score}  ${signal} ${macdStr} ${volStr} ${psychPad} ${pricePosStrPad} ${rsiStr} ${changeStr}\n`;
+              content += `${sym} ${score}  ${signal} ${macdStr} ${macdScorePad} ${volStr} ${psychPad} ${pricePosStrPad} ${rsiStr} ${changeStr}\n`;
             });
 
             content += "───────────────────────────────────────────────────────────────────────────────\n\n";
@@ -7228,7 +7312,9 @@ Folder: ${result.action.id}`,
               }
 
               content += `\n${i + 1}. ${t.symbol} (${t.name?.substring(0, 25) || ""})\n`;
-              content += `   MACD: ${t.macd?.macd?.toFixed(2) || "N/A"} | Signal: ${t.macd?.signal?.toFixed(2) || "N/A"} | Hist: ${t.macd?.histogram?.toFixed(2) || "N/A"} → Adj: ${macdAdj >= 0 ? "+" : ""}${macdAdj.toFixed(2)} (${macdMethod})\n`;
+              const macdScore = calculateMACDScore(t.macd);
+              content += `   MACD: ${t.macd?.macd?.toFixed(2) || "N/A"} | Signal: ${t.macd?.signal?.toFixed(2) || "N/A"} | Hist: ${t.macd?.histogram?.toFixed(2) || "N/A"} | Score: ${macdScore >= 0 ? "+" : ""}${macdScore.toFixed(2)}\n`;
+              content += `   MACD Adj (legacy): ${macdAdj >= 0 ? "+" : ""}${macdAdj.toFixed(2)} (${macdMethod})\n`;
               content += `   RSI: ${t.rsi || "N/A"} ${t.rsi && t.rsi < 30 ? "(OVERSOLD)" : t.rsi && t.rsi > 70 ? "(OVERBOUGHT)" : ""}\n`;
               content += `   Volume: ${sigma.toFixed(2)}σ → Score: ${volScore >= 0 ? "+" : ""}${volScore.toFixed(2)}\n`;
               content += `   PricePos: ${pricePosLabel} → Score: ${detailPricePos >= 0 ? "+" : ""}${detailPricePos.toFixed(2)} (×1.25 = ${(detailPricePos * 1.25) >= 0 ? "+" : ""}${(detailPricePos * 1.25).toFixed(2)})\n`;
@@ -7501,6 +7587,148 @@ Folder: ${result.action.id}`,
             { role: "assistant", content: `Error: ${error.message}`, timestamp: new Date() }
           ]);
           setLastAction("LinkedIn error");
+        }
+        return;
+      }
+
+      // /linkedin update - Full update via Claude vision browser agent
+      if (resolved === "/linkedin update") {
+        const hasAnthropicKey = process.env.ANTHROPIC_API_KEY || process.env.CLAUDE_API_KEY;
+        if (!hasAnthropicKey) {
+          const apiResult = await openApiKeyPage("anthropic");
+          const url = apiResult?.url || "https://console.anthropic.com/settings/keys";
+          const envKey = apiResult?.envKey || "ANTHROPIC_API_KEY";
+          const notice = [
+            "LinkedIn update requires an Anthropic API key.",
+            "We opened the API keys page in your browser.",
+            `URL: ${url}`,
+            `Paste your key into .env as ${envKey}=your-key`,
+            "Restart BACKBONE, then run /linkedin update again."
+          ].join("\n");
+          setOnboardingOverride({
+            stepId: "model",
+            notice,
+            modelProviderId: "anthropic",
+            autoOpenProvider: true
+          });
+          setShowOnboarding(true);
+          setLastAction("LinkedIn update needs Anthropic API key");
+          return;
+        }
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "assistant",
+            content: "Running full LinkedIn update...\nOpening LinkedIn and capturing multiple screenshots.\nClaude Vision will extract profile data from the images.",
+            timestamp: new Date()
+          }
+        ]);
+        setLastAction("LinkedIn update (vision)");
+
+        try {
+          const updateEvents = new Set(["task-started", "navigation", "step-analysis", "step-error", "task-failed", "task-completed", "download-complete"]);
+          let firstAnalysisShown = false;
+          const result = await updateLinkedInViaBrowserAgent({
+            onEvent: (evt, data) => {
+              if (!updateEvents.has(evt)) return;
+              if (evt === "task-started") {
+                setMessages((prev) => [
+                  ...prev,
+                  { role: "assistant", content: "Browser agent started. Watching LinkedIn in Chrome...", timestamp: new Date() }
+                ]);
+                return;
+              }
+              if (evt === "navigation") {
+                const url = data?.url || data?.startUrl || "unknown";
+                const looksLinkedIn = typeof url === "string" && url.includes("linkedin.com");
+                const note = looksLinkedIn
+                  ? `Navigated to ${url}`
+                  : `Navigation landed on ${url}. If this isn't LinkedIn, make sure Chrome profile '${process.env.CHROME_PROFILE_DIRECTORY || "Default"}' is logged in, or set CHROME_PROFILE_DIRECTORY.`;
+                setMessages((prev) => [
+                  ...prev,
+                  { role: "assistant", content: note, timestamp: new Date() }
+                ]);
+                return;
+              }
+              if (evt === "step-analysis") {
+                if (firstAnalysisShown) return;
+                firstAnalysisShown = true;
+                setMessages((prev) => [
+                  ...prev,
+                  { role: "assistant", content: `Agent analyzing page… next action: ${data?.action || "unknown"}`, timestamp: new Date() }
+                ]);
+                return;
+              }
+              if (evt === "download-complete") {
+                setMessages((prev) => [
+                  ...prev,
+                  { role: "assistant", content: `Downloaded: ${data?.fileName || "file"}`, timestamp: new Date() }
+                ]);
+                return;
+              }
+              if (evt === "step-error") {
+                setMessages((prev) => [
+                  ...prev,
+                  { role: "assistant", content: `Browser agent error: ${data?.error || "unknown error"}`, timestamp: new Date() }
+                ]);
+                return;
+              }
+              if (evt === "task-failed") {
+                setMessages((prev) => [
+                  ...prev,
+                  { role: "assistant", content: `Browser task failed: ${data?.error || "unknown error"}`, timestamp: new Date() }
+                ]);
+                return;
+              }
+              if (evt === "task-completed") {
+                setMessages((prev) => [
+                  ...prev,
+                  { role: "assistant", content: `Browser task completed: ${data?.message || "done"}`, timestamp: new Date() }
+                ]);
+              }
+            }
+          });
+
+          if (result.success) {
+            const linkedInData = {
+              ...result.profile,
+              profileUrl: result.profileUrl,
+              connected: true,
+              verified: true
+            };
+            setLinkedInProfile(linkedInData);
+            updateFromLinkedIn(linkedInData);
+
+            await generateLinkedInMarkdown(result);
+            const snapResult = captureLinkedInSnapshot();
+
+            let summary = `LinkedIn profile updated!\n\n`;
+            summary += `Name: ${result.profile?.name || "-"}\n`;
+            summary += `Headline: ${result.profile?.headline || "-"}\n`;
+            summary += `Location: ${result.profile?.location || "-"}\n`;
+            summary += `About: ${(result.profile?.about || "-").substring(0, 100)}${(result.profile?.about || "").length > 100 ? "..." : ""}\n`;
+            summary += `\nScreenshots captured: ${result.screenshots?.length || 0}\n`;
+            summary += snapResult.success ? `\n${snapResult.changes?.length || 0} change(s) detected since last capture.` : "";
+            summary += `\n\nView full data with /linkedin data`;
+
+            setMessages((prev) => [
+              ...prev,
+              { role: "assistant", content: summary, timestamp: new Date() }
+            ]);
+            setLastAction("LinkedIn updated");
+          } else {
+            setMessages((prev) => [
+              ...prev,
+              { role: "assistant", content: `LinkedIn update failed: ${result.error}`, timestamp: new Date() }
+            ]);
+            setLastAction("LinkedIn update failed");
+          }
+        } catch (error) {
+          setMessages((prev) => [
+            ...prev,
+            { role: "assistant", content: `Error: ${error.message}`, timestamp: new Date() }
+          ]);
+          setLastAction("LinkedIn update error");
         }
         return;
       }
@@ -9487,11 +9715,16 @@ Folder: ${result.action.id}`,
       },
       e(OnboardingPanel, {
         userDisplay: firebaseUserDisplay,
+        initialStepId: onboardingOverride.stepId,
+        notice: onboardingOverride.notice,
+        modelProviderId: onboardingOverride.modelProviderId,
+        autoOpenProvider: onboardingOverride.autoOpenProvider,
         onComplete: () => {
           // Clear screen and transition to main view
           process.stdout.write("\x1b[2J\x1b[1;1H");
           updateSetting("onboardingComplete", true);
           setShowOnboarding(false);
+          setOnboardingOverride({ stepId: null, notice: null, modelProviderId: null, autoOpenProvider: false });
           pauseUpdatesRef.current = false;
           setPauseUpdates(false);
           setLastAction("Setup complete!");
@@ -9502,6 +9735,7 @@ Folder: ${result.action.id}`,
           // Profile restored from archive — skip onboarding entirely
           process.stdout.write("\x1b[2J\x1b[1;1H");
           setShowOnboarding(false);
+          setOnboardingOverride({ stepId: null, notice: null, modelProviderId: null, autoOpenProvider: false });
           pauseUpdatesRef.current = false;
           setPauseUpdates(false);
           setFirebaseUser(user);
@@ -10244,22 +10478,36 @@ Folder: ${result.action.id}`,
               const total = tickerStatus?.scanTotal || universe;
               return e(Text, { color: "#9ca3af" }, `Tickers: ${progress}/${total}`);
             }
-            return [
-              e(Text, { key: "td", color: allDone ? "#22c55e" : "#ef4444" }, "●"),
-              e(Text, { key: "tl", color: "#64748b" }, ` Tickers: ${evaluated}/${universe}`)
-            ];
+            return e(
+              Text,
+              { color: allDone ? "#22c55e" : "#ef4444" },
+              `Tickers: ${evaluated}/${universe}`
+            );
           })(),
-          // Sweep status (based on actual ticker count, not just timestamp)
+          // Sweep status + timestamp (compact)
           e(Text, { color: "#334155" }, "|"),
           (() => {
             const evaluated = tickerStatus?.evaluatedToday || 0;
             const universe = tickerStatus?.universeSize || 0;
             const allDone = evaluated >= universe && universe > 0;
             const scanning = tickerStatus?.fullScanRunning;
+            const lastFullScan = tickerStatus?.lastFullScan;
+
             if (scanning) {
-              return e(Text, { color: "#9ca3af" }, "◐ Sweep");
+              return e(Text, { color: "#9ca3af" }, "Sweep running");
             }
-            return e(Text, { color: allDone ? "#22c55e" : "#ef4444" }, `${allDone ? "✓" : "✗"} Sweep`);
+            if (!lastFullScan) {
+              return e(Text, { color: allDone ? "#22c55e" : "#ef4444" }, "Sweep —");
+            }
+            const d = new Date(lastFullScan);
+            const date = `${d.getMonth() + 1}/${d.getDate()}/${String(d.getFullYear()).slice(-2)}`;
+            const time = d.toLocaleTimeString("en-US", {
+              hour: "numeric",
+              minute: "2-digit",
+              hour12: true
+            });
+            const timeCompact = time.replace(" AM", "a").replace(" PM", "p").replace(" am", "a").replace(" pm", "p").replace(/\s+/g, "");
+            return e(Text, { color: allDone ? "#22c55e" : "#ef4444" }, `Sweep ${date} ${timeCompact}`);
           })(),
           // Trading mode/strategy (shows OFFLINE when no internet)
           e(Text, { color: "#334155" }, "|"),
@@ -10276,11 +10524,13 @@ Folder: ${result.action.id}`,
             const mode = config.mode || "paper";
             const risk = config.risk || "conservative";
             const modeColor = mode === "live" ? "#22c55e" : "#f59e0b";
-            const stratLabel = strategy.charAt(0).toUpperCase() + strategy.slice(1);
+            const toTitle = (value) => value ? value.charAt(0).toUpperCase() + value.slice(1) : "";
+            const modeLabel = mode === "live" ? "Live" : "Paper";
+            const stratLabel = toTitle(strategy);
+            const riskLabel = toTitle(risk);
             return [
-              e(Text, { key: "tm", color: modeColor, bold: true }, mode === "live" ? "LIVE" : "PAPER"),
-              e(Text, { key: "ts", color: "#94a3b8" }, ` ${stratLabel}`),
-              e(Text, { key: "tr", color: risk === "risky" ? "#ef4444" : "#64748b" }, ` (${risk})`)
+              e(Text, { key: "tm", color: modeColor, bold: true }, modeLabel),
+              e(Text, { key: "ts", color: "#94a3b8" }, ` ${stratLabel} ${riskLabel}`)
             ];
           })()
         ),

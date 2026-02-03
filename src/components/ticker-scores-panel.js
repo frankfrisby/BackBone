@@ -89,6 +89,21 @@ const formatDateTime = (date = new Date()) => {
 };
 
 /**
+ * Short date/time for compact status display (e.g. 2/1 9:42a)
+ */
+const formatShortDateTime = (date) => {
+  if (!date) return "--";
+  const dt = new Date(date);
+  if (Number.isNaN(dt.getTime())) return "--";
+  const datePart = dt.toLocaleDateString("en-US", { month: "numeric", day: "numeric" });
+  const timePart = dt
+    .toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true })
+    .replace(" AM", "a")
+    .replace(" PM", "p");
+  return `${datePart} ${timePart}`;
+};
+
+/**
  * BackBoneApp Thresholds
  * - Top 3 threshold varies by SPY direction:
  *   - SPY Positive: 7.1 (more lenient)
@@ -290,7 +305,11 @@ const TickerScoresPanelBase = ({
   trailingStops = {},   // Trailing stop data keyed by symbol { symbol: { trailPercent, gainPercent } }
 }) => {
   // Format timestamp for display
-  const displayTime = formatDateTime(timestamp ? new Date(timestamp) : new Date());
+  const displayTime = formatDateTime(
+    tickerStatus?.lastRefresh
+      ? new Date(tickerStatus.lastRefresh)
+      : (timestamp ? new Date(timestamp) : new Date())
+  );
   // Determine max items based on view mode
   const itemCount = viewMode === "minimal" ? 3 :
                     viewMode === "advanced" ? 15 : 7;
@@ -490,7 +509,10 @@ const TickerScoresPanelBase = ({
           e(StatusDot, {
             status: marketStatus,
             blinking: marketStatus === "working"
-          })
+          }),
+          e(Text, { color: "#334155" }, "│"),
+          e(Text, { color: "#475569", dimColor: true },
+            `last ${formatShortDateTime(tickerStatus?.lastRefresh)}`)
         )
       ),
       // Mini view column headers

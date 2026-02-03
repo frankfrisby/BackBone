@@ -10,6 +10,7 @@ import fs from "fs";
 import path from "path";
 import http from "http";
 import { openUrl } from "./open-url.js";
+import { initializeRemoteConfig } from "./firebase-config.js";
 
 const DATA_DIR = path.join(process.cwd(), "data");
 const GOOGLE_TOKEN_FILE = path.join(DATA_DIR, "google-email-tokens.json");
@@ -344,7 +345,8 @@ const getMicrosoftAccessToken = async () => {
 /**
  * Start OAuth flow with local callback server
  */
-export const startOAuthFlow = (provider) => {
+export const startOAuthFlow = async (provider) => {
+  await initializeRemoteConfig();
   return new Promise((resolve, reject) => {
     const authUrl = provider === "google" ? getGoogleAuthUrl() : getMicrosoftAuthUrl();
 
@@ -410,6 +412,42 @@ export const startOAuthFlow = (provider) => {
 // Google API Calls
 // ============================================================================
 
+const decodeBase64Url = (value) => {
+  if (!value) return "";
+  try {
+    const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized + "=".repeat((4 - (normalized.length % 4)) % 4);
+    return Buffer.from(padded, "base64").toString("utf-8");
+  } catch {
+    return "";
+  }
+};
+
+const extractGmailText = (payload) => {
+  if (!payload) return { text: "", html: "" };
+  const stack = [payload];
+  let text = "";
+  let html = "";
+
+  while (stack.length) {
+    const part = stack.pop();
+    if (!part) continue;
+    if (part.parts && Array.isArray(part.parts)) {
+      stack.push(...part.parts);
+      continue;
+    }
+    const mimeType = part.mimeType || "";
+    const data = part.body?.data;
+    if (!data) continue;
+    const decoded = decodeBase64Url(data);
+    if (!decoded) continue;
+    if (mimeType === "text/plain" && !text) text = decoded;
+    if (mimeType === "text/html" && !html) html = decoded;
+  }
+
+  return { text, html };
+};
+
 /**
  * Fetch Gmail messages
  */
@@ -434,7 +472,7 @@ export const fetchGmailMessages = async (maxResults = 20) => {
   const messages = await Promise.all(
     listData.messages.slice(0, 10).map(async (msg) => {
       const response = await fetch(
-        `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date`,
+        `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}?format=full`,
         { headers: { Authorization: `Bearer ${accessToken}` } }
       );
       if (!response.ok) return null;
@@ -442,6 +480,7 @@ export const fetchGmailMessages = async (maxResults = 20) => {
 
       const headers = data.payload?.headers || [];
       const getHeader = (name) => headers.find(h => h.name === name)?.value || "";
+      const { text, html } = extractGmailText(data.payload);
 
       return {
         id: data.id,
@@ -450,6 +489,8 @@ export const fetchGmailMessages = async (maxResults = 20) => {
         subject: getHeader("Subject"),
         date: getHeader("Date"),
         snippet: data.snippet,
+        bodyText: text,
+        bodyHtml: html,
         isUnread: data.labelIds?.includes("UNREAD")
       };
     })
@@ -462,42 +503,62 @@ export const fetchGmailMessages = async (maxResults = 20) => {
  * Fetch Google Calendar events
  */
 export const fetchGoogleCalendarEvents = async (daysAhead = 7) => {
+  return fetchAllGoogleCalendarEvents(daysAhead);
+};
+
+/**
+ * Fetch events from all Google calendars
+ */
+export const fetchAllGoogleCalendarEvents = async (daysAhead = 7, limitPerCalendar = 50) => {
   const accessToken = await getGoogleAccessToken();
   if (!accessToken) throw new Error("Google not configured");
 
+  const listResponse = await fetch(
+    "https://www.googleapis.com/calendar/v3/users/me/calendarList",
+    { headers: { Authorization: `Bearer ${accessToken}` } }
+  );
+  if (!listResponse.ok) {
+    throw new Error(`Google Calendar list error: ${listResponse.status}`);
+  }
+  const listData = await listResponse.json();
+  const calendars = listData.items || [];
+
   const now = new Date();
   const future = new Date(now.getTime() + daysAhead * 24 * 60 * 60 * 1000);
-
   const params = new URLSearchParams({
     timeMin: now.toISOString(),
     timeMax: future.toISOString(),
     singleEvents: "true",
     orderBy: "startTime",
-    maxResults: "50"
+    maxResults: String(limitPerCalendar)
   });
 
-  const response = await fetch(
-    `https://www.googleapis.com/calendar/v3/calendars/primary/events?${params}`,
-    { headers: { Authorization: `Bearer ${accessToken}` } }
-  );
+  const fetchCalendarEvents = async (calendar) => {
+    const response = await fetch(
+      `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendar.id)}/events?${params}`,
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+    if (!response.ok) {
+      return [];
+    }
+    const data = await response.json();
+    return (data.items || []).map(event => ({
+      id: event.id,
+      title: event.summary || "(No title)",
+      description: event.description,
+      location: event.location,
+      start: event.start?.dateTime || event.start?.date,
+      end: event.end?.dateTime || event.end?.date,
+      isAllDay: !event.start?.dateTime,
+      attendees: event.attendees?.map(a => ({ email: a.email, name: a.displayName, status: a.responseStatus })),
+      meetLink: event.hangoutLink || event.conferenceData?.entryPoints?.[0]?.uri,
+      calendarId: calendar.id,
+      calendarName: calendar.summary
+    }));
+  };
 
-  if (!response.ok) {
-    throw new Error(`Google Calendar API error: ${response.status}`);
-  }
-
-  const data = await response.json();
-
-  return (data.items || []).map(event => ({
-    id: event.id,
-    title: event.summary || "(No title)",
-    description: event.description,
-    location: event.location,
-    start: event.start?.dateTime || event.start?.date,
-    end: event.end?.dateTime || event.end?.date,
-    isAllDay: !event.start?.dateTime,
-    attendees: event.attendees?.map(a => ({ email: a.email, name: a.displayName, status: a.responseStatus })),
-    meetLink: event.hangoutLink || event.conferenceData?.entryPoints?.[0]?.uri
-  }));
+  const results = await Promise.all(calendars.map(fetchCalendarEvents));
+  return results.flat();
 };
 
 // ============================================================================
@@ -611,7 +672,7 @@ export const fetchAllCalendarEvents = async (daysAhead = 7) => {
 
   if (isGoogleEmailConfigured()) {
     try {
-      results.google = await fetchGoogleCalendarEvents(daysAhead);
+      results.google = await fetchAllGoogleCalendarEvents(daysAhead);
     } catch (err) {
       results.googleError = err.message;
     }

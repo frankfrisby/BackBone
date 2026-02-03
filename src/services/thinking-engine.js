@@ -746,6 +746,8 @@ function buildContext() {
   const backlog = loadBacklog();
   const roleModels = getRoleModels();
 
+  const knowledgeProfile = calculateDataCompleteness();
+
   return {
     profile,
     goalsMemory,
@@ -758,6 +760,7 @@ function buildContext() {
     projects,
     backlog,
     roleModels,
+    knowledgeProfile,
     timestamp: new Date().toISOString()
   };
 }
@@ -797,6 +800,18 @@ function buildThinkingPrompt(context) {
     .map(([k, v]) => `- ${k}: ${typeof v === "object" ? v.score || JSON.stringify(v) : v}`)
     .join("\n") || "No life scores.";
 
+  // Build knowledge profile text for the prompt
+  const kp = context.knowledgeProfile;
+  const domainLabels = {
+    profile: "Profile", goals: "Goals", beliefs: "Beliefs", financials: "Financials",
+    health: "Health", markets: "Markets", disaster: "Disaster", contacts: "Contacts",
+    projects: "Projects", backlog: "Backlog", lifeScores: "Life Scores",
+    thesis: "Thesis", research: "Research"
+  };
+  const knowledgeLines = Object.entries(kp.scores)
+    .map(([k, v]) => `- **${domainLabels[k] || k}**: ${v}/10${v <= 3 ? " ⚠ GAP" : ""}`)
+    .join("\n");
+
   return `You are the Thinking Engine for BACKBONE, a life optimization system.
 
 ## THE PIPELINE
@@ -807,6 +822,17 @@ function buildThinkingPrompt(context) {
 4. **Projects** → Goals connect to existing projects OR create new ones
 5. **Tasks** → Discrete work executed via Claude Code
 
+## KNOWLEDGE PROFILE — ${kp.percentage}%
+
+This is how much the AI knows about the user across all domains. **Prioritize filling gaps** (domains marked ⚠ GAP) when generating backlog items and goals.
+
+${knowledgeLines}
+
+**Overall: ${kp.percentage}% (${kp.total}/${kp.maxPossible})**
+${kp.percentage < 25 ? "\n⚠ KNOWLEDGE IS LOW — focus on data collection, connecting services, building profile." : ""}
+${kp.percentage >= 25 && kp.percentage < 50 ? "\nKnowledge is growing. Keep filling weak domains while maintaining strong ones." : ""}
+${kp.percentage >= 50 ? "\nKnowledge is solid. Focus on depth in weak areas and keeping strong areas current." : ""}
+
 ## IMPORTANT RULES
 
 - **Backlog items** are ideas, NOT commitments. Generate many.
@@ -814,6 +840,7 @@ function buildThinkingPrompt(context) {
 - **Projects** should be REUSED when possible, but NOT if stale (${PROJECT_STALE_DAYS}+ days old) for time-sensitive work.
 - **Time-sensitive** work (stock analysis, news-based decisions) needs FRESH projects.
 - Role models provide INSPIRATION for what kinds of ideas to generate.
+- **Prioritize GAP domains** — generate backlog items that would improve low-scoring knowledge areas.
 
 ## Current User Context
 
@@ -957,7 +984,7 @@ class ThinkingEngine extends EventEmitter {
 
     const interval = getAdaptiveCycleInterval();
     const { percentage } = calculateDataCompleteness();
-    console.log(`[ThinkingEngine] Started — data completeness ${percentage}%, interval ${interval / 60000} min`);
+    console.log(`[ThinkingEngine] Started — Knowledge Profile ${percentage}%, interval ${interval / 60000} min`);
 
     // Run first cycle after a short delay
     setTimeout(() => this.runCycle(), 10000);
@@ -1284,7 +1311,7 @@ ${result.insight || "No specific insight this cycle."}
 
   getStatus() {
     const backlog = loadBacklog();
-    const dataCompleteness = calculateDataCompleteness();
+    const knowledgeProfile = calculateDataCompleteness();
     const interval = getAdaptiveCycleInterval();
     return {
       isRunning: this.isRunning,
@@ -1292,7 +1319,7 @@ ${result.insight || "No specific insight this cycle."}
       lastCycle: this.lastCycle,
       nextCycleIn: this.cycleTimer ? (this.currentInterval || interval) : null,
       intervalMinutes: interval / 60000,
-      dataCompleteness,
+      knowledgeProfile,
       backlogStats: {
         total: backlog.items.length,
         highImpact: backlog.items.filter(i => i.impactScore >= GRADUATION_THRESHOLD).length,

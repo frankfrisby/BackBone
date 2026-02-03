@@ -69,6 +69,7 @@ const RightColumnBase = ({
   personalCapitalData,
   connectionStatuses = {},
   uiClock,
+  tradeAction,
 }) => {
   // Compute ticker scores for position action indicators
   const tickerScores = useMemo(() => {
@@ -103,6 +104,7 @@ const RightColumnBase = ({
       nextTradeTime: nextTradeTimeDisplay,
       privateMode,
       tickerScores,
+      tradeAction,
     }),
 
     // Trading History Panel (only in non-minimal mode)

@@ -1,26 +1,31 @@
 @echo off
 setlocal EnableDelayedExpansion
+chcp 65001 >nul 2>&1
 
 :: BACKBONE Engine Launcher
 
+:: ── Singleton check: exit if already running ──
+if exist "%~dp0data\.backbone.lock" (
+  for /f "tokens=2 delims=:," %%a in ('type "%~dp0data\.backbone.lock" 2^>nul ^| findstr "pid"') do (
+    set "LOCK_PID=%%~a"
+  )
+  if defined LOCK_PID (
+    set "LOCK_PID=!LOCK_PID: =!"
+    tasklist /FI "PID eq !LOCK_PID!" 2>nul | findstr /i "node" >nul 2>&1
+    if not errorlevel 1 (
+      exit
+    )
+  )
+)
+tasklist /FI "WINDOWTITLE eq BACKBONE ENGINE" 2>nul | findstr /i "cmd" >nul 2>&1
+if not errorlevel 1 (
+  exit
+)
+
 title BACKBONE ENGINE
 
-:: Set console buffer and resize window
-mode con: cols=140 lines=50
-:: Use PowerShell to resize the actual window to a large size
-powershell -NoProfile -Command "Add-Type @'
-using System; using System.Runtime.InteropServices;
-public class Win { [DllImport(\"user32.dll\")] public static extern IntPtr GetForegroundWindow(); [DllImport(\"user32.dll\")] public static extern bool MoveWindow(IntPtr h,int x,int y,int w,int h2,bool r); }
-'@; $w=[Win]::GetForegroundWindow(); [Win]::MoveWindow($w,50,20,1200,950,$true)" >nul 2>&1
-
-:: Enable ANSI escape sequences (Virtual Terminal Processing)
+:: Enable ANSI escape sequences
 reg add HKCU\Console /v VirtualTerminalLevel /t REG_DWORD /d 1 /f >nul 2>&1
-
-:: Set UTF-8 code page for proper character rendering
-chcp 65001 >nul 2>&1
-
-:: Dark theme colors (black background, orange text)
-color 06
 
 :: Change to script directory
 cd /d "%~dp0"
@@ -29,10 +34,9 @@ cd /d "%~dp0"
 node bin/backbone.js
 
 :: Handle errors
-if %errorlevel% neq 0 (
+if errorlevel 1 (
     echo.
-    echo   [ERROR] BACKBONE exited with code %errorlevel%
+    echo   [ERROR] BACKBONE exited with error
     echo.
-    echo   Press any key to close...
-    pause >nul
+    pause
 )

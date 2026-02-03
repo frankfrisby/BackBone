@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  backbone-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      # Firebase Configuration
+      - NEXT_PUBLIC_FIREBASE_API_KEY=${NEXT_PUBLIC_FIREBASE_API_KEY}
+      - NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=${NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN}
+      - NEXT_PUBLIC_FIREBASE_PROJECT_ID=${NEXT_PUBLIC_FIREBASE_PROJECT_ID}
+      - NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=${NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET}
+      - NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=${NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID}
+      - NEXT_PUBLIC_FIREBASE_APP_ID=${NEXT_PUBLIC_FIREBASE_APP_ID}
+
+      # BACKBONE API
+      - NEXT_PUBLIC_BACKBONE_API=${NEXT_PUBLIC_BACKBONE_API:-http://localhost:3001}
+
+      # Alpaca Trading API (optional)
+      - NEXT_PUBLIC_ALPACA_API_KEY=${NEXT_PUBLIC_ALPACA_API_KEY}
+      - NEXT_PUBLIC_ALPACA_SECRET_KEY=${NEXT_PUBLIC_ALPACA_SECRET_KEY}
+      - NEXT_PUBLIC_ALPACA_BASE_URL=${NEXT_PUBLIC_ALPACA_BASE_URL:-https://paper-api.alpaca.markets}
+    restart: unless-stopped
+    networks:
+      - backbone-network
+
+networks:
+  backbone-network:
+    driver: bridge

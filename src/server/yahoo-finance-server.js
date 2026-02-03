@@ -3,6 +3,7 @@ import fetch from "node-fetch";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import { calculateEffectiveScore } from "../services/score-engine.js";
 
 /**
  * Yahoo Finance Background Server
@@ -12,6 +13,7 @@ import { fileURLToPath } from "url";
 
 const app = express();
 const PORT = process.env.YAHOO_SERVER_PORT || 3001;
+let httpServer = null;
 
 // Data cache
 let tickerCache = {
@@ -26,6 +28,43 @@ let tickerCache = {
 
 // Flag to signal a running full scan to abort (used by force-restart)
 let scanAbortFlag = false;
+
+const BLACKLIST_PATH = path.join(process.cwd(), "data", "ticker-blacklist.json");
+let tickerBlacklist = new Set();
+
+const loadBlacklist = () => {
+  try {
+    if (fs.existsSync(BLACKLIST_PATH)) {
+      const data = JSON.parse(fs.readFileSync(BLACKLIST_PATH, "utf-8"));
+      if (Array.isArray(data)) {
+        tickerBlacklist = new Set(data);
+      }
+    }
+  } catch {
+    tickerBlacklist = new Set();
+  }
+};
+
+const saveBlacklist = () => {
+  try {
+    const dataDir = path.join(process.cwd(), "data");
+    if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
+    fs.writeFileSync(BLACKLIST_PATH, JSON.stringify(Array.from(tickerBlacklist), null, 2));
+  } catch {
+    // ignore
+  }
+};
+
+const getActiveUniverse = () => TICKER_UNIVERSE.filter(sym => !tickerBlacklist.has(sym));
+
+const blacklistTicker = (symbol, reason = "no_quote") => {
+  if (!symbol || tickerBlacklist.has(symbol)) return;
+  tickerBlacklist.add(symbol);
+  console.warn(`[Blacklist] ${symbol} removed from universe (${reason})`);
+  // Remove from cache so counts align
+  tickerCache.tickers = tickerCache.tickers.filter(t => t.symbol !== symbol);
+  saveBlacklist();
+};
 
 const YAHOO_FINANCE_BASE = "https://query1.finance.yahoo.com/v8/finance";
 const YAHOO_CHART_BASE = "https://query1.finance.yahoo.com/v8/finance/chart";
@@ -176,7 +215,7 @@ const fetchQuoteFromAlpaca = async (symbol) => {
 
 const fetchQuoteFromChart = async (symbol) => {
   try {
-    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=3mo`;
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=6mo`;
 
     const response = await fetch(url, {
       headers: {
@@ -235,6 +274,85 @@ const fetchQuoteFromChart = async (symbol) => {
     // Yahoo threw — try Alpaca fallback
     return await fetchQuoteFromAlpaca(symbol);
   }
+};
+
+const INTRADAY_CACHE_TTL_MS = 5 * 60 * 1000;
+const intradayCache = new Map();
+
+const fetchIntradayBars = async (symbol) => {
+  try {
+    const cached = intradayCache.get(symbol);
+    if (cached && (Date.now() - cached.timestamp) < INTRADAY_CACHE_TTL_MS) {
+      return cached.bars;
+    }
+
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1m&range=1d`;
+    const response = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+      }
+    });
+    if (!response.ok) return null;
+    const data = await response.json();
+    const result = data.chart?.result?.[0];
+    if (!result) return null;
+    const quotes = result.indicators?.quote?.[0] || {};
+    const closes = quotes.close || [];
+    const volumes = quotes.volume || [];
+    const timestamps = result.timestamp || [];
+
+    const bars = timestamps.map((t, i) => ({
+      t: t * 1000,
+      c: closes[i],
+      v: volumes[i]
+    })).filter(b => b.c != null && b.v != null);
+
+    intradayCache.set(symbol, { bars, timestamp: Date.now() });
+    return bars;
+  } catch (error) {
+    return null;
+  }
+};
+
+const calculateIntradayVolumeMultiplier = (bars) => {
+  if (!bars || bars.length < 10) return { intradayVolumeMultiplier: 0, recentPriceChange30min: null };
+
+  const PRICE_NOISE_THRESHOLD = 0.002; // 0.2%
+  const lastHourBars = bars.slice(-60);
+  const lastHourVolume = lastHourBars.reduce((sum, b) => sum + (b.v || 0), 0);
+
+  const last8HoursBars = bars.slice(-480);
+  if (last8HoursBars.length < 60) {
+    return { intradayVolumeMultiplier: 0, recentPriceChange30min: null };
+  }
+
+  let max8HourVolume = 0;
+  for (let i = 0; i <= last8HoursBars.length - 60; i++) {
+    const windowVol = last8HoursBars.slice(i, i + 60).reduce((sum, b) => sum + (b.v || 0), 0);
+    if (windowVol > max8HourVolume) max8HourVolume = windowVol;
+  }
+
+  const volumeMagnitude = max8HourVolume > 0 ? Math.min(1.0, lastHourVolume / max8HourVolume) : 0;
+
+  const firstBar = last8HoursBars[0];
+  const lastBar = last8HoursBars[last8HoursBars.length - 1];
+  const openPrice = firstBar.c;
+  const closePrice = lastBar.c;
+  const priceChange = openPrice ? (closePrice - openPrice) / openPrice : 0;
+
+  let directionSign = 0;
+  if (Math.abs(priceChange) > PRICE_NOISE_THRESHOLD) {
+    directionSign = priceChange > 0 ? 1 : -1;
+  }
+
+  const intradayVolumeMultiplier = volumeMagnitude * directionSign;
+
+  const last30Bars = bars.slice(-30);
+  const price30m = last30Bars.length >= 30 ? last30Bars[0].c : null;
+  const priceNow = bars[bars.length - 1]?.c ?? null;
+  const recentPriceChange30min = (price30m && priceNow) ? ((priceNow - price30m) / price30m) * 100 : null;
+
+  return { intradayVolumeMultiplier, recentPriceChange30min };
 };
 
 /**
@@ -313,7 +431,7 @@ const calculateEMA = (prices, period) => {
  * when it actually means momentum is fading (bearish).
  */
 const calculateMACD = (bars) => {
-  const nullResult = { macd: null, signal: null, histogram: null, trend: "neutral", histogramArray: null, macdLine: null, macdLineMin: null, macdLineMax: null };
+const nullResult = { macd: null, signal: null, histogram: null, trend: "neutral", histogramArray: null, macdLine: null, macdLineMin: null, macdLineMax: null, macdLineMin30d: null, macdLineMax30d: null, macdLineMin60d: null, macdLineMax60d: null, macdLineMin120d: null, macdLineMax120d: null };
   if (!bars || bars.length < 35) {
     return nullResult;
   }
@@ -354,15 +472,23 @@ const calculateMACD = (bars) => {
     }
   }
 
-  // Last 6 histogram values for slope-based scoring
-  // This enables score-engine to detect direction (rising vs falling)
-  // instead of just using the raw value (which is inverted at peaks)
+  // Last 16 histogram values for slope/cycle scoring (fallback to shorter if needed)
   let histogramArray = null;
-  if (histogramHistory.length >= 6) {
-    histogramArray = histogramHistory.slice(-6);
+  if (histogramHistory.length >= 16) {
+    histogramArray = histogramHistory.slice(-16);
   } else if (histogramHistory.length > 0) {
-    histogramArray = [...Array(6 - histogramHistory.length).fill(null), ...histogramHistory];
+    histogramArray = [...Array(16 - histogramHistory.length).fill(null), ...histogramHistory];
   }
+
+  const last30 = macdHistory.slice(-30);
+  const last60 = macdHistory.slice(-60);
+  const last120 = macdHistory.slice(-120);
+  const macdLineMin30d = last30.length > 0 ? Math.min(...last30) : null;
+  const macdLineMax30d = last30.length > 0 ? Math.max(...last30) : null;
+  const macdLineMin60d = last60.length > 0 ? Math.min(...last60) : null;
+  const macdLineMax60d = last60.length > 0 ? Math.max(...last60) : null;
+  const macdLineMin120d = last120.length > 0 ? Math.min(...last120) : null;
+  const macdLineMax120d = last120.length > 0 ? Math.max(...last120) : null;
 
   let trend = "neutral";
   if (macd > signal && histogram > 0) trend = "bullish";
@@ -376,7 +502,13 @@ const calculateMACD = (bars) => {
     histogramArray,
     macdLine: macd,
     macdLineMin: macdMin !== Infinity ? macdMin : null,
-    macdLineMax: macdMax !== -Infinity ? macdMax : null
+    macdLineMax: macdMax !== -Infinity ? macdMax : null,
+    macdLineMin30d,
+    macdLineMax30d,
+    macdLineMin60d,
+    macdLineMax60d,
+    macdLineMin120d,
+    macdLineMax120d
   };
 };
 
@@ -518,55 +650,18 @@ const calculatePsychological = (percentChange) => {
  * Falls back to simple histogram scoring only when histogramArray is unavailable.
  */
 const calculateMACDScore = (macdData) => {
-  if (!macdData || macdData.histogram === null) return 0;
+  if (!macdData || macdData.histogram == null) return 0;
 
-  // Slope-based analysis when histogram array is available
-  if (macdData.histogramArray && macdData.histogramArray.length >= 6) {
-    const slopeResult = calculateHistogramSlope(macdData.histogramArray);
+  const histogram = macdData.histogram;
+  const absHist = Math.abs(histogram);
+  if (absHist === 0) return 0;
 
-    if (slopeResult.isValid) {
-      const dirMultiplier = slopeResult.direction === "positive" ? 1 :
-                            slopeResult.direction === "negative" ? -1 : 0;
-      const scaledMag = Math.min(1, slopeResult.magnitude * 10);
-      let rawAdj = dirMultiplier * scaledMag;
+  // Normalize: closer to zero => higher magnitude. Negative histogram => positive score.
+  const normalized = 1 - Math.min(1, absHist / 1.0);
+  const direction = histogram < 0 ? 1 : -1;
+  const score = direction * normalized;
 
-      // Apply position-in-range factor if MACD line range is available
-      // Rewards mid-range positions, reduces score at extremes
-      if (macdData.macdLine != null && macdData.macdLineMin != null && macdData.macdLineMax != null) {
-        const range = macdData.macdLineMax - macdData.macdLineMin;
-        if (range > 0) {
-          const pos = (macdData.macdLine - macdData.macdLineMin) / range; // 0 to 1
-          // Peak factor: highest at mid-range (0.5), lowest at extremes (0 or 1)
-          const posFactor = 1 - Math.abs(pos - 0.5) * 1.2;
-          rawAdj *= Math.max(0.3, Math.min(1.0, posFactor));
-        }
-      }
-
-      return Math.max(-2.5, Math.min(2.5, rawAdj * 2.5));
-    }
-  }
-
-  // Fallback: simple histogram-based scoring (no slope data available)
-  const { histogram, macd, signal, trend } = macdData;
-
-  let score = 0;
-  if (histogram > 0.5) {
-    score = Math.min(1, histogram / 2);
-  } else if (histogram < -0.5) {
-    score = Math.max(-1, histogram / 2);
-  } else {
-    score = histogram / 0.5 * 0.5;
-  }
-
-  // Trend confirmation bonus
-  if (trend === "bullish" && macd > signal) {
-    score += 0.25;
-  } else if (trend === "bearish" && macd < signal) {
-    score -= 0.25;
-  }
-
-  // Reduced weight for fallback since we lack slope data
-  return Math.max(-1.5, Math.min(1.5, score * 1.5));
+  return Math.max(-2.5, Math.min(2.5, score * 2.5));
 };
 
 /**
@@ -761,43 +856,56 @@ const buildTickerAnalysis = async (symbol, quote) => {
   // 1. Technical Score (0-10) from RSI
   const technicalScore = (100 - Math.abs(50 - rsi)) / 10;
 
-  // 2. MACD Score (-2.5 to +2.5)
-  const macdScore = calculateMACDScore(macd);
+  // 2. Build inputs for full effective score (BackBoneApp-aligned)
+  const histArray = macd?.histogramArray || null;
+  const macd5dAgo = Array.isArray(histArray) && histArray.length >= 6 ? histArray[histArray.length - 6] : null;
+  const effectiveMacdScore = macd5dAgo != null && macd?.histogram != null
+    ? macd.histogram - macd5dAgo
+    : null;
+  const recentCloses = closes.length > 0 ? closes.slice(-60) : closes;
+  const price60dMin = recentCloses.length > 0 ? Math.min(...recentCloses) : null;
+  const price60dMax = recentCloses.length > 0 ? Math.max(...recentCloses) : null;
 
-  // 3. Volume Sigma Score (-1.5 to +1.5)
-  const volumeScore = calculateVolumeSigmaScore(volumeSigma, quote.regularMarketChangePercent);
+  const intraday = await fetchIntradayBars(symbol);
+  const intradayMetrics = calculateIntradayVolumeMultiplier(intraday);
 
-  // 4. Price Position Score (-1.5 to +1.5)
-  const pricePositionScore = calculatePricePosition(quote.regularMarketPrice, closes);
+  const breakdown = calculateEffectiveScore({
+    technicalScore,
+    predictionScore: 0.5,
+    percentChange: quote.regularMarketChangePercent || 0,
+    avgDirectional: 0,
+    avgPositive: 0,
+    predictionDate: null,
+    sigmaScore: volumeSigma,
+    intradayVolumeMultiplier: intradayMetrics.intradayVolumeMultiplier || 0,
+    recentPriceChange30min: intradayMetrics.recentPriceChange30min,
+    macdHistogramArray: histArray,
+    macdLine: macd?.macdLine ?? null,
+    macdSignal: macd?.signal ?? null,
+    macdLineMin30d: macd?.macdLineMin30d ?? null,
+    macdLineMax30d: macd?.macdLineMax30d ?? null,
+    macdLineMin60d: macd?.macdLineMin60d ?? null,
+    macdLineMax60d: macd?.macdLineMax60d ?? null,
+    macdLineMin120d: macd?.macdLineMin120d ?? null,
+    macdLineMax120d: macd?.macdLineMax120d ?? null,
+    macd: macd?.histogram ?? null,
+    macd5dAgo,
+    effectiveMacdScore,
+    currentPrice: quote.regularMarketPrice ?? null,
+    price60dMin,
+    price60dMax,
+    earningsDate: null
+  });
 
-  // 5. Psychological Adjustment (-3.5 to +3.5)
-  const psychologicalScore = calculatePsychological(quote.regularMarketChangePercent);
-
-  // 6. Price Movement Penalty (for extreme moves)
-  const priceMovementPenalty = calculatePriceMovementPenalty(quote.regularMarketChangePercent);
-
-  // Base score: average of technical and a neutral prediction (5.5) plus psychological
-  const baseScore = (technicalScore + 5.5 + psychologicalScore) / 2;
-
-  // Apply adjustments (matching BackBoneApp formula)
-  let rawScore = baseScore +
-    macdScore +
-    volumeScore +
-    (pricePositionScore * 1.25) +
-    priceMovementPenalty;  // Add extreme movement penalty
-
-  // Debug logging for score breakdown
-  if (quote.symbol === "ZS" || rawScore >= 9.5) {
-    console.log(`[Score Debug] ${quote.symbol}: tech=${technicalScore.toFixed(2)}, psych=${psychologicalScore.toFixed(2)}, base=${baseScore.toFixed(2)}, macd=${macdScore.toFixed(2)}, vol=${volumeScore.toFixed(2)}, pos=${pricePositionScore.toFixed(2)}, penalty=${priceMovementPenalty.toFixed(2)}, raw=${rawScore.toFixed(2)}`);
-  }
+  let score = breakdown.effectiveScore;
 
   // Penalize tickers with missing data — they shouldn't rank high
   if (isMissingData) {
-    rawScore = Math.min(rawScore, 2.0);
+    score = Math.min(score, 2.0);
   }
 
   // Clamp to 0-10 with 1 decimal
-  const score = Math.round(Math.max(0, Math.min(10, rawScore)) * 10) / 10;
+  score = Math.round(Math.max(0, Math.min(10, score)) * 10) / 10;
 
   return {
     symbol: quote.symbol,
@@ -820,6 +928,9 @@ const buildTickerAnalysis = async (symbol, quote) => {
     volumeSigma,
     rsi,
     score,
+    macdAdjustment: breakdown.macdAdjustment,
+    intradayVolumeMultiplier: intradayMetrics.intradayVolumeMultiplier || 0,
+    recentPriceChange30min: intradayMetrics.recentPriceChange30min,
     scoredAt: new Date().toISOString(),
     historyDays: closes.length
   };
@@ -902,6 +1013,13 @@ app.use(express.json());
 
 // Get all tickers
 app.get("/api/tickers", (req, res) => {
+  const activeUniverse = getActiveUniverse();
+  const evaluatedToday = tickerCache.tickers.filter(t => isTickerToday(t.lastEvaluated)).length;
+  let universeSize = activeUniverse.length;
+  // Always reflect the actual completed count when we have any evaluated today
+  if (evaluatedToday > 0) {
+    universeSize = evaluatedToday;
+  }
   res.json({
     success: true,
     tickers: tickerCache.tickers,
@@ -911,8 +1029,8 @@ app.get("/api/tickers", (req, res) => {
     lastFullScan: tickerCache.lastFullScan,
     scanProgress: tickerCache.scanProgress,
     scanTotal: tickerCache.scanTotal,
-    evaluatedToday: tickerCache.tickers.filter(t => isTickerToday(t.lastEvaluated)).length,
-    universeSize: TICKER_UNIVERSE.length
+    evaluatedToday,
+    universeSize
   });
 });
 
@@ -966,7 +1084,8 @@ app.post("/api/full-scan", async (req, res) => {
     tickerCache.lastFullScan = null;
   }
 
-  res.json({ success: true, message: `Full scan ${force ? "restarted" : "started"} for ${TICKER_UNIVERSE.length} tickers`, force });
+  const activeUniverse = getActiveUniverse();
+  res.json({ success: true, message: `Full scan ${force ? "restarted" : "started"} for ${activeUniverse.length} tickers`, force });
   runFullScan();
 });
 
@@ -981,6 +1100,19 @@ app.get("/health", (req, res) => {
   });
 });
 
+// Shutdown endpoint (used to restart server on CLI startup)
+app.post("/api/shutdown", (req, res) => {
+  res.json({ success: true, message: "Shutting down" });
+  if (httpServer) {
+    httpServer.close(() => {
+      process.exit(0);
+    });
+    setTimeout(() => process.exit(0), 2000);
+  } else {
+    process.exit(0);
+  }
+});
+
 // Load cached data on startup
 const loadCache = () => {
   try {
@@ -990,7 +1122,7 @@ const loadCache = () => {
       // Restore data but reset runtime flags (may be stale from killed process)
       const rawTickers = data.tickers || [];
       // Purge orphan tickers, non-major exchanges, delisted, penny stocks
-      const universeSet = new Set(TICKER_UNIVERSE);
+      const universeSet = new Set(getActiveUniverse());
       tickerCache.tickers = rawTickers.filter(t => {
         if (!universeSet.has(t.symbol)) return false;
         const check = isActiveTicker(t);
@@ -1022,9 +1154,10 @@ const runFullScan = async () => {
     return;
   }
 
+  const activeUniverse = getActiveUniverse();
   tickerCache.fullScanRunning = true;
   tickerCache.scanProgress = 0;
-  const totalCount = TICKER_UNIVERSE.length;
+  const totalCount = activeUniverse.length;
   console.log(`[${new Date().toISOString()}] FULL SCAN started — ${totalCount} real tickers...`);
 
   try {
@@ -1035,7 +1168,7 @@ const runFullScan = async () => {
     }
 
     // Figure out which tickers need evaluation (not evaluated in current ticker day, 4 AM to 4 AM)
-    const needsEval = TICKER_UNIVERSE.filter(sym => {
+    const needsEval = activeUniverse.filter(sym => {
       const existing = existingMap.get(sym);
       if (!existing || !existing.lastEvaluated) return true;
       return !isTickerToday(existing.lastEvaluated);
@@ -1057,6 +1190,7 @@ const runFullScan = async () => {
     // Fetch in batches of 5
     let evaluated = 0;
     let aborted = false;
+    const missingQuotes = [];
     for (let i = 0; i < needsEval.length; i += 5) {
       // Check abort flag (set by force-restart)
       if (scanAbortFlag) {
@@ -1067,20 +1201,37 @@ const runFullScan = async () => {
 
       const batch = needsEval.slice(i, i + 5);
       const batchQuotes = await Promise.all(batch.map(fetchQuoteFromChart));
+      const nowISO = new Date().toISOString();
 
-      for (const quote of batchQuotes) {
-        if (!quote) continue;
+      for (let j = 0; j < batch.length; j++) {
+        const symbol = batch[j];
+        const quote = batchQuotes[j];
+        if (!quote) {
+          blacklistTicker(symbol, "no_quote_full_scan");
+          missingQuotes.push(symbol);
+          if (tickerCache.scanTotal > 0) {
+            tickerCache.scanTotal = Math.max(0, tickerCache.scanTotal - 1);
+          }
+          existingMap.delete(symbol);
+          evaluated++;
+          tickerCache.scanProgress = evaluated;
+          continue;
+        }
         try {
           const analysis = await buildTickerAnalysis(quote.symbol, quote);
           const check = isActiveTicker(analysis);
           if (!check.valid) {
             console.log(`[Skip] ${analysis.symbol} — ${check.reason}`);
+            blacklistTicker(analysis.symbol, check.reason);
+            if (tickerCache.scanTotal > 0) {
+              tickerCache.scanTotal = Math.max(0, tickerCache.scanTotal - 1);
+            }
             existingMap.delete(analysis.symbol);
             evaluated++;
             tickerCache.scanProgress = evaluated;
             continue;
           }
-          analysis.lastEvaluated = new Date().toISOString();
+          analysis.lastEvaluated = nowISO;
           existingMap.set(analysis.symbol, analysis);
           evaluated++;
           tickerCache.scanProgress = evaluated;
@@ -1094,6 +1245,11 @@ const runFullScan = async () => {
         console.log(`[Full scan] ${evaluated}/${needsEval.length} evaluated...`);
       }
 
+      // Update live cache ordering so top lists reflect latest scores mid-sweep
+      const liveTickers = Array.from(existingMap.values()).sort((a, b) => (b.score || 0) - (a.score || 0));
+      tickerCache.tickers = liveTickers;
+      tickerCache.lastUpdate = new Date().toISOString();
+
       // Small delay between batches to avoid rate limits
       if (i + 5 < needsEval.length) {
         await new Promise(r => setTimeout(r, 300));
@@ -1104,6 +1260,11 @@ const runFullScan = async () => {
     const allTickers = Array.from(existingMap.values()).sort((a, b) => b.score - a.score);
     tickerCache.tickers = allTickers;
     tickerCache.lastUpdate = new Date().toISOString();
+
+    if (missingQuotes.length > 0) {
+      const sample = missingQuotes.slice(0, 5).join(", ");
+      console.warn(`[Full scan] Missing quotes for ${missingQuotes.length} tickers (sample: ${sample})`);
+    }
 
     if (aborted) {
       console.log(`[${new Date().toISOString()}] FULL SCAN aborted — saved ${evaluated} partial results. ${allTickers.length} total tickers in cache.`);
@@ -1179,7 +1340,7 @@ const reset4amSweep = () => {
     JSON.stringify(tickerCache, null, 2)
   );
 
-  console.log(`[${new Date().toISOString()}] 4AM RESET complete — sweep counter now 0/${TICKER_UNIVERSE.length}`);
+  console.log(`[${new Date().toISOString()}] 4AM RESET complete — sweep counter now 0/${getActiveUniverse().length}`);
 
   // Optionally start the full scan automatically at 4am
   // Uncomment if you want auto-scan at 4am:
@@ -1188,16 +1349,17 @@ const reset4amSweep = () => {
 
 // Start server
 const startServer = () => {
+  loadBlacklist();
   loadCache();
 
-  app.listen(PORT, () => {
+  httpServer = app.listen(PORT, () => {
     console.log(`Yahoo Finance Server running on http://localhost:${PORT}`);
-    console.log(`Ticker universe: ${TICKER_UNIVERSE.length} real symbols`);
+    console.log(`Ticker universe: ${getActiveUniverse().length} real symbols`);
     console.log(`Endpoints:`);
     console.log(`  GET  /api/tickers - Get all tickers`);
     console.log(`  GET  /api/ticker/:symbol - Get single ticker`);
     console.log(`  POST /api/refresh - Force refresh (top ${CORE_TICKERS.length})`);
-    console.log(`  POST /api/full-scan - Full scan all ${TICKER_UNIVERSE.length} tickers`);
+    console.log(`  POST /api/full-scan - Full scan all ${getActiveUniverse().length} tickers`);
     console.log(`  GET  /health - Health check`);
   });
 

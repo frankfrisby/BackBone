@@ -2,20 +2,13 @@
  * Firebase Remote Configuration Service
  * Fetches SYSTEM-LEVEL app configuration from Firebase Firestore
  *
- * System-level keys (stored in Firebase - same for all users):
- *   config/config_plaid -> { clientId, secret, env }
- *   config/config_google -> { clientId, clientSecret }
- *
- * User-level keys (stored locally in .env - unique per user):
- *   - Alpaca (trading account)
- *   - OpenAI (personal API key)
+ * All keys live in Firebase — fetched at runtime, held in memory only.
+ * No secrets are written to disk.
  */
 
 import fs from "node:fs";
 import path from "node:path";
-
-const DATA_DIR = path.join(process.cwd(), "data");
-const CONFIG_CACHE_PATH = path.join(DATA_DIR, ".firebase-remote-config.json");
+import { loadFirebaseUser } from "./firebase-auth.js";
 
 // Firebase project config (same as firebase-auth.js)
 export const FIREBASE_CONFIG = {
@@ -32,45 +25,17 @@ export const FIRESTORE_BASE_URL = `https://firestore.googleapis.com/v1/projects/
 // Cache duration (10 minutes) - fetches fresh config periodically
 const CACHE_DURATION = 10 * 60 * 1000;
 
+// In-memory only — no secrets written to disk
 let configCache = null;
 let lastFetchTime = 0;
 
-/**
- * Ensure data directory exists
- */
-const ensureDataDir = () => {
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
+// Clean up any legacy disk cache that may contain secrets
+const LEGACY_CACHE_PATH = path.join(process.cwd(), "data", ".firebase-remote-config.json");
+try {
+  if (fs.existsSync(LEGACY_CACHE_PATH)) {
+    fs.unlinkSync(LEGACY_CACHE_PATH);
   }
-};
-
-/**
- * Load cached config from disk
- */
-const loadCachedConfig = () => {
-  try {
-    if (fs.existsSync(CONFIG_CACHE_PATH)) {
-      const data = JSON.parse(fs.readFileSync(CONFIG_CACHE_PATH, "utf-8"));
-      if (data.fetchedAt && Date.now() - new Date(data.fetchedAt).getTime() < CACHE_DURATION) {
-        return data.config;
-      }
-    }
-  } catch (e) {}
-  return null;
-};
-
-/**
- * Save config to disk cache
- */
-const saveCachedConfig = (config) => {
-  try {
-    ensureDataDir();
-    fs.writeFileSync(CONFIG_CACHE_PATH, JSON.stringify({
-      config,
-      fetchedAt: new Date().toISOString()
-    }, null, 2));
-  } catch (e) {}
-};
+} catch (e) {}
 
 /**
  * Parse Firestore document fields to plain object
@@ -106,7 +71,12 @@ const parseFirestoreFields = (fields) => {
 const fetchFirestoreDoc = async (collection, docId) => {
   try {
     const url = `${FIRESTORE_BASE_URL}/${collection}/${docId}?key=${FIREBASE_CONFIG.apiKey}`;
-    const response = await fetch(url);
+    const user = loadFirebaseUser();
+    const headers = {};
+    if (user?.idToken) {
+      headers.Authorization = `Bearer ${user.idToken}`;
+    }
+    const response = await fetch(url, { headers });
 
     if (!response.ok) {
       if (response.status === 404) {
@@ -128,7 +98,7 @@ const fetchFirestoreDoc = async (collection, docId) => {
 };
 
 /**
- * Generic fetch config helper
+ * Generic fetch config helper — memory cache only, no disk writes
  */
 const fetchConfigWithFallback = async (configName, envFallback = {}) => {
   // Check memory cache first
@@ -136,22 +106,12 @@ const fetchConfigWithFallback = async (configName, envFallback = {}) => {
     return configCache[configName];
   }
 
-  // Check disk cache
-  const cached = loadCachedConfig();
-  if (cached?.[configName]) {
-    configCache = cached;
-    lastFetchTime = Date.now();
-    return cached[configName];
-  }
-
-  // Fetch from Firebase
+  // Fetch from Firebase (no disk cache)
   const config = await fetchFirestoreDoc("config", configName);
 
   if (config && Object.keys(config).length > 0) {
-    // Update cache
     configCache = { ...configCache, [configName]: config };
     lastFetchTime = Date.now();
-    saveCachedConfig(configCache);
     return config;
   }
 
@@ -224,6 +184,40 @@ export const fetchTwilioConfig = async () => {
 };
 
 /**
+ * Fetch Vapi configuration from Firebase (system-level)
+ * Document: config/config_vapi
+ * Expected fields: privateKey, publicKey, phoneNumberId, userPhoneNumber
+ */
+export const fetchVapiConfig = async () => {
+  const config = await fetchConfigWithFallback("config_vapi", {
+    privateKey: process.env.VAPI_PRIVATE_KEY,
+    publicKey: process.env.VAPI_PUBLIC_KEY,
+    phoneNumberId: process.env.VAPI_PHONE_NUMBER_ID,
+  });
+
+  // Handle common field name variations
+  if (config) {
+    if (config.private_key && !config.privateKey) {
+      config.privateKey = config.private_key;
+    }
+    if (config.public_key && !config.publicKey) {
+      config.publicKey = config.public_key;
+    }
+    if (config.phone_number_id && !config.phoneNumberId) {
+      config.phoneNumberId = config.phone_number_id;
+    }
+    if (config.default_voice_provider && !config.defaultVoiceProvider) {
+      config.defaultVoiceProvider = config.default_voice_provider;
+    }
+    if (config.default_voice_id && !config.defaultVoiceId) {
+      config.defaultVoiceId = config.default_voice_id;
+    }
+  }
+
+  return config;
+};
+
+/**
  * Fetch all app configuration from Firebase
  */
 export const fetchAppConfig = async () => {
@@ -232,15 +226,7 @@ export const fetchAppConfig = async () => {
     return configCache;
   }
 
-  // Check disk cache
-  const cached = loadCachedConfig();
-  if (cached) {
-    configCache = cached;
-    lastFetchTime = Date.now();
-    return cached;
-  }
-
-  // Fetch from Firebase
+  // Fetch from Firebase (no disk cache)
   const [plaidConfig, appConfig] = await Promise.all([
     fetchFirestoreDoc("config", "plaid"),
     fetchFirestoreDoc("config", "app")
@@ -255,11 +241,8 @@ export const fetchAppConfig = async () => {
     app: appConfig || {}
   };
 
-  // Update cache
   configCache = config;
   lastFetchTime = Date.now();
-  saveCachedConfig(config);
-
   return config;
 };
 
@@ -269,11 +252,6 @@ export const fetchAppConfig = async () => {
 export const clearConfigCache = () => {
   configCache = null;
   lastFetchTime = 0;
-  try {
-    if (fs.existsSync(CONFIG_CACHE_PATH)) {
-      fs.unlinkSync(CONFIG_CACHE_PATH);
-    }
-  } catch (e) {}
 };
 
 /**
@@ -320,6 +298,7 @@ export default {
   fetchPlaidConfig,
   fetchGoogleConfig,
   fetchTwilioConfig,
+  fetchVapiConfig,
   fetchAppConfig,
   clearConfigCache,
   isPlaidConfigured,

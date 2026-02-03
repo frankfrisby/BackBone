@@ -21,6 +21,7 @@ import { getTwilioWhatsApp } from "./twilio-whatsapp.js";
 import { getUnifiedMessageLog, MESSAGE_CHANNEL } from "./unified-message-log.js";
 import { getVerifiedPhone } from "./phone-auth.js";
 import { showNotificationTitle, restoreBaseTitle } from "./terminal-resize.js";
+import { sendPush, sendMorningBriefPush, sendTradeAlertPush, getPushStatus, PUSH_TYPE } from "./push-notifications.js";
 
 /**
  * Notification types
@@ -182,10 +183,33 @@ class WhatsAppNotifications extends EventEmitter {
         this.emit("notification-sent", { type, message, messageId: result.messageId });
       }
 
+      // Also send via push notification
+      try {
+        await sendPush(null, {
+          title: "BACKBONE",
+          body: message.substring(0, 200),
+          type: options.pushType || PUSH_TYPE.SYSTEM_ALERT
+        });
+      } catch (pushErr) {
+        // Push is best-effort, don't fail the whole notification
+      }
+
       return result;
 
     } catch (error) {
       console.error("[WhatsAppNotifications] Send error:", error.message);
+
+      // Fallback: try push even if WhatsApp failed
+      try {
+        await sendPush(null, {
+          title: "BACKBONE",
+          body: message.substring(0, 200),
+          type: options.pushType || PUSH_TYPE.SYSTEM_ALERT
+        });
+      } catch (pushErr) {
+        // Best-effort
+      }
+
       return { success: false, error: error.message };
     }
   }
@@ -227,12 +251,20 @@ class WhatsAppNotifications extends EventEmitter {
     const { symbol, action, quantity, price, total } = trade;
     const actionWord = action === "buy" ? "Bought" : "Sold";
 
+    // Also send as push notification
+    try {
+      await sendTradeAlertPush(trade);
+    } catch (pushErr) {
+      // Best-effort
+    }
+
     return this.send(NOTIFICATION_TYPE.TRADE,
       `${actionWord} ${quantity} ${symbol} @ $${price.toFixed(2)}\nTotal: $${total.toFixed(2)}`,
       {
         identifier: `${symbol}_${action}_${Date.now()}`,
         priority: NOTIFICATION_PRIORITY.HIGH,
-        metadata: trade
+        metadata: trade,
+        pushType: PUSH_TYPE.TRADE_ALERT
       }
     );
   }
@@ -341,8 +373,16 @@ class WhatsAppNotifications extends EventEmitter {
     const result = await this.send(NOTIFICATION_TYPE.MORNING_BRIEF, message, {
       identifier: `morning_${today}`,
       priority: NOTIFICATION_PRIORITY.NORMAL,
-      allowDuplicate: false
+      allowDuplicate: false,
+      pushType: PUSH_TYPE.MORNING_BRIEF
     });
+
+    // Also send as push notification
+    try {
+      await sendMorningBriefPush(brief);
+    } catch (pushErr) {
+      // Best-effort
+    }
 
     if (result.success) {
       this.lastMorningBrief = today;

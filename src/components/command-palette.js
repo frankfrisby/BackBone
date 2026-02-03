@@ -82,13 +82,14 @@ const CommandPaletteBase = ({
 
     return {
       value,
-      label: item.label || value,
+      label: (value && value.startsWith("/") && item.label && !item.label.startsWith("/")) ? value : (item.label || value),
       description: item.description || COMMAND_DESCRIPTIONS[value] || "",
       recommended: Boolean(item.recommended)
     };
   });
 
-  const visibleItems = normalizedItems.slice(0, 8);
+  const maxVisible = 18;
+  const visibleItems = normalizedItems.slice(0, maxVisible);
   const headerColor = isFocused ? "#f59e0b" : "#64748b";
   const borderColor = isFocused ? "#334155" : "#1e293b";
 
@@ -124,6 +125,7 @@ const CommandPaletteBase = ({
 
       // Find the longest label for consistent padding
       const maxLabelLen = Math.max(...visibleItems.map(i => i.label.length), 14);
+      const cmdColWidth = maxLabelLen + 2;
 
       return e(
         Box,
@@ -139,7 +141,7 @@ const CommandPaletteBase = ({
         e(
           Text,
           { color: isActive ? "#f59e0b" : "#334155", bold: isActive },
-          isActive ? "▸ " : "  "
+          isActive ? " " : "  "
         ),
         // Icon
         e(
@@ -147,20 +149,17 @@ const CommandPaletteBase = ({
           { color: isActive ? cmdColor : "#475569" },
           `${icon} `
         ),
-        // Command name
+        // Command name column (fixed width)
         e(
-          Text,
-          { color: isActive ? "#f8fafc" : "#e2e8f0", bold: isActive },
-          item.label.padEnd(maxLabelLen + 2)
-        ),
-        // Recommended badge
-        item.recommended &&
+          Box,
+          { width: cmdColWidth },
           e(
             Text,
-            { color: "#a78bfa" },
-            "★ "
-          ),
-        // Description (dimmer, takes remaining space)
+            { color: isActive ? "#f8fafc" : "#e2e8f0", bold: isActive },
+            item.label
+          )
+        ),
+        // Description column (single line, truncated)
         e(
           Box,
           { flexGrow: 1 },
@@ -169,14 +168,21 @@ const CommandPaletteBase = ({
             { color: isActive ? "#94a3b8" : "#64748b", wrap: "truncate" },
             item.description
           )
-        )
+        ),
+        // Recommended badge
+        item.recommended &&
+          e(
+            Text,
+            { color: "#a78bfa" },
+            " "
+          )
       );
     }),
-    // More items indicator
-    normalizedItems.length > 8 && e(
+// More items indicator
+    normalizedItems.length > maxVisible && e(
       Box,
       { marginTop: 1, paddingX: 1 },
-      e(Text, { color: "#475569" }, `↓ ${normalizedItems.length - 8} more...`)
+      e(Text, { color: "#475569" }, `↓ ${normalizedItems.length - maxVisible} more...`)
     ),
     // Footer hint
     e(

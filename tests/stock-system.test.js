@@ -293,10 +293,35 @@ if (serverRunning) {
     assert(typeof success === "boolean", "Should return boolean");
   });
 
-  await asyncTest("Server /api/full-scan triggers scan", async () => {
+await asyncTest("Server /api/full-scan triggers scan", async () => {
     const result = await triggerFullScan();
     assert(result, "Should return result");
     assert(result.success !== undefined || result.message, "Should have success or message");
+  });
+
+  await asyncTest("Full scan updates cache timestamps", async () => {
+    const cachePath = path.join(DATA_DIR, "tickers-cache.json");
+    const before = JSON.parse(fs.readFileSync(cachePath, "utf-8"));
+    const beforeUpdate = before.lastUpdate ? new Date(before.lastUpdate).getTime() : 0;
+    const beforeScan = before.lastFullScan ? new Date(before.lastFullScan).getTime() : 0;
+
+    await triggerFullScan(true);
+
+    const deadline = Date.now() + 3 * 60 * 1000; // up to 3 minutes
+    let updated = false;
+
+    while (Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, 5000));
+      const after = JSON.parse(fs.readFileSync(cachePath, "utf-8"));
+      const afterUpdate = after.lastUpdate ? new Date(after.lastUpdate).getTime() : 0;
+      const afterScan = after.lastFullScan ? new Date(after.lastFullScan).getTime() : 0;
+      if (afterUpdate > beforeUpdate || afterScan > beforeScan) {
+        updated = true;
+        break;
+      }
+    }
+
+    assert(updated, "Cache timestamps did not update after full scan");
   });
 
   await asyncTest("Server reports scan progress correctly", async () => {

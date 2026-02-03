@@ -212,12 +212,16 @@ const generateSignInPage = (firebaseConfig) => {
       statusEl.textContent = 'Success! This tab will close automatically.';
       statusEl.className = 'status success';
 
+      const token = await user.getIdToken();
+      const tokenResult = await user.getIdTokenResult();
       const userData = {
         id: user.uid,
         email: user.email,
         name: user.displayName,
         picture: user.photoURL,
-        verified: user.emailVerified
+        verified: user.emailVerified,
+        idToken: token,
+        tokenExpiresAt: tokenResult?.expirationTime || null
       };
 
       await fetch('/auth/callback', {
@@ -521,6 +525,8 @@ export const signInWithGoogle = async () => {
               name: userData.name,
               picture: userData.picture,
               verified: userData.verified,
+              idToken: userData.idToken,
+              tokenExpiresAt: userData.tokenExpiresAt,
               signedInAt: new Date().toISOString()
             };
 
@@ -598,7 +604,12 @@ export const loadFirebaseUser = () => {
  * Get current Firebase user
  */
 export const getCurrentFirebaseUser = () => {
-  return loadFirebaseUser();
+  const user = loadFirebaseUser();
+  if (user?.tokenExpiresAt) {
+    const expiresAt = new Date(user.tokenExpiresAt).getTime();
+    user.tokenExpired = Number.isFinite(expiresAt) ? Date.now() > expiresAt - 30000 : false;
+  }
+  return user;
 };
 
 /**

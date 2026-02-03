@@ -1,6 +1,7 @@
 import fetch from "node-fetch";
 import { getAPIQuotaMonitor } from "./api-quota-monitor.js";
 import { hasValidCredentials as hasCodexCredentials } from "./codex-oauth.js";
+import { getClaudeCodeStatus, runClaudeCodeStreaming } from "./claude-code-cli.js";
 
 /**
  * Parse OpenAI API error response and return a clean message
@@ -487,6 +488,34 @@ export const sendToClaude = async (message, context = {}, stream = false) => {
   return data.content?.[0]?.text || "";
 };
 
+const sendToClaudeCodeCLI = async (message, context = {}, taskType = TASK_TYPES.STANDARD) => {
+  const systemPrompt = getSystemPrompt(context, taskType);
+  const prompt = `${systemPrompt}\n\nUSER:\n${message}`;
+  const stream = await runClaudeCodeStreaming(prompt, { cwd: process.cwd() });
+
+  return new Promise((resolve, reject) => {
+    let output = "";
+    let done = false;
+
+    const finalize = (result) => {
+      if (done) return;
+      done = true;
+      const finalText = (result?.output || output || "").trim();
+      resolve(finalText);
+    };
+
+    stream.on("data", (text) => {
+      output = text || output;
+    });
+    stream.on("complete", (result) => finalize(result));
+    stream.on("error", (err) => {
+      if (done) return;
+      done = true;
+      reject(new Error(err?.error || "Claude Code CLI error"));
+    });
+  });
+};
+
 /**
  * Auto-detect task type from message
  */
@@ -545,6 +574,19 @@ export const sendMessage = async (message, context = {}, taskType = "auto") => {
     taskType = detectTaskType(message);
   }
   lastTaskType = taskType;
+
+  // Prefer Claude Code CLI for all queries when available
+  const claudeCodeStatus = await getClaudeCodeStatus();
+  if (claudeCodeStatus.ready) {
+    currentModel = MODELS.CLAUDE_CODE_CLI;
+    const response = await sendToClaudeCodeCLI(message, context, taskType);
+    return {
+      model: "claude-code",
+      modelInfo: MODELS.CLAUDE_CODE_CLI,
+      taskType,
+      response
+    };
+  }
 
   // Route to appropriate model
   let modelConfig;

@@ -31,6 +31,14 @@
     "backbone-projects": {
       "command": "node",
       "args": ["src/mcp/projects-server.js"]
+    },
+    "backbone-vapi": {
+      "command": "node",
+      "args": ["src/mcp/vapi-server.js"]
+    },
+    "backbone-youtube": {
+      "command": "node",
+      "args": ["src/mcp/youtube-server.js"]
     }
   }
 }

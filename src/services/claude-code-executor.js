@@ -26,6 +26,7 @@ const MCP_TOOLS = [
   "mcp__backbone-health",
   "mcp__backbone-trading",
   "mcp__backbone-projects",
+  "mcp__backbone-vapi",
 ];
 
 // Tool permission levels

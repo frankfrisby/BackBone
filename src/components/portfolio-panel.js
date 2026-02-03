@@ -318,7 +318,8 @@ const PortfolioPanelBase = ({
   lastUpdatedAgo,
   nextTradeTime,
   privateMode = false,
-  tickerScores = {}
+  tickerScores = {},
+  tradeAction
 }) => {
   // Ensure portfolio has default values
   const portfolio = {
@@ -422,7 +423,11 @@ const PortfolioPanelBase = ({
         Box,
         { flexDirection: "row", gap: 1 },
         e(Text, { color: getStatusColor(portfolio.status) }, getStatusDot(portfolio.status)),
-        e(Text, { color: COLORS.dim }, portfolio.mode)
+        e(Text, { color: COLORS.dim }, portfolio.mode),
+        // Trade action indicator: ✓ green for trades, ✗ red with reason when idle
+        tradeAction && tradeAction.type === "trade" && e(Text, { color: "#22c55e" }, `\u2713 ${tradeAction.text}`),
+        tradeAction && tradeAction.type === "no-trade" && e(Text, { color: "#ef4444" }, `\u2717 ${tradeAction.text}`),
+        tradeAction && tradeAction.type === "idle" && e(Text, { color: "#64748b" }, `\u2013 ${tradeAction.text}`)
       )
     ),
 

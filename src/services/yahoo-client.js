@@ -73,6 +73,31 @@ export const startServer = async () => {
 };
 
 /**
+ * Restart Yahoo Finance server to ensure latest code is running
+ */
+export const restartServer = async () => {
+  try {
+    if (await isServerRunning()) {
+      try {
+        await fetch(`${SERVER_URL}/api/shutdown`, { method: "POST" });
+      } catch {
+        // ignore shutdown errors
+      }
+      // Wait for shutdown
+      const deadline = Date.now() + 4000;
+      while (Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, 200));
+        if (!(await isServerRunning())) break;
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  return startServer();
+};
+
+/**
  * Fetch tickers from server
  */
 export const fetchTickers = async () => {

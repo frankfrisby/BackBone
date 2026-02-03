@@ -194,25 +194,6 @@ export const PRIORITY_LEVELS = {
   SOMEDAY: 5
 };
 
-// Default goals for new users
-export const DEFAULT_GOALS = [
-  {
-    ...GOAL_TEMPLATES.WEALTH_1M,
-    title: "Turn $1,000 into $1,000,000",
-    priority: PRIORITY_LEVELS.CRITICAL,
-    startValue: 1000,
-    currentValue: 1000
-  },
-  {
-    ...GOAL_TEMPLATES.SLEEP_OPTIMIZATION,
-    priority: PRIORITY_LEVELS.HIGH
-  },
-  {
-    ...GOAL_TEMPLATES.QUALITY_TIME,
-    priority: PRIORITY_LEVELS.HIGH
-  }
-];
-
 /**
  * Calculate progress percentage
  */
@@ -313,7 +294,6 @@ export default {
   GOAL_CATEGORIES,
   GOAL_TEMPLATES,
   PRIORITY_LEVELS,
-  DEFAULT_GOALS,
   calculateProgress,
   formatCurrency,
   formatGoalValue,

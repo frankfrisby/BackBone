@@ -5,12 +5,14 @@
 
 import fs from "fs";
 import path from "path";
+import { getCurrentFirebaseUser } from "./firebase-auth.js";
 
 const DATA_DIR = path.join(process.cwd(), "data");
 const SETTINGS_PATH = path.join(DATA_DIR, "user-settings.json");
+const SETUP_WIZARD_PATH = path.join(DATA_DIR, "setup-wizard-status.json");
 
 // Default settings
-const DEFAULT_SETTINGS = {
+export const DEFAULT_SETTINGS = {
   // App Identity
   appName: "Backbone",  // Configurable name used throughout the app
 
@@ -30,6 +32,9 @@ const DEFAULT_SETTINGS = {
     plaid: false
   },
   phoneNumber: null,
+
+  // Core Goals (from onboarding - minimum 40 words)
+  coreGoals: null,
 
   // User Profile (for benchmarks & role model matching)
   userProfile: {
@@ -90,12 +95,71 @@ export const loadUserSettings = () => {
     ensureDataDir();
     if (fs.existsSync(SETTINGS_PATH)) {
       const data = JSON.parse(fs.readFileSync(SETTINGS_PATH, "utf-8"));
-      return { ...DEFAULT_SETTINGS, ...data };
+      return syncWizardStatus({ ...DEFAULT_SETTINGS, ...data });
     }
   } catch (error) {
     console.error("Failed to load user settings:", error.message);
   }
-  return { ...DEFAULT_SETTINGS };
+  return syncWizardStatus({ ...DEFAULT_SETTINGS });
+};
+
+const syncWizardStatus = (settings) => {
+  try {
+    if (!fs.existsSync(SETUP_WIZARD_PATH)) return settings;
+    const wizard = JSON.parse(fs.readFileSync(SETUP_WIZARD_PATH, "utf-8"));
+    const stepStatuses = wizard?.stepStatuses || {};
+    const providers = wizard?.connectedProviders || {};
+
+    const googleConnected = stepStatuses.google === "completed";
+    const aiConnected = stepStatuses.ai === "completed";
+    const alpacaConnected = stepStatuses.alpaca === "completed";
+    const ouraConnected = stepStatuses.oura === "completed";
+    const emailConnected = stepStatuses.email === "completed";
+    const plaidConnected = stepStatuses.plaid === "completed";
+    const phoneConnected = stepStatuses.whatsapp === "completed";
+
+    const next = { ...settings };
+    next.connections = {
+      ...next.connections,
+      google: googleConnected || next.connections?.google || false,
+      phone: phoneConnected || next.connections?.phone || false,
+      alpaca: alpacaConnected || next.connections?.alpaca || false,
+      oura: ouraConnected || next.connections?.oura || false,
+      email: emailConnected || next.connections?.email || false,
+      personalCapital: next.connections?.personalCapital || false,
+      plaid: plaidConnected || next.connections?.plaid || false
+    };
+
+    const authUser = getCurrentFirebaseUser();
+    const authUid = authUser?.uid || authUser?.id || null;
+    if (authUid) {
+      next.firebaseUser = {
+        ...authUser,
+        uid: authUser.uid || authUser.id
+      };
+      next.connections.google = true;
+    }
+
+    if (!next.coreModelProvider && aiConnected) {
+      const aiProviders = Array.isArray(providers.ai) ? providers.ai : [];
+      if (aiProviders.some((p) => p.toLowerCase().includes("openai"))) {
+        next.coreModelProvider = "openai";
+      } else if (aiProviders.some((p) => p.toLowerCase().includes("anthropic"))) {
+        next.coreModelProvider = "anthropic";
+      } else if (aiProviders.some((p) => p.toLowerCase().includes("google"))) {
+        next.coreModelProvider = "google";
+      }
+    }
+
+    if (!next.onboardingComplete && googleConnected && aiConnected) {
+      next.onboardingComplete = true;
+    }
+
+    return next;
+  } catch (error) {
+    console.error("Failed to sync wizard status:", error.message);
+    return settings;
+  }
 };
 
 /**

@@ -40,6 +40,26 @@ const THEME = {
 // Tool color - all tools use white for consistency (Claude Code style)
 const TOOL_COLOR = "#ffffff";
 
+const formatNextRun = (nextIso, nowMs) => {
+  if (!nextIso) return null;
+  const nextMs = new Date(nextIso).getTime();
+  if (Number.isNaN(nextMs)) return null;
+  const diffMs = Math.max(0, nextMs - nowMs);
+  if (diffMs < 60 * 1000) {
+    const secs = Math.max(1, Math.round(diffMs / 1000));
+    return `${secs}s`;
+  }
+  if (diffMs < 60 * 60 * 1000) {
+    const mins = Math.max(1, Math.round(diffMs / 60000));
+    return `${mins} min`;
+  }
+  const hours = diffMs / (60 * 60 * 1000);
+  if (hours < 10) {
+    return `${hours.toFixed(1)} hours`;
+  }
+  return `${Math.round(hours)} hours`;
+};
+
 /**
  * Flashlight/Shimmer effect for thinking state
  * Creates moving highlight that sweeps across text (orange background on white text)
@@ -652,6 +672,12 @@ const AgentActivityPanelBase = ({
 }) => {
   const narrator = getActivityNarrator();
   const autonomousEngine = getAutonomousEngine();
+  const [clockTick, setClockTick] = useState(() => Date.now());
+
+  useEffect(() => {
+    const interval = setInterval(() => setClockTick(Date.now()), 30000);
+    return () => clearInterval(interval);
+  }, []);
 
   // Blinking animation for header dot
   const [dotVisible, setDotVisible] = useState(true);
@@ -686,6 +712,10 @@ const AgentActivityPanelBase = ({
   const stats = data.stats || { tokens: 0, runtime: 0 };
   const claudeCode = data.claudeCode || { active: false };
   const isClaudeCodeActive = claudeCode.active;
+  const nextRunLabel = useMemo(
+    () => formatNextRun(engineData?.schedulerStatus?.nextScheduled, clockTick),
+    [engineData?.schedulerStatus?.nextScheduled, clockTick]
+  );
 
   // Waiting reasons for idle state
   const waitingReasons = useMemo(() => {
@@ -765,7 +795,9 @@ const AgentActivityPanelBase = ({
           e(Text, { color: modelColor, bold: true }, modelName),
           isClaudeCodeActive && e(Text, { color: THEME.dim }, " · "),
           isClaudeCodeActive && e(Text, { color: "#f97316", backgroundColor: "#7c2d12", bold: true }, " ACTIVE "),
-          !isClaudeCodeActive && claudeCodeStatus.loggedIn && e(Text, { color: THEME.dim }, " · Ready")
+          !isClaudeCodeActive && claudeCodeStatus.loggedIn && e(Text, { color: THEME.dim }, " · Ready"),
+          !isClaudeCodeActive && claudeCodeStatus.loggedIn && nextRunLabel &&
+            e(Text, { color: THEME.dim }, ` · next: [${nextRunLabel}]`)
         ),
         // Right: Stats
         e(StatsLine, { tokens: stats.tokens, runtime: stats.runtime })

@@ -348,6 +348,20 @@ function windowScore(hist, macd) {
   return clamp11(base * weight);
 }
 
+
+/**
+ * MACD score based on 5-day change and proximity to zero (cycle-aware).
+ * Uses previous vs current histogram values (x=5d ago, y=today).
+ * Returns a signed score in [-1, 1].
+ */
+export function calculateMacdScore(x, y) {
+  if (x == null || y == null || isNaN(x) || isNaN(y)) return 0;
+  const t = Math.abs(y);
+  const g = Math.max(0.0, -5.0 * (t ** 2) - 2.5 * t + 1.0);
+  let s = Math.sign(y - x) * g;
+  if (x === y) s = 0.0;
+  return Math.max(-1.0, Math.min(1.0, s));
+}
 // ============================================================================
 // PSYCHOLOGICAL ADJUSTMENTS
 // ============================================================================
@@ -538,7 +552,7 @@ export function calculateVolumeScore(sigmaScore, intradayVolumeMultiplier = 0, r
  * UNIFIED EFFECTIVE SCORE CALCULATION ENGINE
  *
  * Formula:
- * (tech + pred + psych)/2 + dir + pos - decay + macd + volume + (pricePos × 1.25) + (earnings × 2.0) + movementPenalty
+ * (tech + pred)/2 + psych + dir + pos - decay + macd + volume + (pricePos x 1.25) + (earnings x 2.0) + movementPenalty
  *
  * @param {Object} inputs - Score calculation inputs
  * @returns {Object} Score breakdown with all components
@@ -547,15 +561,15 @@ export function calculateEffectiveScore(inputs) {
   const sanitize = (val, def = 0) => (val == null || isNaN(val)) ? def : val;
 
   const technicalScore = sanitize(inputs.technicalScore);
-  const predictionScore = sanitize(inputs.predictionScore);
+  const predictionScore = sanitize(inputs.predictionScore, 0.5);
   const percentChange = sanitize(inputs.percentChange);
   const avgDirectional = sanitize(inputs.avgDirectional);
   const avgPositive = sanitize(inputs.avgPositive);
   const sigmaScore = sanitize(inputs.sigmaScore, 1);
 
-  // STEP 1: Adjust base scores (0 becomes default)
+  // STEP 1: Adjust base scores (technical 0 becomes default)
   const adjustedTechnicalScore = technicalScore === 0 ? 6.0 : technicalScore;
-  const adjustedPredictionScore = predictionScore === 0 ? 5.5 : predictionScore;
+  const adjustedPredictionScore = predictionScore;
 
   // STEP 2: Psychological adjustment
   const psychologicalAdjustment = calculatePsychologicalAdjustment(percentChange);
@@ -583,19 +597,73 @@ export function calculateEffectiveScore(inputs) {
   } else if (inputs.improvedMacdScore != null) {
     macdAdjustment = inputs.improvedMacdScore * 2.5;
   } else if (inputs.macdHistogramArray && inputs.macdHistogramArray.length >= 6) {
-    const slopeAnalysis = calculateMacdSlopeAndDirection(inputs.macdHistogramArray);
-    if (slopeAnalysis.isValid) {
-      const directionMultiplier = slopeAnalysis.direction === 'positive' ? 1 :
-                                   slopeAnalysis.direction === 'negative' ? -1 : 0;
-      const scaledMagnitude = Math.min(1, slopeAnalysis.magnitude * 10);
-      const rawMacd = directionMultiplier * scaledMagnitude;
+    const hist = inputs.macdHistogramArray.filter(h => h != null);
+    const x = hist.length >= 6 ? hist[hist.length - 6] : null;
+    const y = hist.length >= 2 ? hist[hist.length - 1] : null;
+    const rawMacd = calculateMacdScore(x, y);
 
-      const eff30d = calculateEffectiveMacdScore(rawMacd, inputs.macdLine, inputs.macdLineMin30d, inputs.macdLineMax30d);
-      const eff120d = calculateEffectiveMacdScore(rawMacd, inputs.macdLine, inputs.macdLineMin120d, inputs.macdLineMax120d);
-      macdAdjustment = (eff30d + eff120d) / 2;
+    const eff30d = calculateEffectiveMacdScore(rawMacd, inputs.macdLine, inputs.macdLineMin30d, inputs.macdLineMax30d);
+    const eff120d = calculateEffectiveMacdScore(rawMacd, inputs.macdLine, inputs.macdLineMin120d, inputs.macdLineMax120d);
+    macdAdjustment = (eff30d + eff120d) / 2;
+  } else if (inputs.macd != null && inputs.macd5dAgo != null) {
+    const histogram0 = inputs.macd;
+    const histogram5 = inputs.macd5dAgo;
+
+    const histogramMax = Math.max(Math.abs(histogram0), Math.abs(histogram5));
+    const histogramMin = -histogramMax;
+
+    let ratio0 = 0;
+    let ratio5 = 0;
+
+    const isPositiveTerritory = histogram5 > 0 || histogram0 > 0;
+    const isNegativeTerritory = histogram5 < 0 || histogram0 < 0;
+
+    if (isPositiveTerritory && histogram0 >= 0 && histogram5 >= 0) {
+      ratio5 = -(histogram5 / histogramMax);
+      ratio0 = -(histogram0 / histogramMax);
+      const cosValue = Math.cos(ratio0);
+      macdAdjustment = -cosValue;
+    } else if (isNegativeTerritory && histogram0 <= 0 && histogram5 <= 0) {
+      ratio5 = -(histogram5 / histogramMin);
+      ratio0 = -(histogram0 / histogramMin);
+      const cosValue = Math.cos(ratio0);
+      macdAdjustment = cosValue;
+    } else {
+      const delta = histogram0 - histogram5;
+      const normalizedDelta = Math.max(-1, Math.min(1, delta / histogramMax));
+      macdAdjustment = normalizedDelta * 0.5;
     }
+
+    macdAdjustment = Math.max(-1, Math.min(1, macdAdjustment));
+
+    const rawMacd = macdAdjustment;
+    const eff30d = calculateEffectiveMacdScore(rawMacd, inputs.macdLine, inputs.macdLineMin30d, inputs.macdLineMax30d);
+    const eff120d = calculateEffectiveMacdScore(rawMacd, inputs.macdLine, inputs.macdLineMin120d, inputs.macdLineMax120d);
+    macdAdjustment = (eff30d + eff120d) / 2;
   } else if (inputs.effectiveMacdScore != null) {
     macdAdjustment = Math.max(-1, Math.min(1, inputs.effectiveMacdScore));
+  }
+
+  const macdLine = inputs.macdLine ?? null;
+  const macdSignal = inputs.macdSignal ?? null;
+  const macdMin60d = inputs.macdLineMin60d ?? null;
+  const macdMax60d = inputs.macdLineMax60d ?? null;
+
+  // Crossover-based MACD score: after crossover, score ramps toward +/-1 as MACD approaches 0.
+  if (macdLine != null && macdSignal != null && macdMin60d != null && macdMax60d != null) {
+    if (macdLine < 0 && macdSignal < 0 && macdLine > macdSignal) {
+      const denom = Math.abs(macdMin60d);
+      if (denom > 0) {
+        const ratio = Math.max(0, Math.min(1, 1 - (Math.abs(macdLine) / denom)));
+        macdAdjustment = Math.max(0, Math.min(1, ratio));
+      }
+    } else if (macdLine > 0 && macdSignal > 0 && macdLine < macdSignal) {
+      const denom = Math.abs(macdMax60d);
+      if (denom > 0) {
+        const ratio = Math.max(0, Math.min(1, 1 - (Math.abs(macdLine) / denom)));
+        macdAdjustment = -Math.max(0, Math.min(1, ratio));
+      }
+    }
   }
 
   // STEP 6: Volume score
@@ -618,7 +686,8 @@ export function calculateEffectiveScore(inputs) {
 
   // STEP 10: Final calculation
   const effectiveScore = Math.max(0, Math.min(10,
-    (adjustedTechnicalScore + adjustedPredictionScore + psychologicalAdjustment) / 2 +
+    (adjustedTechnicalScore + adjustedPredictionScore) / 2 +
+    psychologicalAdjustment +
     directionalBonus +
     positiveBonus -
     timeDecayPenalty +
@@ -643,7 +712,7 @@ export function calculateEffectiveScore(inputs) {
     priceMovementPenalty,
     daysOld,
     effectiveScore,
-    formula: `(${adjustedTechnicalScore.toFixed(1)} + ${adjustedPredictionScore.toFixed(1)} + ${psychologicalAdjustment.toFixed(2)}) / 2 + ${directionalBonus.toFixed(2)} + ${positiveBonus.toFixed(2)} - ${timeDecayPenalty.toFixed(1)} + ${macdAdjustment.toFixed(1)} + ${volumeScore.toFixed(2)} + (${pricePositionScore.toFixed(2)} × 1.25) + (${earningsScore.toFixed(4)} × 2.0) + ${priceMovementPenalty.toFixed(2)} = ${effectiveScore.toFixed(2)}`
+    formula: `(${adjustedTechnicalScore.toFixed(1)} + ${adjustedPredictionScore.toFixed(1)}) / 2 + ${psychologicalAdjustment.toFixed(2)} + ${directionalBonus.toFixed(2)} + ${positiveBonus.toFixed(2)} - ${timeDecayPenalty.toFixed(1)} + ${macdAdjustment.toFixed(1)} + ${volumeScore.toFixed(2)} + (${pricePositionScore.toFixed(2)} x 1.25) + (${earningsScore.toFixed(4)} x 2.0) + ${priceMovementPenalty.toFixed(2)} = ${effectiveScore.toFixed(2)}`
   };
 }
 

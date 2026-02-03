@@ -1,4 +1,19 @@
 {
+  "firestore": {
+    "rules": "firestore.rules"
+  },
+  "storage": {
+    "rules": "storage.rules"
+  },
+  "hosting": {
+    "public": "backbone-app/out",
+    "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
+    "rewrites": [{ "source": "**", "destination": "/index.html" }],
+    "headers": [{
+      "source": "/firebase-messaging-sw.js",
+      "headers": [{ "key": "Service-Worker-Allowed", "value": "/" }]
+    }]
+  },
   "functions": {
     "source": "firebase-functions",
     "codebase": "default",

@@ -306,7 +306,7 @@ export const saveApiKeyToEnv = (provider, key) => {
     // Also set in process.env for immediate use
     process.env[envKey] = key;
 
-    return { success: true };
+    return { success: true, envPath: ENV_PATH, envKey };
   } catch (error) {
     return { success: false, error: error.message };
   }

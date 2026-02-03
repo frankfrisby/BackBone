@@ -1464,8 +1464,13 @@ const App = ({ updateConsoleTitle, updateState }) => {
 
         // Set up message handler — classify, route, and respond
         realtimeMessaging.setMessageHandler(async (message) => {
-          // Log to unified message log
-          unifiedMessageLog.addUserMessage(message.content, MESSAGE_CHANNEL.WHATSAPP, {
+          // Detect actual channel from message (app vs whatsapp vs unknown)
+          const msgChannel = message.channel === "whatsapp" || message.source === "whatsapp"
+            ? MESSAGE_CHANNEL.WHATSAPP
+            : MESSAGE_CHANNEL.APP;
+
+          // Log to unified message log with correct channel
+          unifiedMessageLog.addUserMessage(message.content, msgChannel, {
             from: message.from,
             messageId: message.id
           });
@@ -1475,12 +1480,12 @@ const App = ({ updateConsoleTitle, updateState }) => {
             role: "user",
             content: message.content,
             timestamp: new Date(message.createdAt || Date.now()),
-            channel: "whatsapp"
+            channel: msgChannel
           }]);
 
           // Classify the message
           const classification = classifyMessage(message.content);
-          console.log(`[App] WhatsApp message classified: ${classification.type} (${classification.confidence}) — ${classification.reason}`);
+          console.log(`[App] ${msgChannel} message classified: ${classification.type} (${classification.confidence}) — ${classification.reason}`);
 
           try {
             let responseContent;
@@ -1489,7 +1494,7 @@ const App = ({ updateConsoleTitle, updateState }) => {
               // ── QUICK PATH: aiBrain.chat() → fast response ──
               const response = await aiBrain.chat(message.content, {
                 userId: firebaseUser.uid,
-                channel: "whatsapp"
+                channel: msgChannel
               });
               responseContent = response.content;
 
@@ -1498,21 +1503,21 @@ const App = ({ updateConsoleTitle, updateState }) => {
               // Send immediate acknowledgment
               await whatsappNotifications.sendAIResponse(
                 "Got it, working on that now...",
-                MESSAGE_CHANNEL.WHATSAPP
+                msgChannel
               );
 
               responseContent = await _handleComplexWhatsApp(message.content, firebaseUser.uid, aiBrain);
             }
 
-            // Log AI response
-            unifiedMessageLog.addAssistantMessage(responseContent, MESSAGE_CHANNEL.WHATSAPP);
+            // Log AI response with correct channel
+            unifiedMessageLog.addAssistantMessage(responseContent, msgChannel);
 
             // Add to conversation
             setMessages(prev => [...prev, {
               role: "assistant",
               content: responseContent,
               timestamp: new Date(),
-              channel: "whatsapp"
+              channel: msgChannel
             }]);
 
             // Route via best channel
@@ -1530,7 +1535,7 @@ const App = ({ updateConsoleTitle, updateState }) => {
 
             return { content: responseContent, type: "ai" };
           } catch (err) {
-            console.error("[App] WhatsApp message handler error:", err.message);
+            console.error(`[App] ${msgChannel} message handler error:`, err.message);
             return { content: "Sorry, I encountered an error.", type: "system" };
           }
         });

@@ -24,6 +24,7 @@ const MESSAGE_LOG_PATH = path.join(DATA_DIR, "unified-message-log.json");
 export const MESSAGE_CHANNEL = {
   CHAT: "chat",           // CLI chat input
   WHATSAPP: "whatsapp",   // WhatsApp messages
+  APP: "app",             // Mobile/web app messages (Firebase)
   SYSTEM: "system",       // System notifications
   PROACTIVE: "proactive"  // AI-initiated messages
 };
@@ -286,9 +287,11 @@ class UnifiedMessageLog extends EventEmitter {
       // Add channel indicator for AI context
       const channelPrefix = m.channel === MESSAGE_CHANNEL.WHATSAPP
         ? "[via WhatsApp] "
-        : m.channel === MESSAGE_CHANNEL.PROACTIVE
-          ? "[proactive notification] "
-          : "";
+        : m.channel === MESSAGE_CHANNEL.APP
+          ? "[via App] "
+          : m.channel === MESSAGE_CHANNEL.PROACTIVE
+            ? "[proactive notification] "
+            : "";
 
       return {
         role: m.role,
@@ -314,11 +317,13 @@ class UnifiedMessageLog extends EventEmitter {
   getStats() {
     const chatMessages = this.messages.filter(m => m.channel === MESSAGE_CHANNEL.CHAT);
     const whatsappMessages = this.messages.filter(m => m.channel === MESSAGE_CHANNEL.WHATSAPP);
+    const appMessages = this.messages.filter(m => m.channel === MESSAGE_CHANNEL.APP);
 
     return {
       totalMessages: this.messages.length,
       chatMessages: chatMessages.length,
       whatsappMessages: whatsappMessages.length,
+      appMessages: appMessages.length,
       compactedSummaries: this.compactedSummaries.length,
       lastCompactTime: this.lastCompactTime
     };
@@ -331,6 +336,25 @@ class UnifiedMessageLog extends EventEmitter {
     return this.messages
       .filter(m => m.channel === MESSAGE_CHANNEL.WHATSAPP)
       .slice(-limit);
+  }
+
+  /**
+   * Get last N app messages
+   */
+  getAppMessages(limit = 10) {
+    return this.messages
+      .filter(m => m.channel === MESSAGE_CHANNEL.APP)
+      .slice(-limit);
+  }
+
+  /**
+   * Get unified message list across all channels (chat + WhatsApp + app)
+   * Sorted by timestamp, tagged with channel source
+   */
+  getUnifiedMessages(limit = 50) {
+    return this.messages
+      .slice(-limit)
+      .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
   }
 
   /**

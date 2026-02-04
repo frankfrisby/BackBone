@@ -165,6 +165,16 @@ const DEFAULT_JOBS = [
     handler: "runMonthlyGoals"
   },
   {
+    id: "evening-briefing",
+    name: "Evening Briefing",
+    shortName: "Eve Brief",
+    description: "Evening recap with charts via WhatsApp",
+    frequency: JOB_FREQUENCY.DAILY,
+    time: "19:45",
+    enabled: true,
+    handler: "runEveningBriefing"
+  },
+  {
     id: "evening-wrap",
     name: "Evening Wrap-up",
     shortName: "Wrap-up",

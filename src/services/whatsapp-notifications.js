@@ -62,6 +62,7 @@ class WhatsAppNotifications extends EventEmitter {
     this.quietHoursEnd = 7;    // 7 AM
     this.respectQuietHours = true;
     this.lastMorningBrief = null;
+    this.lastEveningBrief = null;
   }
 
   /**
@@ -317,10 +318,16 @@ class WhatsAppNotifications extends EventEmitter {
   }
 
   /**
-   * Send daily morning brief via WhatsApp
-   * Produces a clean, concise message the user is happy to see when they open their phone
+   * Send daily morning brief via WhatsApp.
+   *
+   * Accepts either:
+   * - A string (new rich format from daily-brief-generator)
+   * - An object with { greeting, health, calendar, ... } (legacy format)
+   *
+   * @param {string|Object} briefOrText - Pre-formatted text or legacy brief object
+   * @param {Object} [options] - { mediaUrl } for chart image attachment
    */
-  async sendMorningBrief(brief) {
+  async sendMorningBrief(briefOrText, options = {}) {
     const today = new Date().toISOString().split("T")[0];
 
     // Only send once per day
@@ -328,58 +335,74 @@ class WhatsAppNotifications extends EventEmitter {
       return { success: false, error: "Already sent today", duplicate: true };
     }
 
-    const { greeting, weather, calendar, priorities, portfolio, health } = brief;
+    let message;
 
-    let message = greeting || "Good morning!";
+    if (typeof briefOrText === "string") {
+      // New path: pre-formatted rich text
+      message = briefOrText;
+    } else {
+      // Legacy path: build from object
+      const { greeting, weather, calendar, priorities, portfolio, health } = briefOrText;
 
-    // Health — one tight line
-    if (health && (health.sleepScore || health.readiness)) {
-      const parts = [];
-      if (health.sleepScore) parts.push(`Sleep ${health.sleepScore}`);
-      if (health.readiness) parts.push(`Readiness ${health.readiness}`);
-      message += `\n\n${parts.join(" · ")}`;
-    }
+      message = greeting || "Good morning!";
 
-    // Calendar — compact list
-    if (calendar && calendar.length > 0) {
-      message += "\n\n";
-      calendar.slice(0, 3).forEach(event => {
-        message += `${event.time} ${event.title}\n`;
-      });
-    }
+      if (health && (health.sleepScore || health.readiness)) {
+        const parts = [];
+        if (health.sleepScore) parts.push(`Sleep ${health.sleepScore}`);
+        if (health.readiness) parts.push(`Readiness ${health.readiness}`);
+        message += `\n\n${parts.join(" · ")}`;
+      }
 
-    // Priorities — numbered, no header bloat
-    if (priorities && priorities.length > 0) {
-      message += "\n";
-      priorities.slice(0, 3).forEach((p, i) => {
-        message += `${i + 1}. ${p}\n`;
-      });
-    }
+      if (calendar && calendar.length > 0) {
+        message += "\n\n";
+        calendar.slice(0, 3).forEach(event => {
+          message += `${event.time} ${event.title}\n`;
+        });
+      }
 
-    // Portfolio — top movers or summary
-    if (portfolio) {
-      if (portfolio.topMovers && portfolio.topMovers.length > 0) {
-        message += `\n${portfolio.topMovers.join(" | ")}`;
-      } else if (portfolio.changePercent != null) {
-        const sign = portfolio.changePercent >= 0 ? "+" : "";
-        message += `\nPortfolio ${sign}${portfolio.changePercent.toFixed(1)}%`;
+      if (priorities && priorities.length > 0) {
+        message += "\n";
+        priorities.slice(0, 3).forEach((p, i) => {
+          message += `${i + 1}. ${p}\n`;
+        });
+      }
+
+      if (portfolio) {
+        if (portfolio.topMovers && portfolio.topMovers.length > 0) {
+          message += `\n${portfolio.topMovers.join(" | ")}`;
+        } else if (portfolio.changePercent != null) {
+          const sign = portfolio.changePercent >= 0 ? "+" : "";
+          message += `\nPortfolio ${sign}${portfolio.changePercent.toFixed(1)}%`;
+        }
+      }
+
+      if (weather) {
+        message += `\n\n${weather}`;
       }
     }
 
-    if (weather) {
-      message += `\n\n${weather}`;
+    // Send with or without media
+    let result;
+    if (options.mediaUrl) {
+      result = await this._sendWithMedia(NOTIFICATION_TYPE.MORNING_BRIEF, message, options.mediaUrl, {
+        identifier: `morning_${today}`,
+        priority: NOTIFICATION_PRIORITY.NORMAL,
+        allowDuplicate: false,
+        pushType: PUSH_TYPE.MORNING_BRIEF
+      });
+    } else {
+      result = await this.send(NOTIFICATION_TYPE.MORNING_BRIEF, message, {
+        identifier: `morning_${today}`,
+        priority: NOTIFICATION_PRIORITY.NORMAL,
+        allowDuplicate: false,
+        pushType: PUSH_TYPE.MORNING_BRIEF
+      });
     }
-
-    const result = await this.send(NOTIFICATION_TYPE.MORNING_BRIEF, message, {
-      identifier: `morning_${today}`,
-      priority: NOTIFICATION_PRIORITY.NORMAL,
-      allowDuplicate: false,
-      pushType: PUSH_TYPE.MORNING_BRIEF
-    });
 
     // Also send as push notification
     try {
-      await sendMorningBriefPush(brief);
+      const pushBrief = typeof briefOrText === "object" ? briefOrText : { greeting: message.substring(0, 100) };
+      await sendMorningBriefPush(pushBrief);
     } catch (pushErr) {
       // Best-effort
     }
@@ -389,6 +412,93 @@ class WhatsAppNotifications extends EventEmitter {
     }
 
     return result;
+  }
+
+  /**
+   * Send evening brief via WhatsApp.
+   *
+   * @param {string} messageText - Pre-formatted rich text
+   * @param {Object} [options] - { mediaUrl } for chart image attachment
+   */
+  async sendEveningBrief(messageText, options = {}) {
+    const today = new Date().toISOString().split("T")[0];
+
+    if (this.lastEveningBrief === today) {
+      return { success: false, error: "Already sent today", duplicate: true };
+    }
+
+    let result;
+    if (options.mediaUrl) {
+      result = await this._sendWithMedia(NOTIFICATION_TYPE.MORNING_BRIEF, messageText, options.mediaUrl, {
+        identifier: `evening_${today}`,
+        priority: NOTIFICATION_PRIORITY.NORMAL,
+        allowDuplicate: false
+      });
+    } else {
+      result = await this.send(NOTIFICATION_TYPE.MORNING_BRIEF, messageText, {
+        identifier: `evening_${today}`,
+        priority: NOTIFICATION_PRIORITY.NORMAL,
+        allowDuplicate: false
+      });
+    }
+
+    if (result.success) {
+      this.lastEveningBrief = today;
+    }
+
+    return result;
+  }
+
+  /**
+   * Internal: send a notification with a media attachment (image/chart).
+   */
+  async _sendWithMedia(type, message, mediaUrl, options = {}) {
+    if (!this.enabled || !this.phoneNumber) {
+      return { success: false, error: "Notifications not enabled" };
+    }
+
+    const identifier = options.identifier || message.substring(0, 50);
+    if (!options.allowDuplicate && this.hasBeenSent(type, identifier)) {
+      return { success: false, error: "Already sent", duplicate: true };
+    }
+
+    if (this.isQuietHours() && options.priority !== NOTIFICATION_PRIORITY.URGENT) {
+      return { success: false, error: "Quiet hours", quietHours: true };
+    }
+
+    const emoji = this.getTypeEmoji(type);
+    const formattedMessage = `${emoji} ${message}`;
+
+    try {
+      const whatsapp = getTwilioWhatsApp();
+      if (!whatsapp.initialized) {
+        const initResult = await whatsapp.initialize();
+        if (!initResult.success) {
+          return { success: false, error: "WhatsApp not configured" };
+        }
+      }
+
+      const result = await whatsapp.sendMediaMessage(this.phoneNumber, formattedMessage, mediaUrl);
+
+      if (result.success) {
+        this.markAsSent(type, identifier);
+
+        const messageLog = getUnifiedMessageLog();
+        messageLog.addMessage("assistant", message, {
+          channel: MESSAGE_CHANNEL.PROACTIVE,
+          metadata: { type, notificationType: type, mediaUrl, ...options.metadata }
+        });
+
+        showNotificationTitle(type, message.substring(0, 30), 5000);
+        this.emit("notification-sent", { type, message, messageId: result.messageId, mediaUrl });
+      }
+
+      return result;
+    } catch (error) {
+      console.error("[WhatsAppNotifications] Media send error:", error.message);
+      // Fallback: try without media
+      return this.send(type, message, options);
+    }
   }
 
   /**
@@ -470,7 +580,8 @@ class WhatsAppNotifications extends EventEmitter {
       isQuietHours: this.isQuietHours(),
       quietHoursStart: this.quietHoursStart,
       quietHoursEnd: this.quietHoursEnd,
-      lastMorningBrief: this.lastMorningBrief
+      lastMorningBrief: this.lastMorningBrief,
+      lastEveningBrief: this.lastEveningBrief
     };
   }
 

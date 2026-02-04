@@ -119,6 +119,30 @@ function getBucket() {
 }
 
 /**
+ * Upload a Buffer to Firebase Storage (no local file needed).
+ */
+export async function uploadBuffer(buffer, remotePath, contentType = "application/octet-stream") {
+  const token = await getAuthToken();
+  const bucket = getBucket();
+  const url = getUploadUrl(bucket, remotePath, token);
+
+  const headers = { "Content-Type": contentType };
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+
+  const res = await fetch(url, { method: "POST", headers, body: buffer });
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Upload failed (${res.status}): ${err}`);
+  }
+
+  const meta = await res.json();
+  return {
+    ...meta,
+    downloadUrl: getDownloadUrl(bucket, remotePath)
+  };
+}
+
+/**
  * Upload a single file to Firebase Storage.
  */
 export async function uploadFile(localPath, remotePath) {
@@ -323,11 +347,16 @@ export function getBackupStatus() {
   };
 }
 
+export { getDownloadUrl, getBucket };
+
 export default {
   uploadFile,
+  uploadBuffer,
   downloadFile,
   listRemoteFiles,
   backupToFirebase,
   restoreFromFirebase,
-  getBackupStatus
+  getBackupStatus,
+  getDownloadUrl,
+  getBucket
 };

@@ -139,7 +139,7 @@ import { loadUserSettings, saveUserSettings, updateSettings as updateUserSetting
 import { archiveCurrentProfile, restoreProfile, hasArchivedProfile, listProfiles as listArchivedProfiles } from "./services/profile-manager.js";
 import { hasValidCredentials as hasCodexCredentials } from "./services/codex-oauth.js";
 import { loadFineTuningConfig, saveFineTuningConfig, runFineTuningPipeline, queryFineTunedModel } from "./services/fine-tuning.js";
-import { monitorAndTrade, loadConfig as loadTradingConfig, setTradingEnabled } from "./services/auto-trader.js";
+import { monitorAndTrade, loadConfig as loadTradingConfig, setTradingEnabled, sendTradeNotification } from "./services/auto-trader.js";
 import { shouldUpdateStops, applyStopsToAllPositions } from "./services/trailing-stop-manager.js";
 import { recordMomentumSnapshot } from "./services/momentum-drift.js";
 import { isMarketOpen } from "./services/trading-status.js";
@@ -204,6 +204,8 @@ import { getClaudeCodeMonitor } from "./services/claude-code-monitor.js";
 import { getStartupEngine } from "./services/startup-engine.js";
 import { getClaudeEngine } from "./services/claude-engine.js";
 import { startRealtimeSync, stopRealtimeSync, isAuthenticated as isFirestoreAuthenticated, pushTickers } from "./services/firestore-sync.js";
+import { getDashboardSync } from "./services/firebase-dashboard-sync.js";
+import { generateDailyBrief, generateAndDeliverBrief, pushBriefToFirestore } from "./services/daily-brief-generator.js";
 // Initialize Claude Code connection monitor
 console.log("[App] Initializing Claude Code monitor...");
 const _claudeCodeMonitor = getClaudeCodeMonitor();
@@ -357,14 +359,19 @@ function _getShortTradeReason(result, tickers) {
     // Position limit full — check if scores are too low to sell
   }
 
-  // SPY is down — common reason nothing qualifies
+  // SPY direction gate blocked buys
+  if (result.spyBlocked) {
+    return "SPY dropping";
+  }
+
+  // SPY is negative but allowed (recovering or flat intraday)
   if (result.spyPositive === false) {
     const threshold = result.effectiveBuyThreshold;
     const topTicker = tickers?.sort?.((a, b) => (b.score || 0) - (a.score || 0))?.[0];
     if (topTicker && topTicker.score < threshold) {
-      return "SPY down, scores low";
+      return "SPY down (ok), low";
     }
-    return "SPY is down";
+    return "SPY down (ok)";
   }
 
   // Check buying power / position limits
@@ -762,49 +769,10 @@ const App = ({ updateConsoleTitle, updateState }) => {
       });
       cronManager.on("run:runMorningBriefing", async () => {
         try {
-          const brief = buildMorningBrief();
-          if (!brief) return;
-
-          // Inject into conversation panel
-          setMessages(prev => [...prev, {
-            role: "assistant",
-            content: brief.conversationText,
-            timestamp: new Date()
-          }]);
-
-          // Send clean version to WhatsApp
-          try {
-            await whatsappNotifications.sendMorningBrief(brief);
-          } catch (e) {
-            console.error("[Cron] WhatsApp morning brief failed:", e.message);
-          }
-
-          // Track that briefing was sent today
-          const briefingStatePath = path.join(process.cwd(), "data", "last-briefing.json");
-          fs.writeFileSync(briefingStatePath, JSON.stringify({
-            lastSentDate: new Date().toISOString().split("T")[0],
-            sentAt: new Date().toISOString()
-          }, null, 2));
-          console.log("[Cron] Morning briefing sent");
-        } catch (e) {
-          console.error("[Cron] Morning briefing failed:", e.message);
-        }
-      });
-
-      // Startup catch-up: send morning briefing if missed today
-      try {
-        const today = new Date().toISOString().split("T")[0];
-        const briefingStatePath = path.join(process.cwd(), "data", "last-briefing.json");
-        let lastSentDate = null;
-        if (fs.existsSync(briefingStatePath)) {
-          const state = JSON.parse(fs.readFileSync(briefingStatePath, "utf-8"));
-          lastSentDate = state.lastSentDate;
-        }
-        if (lastSentDate !== today) {
-          const now = new Date();
-          const hour = now.getHours();
-          // Only auto-send if it's after 8:30 (the scheduled time) and before midnight
-          if (hour >= 9) {
+          // Generate rich daily brief and deliver via all channels (Firestore + WhatsApp + Push)
+          const result = await generateAndDeliverBrief("morning");
+          if (result.success) {
+            // Also inject a conversation-friendly version into the chat panel
             const brief = buildMorningBrief();
             if (brief) {
               setMessages(prev => [...prev, {
@@ -812,19 +780,50 @@ const App = ({ updateConsoleTitle, updateState }) => {
                 content: brief.conversationText,
                 timestamp: new Date()
               }]);
+            }
+            console.log("[Cron] Morning brief generated and delivered");
+          }
+        } catch (e) {
+          console.error("[Cron] Morning brief failed:", e.message);
+        }
+      });
+      cronManager.on("run:runEveningBriefing", async () => {
+        try {
+          const result = await generateAndDeliverBrief("evening");
+          if (result.success) {
+            console.log("[Cron] Evening brief generated and delivered");
+          }
+        } catch (e) {
+          console.error("[Cron] Evening brief failed:", e.message);
+        }
+      });
 
-              // Send to WhatsApp
-              try {
-                await whatsappNotifications.sendMorningBrief(brief);
-              } catch (e) {
-                // Silent - WhatsApp may not be configured
+      // Startup catch-up: send daily brief if missed today
+      try {
+        const today = new Date().toISOString().split("T")[0];
+        const briefStatePath = path.join(process.cwd(), "data", "daily-brief-state.json");
+        let morningLastSent = null;
+        if (fs.existsSync(briefStatePath)) {
+          const state = JSON.parse(fs.readFileSync(briefStatePath, "utf-8"));
+          // Support both old flat format and new split format
+          morningLastSent = state.morning?.lastSentDate || state.lastSentDate || null;
+        }
+        if (morningLastSent !== today) {
+          const now = new Date();
+          const hour = now.getHours();
+          // Only auto-send if it's after 8:30 and before midnight
+          if (hour >= 9) {
+            const result = await generateAndDeliverBrief("morning");
+            if (result.success) {
+              const brief = buildMorningBrief();
+              if (brief) {
+                setMessages(prev => [...prev, {
+                  role: "assistant",
+                  content: brief.conversationText,
+                  timestamp: new Date()
+                }]);
               }
-
-              fs.writeFileSync(briefingStatePath, JSON.stringify({
-                lastSentDate: today,
-                sentAt: new Date().toISOString()
-              }, null, 2));
-              console.log("[App] Startup catch-up: morning briefing sent");
+              console.log("[App] Startup catch-up: morning brief sent");
             }
           }
         }
@@ -1325,6 +1324,7 @@ const App = ({ updateConsoleTitle, updateState }) => {
   const plaidDataRef = useRef(plaidData);
   const socialConnectionsRef = useRef(socialConnections);
   const integrationsRef = useRef(null);
+  const dashboardSyncInitRef = useRef(false);
   const [cloudSyncStatus, setCloudSyncStatus] = useState(null);
   const [lifeChanges, setLifeChanges] = useState(() => buildLifeChanges(10));
 
@@ -1630,6 +1630,7 @@ const App = ({ updateConsoleTitle, updateState }) => {
   const updateLifeScoresData = useCallback(() => {
     const next = lifeScores.getDisplayData();
     setLifeScoresData((prev) => (deepEqual(prev, next) ? prev : next));
+    if (dashboardSyncInitRef.current) getDashboardSync().triggerImmediateSync("lifeScores");
   }, [lifeScores]);
 
   const refreshAutonomousState = useCallback(() => {
@@ -1710,6 +1711,20 @@ const App = ({ updateConsoleTitle, updateState }) => {
   const isLive = alpacaStatus === "Live";
   const isLiveRef = useRef(false);
   const tickersRef = useRef(tickers);
+
+  // Trailing stop detection: track previous position symbols to detect fills
+  const prevPositionSymbolsRef = useRef(new Set());
+  const recentAutoTraderSellsRef = useRef(new Set()); // symbols sold by auto-trader this cycle
+
+  // Proactive market updates: track what's been notified today (reset daily)
+  const proactiveNotifiedRef = useRef({
+    spyMoves: new Set(),       // "up_1.5", "down_1.5", "up_2.0", etc.
+    positionAlerts: new Set(),  // "NVDA_up_5", "NVDA_down_5"
+    scoreFlips: new Set(),      // "NVDA_sell", "AMD_extreme"
+    marketOpenSent: false,
+    marketCloseSent: false,
+    lastResetDate: null
+  });
 
   // Internet connectivity state
   const [isInternetConnected, setIsInternetConnected] = useState(false);
@@ -2544,9 +2559,13 @@ const App = ({ updateConsoleTitle, updateState }) => {
       goalTracker.on("milestone-achieved", ({ goal, milestone }) => {
         workLog.logMilestone(LOG_SOURCE.GOAL, `Milestone: ${milestone.label}`, goal.title);
         updateGoals();
+        if (dashboardSyncInitRef.current) getDashboardSync().triggerImmediateSync("goals");
       });
 
-      goalTracker.on("progress-updated", updateGoals);
+      goalTracker.on("progress-updated", () => {
+        updateGoals();
+        if (dashboardSyncInitRef.current) getDashboardSync().triggerImmediateSync("goals");
+      });
 
       // Listen for work log events (with change detection)
       workLog.on("entry", () => {
@@ -2873,6 +2892,132 @@ const App = ({ updateConsoleTitle, updateState }) => {
     };
   }, []);
 
+  // ===== DASHBOARD SYNC (CLI → Firestore → Web App) =====
+  useEffect(() => {
+    if (dashboardSyncInitRef.current) return;
+    if (!firebaseUser?.uid) return;
+
+    dashboardSyncInitRef.current = true;
+    const dashSync = getDashboardSync();
+
+    // Register data providers — each returns a minimal snapshot
+    dashSync.registerDataProvider("portfolio", () => {
+      const p = portfolioRef.current;
+      if (!p) return null;
+      const equityNum = p.equityRaw || (typeof p.equity === "string" ? parseFloat(p.equity.replace(/[$,]/g, "")) : p.equity);
+      return {
+        equity: equityNum || 0,
+        cash: typeof p.cash === "string" ? parseFloat(p.cash.replace(/[$,]/g, "")) : (p.cash || 0),
+        dayPL: p.dayPL || 0,
+        dayPLPercent: p.dayPLPercent || 0,
+        totalPL: p.totalPL || 0,
+        totalPLPercent: p.totalPLPercent || 0,
+        positions: (p.positions || []).slice(0, 10).map(pos => ({
+          symbol: pos.symbol,
+          qty: pos.qty,
+          currentPrice: pos.currentPrice,
+          avgEntryPrice: pos.avgEntryPrice,
+          unrealizedPL: pos.unrealizedPL,
+          unrealizedPLPercent: pos.unrealizedPLPercent,
+          marketValue: pos.marketValue
+        }))
+      };
+    });
+
+    dashSync.registerDataProvider("health", () => {
+      const h = ouraHealthRef.current;
+      if (!h?.connected) return null;
+      return {
+        sleep: { score: h.sleep?.score, duration: h.sleep?.duration, efficiency: h.sleep?.efficiency },
+        readiness: { score: h.readiness?.score },
+        activity: { score: h.activity?.score, steps: h.activity?.steps, calories: h.activity?.calories },
+        hrv: h.hrv || null,
+        rhr: h.rhr || null
+      };
+    });
+
+    dashSync.registerDataProvider("goals", () => {
+      const active = goalTracker.getActive();
+      if (!active || active.length === 0) return null;
+      return {
+        goals: active.slice(0, 10).map(g => ({
+          id: g.id,
+          title: g.title,
+          category: g.category,
+          progress: g.progress || 0,
+          status: g.status,
+          milestones: (g.milestones || []).map(m => ({ label: m.label, target: m.target, achieved: m.achieved }))
+        })),
+        totalActive: active.length
+      };
+    });
+
+    dashSync.registerDataProvider("tickers", () => {
+      const t = tickersRef.current;
+      if (!t || t.length === 0) return null;
+      return {
+        tickers: t.slice(0, 15).map(tk => ({
+          symbol: tk.symbol || tk.ticker,
+          score: tk.score,
+          price: tk.price || tk.lastPrice,
+          change: tk.change || tk.changePercent,
+          macdTrend: tk.macdTrend || tk.trend
+        }))
+      };
+    });
+
+    dashSync.registerDataProvider("trading", () => {
+      const tradingConfig = loadTradingConfig();
+      return {
+        autoTradingEnabled: tradingConfig?.enabled || false,
+        mode: tradingConfig?.mode || "paper",
+        todayTradeCount: tradingConfig?.todayTradeCount || 0,
+        lastTradeTime: tradingConfig?.lastTradeTime || null
+      };
+    });
+
+    dashSync.registerDataProvider("lifeScores", () => {
+      const data = lifeScores.getDisplayData();
+      if (!data) return null;
+      return {
+        overall: data.overall || 0,
+        categories: data.categories || {},
+        trends: data.trends || {}
+      };
+    });
+
+    // Initialize the sync service
+    dashSync.initialize(firebaseUser.uid);
+
+    // Push connected sources
+    dashSync.setConnectedSources({
+      alpaca: alpacaStatus === "Live",
+      oura: !!ouraHealth?.connected,
+      goals: goalTracker.getActive().length > 0,
+      linkedin: !!linkedInProfile?.connected
+    });
+
+    return () => {
+      getDashboardSync().stop();
+    };
+  }, [firebaseUser?.uid]);
+
+  // Mark portfolio/tickers dirty when they update (high-freq 3-min batch)
+  useEffect(() => {
+    if (dashboardSyncInitRef.current) getDashboardSync().markDirty("portfolio");
+  }, [portfolio?.equity]);
+
+  useEffect(() => {
+    if (dashboardSyncInitRef.current) getDashboardSync().markDirty("tickers");
+  }, [tickers]);
+
+  // Trigger immediate sync for low-freq sources
+  useEffect(() => {
+    if (dashboardSyncInitRef.current && ouraHealth?.connected) {
+      getDashboardSync().triggerImmediateSync("health");
+    }
+  }, [ouraHealth?.sleep?.score]);
+
   // Sync goals and life scores with portfolio/health data
   useEffect(() => {
     const equityNum = portfolio?.equityRaw || (typeof portfolio?.equity === "string" ? parseFloat(portfolio.equity.replace(/[$,]/g, "")) : portfolio?.equity);
@@ -2951,6 +3096,16 @@ const App = ({ updateConsoleTitle, updateState }) => {
       }
       return next;
     });
+
+    // Update dashboard connected sources when integrations change
+    if (dashboardSyncInitRef.current) {
+      getDashboardSync().setConnectedSources({
+        alpaca: alpacaStatus === "Live",
+        oura: !!ouraHealth?.connected,
+        goals: goalTracker.getActive().length > 0,
+        linkedin: !!linkedInProfile?.connected
+      });
+    }
   }, [alpacaStatus, alpacaMode, claudeStatus, claudeCodeStatus.available, claudeCodeStatus.ready, linkedInProfile?.connected, ouraHealth?.connected, personalCapitalData?.connected, isInternetConnected]);
 
   // Simple main view readiness - no delays, no multiple refreshes
@@ -4355,6 +4510,7 @@ Execute this task and provide concrete results.`);
           const summary = result.executed.map(t => `${t.side === "buy" ? "Bought" : "Sold"} ${t.symbol}`).join(", ");
           setTradeAction({ type: "trade", text: summary, color: "green" });
           setLastAction(`Auto-trade: ${summary}`);
+          if (dashboardSyncInitRef.current) getDashboardSync().triggerImmediateSync("trading");
         } else if (result.monitored) {
           // No trades — red X with concise reason (max ~3 words)
           const reason = _getShortTradeReason(result, tickers);
@@ -8475,58 +8631,56 @@ Folder: ${result.action.id}`,
         return;
       }
 
-      // /morning - Morning Briefing (show in conversation)
-      // /morning test - Build + send to WhatsApp as a test
-      if (resolved === "/morning" || resolved === "/briefing" || resolved === "/morning test" || resolved === "/briefing test") {
+      // /morning or /brief - Daily Brief (show in conversation + push to all channels)
+      // /brief test - Also sends to WhatsApp + push
+      if (resolved === "/morning" || resolved === "/briefing" || resolved === "/brief" ||
+          resolved === "/morning test" || resolved === "/briefing test" || resolved === "/brief test") {
         const isTest = resolved.includes("test");
-        const brief = buildMorningBrief();
 
-        if (!brief) {
+        // Show conversation version
+        const brief = buildMorningBrief();
+        if (brief) {
           setMessages((prev) => [...prev, {
             role: "assistant",
-            content: "No data available for morning brief right now (no health, goals, calendar, or market data).",
+            content: brief.conversationText,
             timestamp: new Date()
           }]);
-          setLastAction("Morning briefing (empty)");
-          return;
         }
 
-        // Always show in conversation
-        setMessages((prev) => [...prev, {
-          role: "assistant",
-          content: brief.conversationText,
-          timestamp: new Date()
-        }]);
-
-        // If test mode, also send to WhatsApp
-        if (isTest) {
-          (async () => {
-            try {
-              const result = await whatsappNotifications.sendMorningBrief(brief);
-              if (result.success) {
+        // Generate and push rich daily brief to Firestore (always) + WhatsApp/Push (if test or first today)
+        (async () => {
+          try {
+            if (isTest) {
+              // Force send to all channels
+              const richBrief = generateDailyBrief();
+              if (richBrief) {
+                await pushBriefToFirestore(richBrief);
+                const { sendBriefToWhatsApp, sendBriefPushNotification } = await import("./services/daily-brief-generator.js");
+                const [waResult, pushResult] = await Promise.allSettled([
+                  sendBriefToWhatsApp(richBrief),
+                  sendBriefPushNotification(richBrief)
+                ]);
+                const waSent = waResult.status === "fulfilled" && waResult.value?.success;
+                const pushSent = pushResult.status === "fulfilled" && pushResult.value?.success;
                 setMessages((prev) => [...prev, {
                   role: "assistant",
-                  content: "Sent to WhatsApp.",
-                  timestamp: new Date()
-                }]);
-              } else {
-                setMessages((prev) => [...prev, {
-                  role: "assistant",
-                  content: `WhatsApp send failed: ${result.error || "unknown error"}`,
+                  content: `Daily brief pushed to Firestore${waSent ? " + WhatsApp" : ""}${pushSent ? " + Push" : ""}.`,
                   timestamp: new Date()
                 }]);
               }
-            } catch (e) {
-              setMessages((prev) => [...prev, {
-                role: "assistant",
-                content: `WhatsApp error: ${e.message}`,
-                timestamp: new Date()
-              }]);
+            } else {
+              // Just push to Firestore for the web app
+              const richBrief = generateDailyBrief();
+              if (richBrief) {
+                await pushBriefToFirestore(richBrief);
+              }
             }
-          })();
-        }
+          } catch (e) {
+            console.error("[Brief] Delivery error:", e.message);
+          }
+        })();
 
-        setLastAction("Morning briefing");
+        setLastAction("Daily brief");
         return;
       }
 

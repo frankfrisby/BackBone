@@ -11,10 +11,11 @@ import path from "path";
 import os from "os";
 import { EventEmitter } from "events";
 
-// Find Claude CLI path - on Windows it's in npm global bin
-const CLAUDE_CMD = process.platform === "win32"
-  ? path.join(os.homedir(), "AppData", "Roaming", "npm", "claude.cmd")
-  : "claude";
+// Use bare "claude" command — it's on PATH via npm global bin.
+// Avoid hardcoding the full Windows path because backslash sequences
+// like \f (form feed) and \n (newline) in paths such as
+// C:\Users\frank\AppData\Roaming\npm\claude.cmd get mangled by shell: true.
+const CLAUDE_CMD = "claude";
 
 // Claude Code stores credentials in these locations
 const CLAUDE_CODE_PATHS = {

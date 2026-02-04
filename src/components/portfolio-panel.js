@@ -319,7 +319,8 @@ const PortfolioPanelBase = ({
   nextTradeTime,
   privateMode = false,
   tickerScores = {},
-  tradeAction
+  tradeAction,
+  spyData = null
 }) => {
   // Ensure portfolio has default values
   const portfolio = {
@@ -427,7 +428,13 @@ const PortfolioPanelBase = ({
         // Trade action indicator: ✓ green for trades, ✗ red with reason when idle
         tradeAction && tradeAction.type === "trade" && e(Text, { color: "#22c55e" }, `\u2713 ${tradeAction.text}`),
         tradeAction && tradeAction.type === "no-trade" && e(Text, { color: "#ef4444" }, `\u2717 ${tradeAction.text}`),
-        tradeAction && tradeAction.type === "idle" && e(Text, { color: "#64748b" }, `\u2013 ${tradeAction.text}`)
+        tradeAction && tradeAction.type === "idle" && e(Text, { color: "#64748b" }, `\u2013 ${tradeAction.text}`),
+        // SPY indicator with arrow (green ▲ / red ▼)
+        spyData && e(Text, { color: "#334155" }, "│"),
+        spyData && e(Text, {
+          color: spyData.positive ? "#22c55e" : "#ef4444",
+          bold: true
+        }, `SPY ${spyData.positive ? "▲" : "▼"} ${spyData.change >= 0 ? "+" : ""}${spyData.change?.toFixed(1)}%`)
       )
     ),
 

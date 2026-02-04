@@ -65,3 +65,32 @@ describe("SPY Indicator - Props Flow", () => {
     expect(leftColumnContent).toContain("prevProps.spyChange !== nextProps.spyChange");
   });
 });
+
+describe("SPY Indicator - Portfolio Panel", () => {
+  const portfolioContent = fs.readFileSync(
+    path.join(process.cwd(), "src", "components", "portfolio-panel.js"), "utf-8"
+  );
+  const rightColumnContent = fs.readFileSync(
+    path.join(process.cwd(), "src", "components", "right-column.js"), "utf-8"
+  );
+
+  it("portfolio panel accepts spyData prop", () => {
+    expect(portfolioContent).toContain("spyData = null");
+  });
+
+  it("portfolio panel shows SPY with arrow", () => {
+    expect(portfolioContent).toContain('SPY ${spyData.positive ? "▲" : "▼"}');
+  });
+
+  it("portfolio panel colors SPY green/red", () => {
+    expect(portfolioContent).toContain('spyData.positive ? "#22c55e" : "#ef4444"');
+  });
+
+  it("right column computes spyData from tickers", () => {
+    expect(rightColumnContent).toContain('tickers?.find(t => t.symbol === "SPY")');
+  });
+
+  it("right column passes spyData to portfolio panel", () => {
+    expect(rightColumnContent).toContain("spyData,");
+  });
+});

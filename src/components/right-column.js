@@ -82,6 +82,14 @@ const RightColumnBase = ({
     }, {});
   }, [tickers]);
 
+  // Extract SPY data for market indicator
+  const spyData = useMemo(() => {
+    const spy = tickers?.find(t => t.symbol === "SPY");
+    if (!spy) return null;
+    const change = spy.changePercent ?? spy.change ?? 0;
+    return { change, positive: change >= 0 };
+  }, [tickers]);
+
   // Format last updated time
   const lastUpdatedAgo = useMemo(() => formatTimeAgo(portfolioLastUpdated), [portfolioLastUpdated]);
 
@@ -105,6 +113,7 @@ const RightColumnBase = ({
       privateMode,
       tickerScores,
       tradeAction,
+      spyData,
     }),
 
     // Trading History Panel (only in non-minimal mode)
@@ -151,8 +160,11 @@ const areRightColumnPropsEqual = (prevProps, nextProps) => {
   if (prevProps.tradingStatus?.statusText !== nextProps.tradingStatus?.statusText) return false;
   if (prevProps.tradingStatus?.marketOpen !== nextProps.tradingStatus?.marketOpen) return false;
 
-  // Compare tickers length (score lookup)
+  // Compare tickers length (score lookup) and SPY change
   if (prevProps.tickers?.length !== nextProps.tickers?.length) return false;
+  const prevSpy = prevProps.tickers?.find(t => t.symbol === "SPY");
+  const nextSpy = nextProps.tickers?.find(t => t.symbol === "SPY");
+  if ((prevSpy?.changePercent ?? prevSpy?.change) !== (nextSpy?.changePercent ?? nextSpy?.change)) return false;
 
   // Compare connection statuses (just connected state)
   const prevConns = Object.values(prevProps.connectionStatuses || {}).map(c => c?.connected).join(",");

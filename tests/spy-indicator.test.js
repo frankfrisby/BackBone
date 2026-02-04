@@ -78,12 +78,18 @@ describe("SPY Indicator - Portfolio Panel", () => {
     expect(portfolioContent).toContain("spyData = null");
   });
 
-  it("portfolio panel shows SPY with arrow", () => {
+  it("portfolio panel shows SPY with arrow on its own row", () => {
     expect(portfolioContent).toContain('SPY ${spyData.positive ? "▲" : "▼"}');
+    expect(portfolioContent).toContain("SPY MARKET INDICATOR");
   });
 
   it("portfolio panel colors SPY green/red", () => {
     expect(portfolioContent).toContain('spyData.positive ? "#22c55e" : "#ef4444"');
+  });
+
+  it("portfolio panel shows Gained/Lost label for day P/L", () => {
+    expect(portfolioContent).toContain('"Gained"');
+    expect(portfolioContent).toContain('"Lost"');
   });
 
   it("right column computes spyData from tickers", () => {

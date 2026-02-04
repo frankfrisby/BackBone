@@ -266,6 +266,7 @@ const AccountSummary = ({ portfolio, privateMode }) => {
 const DayPL = ({ portfolio, privateMode }) => {
   const color = getPLColor(portfolio.dayChange, privateMode);
   const isPositive = portfolio.dayChange >= 0;
+  const gainLossLabel = privateMode ? "Today" : isPositive ? "Gained" : "Lost";
 
   return e(
     Box,
@@ -276,7 +277,7 @@ const DayPL = ({ portfolio, privateMode }) => {
       paddingX: 1,
       marginY: 1
     },
-    e(Text, { color: COLORS.muted }, "Today"),
+    e(Text, { color: isPositive ? "#22c55e" : "#ef4444", bold: true }, gainLossLabel),
     e(
       Box,
       { flexDirection: "row", gap: 1 },
@@ -413,7 +414,7 @@ const PortfolioPanelBase = ({
     // ===== HEADER =====
     e(
       Box,
-      { flexDirection: "row", justifyContent: "space-between", marginBottom: 1 },
+      { flexDirection: "row", justifyContent: "space-between", marginBottom: 0 },
       e(
         Box,
         { flexDirection: "row", gap: 1 },
@@ -425,18 +426,22 @@ const PortfolioPanelBase = ({
         { flexDirection: "row", gap: 1 },
         e(Text, { color: getStatusColor(portfolio.status) }, getStatusDot(portfolio.status)),
         e(Text, { color: COLORS.dim }, portfolio.mode),
-        // Trade action indicator: ✓ green for trades, ✗ red with reason when idle
+        // Trade action indicator
         tradeAction && tradeAction.type === "trade" && e(Text, { color: "#22c55e" }, `\u2713 ${tradeAction.text}`),
         tradeAction && tradeAction.type === "no-trade" && e(Text, { color: "#ef4444" }, `\u2717 ${tradeAction.text}`),
-        tradeAction && tradeAction.type === "idle" && e(Text, { color: "#64748b" }, `\u2013 ${tradeAction.text}`),
-        // SPY indicator with arrow (green ▲ / red ▼)
-        spyData && e(Text, { color: "#334155" }, "│"),
-        spyData && e(Text, {
-          color: spyData.positive ? "#22c55e" : "#ef4444",
-          bold: true
-        }, `SPY ${spyData.positive ? "▲" : "▼"} ${spyData.change >= 0 ? "+" : ""}${spyData.change?.toFixed(1)}%`)
+        tradeAction && tradeAction.type === "idle" && e(Text, { color: "#64748b" }, `\u2013 ${tradeAction.text}`)
       )
     ),
+    // ===== SPY MARKET INDICATOR (own row for visibility) =====
+    spyData && e(
+      Box,
+      { flexDirection: "row", justifyContent: "flex-end", marginBottom: 1 },
+      e(Text, {
+        color: spyData.positive ? "#22c55e" : "#ef4444",
+        bold: true
+      }, `SPY ${spyData.positive ? "▲" : "▼"} ${spyData.change >= 0 ? "+" : ""}${spyData.change?.toFixed(1)}%`)
+    ),
+    !spyData && e(Box, { marginBottom: 1 }),
 
     // ===== ACCOUNT SUMMARY =====
     e(AccountSummary, { portfolio, privateMode }),

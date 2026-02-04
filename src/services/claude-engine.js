@@ -637,15 +637,22 @@ Write-Output $p.Id
 
       const quickExit = reason === "process-exited" && this.currentStartTime && (Date.now() - this.currentStartTime) < 15000;
 
+      // Determine if this was a successful run (actually did work)
+      const wasSuccessful = !authError && !rateLimited && !quickExit && currentContent !== initialContent;
+      const wasNormalExit = !authError && reason === "process-exited" && !quickExit;
+
       this.currentPid = null;
       this.currentBackend = null;
       this.currentStartTime = null;
       this.currentLogPath = null;
-      this.lastRunCompletedAt = Date.now();
       this.lastLogSize = 0;
 
-      // Persist so cooldown survives app restarts
-      saveEngineState({ lastRunCompletedAt: new Date(this.lastRunCompletedAt).toISOString() });
+      // Only set cooldown if the run was successful or had a normal exit
+      // Failed runs (auth errors, quick exits, rate limits) should NOT block the next run
+      if (wasSuccessful || wasNormalExit) {
+        this.lastRunCompletedAt = Date.now();
+        saveEngineState({ lastRunCompletedAt: new Date(this.lastRunCompletedAt).toISOString() });
+      }
 
       const logEntry = `\n## ${new Date().toISOString()}\n` +
         `**Backend:** ${backend}\n` +

@@ -108,6 +108,10 @@ describe("detectAuthError - Logic", () => {
     if (lower.includes("oauth") && (lower.includes("expired") || lower.includes("invalid"))) {
       return "OAuth session expired — Run 'claude login' to re-authenticate.";
     }
+    if (lower.includes("credit balance") || lower.includes("billing_error") ||
+        lower.includes("insufficient_credit") || lower.includes("billing error")) {
+      return "API credit balance too low — ANTHROPIC_API_KEY is being used instead of Pro/Max subscription. Restarting without API key.";
+    }
     return null;
   };
 
@@ -146,6 +150,17 @@ describe("detectAuthError - Logic", () => {
 
   it("detects fatal API key error", () => {
     const result = detectAuthError("Fatal: API key is invalid");
+    expect(result).not.toBeNull();
+  });
+
+  it("detects 'Credit balance is too low'", () => {
+    const result = detectAuthError('{"error":"billing_error","result":"Credit balance is too low"}');
+    expect(result).not.toBeNull();
+    expect(result).toContain("credit");
+  });
+
+  it("detects billing_error", () => {
+    const result = detectAuthError('billing_error');
     expect(result).not.toBeNull();
   });
 

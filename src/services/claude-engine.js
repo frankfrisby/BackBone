@@ -113,6 +113,12 @@ class ClaudeEngine extends EventEmitter {
       return "OAuth session expired — Run 'claude login' to re-authenticate.";
     }
 
+    // Billing/credit errors (API key has no credits)
+    if (lower.includes("credit balance") || lower.includes("billing_error") ||
+        lower.includes("insufficient_credit") || lower.includes("billing error")) {
+      return "API credit balance too low — ANTHROPIC_API_KEY is being used instead of Pro/Max subscription. Restarting without API key.";
+    }
+
     return null;
   }
 
@@ -492,9 +498,11 @@ Start by reading engine-work-log.md to see recent work, then update the priority
     // No separate script files needed - run directly in batch
 
     // Create a batch script that runs CLI and then pauses briefly so user can see result
+    // IMPORTANT: Unset ANTHROPIC_API_KEY so CLI uses Pro/Max OAuth subscription instead of API key
     const batchContent = `@echo off
 title BACKBONE Claude
 cd /d "${cwd}"
+set ANTHROPIC_API_KEY=
 echo.
 echo ========================================
 echo BACKBONE Claude Engine

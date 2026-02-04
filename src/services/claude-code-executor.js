@@ -187,10 +187,14 @@ export class ClaudeCodeExecutor extends EventEmitter {
       // Add the prompt
       args.push(prompt);
 
+      // Remove ANTHROPIC_API_KEY so CLI uses Pro/Max OAuth subscription
+      const cleanEnv = { ...process.env, FORCE_COLOR: "0" };
+      delete cleanEnv.ANTHROPIC_API_KEY;
+
       const proc = spawn("claude", args, {
         shell: true,
         cwd: options.workDir || this.workDir,
-        env: { ...process.env, FORCE_COLOR: "0" }
+        env: cleanEnv
       });
 
       let output = "";

@@ -548,6 +548,12 @@ const detectAuthError = (text) => {
     return "OAuth session expired — Run 'claude login' to re-authenticate.";
   }
 
+  // Billing/credit errors (API key has no credits)
+  if (lower.includes("credit balance") || lower.includes("billing_error") ||
+      lower.includes("insufficient_credit") || lower.includes("billing error")) {
+    return "API credit balance too low — using API key instead of Pro/Max subscription.";
+  }
+
   return null;
 };
 
@@ -625,10 +631,15 @@ export const runClaudeCodeStreaming = async (prompt, options = {}) => {
   console.log(`[ClaudeCodeCLI] CWD: ${options.cwd || process.cwd()}`);
   console.log(`[ClaudeCodeCLI] Using ${isUsingFallback ? "FALLBACK (Sonnet)" : "PREFERRED (Opus 4.5)"} model`);
 
+  // Remove ANTHROPIC_API_KEY so CLI uses Pro/Max OAuth subscription instead of API key
+  const cleanEnv = { ...process.env };
+  delete cleanEnv.ANTHROPIC_API_KEY;
+
   const proc = spawn(CLAUDE_CMD, args, {
     shell: true,
     cwd: options.cwd || process.cwd(),
-    stdio: ["pipe", "pipe", "pipe"]
+    stdio: ["pipe", "pipe", "pipe"],
+    env: cleanEnv
   });
 
   console.log(`[ClaudeCodeCLI] Process spawned, PID: ${proc.pid || "unknown"}`);

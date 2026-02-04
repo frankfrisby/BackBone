@@ -363,10 +363,14 @@ export class ClaudeCodeBackend extends EventEmitter {
       const spawnCmd = useDirectNode ? process.execPath : command;
       const spawnArgs = useDirectNode ? [claudeCliPath, ...args] : args;
 
+      // Remove ANTHROPIC_API_KEY so CLI uses Pro/Max OAuth subscription
+      const cleanEnv = { ...process.env, FORCE_COLOR: "0" };
+      delete cleanEnv.ANTHROPIC_API_KEY;
+
       const proc = spawn(spawnCmd, spawnArgs, {
         stdio: ["pipe", "pipe", "pipe"],
         cwd: options.cwd || process.cwd(),
-        env: { ...process.env, FORCE_COLOR: "0" }
+        env: cleanEnv
       });
 
       // Send prompt via stdin for real-time streaming (avoids -p buffering issue)

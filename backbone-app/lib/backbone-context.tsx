@@ -159,6 +159,21 @@ function classifyQuery(query: string): {
   const q = query.toLowerCase();
 
   if (
+    q.includes("brief") ||
+    q.includes("briefing") ||
+    q.includes("morning brief") ||
+    q.includes("daily brief")
+  ) {
+    return { viewType: "brief", title: "Daily Brief" };
+  }
+  if (
+    q.includes("dashboard") ||
+    q.includes("overview") ||
+    q.includes("summary")
+  ) {
+    return { viewType: "dashboard", title: "Dashboard" };
+  }
+  if (
     q.includes("portfolio") ||
     q.includes("stocks") ||
     q.includes("positions") ||

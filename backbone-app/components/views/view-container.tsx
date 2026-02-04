@@ -13,6 +13,8 @@ import { VideoView } from "./video-view";
 import { DocumentView } from "./document-view";
 import { SkeletonView } from "./skeleton-view";
 import { VapiCallView } from "../call/vapi-call";
+import { DashboardView } from "../dashboard/dashboard-view";
+import { BriefView } from "./brief-view";
 import { LayoutGrid } from "lucide-react";
 
 export function ViewContainer() {
@@ -20,24 +22,15 @@ export function ViewContainer() {
   const { activeTab } = state;
 
   if (!activeTab) {
-    return (
-      <div className="h-full flex flex-col items-center justify-center">
-        <div className="h-12 w-12 rounded-2xl bg-[#111] border border-[#1a1a1a] flex items-center justify-center mb-3">
-          <LayoutGrid className="h-5 w-5 text-neutral-700" />
-        </div>
-        <p className="text-[13px] text-neutral-600">
-          Your views will appear here
-        </p>
-        <p className="text-[11px] text-neutral-700 mt-1">
-          Ask a question to generate a view
-        </p>
-      </div>
-    );
+    // Default to dashboard view when no active tab
+    return <DashboardView />;
   }
 
   const viewType = activeTab.viewType;
 
   switch (viewType) {
+    case "dashboard":
+      return <DashboardView />;
     case "portfolio":
       return <PortfolioView data={activeTab.data} isLive={activeTab.isLive} />;
     case "trading":
@@ -60,6 +53,8 @@ export function ViewContainer() {
       return <DocumentView data={activeTab.data} />;
     case "call":
       return <VapiCallView />;
+    case "brief":
+      return <BriefView />;
     default:
       return <SkeletonView title={activeTab.title} viewType={viewType || "unknown"} />;
   }

@@ -117,13 +117,8 @@ export const buildPortfolioFromAlpaca = (account, positions) => {
   const lastEquity = parseNumber(account.last_equity || account.equity);
   const invested = Math.max(0, equity - cash);
 
-  const dayChange = lastEquity ? ((equity - lastEquity) / lastEquity) * 100 : 0;
-  const totalChange =
-    parseNumber(account.equity) && parseNumber(account.last_equity)
-      ? ((parseNumber(account.equity) - parseNumber(account.last_equity)) /
-          parseNumber(account.last_equity)) *
-        100
-      : 0;
+  // Filter out CVR (Contingent Value Rights) - they don't count as real positions
+  const filteredPositions = positions.filter(p => !p.symbol.includes("CVR"));
 
   const formatPosition = (position) => {
     const avgPrice = parseNumber(position.avg_entry_price);
@@ -168,11 +163,30 @@ export const buildPortfolioFromAlpaca = (account, positions) => {
     };
   };
 
+  // Process positions first so we can use them for portfolio-level calculations
+  const formattedPositions = filteredPositions.map(formatPosition);
+
+  // Day change: equity-level comparison as primary
+  let dayChange = lastEquity ? ((equity - lastEquity) / lastEquity) * 100 : 0;
+  let dayChangeDollar = equity - lastEquity;
+
+  // When equity-level day change is 0 but positions have intraday P&L, use position-level data
+  // This handles cases where last_equity matches equity (pre-market, stale data)
+  if (Math.abs(dayChange) < 0.005 && formattedPositions.length > 0) {
+    const positionDayPnl = formattedPositions.reduce((sum, p) => sum + (p.todayPnl || 0), 0);
+    if (Math.abs(positionDayPnl) > 0.01) {
+      dayChangeDollar = positionDayPnl;
+      dayChange = equity > 0 ? (positionDayPnl / equity) * 100 : 0;
+    }
+  }
+
+  // Total change: use sum of all position unrealized P&L (not equity vs last_equity)
+  const totalPnl = formattedPositions.reduce((sum, p) => sum + (p.pnl || 0), 0);
+  const totalCostBasis = formattedPositions.reduce((sum, p) => sum + (p.costBasis || 0), 0);
+  const totalChange = totalCostBasis > 0 ? (totalPnl / totalCostBasis) * 100 : 0;
+
   // Determine mode - live accounts don't return trading_environment
   const mode = account.trading_environment || (account.account_number ? "Live" : "Paper");
-
-  // Filter out CVR (Contingent Value Rights) - they don't count as real positions
-  const filteredPositions = positions.filter(p => !p.symbol.includes("CVR"));
 
   return {
     mode,
@@ -183,9 +197,9 @@ export const buildPortfolioFromAlpaca = (account, positions) => {
     buyingPower: formatMoney(buyingPower),
     dayChange,
     totalChange,
-    dayChangeDollar: formatMoney((equity * dayChange) / 100),
-    totalChangeDollar: formatMoney((equity * totalChange) / 100),
-    positions: filteredPositions.map(formatPosition),
+    dayChangeDollar: formatMoney(dayChangeDollar),
+    totalChangeDollar: formatMoney(totalPnl),
+    positions: formattedPositions,
     lastUpdated: new Date().toLocaleTimeString("en-US", {
       hour: "2-digit",
       minute: "2-digit",

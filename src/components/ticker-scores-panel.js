@@ -340,10 +340,11 @@ const TickerScoresPanelBase = ({
     for (const pos of positions) {
       const sym = pos.symbol;
       const gainPct = pos.unrealizedPlPercent ?? pos.totalChangePercent ?? pos.pnlPercent ?? null;
+      const todayPct = pos.todayChange ?? pos.dayChangePercent ?? 0;
       const hasStop = trailingStops && trailingStops[sym];
       const trailPct = hasStop ? trailingStops[sym].trailPercent : null;
       const mktVal = pos.marketValue || (pos.shares * parseFloat(String(pos.lastPrice || 0).replace(/[$,]/g, ""))) || 0;
-      positionMap[sym] = { gainPct, hasStop: !!hasStop, trailPct, marketValue: mktVal };
+      positionMap[sym] = { gainPct, todayPct, hasStop: !!hasStop, trailPct, marketValue: mktVal };
     }
   }
 
@@ -524,7 +525,8 @@ const TickerScoresPanelBase = ({
         e(Text, { color: "#475569", width: 2 }, ""),
         e(Text, { color: "#475569", width: 5 }, "SCORE"),
         e(Text, { color: "#475569", width: 7 }, " SIGNAL"),
-        e(Text, { color: "#475569", width: 8 }, "     AMT")
+        e(Text, { color: "#475569", width: 8 }, "   VALUE"),
+        e(Text, { color: "#475569", width: 8 }, "     P/L")
       ),
       // Top scored tickers + held positions
       ...miniTickers.map((ticker, i) => {
@@ -551,10 +553,25 @@ const TickerScoresPanelBase = ({
             formatScore(ticker.score)),
           e(Text, { color, width: 7 },
             ` ${getSignalLabel(ticker.score, isTop3)}`),
-          // Position amount (only for held positions)
+          // Position value (only for held positions)
           positionMap[ticker.symbol]
             ? e(Text, { color: "#94a3b8", width: 8 },
-                ` $${formatCompactValue(positionMap[ticker.symbol].marketValue)}`)
+                `${formatCompactValue(positionMap[ticker.symbol].marketValue).padStart(8)}`)
+            : e(Text, { width: 8 }, ""),
+          // Position daily P&L % (only for held positions)
+          positionMap[ticker.symbol]
+            ? (() => {
+                const today = positionMap[ticker.symbol].todayPct;
+                const total = positionMap[ticker.symbol].gainPct;
+                // Show today's change if non-zero, otherwise show total P&L
+                const pct = (today && Math.abs(today) >= 0.01) ? today : (total || 0);
+                const isToday = today && Math.abs(today) >= 0.01;
+                const sign = pct >= 0 ? "+" : "";
+                const label = `${sign}${pct.toFixed(1)}%`;
+                const plColor = pct > 0 ? "#22c55e" : pct < 0 ? "#ef4444" : "#64748b";
+                return e(Text, { color: plColor, width: 8 },
+                  `${label.padStart(7)}${isToday ? "" : "*"}`);
+              })()
             : e(Text, { width: 8 }, "")
         );
       }),

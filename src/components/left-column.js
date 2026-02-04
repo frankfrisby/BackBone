@@ -183,8 +183,16 @@ const areLeftColumnPropsEqual = (prevProps, nextProps) => {
   if (prevProps.spyPositive !== nextProps.spyPositive) return false;
   if (prevProps.spyChange !== nextProps.spyChange) return false;
 
-  // Compare positions and trailing stops (for stop dots)
-  if ((prevProps.positions?.length || 0) !== (nextProps.positions?.length || 0)) return false;
+  // Compare positions and trailing stops (for stop dots and P&L display)
+  const prevPos = prevProps.positions || [];
+  const nextPos = nextProps.positions || [];
+  if (prevPos.length !== nextPos.length) return false;
+  // Compare position P&L values so mini view updates when P&L changes
+  for (let i = 0; i < prevPos.length; i++) {
+    if (prevPos[i]?.symbol !== nextPos[i]?.symbol) return false;
+    if (prevPos[i]?.todayChange !== nextPos[i]?.todayChange) return false;
+    if (prevPos[i]?.marketValue !== nextPos[i]?.marketValue) return false;
+  }
   const prevStops = prevProps.trailingStops || {};
   const nextStops = nextProps.trailingStops || {};
   const prevStopKeys = Object.keys(prevStops).sort();

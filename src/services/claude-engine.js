@@ -80,6 +80,51 @@ class ClaudeEngine extends EventEmitter {
   }
 
   /**
+   * Detect auth/API key errors in CLI output.
+   * Returns a descriptive string if an auth error is found, null otherwise.
+   */
+  detectAuthError(text) {
+    if (!text) return null;
+    const lower = text.toLowerCase();
+
+    // API key errors
+    if (lower.includes("api key") || lower.includes("api_key") || lower.includes("apikey")) {
+      if (lower.includes("no value") || lower.includes("not set") || lower.includes("missing") ||
+          lower.includes("invalid") || lower.includes("required") || lower.includes("empty")) {
+        return "API key not set — Claude Code should use Pro/Max subscription. Run 'claude login' in terminal.";
+      }
+      if (lower.includes("expired")) {
+        return "API key expired — Run 'claude login' to re-authenticate with your Pro/Max subscription.";
+      }
+      return "API key error — Run 'claude login' to authenticate with your Pro/Max subscription.";
+    }
+
+    // Auth/login errors
+    if (lower.includes("not logged in") || lower.includes("not authenticated") ||
+        lower.includes("authentication required") || lower.includes("login required") ||
+        lower.includes("unauthorized") || lower.includes("401")) {
+      return "Not logged in — Run 'claude login' to authenticate with your Pro/Max subscription.";
+    }
+
+    // OAuth errors
+    if (lower.includes("oauth") && (lower.includes("expired") || lower.includes("invalid") || lower.includes("error"))) {
+      return "OAuth session expired — Run 'claude login' to re-authenticate.";
+    }
+
+    // Subscription errors
+    if (lower.includes("subscription") && (lower.includes("required") || lower.includes("inactive") || lower.includes("expired"))) {
+      return "Subscription issue — Check your Claude Pro/Max subscription status.";
+    }
+
+    // ANTHROPIC_API_KEY specific
+    if (lower.includes("anthropic_api_key")) {
+      return "ANTHROPIC_API_KEY env var issue — Claude Code should use Pro/Max login, not API key. Run 'claude login'.";
+    }
+
+    return null;
+  }
+
+  /**
    * Parse a stream-json line into human-readable text for the UI.
    * Claude Code CLI with --output-format stream-json emits one JSON object per line.
    */
@@ -557,11 +602,13 @@ Write-Output $p.Id
       this.setCurrentWorkingProject(null);
 
       let rateLimited = false;
+      let authError = null;
       let logTail = "";
       if (this.currentLogPath && fs.existsSync(this.currentLogPath)) {
         try {
           const logText = fs.readFileSync(this.currentLogPath, "utf-8");
           rateLimited = this.isRateLimitOutput(logText);
+          authError = this.detectAuthError(logText);
           logTail = logText.slice(-4000);
         } catch {}
       }
@@ -570,7 +617,14 @@ Write-Output $p.Id
         this.lastRateLimitAt = Date.now();
       }
 
-      if (currentContent !== initialContent) {
+      // Check for auth errors first - these should not retry
+      if (authError) {
+        this.emit("status", `Auth Error: ${authError}`);
+        this.emit("auth-error", { error: authError });
+        const narratorAuth = getActivityNarrator();
+        narratorAuth.observe(`Claude Code: ${authError}`);
+        this.emit("complete", { success: false, reason: "auth-error", error: authError });
+      } else if (currentContent !== initialContent) {
         this.emit("status", "Work complete - files updated");
         this.emit("complete", { success: true, workStatus: currentContent });
       } else if (reason === "process-exited") {
@@ -581,7 +635,7 @@ Write-Output $p.Id
         this.emit("complete", { success: false, reason: "timeout" });
       }
 
-    const quickExit = reason === "process-exited" && this.currentStartTime && (Date.now() - this.currentStartTime) < 15000;
+      const quickExit = reason === "process-exited" && this.currentStartTime && (Date.now() - this.currentStartTime) < 15000;
 
       this.currentPid = null;
       this.currentBackend = null;
@@ -595,11 +649,16 @@ Write-Output $p.Id
 
       const logEntry = `\n## ${new Date().toISOString()}\n` +
         `**Backend:** ${backend}\n` +
-        `**Result:** ${reason || (currentContent !== initialContent ? "updated" : "unknown")}\n\n` +
+        `**Result:** ${authError ? `AUTH ERROR: ${authError}` : (reason || (currentContent !== initialContent ? "updated" : "unknown"))}\n\n` +
         `### Current Work Snapshot\n\n` +
         `${currentContent}\n\n` +
         (logTail ? `### CLI Output (tail)\n\n\`\`\`\n${logTail}\n\`\`\`\n` : "");
       this.appendEngineLog(logEntry);
+
+      // Auth errors should not retry - stop and let the user know
+      if (authError) {
+        return;
+      }
 
       // If Claude hit rate limit, wait and retry
       if (!this.triedRetry && rateLimited) {
@@ -649,6 +708,14 @@ Write-Output $p.Id
             fs.closeSync(fd);
             this.lastLogSize = stat.size;
             const chunk = buffer.toString("utf-8");
+
+            // Check for auth errors in real-time output
+            const authErr = this.detectAuthError(chunk);
+            if (authErr) {
+              finalizeRun(currentContent, "auth-error");
+              return;
+            }
+
             if (chunk.trim()) {
               chunk.split(/\r?\n/).forEach((line) => {
                 if (!line.trim()) return;

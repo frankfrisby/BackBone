@@ -516,6 +516,43 @@ const isRateLimitError = (text) => {
 };
 
 /**
+ * Detect auth/API key errors in CLI output.
+ * Returns a descriptive string if an auth error is found, null otherwise.
+ */
+const detectAuthError = (text) => {
+  if (!text) return null;
+  const lower = text.toLowerCase();
+
+  // API key errors
+  if (lower.includes("api key") || lower.includes("api_key") || lower.includes("apikey") || lower.includes("anthropic_api_key")) {
+    if (lower.includes("no value") || lower.includes("not set") || lower.includes("missing") ||
+        lower.includes("invalid") || lower.includes("required") || lower.includes("empty")) {
+      return "API key not set — use Pro/Max subscription. Run 'claude login' in terminal.";
+    }
+    if (lower.includes("expired")) {
+      return "API key expired — Run 'claude login' to re-authenticate.";
+    }
+    return "API key error — Run 'claude login' to authenticate with Pro/Max subscription.";
+  }
+
+  // Auth/login errors
+  if (lower.includes("not logged in") || lower.includes("not authenticated") ||
+      lower.includes("authentication required") || lower.includes("login required") ||
+      lower.includes("unauthorized") || lower.includes("401")) {
+    return "Not logged in — Run 'claude login' to authenticate with Pro/Max subscription.";
+  }
+
+  // OAuth errors
+  if (lower.includes("oauth") && (lower.includes("expired") || lower.includes("invalid") || lower.includes("error"))) {
+    return "OAuth session expired — Run 'claude login' to re-authenticate.";
+  }
+
+  return null;
+};
+
+export { detectAuthError };
+
+/**
  * Run Claude Code with streaming output
  * Returns an EventEmitter that emits 'data', 'tool', 'complete', and 'error' events
  *
@@ -527,6 +564,7 @@ const isRateLimitError = (text) => {
  * - 'action': Action requiring approval { id, type, description }
  * - 'complete': Process completed { success, output, model }
  * - 'error': Error occurred { error }
+ * - 'auth-error': Authentication error { error, raw }
  * - 'model-fallback': Switched to fallback model due to rate limit
  *
  * Usage:
@@ -675,6 +713,13 @@ export const runClaudeCodeStreaming = async (prompt, options = {}) => {
       console.log(`[ClaudeCodeCLI] Rate limit detected in stderr`);
     }
 
+    // Check for auth/API key errors in stderr
+    const authError = detectAuthError(text);
+    if (authError) {
+      console.error(`[ClaudeCodeCLI] Auth error: ${authError}`);
+      emitter.emit("auth-error", { error: authError, raw: text.slice(0, 200) });
+    }
+
     emitter.emit("data", text);
   });
 
@@ -682,6 +727,21 @@ export const runClaudeCodeStreaming = async (prompt, options = {}) => {
     // Process any remaining buffered line
     if (lineBuffer.trim()) processStreamLine(lineBuffer);
     console.log(`[ClaudeCodeCLI] Process closed with code: ${code}`);
+
+    // Check for auth errors in accumulated output - don't retry these
+    const authErr = detectAuthError(fullOutput);
+    if (authErr) {
+      console.error(`[ClaudeCodeCLI] Auth error in output: ${authErr}`);
+      emitter.emit("auth-error", { error: authErr });
+      emitter.emit("complete", {
+        success: false,
+        output: fullOutput,
+        exitCode: code,
+        model: modelToUse,
+        authError: authErr
+      });
+      return;
+    }
 
     // If rate limit detected and we were using Opus, retry with Sonnet
     if (rateLimitDetected && modelToUse === PREFERRED_MODEL && !options._isRetry) {

@@ -2771,13 +2771,27 @@ const App = ({ updateConsoleTitle, updateState }) => {
 
     const onComplete = (result) => {
       console.log(`[ClaudeEngine] Completed: ${result.success ? "success" : "failed"}`);
-      if (result.success) {
+      if (result.reason === "auth-error") {
+        // Auth error - show clear message to user
+        setActionStreamingTitle("Auth Error");
+        setActionStreamingText((prev) => prev + `\n✗ ${result.error || "Authentication failed"}\n\nRun 'claude login' in a terminal to authenticate with your Pro/Max subscription.\n`);
+        // Update connection status
+        setClaudeCodeAlert(result.error || "Claude Code auth error");
+      } else if (result.success) {
         setActionStreamingTitle("Work completed");
         setActionStreamingText((prev) => prev + "\n✓ Work done. Next run in 2 minutes.\n\nCheck memory/current-work.md for details.");
       } else {
         setActionStreamingTitle("Work failed");
         setActionStreamingText((prev) => prev + `\n✗ Failed with code ${result.code}\n`);
       }
+      setCliStreaming(false);
+    };
+
+    const onAuthError = (data) => {
+      console.error("[ClaudeEngine] Auth error:", data.error);
+      setActionStreamingTitle("Auth Error");
+      setActionStreamingText((prev) => prev + `\n✗ ${data.error}\n`);
+      setClaudeCodeAlert(data.error);
       setCliStreaming(false);
     };
 
@@ -2795,6 +2809,7 @@ const App = ({ updateConsoleTitle, updateState }) => {
     claudeEngine.on("started", onStarted);
     claudeEngine.on("status", onStatus);
     claudeEngine.on("complete", onComplete);
+    claudeEngine.on("auth-error", onAuthError);
     claudeEngine.on("error", onError);
     claudeEngine.on("stopped", onStopped);
 
@@ -2802,6 +2817,7 @@ const App = ({ updateConsoleTitle, updateState }) => {
       claudeEngine.off("started", onStarted);
       claudeEngine.off("status", onStatus);
       claudeEngine.off("complete", onComplete);
+      claudeEngine.off("auth-error", onAuthError);
       claudeEngine.off("error", onError);
       claudeEngine.off("stopped", onStopped);
     };
@@ -2894,8 +2910,12 @@ const App = ({ updateConsoleTitle, updateState }) => {
       const claudeStatusState = claudeConnected
         ? "connected"
         : (claudeStatus === "Missing key" || claudeStatus === "Checking..." ? "never" : "broken");
-      const claudeCodeConnected = claudeCodeStatus.available;
-      const claudeCodeStatusState = claudeCodeConnected ? "connected" : "never";
+      const claudeCodeConnected = claudeCodeStatus.ready || false;
+      const claudeCodeStatusState = claudeCodeConnected
+        ? "connected"
+        : claudeCodeStatus.available
+          ? "broken"  // installed but not logged in
+          : "never";  // not installed
       const linkedinConnected = linkedInProfile?.connected;
       const linkedinStatusState = linkedinConnected ? "connected" : "never";
       const ouraConnected = ouraHealth?.connected;
@@ -2908,7 +2928,15 @@ const App = ({ updateConsoleTitle, updateState }) => {
       const next = {
         alpaca: { connected: alpacaConnected, status: alpacaStatusState, details: alpacaMode },
         claude: { connected: claudeConnected, status: claudeStatusState, details: "" },
-        claudeCode: { connected: claudeCodeConnected, status: claudeCodeStatusState, details: claudeCodeStatus.available ? "Ready" : "Not installed" },
+        claudeCode: {
+          connected: claudeCodeConnected,
+          status: claudeCodeStatusState,
+          details: claudeCodeConnected
+            ? "Ready"
+            : claudeCodeStatus.available
+              ? "Not logged in — run 'claude login'"
+              : "Not installed"
+        },
         linkedin: { connected: linkedinConnected, status: linkedinStatusState, details: "" },
         oura: { connected: ouraConnected, status: ouraStatusState, details: "" },
         yahoo: { connected: yahooConnected, status: yahooStatusState, details: "" }, // Removed lastQuoteUpdate to prevent flickering
@@ -2922,7 +2950,7 @@ const App = ({ updateConsoleTitle, updateState }) => {
       }
       return next;
     });
-  }, [alpacaStatus, alpacaMode, claudeStatus, claudeCodeStatus.available, linkedInProfile?.connected, ouraHealth?.connected, personalCapitalData?.connected, isInternetConnected]);
+  }, [alpacaStatus, alpacaMode, claudeStatus, claudeCodeStatus.available, claudeCodeStatus.ready, linkedInProfile?.connected, ouraHealth?.connected, personalCapitalData?.connected, isInternetConnected]);
 
   // Simple main view readiness - no delays, no multiple refreshes
   useEffect(() => {

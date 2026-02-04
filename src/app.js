@@ -499,7 +499,7 @@ const App = ({ updateConsoleTitle, updateState }) => {
   // Pre-render phase: render main view first (invisible) to set terminal rows, then show splash
   const [preRenderPhase, setPreRenderPhase] = useState(true);
   const [isInitializing, setIsInitializing] = useState(true);
-  // Track how many outcomes to show (4 during loading, 2 after)
+  // Track how many outcomes to show (4 during loading, then dynamic 2-5 based on height)
   const [maxOutcomesToShow, setMaxOutcomesToShow] = useState(4);
   const [lifeEngineCoverage, setLifeEngineCoverage] = useState(0);
   const [lifeEngineReady, setLifeEngineReady] = useState(false);
@@ -873,8 +873,11 @@ const App = ({ updateConsoleTitle, updateState }) => {
           // Clear screen before transitioning from splash to main view
           process.stdout.write("\x1b[2J\x1b[1;1H");
           setIsInitializing(false);
-          // Reduce outcomes to 2 after loading
-          setMaxOutcomesToShow(2);
+          // Set outcomes count based on terminal height (default 2, expand to 5 for tall terminals)
+          // Each outcome row takes ~1 line; base threshold 40 rows for 2, +1 outcome per 8 extra rows
+          const rows = process.stdout.rows || 40;
+          const heightBasedOutcomes = Math.min(5, Math.max(2, 2 + Math.floor((rows - 40) / 8)));
+          setMaxOutcomesToShow(heightBasedOutcomes);
           // Restore terminal title after splash (ensure "Backbone · [User]" shows)
           restoreBaseTitle();
           // Emit resize event to ensure layout calculates correctly
@@ -888,6 +891,18 @@ const App = ({ updateConsoleTitle, updateState }) => {
     };
     init();
   }, [nudgeStdoutSize]);
+
+  // Update outcomes count on terminal resize (2 default, up to 5 for tall terminals)
+  useEffect(() => {
+    if (isInitializing) return;
+    const onResize = () => {
+      const rows = process.stdout.rows || 40;
+      const heightBased = Math.min(5, Math.max(2, 2 + Math.floor((rows - 40) / 8)));
+      setMaxOutcomesToShow(heightBased);
+    };
+    process.stdout.on("resize", onResize);
+    return () => process.stdout.removeListener("resize", onResize);
+  }, [isInitializing]);
 
   // Show post-update notification if we just restarted after an auto-update
   useEffect(() => {

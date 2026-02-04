@@ -172,24 +172,35 @@ export class LifeScores extends EventEmitter {
 
     let score = 0;
 
-    // Base score from having a portfolio
+    // Parse equity as number (could be formatted string like "$1,266.99")
+    const equity = portfolio.equityRaw ||
+      (typeof portfolio.equity === "string" ? parseFloat(portfolio.equity.replace(/[$,]/g, "")) : portfolio.equity) || 0;
+
+    // Base score from having a connected portfolio
     score += 20;
 
+    // Equity level bonus (having money invested)
+    if (equity > 500) score += 10;
+    if (equity > 5000) score += 10;
+    if (equity > 25000) score += 10;
+
     // Progress toward wealth goal
-    const wealthGoal = goals?.find(g => g.category === LIFE_CATEGORIES.FINANCE);
-    if (wealthGoal) {
-      const progress = (portfolio.equity - wealthGoal.startValue) /
-                       (wealthGoal.targetValue - wealthGoal.startValue);
-      score += Math.min(40, progress * 40);
+    const wealthGoal = goals?.find(g => g.category === LIFE_CATEGORIES.FINANCE && (g.unit === "USD" || g.unit === "$" || g.targetValue > 1000));
+    if (wealthGoal && wealthGoal.targetValue > wealthGoal.startValue) {
+      const progress = (equity - (wealthGoal.startValue || 0)) /
+                       (wealthGoal.targetValue - (wealthGoal.startValue || 0));
+      score += Math.min(20, Math.max(0, progress) * 20);
     }
 
     // Positive P/L bonus
-    if (portfolio.dayPL > 0) score += 10;
-    if (portfolio.totalPL > 0) score += 20;
+    const dayPL = portfolio.dayPL || portfolio.dayChange || 0;
+    const totalChange = portfolio.totalChange || 0;
+    if (dayPL > 0) score += 10;
+    if (totalChange > 0) score += 10;
 
     // Diversification bonus (number of positions)
+    if (portfolio.positions?.length >= 1) score += 5;
     if (portfolio.positions?.length >= 3) score += 5;
-    if (portfolio.positions?.length >= 5) score += 5;
 
     return Math.min(100, Math.round(score));
   }

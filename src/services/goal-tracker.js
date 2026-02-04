@@ -314,10 +314,14 @@ export class GoalTracker extends EventEmitter {
 
   /**
    * Sync finance goal with portfolio
+   * Only syncs value-tracked goals (unit "USD" or dollar targets), not task-completion goals
    */
   syncFinanceGoal(portfolioValue) {
+    // Find a value-tracked finance goal (unit is USD or targetValue > 1000 suggesting dollar amount)
     const financeGoal = this.goals.find(
-      g => g.category === GOAL_CATEGORY.FINANCE && g.status === GOAL_STATUS.ACTIVE
+      g => g.category === GOAL_CATEGORY.FINANCE &&
+           g.status === GOAL_STATUS.ACTIVE &&
+           (g.unit === "USD" || g.unit === "$" || g.targetValue > 1000)
     );
 
     if (financeGoal) {
@@ -329,10 +333,13 @@ export class GoalTracker extends EventEmitter {
 
   /**
    * Sync health goal with Oura data
+   * Only syncs score-tracked goals, not task-completion goals
    */
   syncHealthGoal(sleepScore) {
     const healthGoal = this.goals.find(
-      g => g.category === GOAL_CATEGORY.HEALTH && g.status === GOAL_STATUS.ACTIVE
+      g => g.category === GOAL_CATEGORY.HEALTH &&
+           g.status === GOAL_STATUS.ACTIVE &&
+           (g.unit !== "%" || g.targetValue > 100)
     );
 
     if (healthGoal) {

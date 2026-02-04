@@ -2875,8 +2875,9 @@ const App = ({ updateConsoleTitle, updateState }) => {
 
   // Sync goals and life scores with portfolio/health data
   useEffect(() => {
-    if (portfolio?.equity && typeof portfolio.equity === "number") {
-      goalTracker.syncFinanceGoal(portfolio.equity);
+    const equityNum = portfolio?.equityRaw || (typeof portfolio?.equity === "string" ? parseFloat(portfolio.equity.replace(/[$,]/g, "")) : portfolio?.equity);
+    if (equityNum && typeof equityNum === "number" && !isNaN(equityNum)) {
+      goalTracker.syncFinanceGoal(equityNum);
       lifeScores.syncAllScores({
         portfolio,
         goals: goalTracker.getActive(),

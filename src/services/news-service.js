@@ -11,6 +11,7 @@ import fs from "fs";
 import path from "path";
 import { sendMessage } from "./claude.js";
 import { getActivityTracker } from "./activity-tracker.js";
+import { getWhatsAppNotifications, NOTIFICATION_TYPE, NOTIFICATION_PRIORITY } from "./whatsapp-notifications.js";
 
 const DATA_DIR = path.join(process.cwd(), "data");
 const MEMORY_DIR = path.join(process.cwd(), "memory");
@@ -306,6 +307,64 @@ function saveNewsCache(result) {
 }
 
 /**
+ * Send WhatsApp alerts for breaking/critical news that could impact the user.
+ * Only fires for genuinely abnormal events (2-sigma) — urgency "critical"
+ * or "high" + impactScore >= 80. Uses URGENT priority to bypass quiet hours.
+ */
+async function sendBreakingNewsAlerts(analysis) {
+  const whatsapp = getWhatsAppNotifications();
+  if (!whatsapp.enabled) return;
+
+  // Collect critical backlog items (these have urgency + impact scores)
+  const critical = (analysis?.backlogItems || []).filter(item =>
+    item.urgency === "critical" ||
+    (item.urgency === "high" && (item.impactScore || 0) >= 80)
+  );
+
+  if (critical.length === 0) return;
+
+  // Build a relevance lookup from newsItems for "why this matters" context
+  const relevanceMap = {};
+  (analysis?.newsItems || []).forEach(n => {
+    if (n.headline && n.relevance) {
+      relevanceMap[n.headline.toLowerCase().trim()] = n.relevance;
+    }
+  });
+
+  let msg = `*BREAKING NEWS ALERT*\n`;
+  critical.slice(0, 3).forEach(item => {
+    msg += `\n*${item.title}*\n`;
+
+    // Show what happened
+    if (item.description) {
+      msg += `${item.description.slice(0, 150)}\n`;
+    }
+
+    // Show HOW it impacts the user — check relevance map or related beliefs
+    const matchKey = Object.keys(relevanceMap).find(k =>
+      item.title.toLowerCase().includes(k.slice(0, 20)) || k.includes(item.title.toLowerCase().slice(0, 20))
+    );
+    const relevance = matchKey ? relevanceMap[matchKey] : null;
+
+    if (relevance) {
+      msg += `\n_How this impacts you:_ ${relevance}\n`;
+    } else if (item.relatedBeliefs?.length > 0) {
+      msg += `\n_Impacts your:_ ${item.relatedBeliefs.join(", ")}\n`;
+    }
+  });
+
+  msg += `\n_This is outside the norm and could significantly affect you._`;
+
+  await whatsapp.send(NOTIFICATION_TYPE.ALERT, msg, {
+    identifier: `breaking_${Date.now()}`,
+    priority: NOTIFICATION_PRIORITY.URGENT,
+    allowDuplicate: false
+  });
+
+  console.log(`[NewsService] Sent breaking news alert for ${critical.length} critical item(s)`);
+}
+
+/**
  * Main news fetch and analysis function
  */
 export async function fetchAndAnalyzeNews() {
@@ -340,7 +399,14 @@ export async function fetchAndAnalyzeNews() {
     // 6. Save to cache
     saveNewsCache(analysis);
 
-    // 7. Log result
+    // 7. Check for breaking/critical news and alert via WhatsApp
+    try {
+      await sendBreakingNewsAlerts(analysis);
+    } catch (alertErr) {
+      console.log("[NewsService] Breaking news alert skipped:", alertErr.message);
+    }
+
+    // 8. Log result
     tracker.action("NEWS", `Analyzed news, added ${itemsAdded} backlog items`);
     tracker.setState("idle", null);
 

@@ -855,39 +855,9 @@ const App = ({ updateConsoleTitle, updateState }) => {
         // Silent fail - AI matching will fall back to algorithm
       }
 
-      // Spawn second terminal with QR code if mobile app not connected yet
-      try {
-        const startupSettings = loadUserSettings();
-        if (!startupSettings.mobileAppInstalled) {
-          const qrScript = path.join(process.cwd(), "scripts", "show-connect-qr.js");
-          if (fs.existsSync(qrScript)) {
-            if (process.platform === "win32") {
-              // Windows: check for Windows Terminal (wt) first for side-by-side split
-              const isWindowsTerminal = process.env.WT_SESSION || process.env.WT_PROFILE_ID;
-              if (isWindowsTerminal) {
-                spawn("wt", ["-w", "0", "sp", "-s", "0.3", "node", qrScript], {
-                  detached: true,
-                  stdio: "ignore"
-                }).unref();
-              } else {
-                spawn("cmd", ["/c", "start", "BACKBONE Connect", "node", qrScript], {
-                  detached: true,
-                  stdio: "ignore",
-                  shell: true
-                }).unref();
-              }
-            } else {
-              // macOS/Linux: open new terminal
-              spawn("node", [qrScript], {
-                detached: true,
-                stdio: "ignore"
-              }).unref();
-            }
-          }
-        }
-      } catch {
-        // Silent fail — QR window is non-critical
-      }
+      // QR code for mobile app connection — shown in-app only, no secondary window
+      // Previously spawned a secondary CLI window which was disruptive.
+      // The /connect command can be used to display the QR code in the chat.
 
       // Phase 1: Pre-render main view (invisible) to set terminal rows based on content
       // Emit resize event immediately to capture terminal size

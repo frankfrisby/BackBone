@@ -8,6 +8,7 @@ import { BILLING_URLS } from "../services/api-quota-monitor.js";
 import { isClaudeCodeLoggedIn, getCurrentModelInUse } from "../services/claude-code-cli.js";
 import { getGoalManager } from "../services/goal-manager.js";
 import { getBackgroundProjectsManager, BACKGROUND_PROJECT_TYPE } from "../services/background-projects.js";
+import { getClaudeEngine } from "../services/claude-engine.js";
 
 const e = React.createElement;
 
@@ -308,7 +309,20 @@ const ThinkingState = memo(({ state = "Thinking", goal = "", projectName = "" })
 });
 
 /**
- * Idle state display
+ * Format last run timestamp as "Monday Jan 5, 2026 9:14 am"
+ */
+const formatLastRanTimestamp = (isoOrMs) => {
+  if (!isoOrMs) return null;
+  const d = typeof isoOrMs === "number" ? new Date(isoOrMs) : new Date(isoOrMs);
+  if (isNaN(d.getTime())) return null;
+  return d.toLocaleString("en-US", {
+    weekday: "long", month: "short", day: "numeric", year: "numeric",
+    hour: "numeric", minute: "2-digit", hour12: true
+  }).replace(",", "");
+};
+
+/**
+ * Idle state display with last run timestamp
  */
 const IdleState = memo(({ waitingReasons = [], backgroundProjects = [] }) => {
   const bgProjectNames = {
@@ -317,6 +331,12 @@ const IdleState = memo(({ waitingReasons = [], backgroundProjects = [] }) => {
     [BACKGROUND_PROJECT_TYPE.DISASTER_PLANNING]: "Disaster Planning"
   };
 
+  // Get Claude Engine last run time
+  const engineStatus = useMemo(() => {
+    try { return getClaudeEngine().getStatus(); } catch { return {}; }
+  }, []);
+  const lastRanLabel = formatLastRanTimestamp(engineStatus.lastRunCompletedAt);
+
   return e(
     Box,
     { flexDirection: "column", marginBottom: 1 },
@@ -324,7 +344,9 @@ const IdleState = memo(({ waitingReasons = [], backgroundProjects = [] }) => {
       Box,
       { flexDirection: "row" },
       e(Text, { color: THEME.gray }, "○ "),
-      e(Text, { color: THEME.muted }, "Idle")
+      e(Text, { color: THEME.muted }, "Idle"),
+      // Last ran timestamp
+      lastRanLabel && e(Text, { color: THEME.dim }, ` · Last ran ${lastRanLabel}`)
     ),
     // Waiting reasons
     waitingReasons.length > 0 && e(

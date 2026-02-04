@@ -3141,6 +3141,23 @@ Execute this task and provide concrete results.`);
         }
       });
 
+      // Auto-start Claude Engine after 30 seconds if not in cooldown
+      // This enables background work (idle processing) without manual /engine start
+      setTimeout(() => {
+        const claudeEngine = getClaudeEngine();
+        const engineStatus = claudeEngine.getStatus();
+        if (!engineStatus.isRunning && !engineStatus.cooldown) {
+          console.log("[App] Auto-starting Claude Engine for background work...");
+          claudeEngine.start().then((result) => {
+            if (result?.success) {
+              workLog.logSystem("Claude Engine", "Auto-started for background work");
+            }
+          }).catch(() => {});
+        } else if (engineStatus.cooldown) {
+          console.log(`[App] Claude Engine in cooldown (${engineStatus.cooldownRemainingMin} min left) — skipping auto-start`);
+        }
+      }, 30000);
+
       // Initial AI Brain observation after a short delay
       setTimeout(async () => {
         try {

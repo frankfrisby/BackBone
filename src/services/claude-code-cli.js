@@ -517,33 +517,34 @@ const isRateLimitError = (text) => {
 
 /**
  * Detect auth/API key errors in CLI output.
+ * Only checks first 500 chars by default to avoid false positives from Claude's
+ * response content (e.g. discussing Alpaca API keys would trigger a false match).
  * Returns a descriptive string if an auth error is found, null otherwise.
  */
 const detectAuthError = (text) => {
   if (!text) return null;
-  const lower = text.toLowerCase();
+  // Only check the beginning — auth errors happen at startup, not mid-response
+  const lower = text.slice(0, 500).toLowerCase();
 
-  // API key errors
-  if (lower.includes("api key") || lower.includes("api_key") || lower.includes("apikey") || lower.includes("anthropic_api_key")) {
-    if (lower.includes("no value") || lower.includes("not set") || lower.includes("missing") ||
-        lower.includes("invalid") || lower.includes("required") || lower.includes("empty")) {
-      return "API key not set — use Pro/Max subscription. Run 'claude login' in terminal.";
-    }
-    if (lower.includes("expired")) {
-      return "API key expired — Run 'claude login' to re-authenticate.";
-    }
+  // ANTHROPIC_API_KEY specific
+  if (lower.includes("anthropic_api_key")) {
+    return "ANTHROPIC_API_KEY not set — Claude Code should use Pro/Max login. Run 'claude login'.";
+  }
+
+  // Error-prefixed API key messages (e.g. "Error: API key has no value")
+  if ((lower.includes("error") || lower.includes("fatal")) &&
+      (lower.includes("api key") || lower.includes("api_key"))) {
     return "API key error — Run 'claude login' to authenticate with Pro/Max subscription.";
   }
 
   // Auth/login errors
-  if (lower.includes("not logged in") || lower.includes("not authenticated") ||
-      lower.includes("authentication required") || lower.includes("login required") ||
-      lower.includes("unauthorized") || lower.includes("401")) {
+  if (lower.includes("not logged in") || lower.includes("authentication required") ||
+      lower.includes("login required")) {
     return "Not logged in — Run 'claude login' to authenticate with Pro/Max subscription.";
   }
 
   // OAuth errors
-  if (lower.includes("oauth") && (lower.includes("expired") || lower.includes("invalid") || lower.includes("error"))) {
+  if (lower.includes("oauth") && (lower.includes("expired") || lower.includes("invalid"))) {
     return "OAuth session expired — Run 'claude login' to re-authenticate.";
   }
 

@@ -81,44 +81,36 @@ class ClaudeEngine extends EventEmitter {
 
   /**
    * Detect auth/API key errors in CLI output.
+   * Only checks the FIRST 500 chars to avoid false positives from Claude's actual responses
+   * (e.g. Claude discussing Alpaca API keys would trigger a false match on the full log).
    * Returns a descriptive string if an auth error is found, null otherwise.
    */
-  detectAuthError(text) {
+  detectAuthError(text, { fullText = false } = {}) {
     if (!text) return null;
-    const lower = text.toLowerCase();
+    // Only check the start of output — auth errors happen immediately, not mid-response
+    const checkText = fullText ? text : text.slice(0, 500);
+    const lower = checkText.toLowerCase();
 
-    // API key errors
-    if (lower.includes("api key") || lower.includes("api_key") || lower.includes("apikey")) {
-      if (lower.includes("no value") || lower.includes("not set") || lower.includes("missing") ||
-          lower.includes("invalid") || lower.includes("required") || lower.includes("empty")) {
-        return "API key not set — Claude Code should use Pro/Max subscription. Run 'claude login' in terminal.";
-      }
-      if (lower.includes("expired")) {
-        return "API key expired — Run 'claude login' to re-authenticate with your Pro/Max subscription.";
-      }
-      return "API key error — Run 'claude login' to authenticate with your Pro/Max subscription.";
+    // ANTHROPIC_API_KEY specific — most common CLI auth error
+    if (lower.includes("anthropic_api_key")) {
+      return "ANTHROPIC_API_KEY not set — Claude Code should use Pro/Max login. Run 'claude login'.";
+    }
+
+    // Error-prefixed API key messages (e.g. "Error: API key has no value")
+    if ((lower.includes("error") || lower.includes("fatal")) &&
+        (lower.includes("api key") || lower.includes("api_key"))) {
+      return "API key error — Run 'claude login' to authenticate with Pro/Max subscription.";
     }
 
     // Auth/login errors
-    if (lower.includes("not logged in") || lower.includes("not authenticated") ||
-        lower.includes("authentication required") || lower.includes("login required") ||
-        lower.includes("unauthorized") || lower.includes("401")) {
-      return "Not logged in — Run 'claude login' to authenticate with your Pro/Max subscription.";
+    if (lower.includes("not logged in") || lower.includes("authentication required") ||
+        lower.includes("login required")) {
+      return "Not logged in — Run 'claude login' to authenticate with Pro/Max subscription.";
     }
 
     // OAuth errors
-    if (lower.includes("oauth") && (lower.includes("expired") || lower.includes("invalid") || lower.includes("error"))) {
+    if (lower.includes("oauth") && (lower.includes("expired") || lower.includes("invalid"))) {
       return "OAuth session expired — Run 'claude login' to re-authenticate.";
-    }
-
-    // Subscription errors
-    if (lower.includes("subscription") && (lower.includes("required") || lower.includes("inactive") || lower.includes("expired"))) {
-      return "Subscription issue — Check your Claude Pro/Max subscription status.";
-    }
-
-    // ANTHROPIC_API_KEY specific
-    if (lower.includes("anthropic_api_key")) {
-      return "ANTHROPIC_API_KEY env var issue — Claude Code should use Pro/Max login, not API key. Run 'claude login'.";
     }
 
     return null;
@@ -608,6 +600,8 @@ Write-Output $p.Id
         try {
           const logText = fs.readFileSync(this.currentLogPath, "utf-8");
           rateLimited = this.isRateLimitOutput(logText);
+          // Only check first 500 chars for auth errors — avoids false positives
+          // from Claude discussing API keys in its actual work output
           authError = this.detectAuthError(logText);
           logTail = logText.slice(-4000);
         } catch {}
@@ -716,11 +710,13 @@ Write-Output $p.Id
             this.lastLogSize = stat.size;
             const chunk = buffer.toString("utf-8");
 
-            // Check for auth errors in real-time output
-            const authErr = this.detectAuthError(chunk);
-            if (authErr) {
-              finalizeRun(currentContent, "auth-error");
-              return;
+            // Check for auth errors only in first 15 seconds (auth failures happen immediately)
+            if (elapsed < 15000) {
+              const authErr = this.detectAuthError(chunk);
+              if (authErr) {
+                finalizeRun(currentContent, "auth-error");
+                return;
+              }
             }
 
             if (chunk.trim()) {

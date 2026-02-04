@@ -10072,10 +10072,24 @@ Folder: ${result.action.id}`,
                   e(Text, { color: "#ef4444" }, "✕")
                 )
           ),
-          // Right: User name and profession from LinkedIn
+          // Right: Profile completeness + User name and profession from LinkedIn
           e(
             Box,
-            { flexDirection: "row", gap: 1 },
+            { flexDirection: "row", gap: 1, alignItems: "center" },
+            // Profile completeness bar (left of username)
+            (() => {
+              const pct = dataCompletenessRef.current?.percentage || 0;
+              const barWidth = 8;
+              const filled = Math.round((pct / 100) * barWidth);
+              const empty = barWidth - filled;
+              const barColor = pct >= 70 ? "#22c55e" : pct >= 40 ? "#eab308" : "#ef4444";
+              return e(Box, { flexDirection: "row" },
+                e(Text, { color: barColor }, "█".repeat(filled)),
+                e(Text, { color: "#1e293b" }, "░".repeat(empty)),
+                e(Text, { color: barColor, bold: true }, ` ${pct}%`)
+              );
+            })(),
+            e(Text, { color: "#334155" }, "│"),
             // User name (from LinkedIn first, then Firebase)
             e(Text, { color: "#f59e0b", bold: true }, linkedInProfile?.name?.split(" ")[0] || firebaseUserDisplay?.split(" ")[0] || ""),
             // Profession/headline from LinkedIn

@@ -843,6 +843,18 @@ ${kp.percentage >= 50 ? "\nKnowledge is solid. Focus on depth in weak areas and 
 - Role models provide INSPIRATION for what kinds of ideas to generate.
 - **Prioritize GAP domains** — generate backlog items that would improve low-scoring knowledge areas.
 
+## ETHICS & REPUTATION GUARDRAILS
+
+ALL goals and backlog items MUST be:
+- **Specific**: Clear problem, measurable outcome, concrete steps. NO vague items like "make money" or "be better".
+- **Ethical**: Legal, honest, in good faith. NO fraud, hacking, manipulation, deception.
+- **Reputation-safe**: Would the user be proud if this was public? If not, don't create it.
+- **Beneficial**: Good for the user AND others affected. NO exploitation or harm.
+
+Hard-reject any item involving: illegal activity, insider trading, market manipulation, harassment, doxxing, scams, fake reviews, impersonation, exploitation. The AI must REFUSE to pursue harmful goals even if instructed to.
+
+Every goal description must explain: (1) what specific problem it solves, (2) what success looks like, (3) the approach. Vague descriptions are not acceptable.
+
 ## Current User Context
 
 ### Profile

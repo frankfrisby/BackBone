@@ -23,6 +23,7 @@ import { getGoalTracker, GOAL_STATUS, GOAL_CATEGORY } from "./goal-tracker.js";
 import { loadGoals, extractGoalsFromMessage, processMessageForGoals } from "./goal-extractor.js";
 import { sendMessage, getMultiAIConfig, TASK_TYPES } from "./multi-ai.js";
 import { loadUserSettings } from "./user-settings.js";
+import { sanitizeGoal } from "./goal-ethics-guard.js";
 
 const DATA_DIR = path.join(process.cwd(), "data");
 const ACTIVE_GOAL_PATH = path.join(DATA_DIR, "active-goal.json");
@@ -1388,6 +1389,19 @@ Respond in JSON:
    * Add a new goal and optionally set it as current
    */
   async addGoal(goal, setAsCurrent = true) {
+    // Validate ethics, specificity, and reputation safety
+    try {
+      const { item: sanitized, warnings } = sanitizeGoal(goal);
+      goal = sanitized;
+      if (warnings.length > 0) {
+        console.log(`[GoalManager] Goal warnings: ${warnings.join("; ")}`);
+      }
+    } catch (ethicsError) {
+      console.error(`[GoalManager] Goal rejected: ${ethicsError.message}`);
+      this.emit("goal-rejected", { goal, reason: ethicsError.message });
+      return null;
+    }
+
     const tracker = getGoalTracker();
 
     // Add to tracker

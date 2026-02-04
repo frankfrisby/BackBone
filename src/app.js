@@ -232,6 +232,7 @@ import { getUnifiedMessageLog, MESSAGE_CHANNEL } from "./services/unified-messag
 import { getWhatsAppNotifications } from "./services/whatsapp-notifications.js";
 import { classifyMessage } from "./services/message-classifier.js";
 import { selectChannel, routeResponse, CHANNEL } from "./services/response-router.js";
+import { tryDirectCommand, buildContextualSystemPrompt } from "./services/app-command-handler.js";
 
 // Engine state and new panels
 import { getEngineStateManager, ENGINE_STATUS } from "./services/engine-state.js";
@@ -391,7 +392,7 @@ function _getShortTradeReason(result, tickers) {
  * Builds a WhatsApp-optimized prompt, executes with full MCP tool access,
  * and extracts the final response. Falls back to aiBrain.chat() on failure.
  */
-async function _handleComplexWhatsApp(userMessage, userId, aiBrain) {
+async function _handleComplexMessage(userMessage, userId, aiBrain, channel = "app") {
   const COMPLEX_TIMEOUT = 120000; // 2 minutes
 
   try {
@@ -399,12 +400,13 @@ async function _handleComplexWhatsApp(userMessage, userId, aiBrain) {
     const isReady = await executor.isReady();
 
     if (!isReady) {
-      console.log("[App] Claude Code not ready, falling back to aiBrain.chat()");
-      const response = await aiBrain.chat(userMessage, { userId, channel: "whatsapp" });
+      console.log(`[App] Claude Code not ready, falling back to aiBrain.chat() for ${channel}`);
+      const systemPrompt = buildContextualSystemPrompt(channel);
+      const response = await aiBrain.chat(userMessage, { userId, channel, systemPrompt });
       return response.content;
     }
 
-    const prompt = _buildWhatsAppCLIPrompt(userMessage);
+    const prompt = _buildMessageCLIPrompt(userMessage, channel);
 
     // Execute with timeout
     const result = await Promise.race([
@@ -424,31 +426,35 @@ async function _handleComplexWhatsApp(userMessage, userId, aiBrain) {
     }
 
     // Fallback if execution didn't produce usable output
-    console.log("[App] Claude Code output not usable, falling back to aiBrain.chat()");
-    const response = await aiBrain.chat(userMessage, { userId, channel: "whatsapp" });
+    console.log(`[App] Claude Code output not usable, falling back to aiBrain.chat() for ${channel}`);
+    const systemPrompt = buildContextualSystemPrompt(channel);
+    const response = await aiBrain.chat(userMessage, { userId, channel, systemPrompt });
     return response.content;
 
   } catch (error) {
-    console.error("[App] Complex WhatsApp handler error:", error.message);
-    const response = await aiBrain.chat(userMessage, { userId, channel: "whatsapp" });
+    console.error(`[App] Complex ${channel} handler error:`, error.message);
+    const systemPrompt = buildContextualSystemPrompt(channel);
+    const response = await aiBrain.chat(userMessage, { userId, channel, systemPrompt });
     return response.content;
   }
 }
 
 /**
- * Build a WhatsApp-optimized prompt for Claude Code CLI
+ * Build a channel-optimized prompt for Claude Code CLI
  */
-function _buildWhatsAppCLIPrompt(userMessage) {
-  return `You are BACKBONE AI responding to a WhatsApp message. You have access to all MCP tools (trading, health, news, contacts, calendar, etc.) and can read memory files from the data/ and memory/ directories.
+function _buildMessageCLIPrompt(userMessage, channel = "app") {
+  const charLimit = channel === "whatsapp" ? 1500 : 3000;
+  return `You are BACKBONE AI responding to a user message via ${channel}. You have access to all MCP tools (trading, health, news, contacts, calendar, etc.) and can read memory files from the data/ and memory/ directories.
 
 USER MESSAGE: "${userMessage}"
 
 INSTRUCTIONS:
 1. Read relevant memory/data files for context (memory/profile.md, memory/portfolio.md, memory/health.md, data/goals.json, etc.)
 2. Use MCP tools to get real-time data if needed (get_positions, get_health_summary, fetch_latest_news, etc.)
-3. Respond with a clear, concise answer optimized for WhatsApp (under 1500 characters)
-4. Use short paragraphs, bullet points where helpful
-5. Be conversational but informative — this is a phone message, not a report
+3. Take real actions when asked (create goals, research topics, check positions, etc.)
+4. Respond with a clear, concise answer (under ${charLimit} characters)
+5. Use short paragraphs, bullet points where helpful
+6. Be conversational but informative
 
 Your final output should be ONLY the response message to send to the user. No explanations of your process.`;
 }
@@ -1483,30 +1489,41 @@ const App = ({ updateConsoleTitle, updateState }) => {
             channel: msgChannel
           }]);
 
-          // Classify the message
-          const classification = classifyMessage(message.content);
-          console.log(`[App] ${msgChannel} message classified: ${classification.type} (${classification.confidence}) — ${classification.reason}`);
-
           try {
             let responseContent;
 
-            if (classification.type === "quick") {
-              // ── QUICK PATH: aiBrain.chat() → fast response ──
-              const response = await aiBrain.chat(message.content, {
-                userId: firebaseUser.uid,
-                channel: msgChannel
-              });
-              responseContent = response.content;
-
+            // ── STEP 1: Try direct command handler (instant, no AI needed) ──
+            const commandResult = await tryDirectCommand(message.content);
+            if (commandResult.matched) {
+              console.log(`[App] ${msgChannel} direct command: ${commandResult.handler}`);
+              responseContent = commandResult.response;
             } else {
-              // ── COMPLEX PATH: ack → Claude Code CLI → full response ──
-              // Send immediate acknowledgment
-              await whatsappNotifications.sendAIResponse(
-                "Got it, working on that now...",
-                msgChannel
-              );
+              // ── STEP 2: Classify for AI routing ──
+              const classification = classifyMessage(message.content);
+              console.log(`[App] ${msgChannel} message classified: ${classification.type} (${classification.confidence}) — ${classification.reason}`);
 
-              responseContent = await _handleComplexWhatsApp(message.content, firebaseUser.uid, aiBrain);
+              if (classification.type === "quick") {
+                // ── QUICK PATH: aiBrain.chat() with rich context ──
+                const systemPrompt = buildContextualSystemPrompt(msgChannel);
+                const response = await aiBrain.chat(message.content, {
+                  userId: firebaseUser.uid,
+                  channel: msgChannel,
+                  systemPrompt
+                });
+                responseContent = response.content;
+              } else {
+                // ── COMPLEX PATH: ack → Claude Code CLI → full response ──
+                // Send immediate acknowledgment via the correct channel
+                if (msgChannel === MESSAGE_CHANNEL.WHATSAPP) {
+                  await whatsappNotifications.sendAIResponse(
+                    "Got it, working on that now...",
+                    msgChannel
+                  );
+                }
+                // For app messages, the "processing" status in Firebase shows the ack
+
+                responseContent = await _handleComplexMessage(message.content, firebaseUser.uid, aiBrain, msgChannel);
+              }
             }
 
             // Log AI response with correct channel
@@ -1520,23 +1537,24 @@ const App = ({ updateConsoleTitle, updateState }) => {
               channel: msgChannel
             }]);
 
-            // Route via best channel
-            const routing = selectChannel(responseContent, {
-              userMessage: message.content,
-              userId: firebaseUser.uid
-            });
-
-            console.log(`[App] Routing response via ${routing.channel} — ${routing.reason}`);
-
-            await routeResponse(responseContent, routing.channel, {
-              chunks: routing.chunks,
-              userId: firebaseUser.uid
-            });
+            // Route response to external channels only for WhatsApp messages
+            // App messages are already sent back via Firebase by realtimeMessaging.processMessage()
+            if (msgChannel === MESSAGE_CHANNEL.WHATSAPP) {
+              const routing = selectChannel(responseContent, {
+                userMessage: message.content,
+                userId: firebaseUser.uid
+              });
+              console.log(`[App] Routing WhatsApp response via ${routing.channel} — ${routing.reason}`);
+              await routeResponse(responseContent, routing.channel, {
+                chunks: routing.chunks,
+                userId: firebaseUser.uid
+              });
+            }
 
             return { content: responseContent, type: "ai" };
           } catch (err) {
             console.error(`[App] ${msgChannel} message handler error:`, err.message);
-            return { content: "Sorry, I encountered an error.", type: "system" };
+            return { content: "Sorry, I encountered an error processing your message. Please try again.", type: "system" };
           }
         });
 

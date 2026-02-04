@@ -64,6 +64,55 @@ const releaseLock = () => {
   }
 };
 
+// ── First-run scaffolding — create required directories and config ──
+const ensureFirstRun = () => {
+  const cwd = process.cwd();
+  const dirs = [
+    "data", "data/goals", "data/user-skills", "data/spreadsheets",
+    "memory", "projects", "screenshots", "skills"
+  ];
+  for (const d of dirs) {
+    const p = path.join(cwd, d);
+    if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true });
+  }
+
+  // Seed essential data files if they don't exist
+  const seeds = {
+    "data/goals.json": "[]",
+    "data/core-beliefs.json": JSON.stringify({
+      beliefs: [
+        { id: "belief_1", name: "Build wealth", description: "Grow financial independence through smart investing and income growth" },
+        { id: "belief_2", name: "Be healthy", description: "Optimize physical and mental health through exercise, sleep, and nutrition" },
+        { id: "belief_3", name: "Grow continuously", description: "Never stop learning — invest in skills, knowledge, and personal development" }
+      ]
+    }, null, 2),
+    "data/life-scores.json": JSON.stringify({
+      overall: 50,
+      categories: {
+        finance: { score: 50, trend: "stable" },
+        health: { score: 50, trend: "stable" },
+        family: { score: 50, trend: "stable" },
+        career: { score: 50, trend: "stable" },
+        growth: { score: 50, trend: "stable" },
+        education: { score: 50, trend: "stable" }
+      }
+    }, null, 2),
+    "data/user-settings.json": JSON.stringify({ theme: "dark", quietHoursStart: 22, quietHoursEnd: 7 }, null, 2),
+    "data/backlog.json": JSON.stringify({ items: [], graduatedToGoals: [], dismissed: [], lastUpdated: null, stats: { totalGenerated: 0, totalGraduated: 0, totalDismissed: 0 } }, null, 2),
+    "data/user-skills/index.json": "[]",
+    "memory/BACKBONE.md": "# BACKBONE Engine Memory\\n\\nThis file stores persistent memory across sessions.\\n"
+  };
+
+  for (const [relPath, content] of Object.entries(seeds)) {
+    const fullPath = path.join(cwd, relPath);
+    if (!fs.existsSync(fullPath)) {
+      fs.writeFileSync(fullPath, content);
+    }
+  }
+};
+
+ensureFirstRun();
+
 // Acquire lock before anything else
 acquireLock();
 

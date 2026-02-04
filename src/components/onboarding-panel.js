@@ -2964,6 +2964,20 @@ export const OnboardingPanel = ({ onComplete, onProfileRestored, userDisplay = "
           statuses.coreGoals = "complete";
         }
       }
+      // Also check core-beliefs.json — user may have set beliefs through the system
+      if (statuses.coreGoals !== "complete") {
+        try {
+          const fs = await import("fs");
+          const path = await import("path");
+          const beliefsPath = path.default.join(process.cwd(), "data", "core-beliefs.json");
+          if (fs.default.existsSync(beliefsPath)) {
+            const beliefsData = JSON.parse(fs.default.readFileSync(beliefsPath, "utf-8"));
+            if (beliefsData.beliefs && beliefsData.beliefs.length >= 1) {
+              statuses.coreGoals = "complete";
+            }
+          }
+        } catch {}
+      }
 
       // Check LinkedIn (optional) - check both settings and linkedin-profile.json
       if (settings.linkedInUrl) {
@@ -3366,10 +3380,11 @@ export const OnboardingPanel = ({ onComplete, onProfileRestored, userDisplay = "
     }
   };
 
-  // Calculate progress
-  const completedCount = Object.values(stepStatuses).filter((s) => s === "complete").length;
-  const requiredCount = ONBOARDING_STEPS.filter((s) => s.required).length;
-  const requiredComplete = ONBOARDING_STEPS.filter((s) => s.required && stepStatuses[s.id] === "complete").length;
+  // Calculate progress (exclude disabled steps from counts)
+  const activeSteps = ONBOARDING_STEPS.filter((s) => !s.disabled);
+  const completedCount = activeSteps.filter((s) => stepStatuses[s.id] === "complete").length;
+  const requiredCount = activeSteps.filter((s) => s.required).length;
+  const requiredComplete = activeSteps.filter((s) => s.required && stepStatuses[s.id] === "complete").length;
   const googleUser = getCurrentFirebaseUser();
   const showLogoutHint = currentStep?.id === "google" && !!googleUser;
 
@@ -3511,7 +3526,7 @@ export const OnboardingPanel = ({ onComplete, onProfileRestored, userDisplay = "
       e(
         Text,
         { color: requiredComplete === requiredCount ? "#22c55e" : "#64748b" },
-        `${completedCount}/${ONBOARDING_STEPS.length} steps`
+        `${completedCount}/${activeSteps.length} steps`
       )
     )
   );

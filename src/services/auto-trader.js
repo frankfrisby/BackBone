@@ -24,6 +24,174 @@ const getMomentumDrift = async () => {
   return momentumDriftModule;
 };
 
+// SPY intraday bars cache (2-minute TTL)
+let spyIntradayCache = { bars: null, timestamp: 0 };
+const SPY_CACHE_TTL = 2 * 60 * 1000; // 2 minutes
+
+/**
+ * Fetch SPY 1-minute intraday bars from Yahoo Finance
+ * Returns array of { t, c, h, l, v } (timestamp, close, high, low, volume)
+ */
+const fetchSpyIntradayBars = async () => {
+  const now = Date.now();
+  if (spyIntradayCache.bars && (now - spyIntradayCache.timestamp) < SPY_CACHE_TTL) {
+    return spyIntradayCache.bars;
+  }
+
+  try {
+    const url = "https://query1.finance.yahoo.com/v8/finance/chart/SPY?interval=1m&range=1d";
+    const response = await fetch(url, {
+      headers: { "User-Agent": "Mozilla/5.0" }
+    });
+
+    if (!response.ok) {
+      console.error(`[SPY Intraday] Yahoo fetch failed: ${response.status}`);
+      return null;
+    }
+
+    const data = await response.json();
+    const result = data?.chart?.result?.[0];
+    if (!result?.timestamp || !result?.indicators?.quote?.[0]) {
+      return null;
+    }
+
+    const timestamps = result.timestamp;
+    const quote = result.indicators.quote[0];
+    const bars = [];
+
+    for (let i = 0; i < timestamps.length; i++) {
+      if (quote.close[i] != null) {
+        bars.push({
+          t: timestamps[i],
+          c: quote.close[i],
+          h: quote.high[i] || quote.close[i],
+          l: quote.low[i] || quote.close[i],
+          v: quote.volume[i] || 0
+        });
+      }
+    }
+
+    spyIntradayCache = { bars, timestamp: now };
+    return bars;
+  } catch (error) {
+    console.error("[SPY Intraday] Fetch error:", error.message);
+    return null;
+  }
+};
+
+/**
+ * Check SPY direction using multi-timeframe intraday analysis.
+ * When SPY daily is green → always allow.
+ * When SPY daily is red → check intraday timeframes for recovery.
+ *
+ * @param {number} dailyChangePercent - SPY daily change %
+ * @returns {{ allow: boolean, reason: string, details: object }}
+ */
+const checkSpyDirection = async (dailyChangePercent) => {
+  // If SPY daily is green, always allow
+  if (dailyChangePercent >= 0) {
+    return {
+      allow: true,
+      reason: `SPY +${dailyChangePercent.toFixed(2)}% (green)`,
+      details: { daily: dailyChangePercent, method: "daily_green" }
+    };
+  }
+
+  // SPY is red — check intraday timeframes
+  const bars = await fetchSpyIntradayBars();
+  if (!bars || bars.length < 5) {
+    // Can't get intraday data — allow (fail open)
+    return {
+      allow: true,
+      reason: `SPY ${dailyChangePercent.toFixed(2)}% (no intraday data, allowing)`,
+      details: { daily: dailyChangePercent, method: "no_data_allow" }
+    };
+  }
+
+  // Calculate minutes since market open (9:30 AM ET)
+  const { hours, minutes } = getEasternTime();
+  const minutesSinceOpen = (hours * 60 + minutes) - (9 * 60 + 30);
+
+  if (minutesSinceOpen < 5) {
+    // Too early to judge
+    return {
+      allow: true,
+      reason: `SPY ${dailyChangePercent.toFixed(2)}% (too early, ${minutesSinceOpen}m since open)`,
+      details: { daily: dailyChangePercent, method: "too_early" }
+    };
+  }
+
+  const currentPrice = bars[bars.length - 1].c;
+  const dayHigh = Math.max(...bars.map(b => b.h));
+  const dayLow = Math.min(...bars.map(b => b.l));
+
+  // Available timeframes based on minutes since open
+  const timeframeDefs = [
+    { name: "5m", minutes: 5, weight: 6 },
+    { name: "10m", minutes: 10, weight: 5 },
+    { name: "15m", minutes: 15, weight: 4 },
+    { name: "30m", minutes: 30, weight: 3 },
+    { name: "1h", minutes: 60, weight: 2 },
+    { name: "4h", minutes: 240, weight: 1 },
+  ];
+
+  const availableTimeframes = timeframeDefs.filter(tf => minutesSinceOpen >= tf.minutes);
+
+  let weightedSum = 0;
+  let totalWeight = 0;
+  const tfDetails = {};
+
+  for (const tf of availableTimeframes) {
+    const barsAgo = Math.min(tf.minutes, bars.length - 1);
+    const pastIdx = bars.length - 1 - barsAgo;
+    if (pastIdx < 0) continue;
+
+    const pastPrice = bars[pastIdx].c;
+    const change = ((currentPrice - pastPrice) / pastPrice) * 100;
+
+    tfDetails[tf.name] = +change.toFixed(3);
+    weightedSum += change * tf.weight;
+    totalWeight += tf.weight;
+  }
+
+  const weightedAvg = totalWeight > 0 ? weightedSum / totalWeight : 0;
+
+  // Recovery check: range position and short-term trend
+  const range = dayHigh - dayLow;
+  const rangePosition = range > 0 ? (currentPrice - dayLow) / range : 0.5;
+  const fiveMinChange = tfDetails["5m"] || 0;
+  const isRecovering = rangePosition > 0.35 && fiveMinChange > 0;
+
+  const tfSummary = Object.entries(tfDetails).map(([k, v]) => `${k}:${v >= 0 ? "+" : ""}${v.toFixed(2)}%`).join(", ");
+
+  let allow, reason;
+
+  if (weightedAvg >= -0.05) {
+    allow = true;
+    reason = `SPY ${dailyChangePercent.toFixed(2)}% daily but intraday flat/positive (wAvg ${weightedAvg >= 0 ? "+" : ""}${weightedAvg.toFixed(3)}%)`;
+  } else if (isRecovering) {
+    allow = true;
+    reason = `SPY ${dailyChangePercent.toFixed(2)}% daily, recovering (range ${(rangePosition * 100).toFixed(0)}%, 5m +${fiveMinChange.toFixed(2)}%)`;
+  } else {
+    allow = false;
+    reason = `SPY ${dailyChangePercent.toFixed(2)}% daily, intraday weak (wAvg ${weightedAvg.toFixed(3)}%, range ${(rangePosition * 100).toFixed(0)}%)`;
+  }
+
+  return {
+    allow,
+    reason,
+    details: {
+      daily: dailyChangePercent,
+      weightedAvg: +weightedAvg.toFixed(4),
+      rangePosition: +rangePosition.toFixed(3),
+      isRecovering,
+      timeframes: tfDetails,
+      timeframeSummary: tfSummary,
+      method: allow ? (weightedAvg >= -0.05 ? "intraday_flat" : "recovering") : "blocked"
+    }
+  };
+};
+
 /**
  * Auto-Trading Service for BACKBONE
  * Based on BackBoneApp production trading system
@@ -817,7 +985,7 @@ export const sendTradeNotification = async (trade) => {
  * @param {Array} positions - Current positions
  * @param {Object} marketContext - Market context (spyChange, etc.)
  */
-export const monitorAndTrade = async (tickers, positions = [], marketContext = {}) => {
+export const monitorAndTrade = async (tickers, positions = []) => {
   if (!config.enabled) {
     return { monitored: false, reason: "Auto-trading disabled" };
   }
@@ -837,8 +1005,13 @@ export const monitorAndTrade = async (tickers, positions = [], marketContext = {
     };
   }
 
-  const { spyChange = 0 } = marketContext;
-  const spyPositive = spyChange >= 0;
+  // Get SPY data from tickers array
+  const spyTicker = tickers.find(t => t.symbol === "SPY");
+  const spyChange = spyTicker?.changePercent || 0;
+
+  // Run multi-timeframe SPY direction check
+  const spyCheck = await checkSpyDirection(spyChange);
+  const spyPositive = spyCheck.allow;
 
   // Determine buy threshold based on SPY direction
   const effectiveBuyThreshold = spyPositive ? config.buyThresholdSPYPositive : config.buyThreshold;
@@ -849,6 +1022,9 @@ export const monitorAndTrade = async (tickers, positions = [], marketContext = {
     marketStatus: marketStatus.reason,
     nextEvaluation: nextEval.nextEval,
     spyPositive,
+    spyBlocked: !spyCheck.allow,
+    spyDirection: spyCheck,
+    spyChange,
     effectiveBuyThreshold,
     buySignals: [],
     sellSignals: [],
@@ -879,7 +1055,12 @@ export const monitorAndTrade = async (tickers, positions = [], marketContext = {
   let buyCount = results.executed.filter(t => t.side === "buy").length;
 
   // --- REASONING: Market context ---
-  results.reasoning.push(`SPY ${spyPositive ? "positive" : "negative"} (${spyChange >= 0 ? "+" : ""}${spyChange.toFixed(2)}%) → buy threshold = ${effectiveBuyThreshold}`);
+  if (spyCheck.details?.timeframeSummary) {
+    results.reasoning.push(`SPY ${spyChange >= 0 ? "+" : ""}${spyChange.toFixed(2)}% daily | Intraday: ${spyCheck.details.timeframeSummary}`);
+    results.reasoning.push(`SPY direction: ${spyCheck.reason} → ${spyCheck.allow ? "ALLOW" : "BLOCK"} buys (threshold = ${effectiveBuyThreshold})`);
+  } else {
+    results.reasoning.push(`SPY ${spyPositive ? "positive" : "negative"} (${spyChange >= 0 ? "+" : ""}${spyChange.toFixed(2)}%) → buy threshold = ${effectiveBuyThreshold}`);
+  }
   results.reasoning.push(`Positions: ${tradablePositions.length}/${config.maxTotalPositions} (${positionSymbols.join(", ") || "none"})`);
 
   // Top scorers summary
@@ -1029,66 +1210,74 @@ export const monitorAndTrade = async (tickers, positions = [], marketContext = {
     }
   }
 
-  // STEP 2: Evaluate top 3 for buy signals
-  for (const ticker of sortedTickers) {
-    // Skip if in blacklist
-    if (config.blacklist.includes(ticker.symbol)) {
-      if (ticker.score >= effectiveBuyThreshold) {
-        results.reasoning.push(`SKIP ${ticker.symbol}: blacklisted (score ${ticker.score.toFixed(1)})`);
+  // STEP 2: Evaluate top 3 for buy signals (only if SPY allows)
+  if (spyCheck.allow) {
+    for (const ticker of sortedTickers) {
+      // Skip if in blacklist
+      if (config.blacklist.includes(ticker.symbol)) {
+        if (ticker.score >= effectiveBuyThreshold) {
+          results.reasoning.push(`SKIP ${ticker.symbol}: blacklisted (score ${ticker.score.toFixed(1)})`);
+        }
+        continue;
       }
-      continue;
-    }
 
-    // Skip if not in watchlist (when watchlist is set)
-    if (config.watchlist.length > 0 && !config.watchlist.includes(ticker.symbol)) continue;
+      // Skip if not in watchlist (when watchlist is set)
+      if (config.watchlist.length > 0 && !config.watchlist.includes(ticker.symbol)) continue;
 
-    // Only evaluate if in top 3 and not already holding
-    const isTop3 = top3BuyTickers.includes(ticker.symbol);
-    if (positionSymbols.includes(ticker.symbol)) {
-      // Already holding — already explained in sell section
-      continue;
-    }
-    if (!isTop3) {
-      // Not in top 3 — skip but note if it was close
-      if (ticker.score >= effectiveBuyThreshold) {
-        results.reasoning.push(`SKIP BUY ${ticker.symbol}: score ${ticker.score.toFixed(1)} qualifies but not in top 3`);
+      // Only evaluate if in top 3 and not already holding
+      const isTop3 = top3BuyTickers.includes(ticker.symbol);
+      if (positionSymbols.includes(ticker.symbol)) {
+        // Already holding — already explained in sell section
+        continue;
       }
-      continue;
-    }
+      if (!isTop3) {
+        // Not in top 3 — skip but note if it was close
+        if (ticker.score >= effectiveBuyThreshold) {
+          results.reasoning.push(`SKIP BUY ${ticker.symbol}: score ${ticker.score.toFixed(1)} qualifies but not in top 3`);
+        }
+        continue;
+      }
 
-    const buyEval = evaluateBuySignal(ticker, { spyPositive, positions });
+      const buyEval = evaluateBuySignal(ticker, { spyPositive, positions });
 
-    if (buyEval.action === "BUY" || buyEval.action === "EXTREME_BUY") {
-      results.buySignals.push(buyEval);
+      if (buyEval.action === "BUY" || buyEval.action === "EXTREME_BUY") {
+        results.buySignals.push(buyEval);
 
-      // Check position limits (max 2 in BackBoneApp)
-      // Use tradablePositions (excludes CVR) for accurate count
-      const currentPositionCount = tradablePositions.length - results.executed.filter(t => t.side === "sell").length + buyCount;
+        // Check position limits (max 2 in BackBoneApp)
+        // Use tradablePositions (excludes CVR) for accurate count
+        const currentPositionCount = tradablePositions.length - results.executed.filter(t => t.side === "sell").length + buyCount;
 
-      if (currentPositionCount < config.maxTotalPositions) {
-        const buyResult = await executeBuy(
-          ticker.symbol,
-          ticker.price,
-          `${buyEval.isExtreme ? "EXTREME: " : ""}Top ${top3BuyTickers.indexOf(ticker.symbol) + 1}: ${buyEval.signals.join(", ")}`
-        );
+        if (currentPositionCount < config.maxTotalPositions) {
+          const buyResult = await executeBuy(
+            ticker.symbol,
+            ticker.price,
+            `${buyEval.isExtreme ? "EXTREME: " : ""}Top ${top3BuyTickers.indexOf(ticker.symbol) + 1}: ${buyEval.signals.join(", ")}`
+          );
 
-        if (buyResult.success) {
-          results.executed.push(buyResult.trade);
-          results.reasoning.push(`EXECUTED BUY ${ticker.symbol}: ${buyEval.signals.join(", ")}`);
-          buyCount++;
+          if (buyResult.success) {
+            results.executed.push(buyResult.trade);
+            results.reasoning.push(`EXECUTED BUY ${ticker.symbol}: ${buyEval.signals.join(", ")}`);
+            buyCount++;
+          } else {
+            results.skipped.push({ symbol: ticker.symbol, reason: buyResult.error });
+            results.reasoning.push(`FAILED BUY ${ticker.symbol}: ${buyResult.error}`);
+          }
         } else {
-          results.skipped.push({ symbol: ticker.symbol, reason: buyResult.error });
-          results.reasoning.push(`FAILED BUY ${ticker.symbol}: ${buyResult.error}`);
+          results.skipped.push({
+            symbol: ticker.symbol,
+            reason: `Position limit reached (${currentPositionCount}/${config.maxTotalPositions})`
+          });
+          results.reasoning.push(`SKIP BUY ${ticker.symbol}: position limit ${currentPositionCount}/${config.maxTotalPositions} (score ${ticker.score.toFixed(1)})`);
         }
       } else {
-        results.skipped.push({
-          symbol: ticker.symbol,
-          reason: `Position limit reached (${currentPositionCount}/${config.maxTotalPositions})`
-        });
-        results.reasoning.push(`SKIP BUY ${ticker.symbol}: position limit ${currentPositionCount}/${config.maxTotalPositions} (score ${ticker.score.toFixed(1)})`);
+        results.reasoning.push(`NO BUY ${ticker.symbol}: ${buyEval.signals.join(", ")}`);
       }
-    } else {
-      results.reasoning.push(`NO BUY ${ticker.symbol}: ${buyEval.signals.join(", ")}`);
+    }
+  } else {
+    // SPY blocked — skip all buys
+    results.reasoning.push(`SPY BLOCK: ${spyCheck.reason} — all buys skipped`);
+    if (top3BuyTickers.length > 0) {
+      results.reasoning.push(`Blocked candidates: ${top3BuyTickers.join(", ")}`);
     }
   }
 

@@ -20,24 +20,25 @@ import {
   getHoldTime,
   explainWhyHeld,
 } from "../services/position-analyzer.js";
+import { getAlpacaConfig } from "../services/alpaca.js";
 
 /**
  * BACKBONE Trading MCP Server
  * Provides tools for portfolio management and auto-trading via Alpaca
  */
 
-const ALPACA_PAPER_URL = "https://paper-api.alpaca.markets";
-const ALPACA_LIVE_URL = "https://api.alpaca.markets";
-
-const getAlpacaHeaders = () => ({
-  "APCA-API-KEY-ID": process.env.ALPACA_KEY,
-  "APCA-API-SECRET-KEY": process.env.ALPACA_SECRET,
-  "Content-Type": "application/json",
-});
+const getAlpacaHeaders = () => {
+  const config = getAlpacaConfig();
+  return {
+    "APCA-API-KEY-ID": config.key,
+    "APCA-API-SECRET-KEY": config.secret,
+    "Content-Type": "application/json",
+  };
+};
 
 const getBaseUrl = () => {
-  const config = loadConfig();
-  return config.mode === "live" ? ALPACA_LIVE_URL : ALPACA_PAPER_URL;
+  const config = getAlpacaConfig();
+  return config.baseUrl;
 };
 
 // Tool definitions

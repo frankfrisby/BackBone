@@ -10246,12 +10246,19 @@ Folder: ${result.action.id}`,
           e(Text, { color: "#64748b" }, "$"),
           e(Text, { color: "#e2e8f0", bold: true }, privateMode ? "***" : (portfolio.equity || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })),
           e(Text, { color: "#334155" }, " | "),
-          // Today's change as % (not amount)
+          // Today's change: dollar amount + percentage
           (() => {
             const dayPct = portfolio.dayPLPercent || (portfolio.dayPL && portfolio.equity ? (portfolio.dayPL / (portfolio.equity - portfolio.dayPL)) * 100 : 0);
+            const dayDollar = portfolio.dayPL || 0;
             const isUp = dayPct >= 0;
             const color = privateMode ? "#64748b" : (isUp ? "#22c55e" : "#ef4444");
-            return e(Text, { color, bold: !privateMode }, privateMode ? "**%" : `${isUp ? "+" : ""}${dayPct.toFixed(2)}%`);
+            const label = privateMode ? "Today" : (isUp ? "Gained" : "Lost");
+            const dollarStr = privateMode ? "$***" : `${isUp ? "+" : ""}$${Math.abs(dayDollar).toFixed(2)}`;
+            const pctStr = privateMode ? "**%" : `${isUp ? "+" : ""}${dayPct.toFixed(2)}%`;
+            return e(Box, { flexDirection: "row", gap: 1 },
+              e(Text, { color, bold: true }, label),
+              e(Text, { color, bold: !privateMode }, `${dollarStr} ${pctStr}`)
+            );
           })(),
           e(Text, { color: "#334155" }, " | "),
           e(Text, { color: "#64748b" }, `${(portfolio.positions || []).length} pos`),

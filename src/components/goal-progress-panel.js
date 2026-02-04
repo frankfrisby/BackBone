@@ -69,9 +69,7 @@ export const GoalProgressPanel = ({ goals = [], title = "Goals" }) => {
       flexDirection: "column",
       borderStyle: "round",
       borderColor: "#0f172a",
-      padding: 1,
-      height: 8,
-      overflow: "hidden"
+      padding: 1
     },
     // Header
     e(
@@ -90,23 +88,26 @@ export const GoalProgressPanel = ({ goals = [], title = "Goals" }) => {
 
         // Use goal title if available, otherwise category name
         const label = goal.title
-          ? goal.title.slice(0, 15)
+          ? goal.title.slice(0, 45)
           : (goal.category || "goal").charAt(0).toUpperCase() + (goal.category || "goal").slice(1);
 
         return e(
           Box,
           { key: goal.id || i, flexDirection: "row", justifyContent: "space-between" },
-          // Left: icon + label
+          // Left: icon + label (wide to show full goal text)
           e(
             Box,
-            { flexDirection: "row", width: 18 },
+            { flexDirection: "row", flexGrow: 1, flexShrink: 1 },
             e(Text, { color }, icon + " "),
-            e(Text, { color: "#94a3b8" }, label.slice(0, 15))
+            e(Text, { color: "#94a3b8" }, label)
           ),
-          // Center: progress bar
-          e(ProgressBar, { progress: goal.progress || 0, width: 8, color }),
-          // Right: percentage
-          e(Text, { color: "#475569" }, `${String(pct).padStart(3)}%`)
+          // Right: percentage + progress bar (fixed width, right-aligned)
+          e(
+            Box,
+            { flexDirection: "row", flexShrink: 0, marginLeft: 1 },
+            e(Text, { color: "#475569" }, `${String(pct).padStart(3)}% `),
+            e(ProgressBar, { progress: goal.progress || 0, width: 8, color })
+          )
         );
       })
     )

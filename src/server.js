@@ -254,11 +254,55 @@ app.post("/api/calendar", async (req, res) => {
   }
 });
 
+// Tickers — top scored tickers for dashboard widgets
+app.get("/api/tickers", async (req, res) => {
+  try {
+    const result = await handleTickers();
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Life Scores
+app.get("/api/life-scores", async (req, res) => {
+  try {
+    const result = await handleLifeScores();
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Trade execution
 app.post("/api/trade", async (req, res) => {
   try {
     const { symbol, action, quantity } = req.body;
-    res.json({ ok: true, symbol, action, quantity, status: "submitted" });
+    if (!symbol || !action || !quantity) {
+      return res.status(400).json({ error: "Missing symbol, action, or quantity" });
+    }
+    const { getAlpacaConfig } = await import("./services/alpaca.js");
+    const config = getAlpacaConfig();
+    if (!config.ready) {
+      return res.status(503).json({ error: "Trading not configured" });
+    }
+    const side = action === "sell" ? "sell" : "buy";
+    const orderRes = await fetch(`${config.baseUrl}/v2/orders`, {
+      method: "POST",
+      headers: {
+        "APCA-API-KEY-ID": config.key,
+        "APCA-API-SECRET-KEY": config.secret,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        symbol, qty: String(quantity), side, type: "market", time_in_force: "day"
+      })
+    });
+    const order = await orderRes.json();
+    if (!orderRes.ok) {
+      return res.status(orderRes.status).json({ error: order.message || "Order failed" });
+    }
+    res.json({ ok: true, orderId: order.id, symbol, side, quantity, status: order.status });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -448,16 +492,33 @@ async function handleSignals() {
     if (fs.existsSync(dataPath)) {
       const data = JSON.parse(fs.readFileSync(dataPath, "utf8"));
       const signals = [];
-      if (data.tickers) {
-        for (const [symbol, ticker] of Object.entries(data.tickers)) {
-          if (ticker.score >= 70) {
-            signals.push({ symbol, action: "buy", score: ticker.score, reason: ticker.signal || "High score" });
-          } else if (ticker.score <= 30) {
-            signals.push({ symbol, action: "sell", score: ticker.score, reason: ticker.signal || "Low score" });
-          }
+      const tickers = Array.isArray(data.tickers) ? data.tickers : Object.values(data.tickers || {});
+      for (const ticker of tickers) {
+        if (!ticker || !ticker.symbol) continue;
+        const score = ticker.score || 0;
+        if (score >= 7) {
+          signals.push({
+            symbol: ticker.symbol,
+            action: "buy",
+            score,
+            price: ticker.price || null,
+            changePercent: ticker.changePercent || null,
+            reason: ticker.signal || (score >= 9 ? "Extreme buy" : "Strong buy")
+          });
+        } else if (score <= 3) {
+          signals.push({
+            symbol: ticker.symbol,
+            action: "sell",
+            score,
+            price: ticker.price || null,
+            changePercent: ticker.changePercent || null,
+            reason: ticker.signal || (score <= 1 ? "Extreme sell" : "Weak sell")
+          });
         }
       }
-      return signals;
+      // Sort by score descending for buys, ascending for sells
+      signals.sort((a, b) => b.score - a.score);
+      return signals.slice(0, 20);
     }
   } catch { /* ignore */ }
   return [];
@@ -510,6 +571,41 @@ async function handleHealth() {
     }
   } catch { /* ignore */ }
   return { sleep: null, readiness: null, activity: null, heartRate: null };
+}
+
+async function handleTickers() {
+  const dataPath = path.resolve("data/tickers-cache.json");
+  try {
+    if (fs.existsSync(dataPath)) {
+      const data = JSON.parse(fs.readFileSync(dataPath, "utf8"));
+      const tickers = Array.isArray(data.tickers) ? data.tickers : [];
+      // Return top 20 by score, with key fields
+      return tickers
+        .filter(t => t.score != null)
+        .sort((a, b) => (b.score || 0) - (a.score || 0))
+        .slice(0, 20)
+        .map(t => ({
+          symbol: t.symbol,
+          name: t.name || null,
+          score: t.score,
+          price: t.price || null,
+          change: t.change || null,
+          changePercent: t.changePercent || null,
+          volume: t.volume || null
+        }));
+    }
+  } catch { /* ignore */ }
+  return [];
+}
+
+async function handleLifeScores() {
+  const dataPath = path.resolve("data/life-scores.json");
+  try {
+    if (fs.existsSync(dataPath)) {
+      return JSON.parse(fs.readFileSync(dataPath, "utf8"));
+    }
+  } catch { /* ignore */ }
+  return {};
 }
 
 async function handleGoals() {

@@ -45,8 +45,8 @@ describe("Sidecar Outcomes - Dynamic Height Limit", () => {
     expect(content).toContain("outcomeItems.length >= maxOutcomesToShow");
   });
 
-  it("app height is 20% taller than terminal", () => {
-    expect(content).toContain("Math.round(terminalHeight * 1.2) - 1");
+  it("app height uses full terminal height", () => {
+    expect(content).toContain("terminalHeight - 1");
   });
 });
 

@@ -9296,7 +9296,7 @@ Folder: ${result.action.id}`,
   const minHeight = 30;
   const minWidth = 120;
   // Use full terminal height
-  const appHeight = Math.round(terminalHeight * 1.2) - 1;
+  const appHeight = terminalHeight - 1;
   // Calculate available height for content (terminal height minus header/footer)
   const contentHeight = Math.max(20, appHeight - 6);
   const isCompact = terminalWidth < minWidth;

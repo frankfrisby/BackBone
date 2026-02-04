@@ -359,18 +359,40 @@ async function handleChat(message) {
 }
 
 async function handlePortfolio() {
+  // Try live Alpaca data first
+  try {
+    const { getAlpacaConfig, fetchAccount } = await import("./services/alpaca.js");
+    const config = getAlpacaConfig();
+    if (config.ready) {
+      const account = await fetchAccount(config);
+      if (account && account.equity) {
+        const equity = parseFloat(account.equity) || 0;
+        const lastEquity = parseFloat(account.last_equity) || equity;
+        const dayPL = equity - lastEquity;
+        const dayPLPercent = lastEquity > 0 ? (dayPL / lastEquity) * 100 : 0;
+        return {
+          equity,
+          buyingPower: parseFloat(account.buying_power) || 0,
+          cash: parseFloat(account.cash) || 0,
+          dayPL: Math.round(dayPL * 100) / 100,
+          dayPLPercent: Math.round(dayPLPercent * 100) / 100,
+          totalPL: Math.round((equity - (parseFloat(account.deposits || 0))) * 100) / 100,
+          totalPLPercent: 0,
+          status: account.status,
+          source: "live"
+        };
+      }
+    }
+  } catch (e) {
+    console.log("[Server] Alpaca portfolio fetch failed, using cache:", e.message);
+  }
+
+  // Fallback to cached data
   const dataPath = path.resolve("data/trades-log.json");
   try {
     if (fs.existsSync(dataPath)) {
       const data = JSON.parse(fs.readFileSync(dataPath, "utf8"));
-      return data.portfolio || {
-        equity: 0,
-        buyingPower: 0,
-        dayPL: 0,
-        dayPLPercent: 0,
-        totalPL: 0,
-        totalPLPercent: 0,
-      };
+      if (data.portfolio) return data.portfolio;
     }
   } catch { /* ignore */ }
   return {
@@ -384,11 +406,37 @@ async function handlePortfolio() {
 }
 
 async function handlePositions() {
+  // Try live Alpaca positions first
+  try {
+    const { getAlpacaConfig, fetchPositions } = await import("./services/alpaca.js");
+    const config = getAlpacaConfig();
+    if (config.ready) {
+      const positions = await fetchPositions(config);
+      if (Array.isArray(positions)) {
+        return positions.map(p => ({
+          symbol: p.symbol,
+          qty: parseFloat(p.qty) || 0,
+          avgEntry: parseFloat(p.avg_entry_price) || 0,
+          currentPrice: parseFloat(p.current_price) || 0,
+          marketValue: parseFloat(p.market_value) || 0,
+          unrealizedPL: parseFloat(p.unrealized_pl) || 0,
+          unrealizedPLPercent: parseFloat(p.unrealized_plpc) * 100 || 0,
+          changeToday: parseFloat(p.change_today) * 100 || 0,
+          side: p.side,
+          source: "live"
+        }));
+      }
+    }
+  } catch (e) {
+    console.log("[Server] Alpaca positions fetch failed, using cache:", e.message);
+  }
+
+  // Fallback to cached data
   const dataPath = path.resolve("data/trades-log.json");
   try {
     if (fs.existsSync(dataPath)) {
       const data = JSON.parse(fs.readFileSync(dataPath, "utf8"));
-      return data.positions || [];
+      if (data.positions) return data.positions;
     }
   } catch { /* ignore */ }
   return [];
@@ -419,10 +467,49 @@ async function handleHealth() {
   const dataPath = path.resolve("data/oura-data.json");
   try {
     if (fs.existsSync(dataPath)) {
-      return JSON.parse(fs.readFileSync(dataPath, "utf8"));
+      const raw = JSON.parse(fs.readFileSync(dataPath, "utf8"));
+
+      // Extract the latest scores from history entries
+      const getLatest = (arr) => {
+        if (!Array.isArray(arr) || arr.length === 0) return null;
+        return arr[arr.length - 1];
+      };
+
+      // Handle both flat format and history array format
+      const history = raw.history || [raw];
+      const latest = history[history.length - 1] || {};
+
+      const latestSleep = getLatest(latest.sleep);
+      const latestReadiness = getLatest(latest.readiness);
+      const latestActivity = getLatest(latest.activity);
+      const latestHR = getLatest(latest.heartRate);
+
+      return {
+        sleep: {
+          score: latestSleep?.score || null,
+          contributors: latestSleep?.contributors || null,
+          day: latestSleep?.day || null
+        },
+        readiness: {
+          score: latestReadiness?.score || null,
+          contributors: latestReadiness?.contributors || null,
+          day: latestReadiness?.day || null
+        },
+        activity: {
+          score: latestActivity?.score || null,
+          steps: latestActivity?.steps || null,
+          calories: latestActivity?.total_calories || latestActivity?.calories || null,
+          day: latestActivity?.day || null
+        },
+        heartRate: latestHR ? {
+          bpm: latestHR.bpm || null,
+          source: latestHR.source || null
+        } : null,
+        lastUpdated: latest.fetchedAt || latest.savedAt || null
+      };
     }
   } catch { /* ignore */ }
-  return { readinessScore: 0, sleepScore: 0, activityScore: 0 };
+  return { sleep: null, readiness: null, activity: null, heartRate: null };
 }
 
 async function handleGoals() {

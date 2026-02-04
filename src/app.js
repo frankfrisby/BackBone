@@ -9296,7 +9296,7 @@ Folder: ${result.action.id}`,
   const minHeight = 30;
   const minWidth = 120;
   // Use full terminal height
-  const appHeight = terminalHeight - 1;
+  const appHeight = Math.round(terminalHeight * 1.2) - 1;
   // Calculate available height for content (terminal height minus header/footer)
   const contentHeight = Math.max(20, appHeight - 6);
   const isCompact = terminalWidth < minWidth;
@@ -10423,59 +10423,59 @@ Folder: ${result.action.id}`,
           // Dots: gray=pending, gray-blink=working, green=complete, red=failed
           e(SmartGoalsPanel, { autoGenerate: true, privateMode }),
 
-          // Outcomes: completed goals + narrator observations
+          // Outcomes: completed goals + narrator observations (total capped by maxOutcomesToShow)
           e(
             Box,
             { flexDirection: "column", marginTop: 1, flexGrow: 1 },
             e(Text, { color: "#64748b" }, "Outcomes:"),
-            // Completed goals shown as green dots
+            // Combined outcomes: completed goals first, then narrator observations, total limited
             ...(() => {
+              const outcomeItems = [];
+
+              // 1. Completed goals (green dots)
               try {
                 const completedGoals = getGoalTracker().getAll().filter(g => g.status === "completed");
-                return completedGoals.slice(0, 3).map((goal, i) => {
+                for (const goal of completedGoals) {
+                  if (outcomeItems.length >= maxOutcomesToShow) break;
                   const projectName = goal.project || goal.projectName || goal.category || "";
                   const label = projectName ? `${goal.title} (${projectName})` : goal.title;
-                  return e(
+                  outcomeItems.push(e(
                     Box,
-                    { key: `cg-${i}`, flexDirection: "row", marginBottom: 1 },
+                    { key: `cg-${outcomeItems.length}`, flexDirection: "row", marginBottom: 1 },
                     e(Text, { color: "#22c55e" }, "●  "),
                     e(Text, { color: "#22c55e", wrap: "wrap" }, label.slice(0, 80))
-                  );
-                });
-              } catch (err) {
-                return [];
-              }
-            })(),
-            // Narrator observations
-            ...(() => {
+                  ));
+                }
+              } catch (err) { /* ignore */ }
+
+              // 2. Narrator observations (fill remaining slots)
               const data = activityNarrator.getDisplayData();
               const observations = data.observations || [];
-              if (observations.length === 0) {
-                // Only show empty state if no completed goals either
-                try {
-                  const hasCompleted = getGoalTracker().getAll().some(g => g.status === "completed");
-                  if (hasCompleted) return [];
-                } catch (err) { /* ignore */ }
-                return [e(Text, { key: "no-obs", color: "#475569", dimColor: true }, "  No outcomes yet")];
-              }
-              return observations.slice(0, maxOutcomesToShow).map((obs, i) => {
+              for (const obs of observations) {
+                if (outcomeItems.length >= maxOutcomesToShow) break;
                 const text = obs.text?.toLowerCase() || (typeof obs === "string" ? obs.toLowerCase() : "");
                 const isCompleted = text.includes("completed") || text.includes("done") || text.includes("success");
                 const isAbandoned = text.includes("abandoned") || text.includes("cancelled") || text.includes("stopped");
                 const isFailed = text.includes("failed") || text.includes("error");
                 const dotColor = isCompleted ? "#22c55e" : isAbandoned ? "#ef4444" : isFailed ? "#ef4444" : "#f59e0b";
                 const textColor = isCompleted ? "#22c55e" : isAbandoned ? "#64748b" : isFailed ? "#64748b" : "#94a3b8";
-                return e(
+                outcomeItems.push(e(
                   Box,
-                  { key: `obs-${i}`, flexDirection: "column", marginBottom: 1 },
+                  { key: `obs-${outcomeItems.length}`, flexDirection: "column", marginBottom: 1 },
                   e(
                     Box,
                     { flexDirection: "row" },
                     e(Text, { color: dotColor }, "●  "),
                     e(Text, { color: textColor, wrap: "wrap" }, (obs.text || obs).slice(0, 80))
                   )
-                );
-              });
+                ));
+              }
+
+              if (outcomeItems.length === 0) {
+                outcomeItems.push(e(Text, { key: "no-obs", color: "#475569", dimColor: true }, "  No outcomes yet"));
+              }
+
+              return outcomeItems;
             })()
           )
         )

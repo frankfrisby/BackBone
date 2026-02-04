@@ -41,8 +41,12 @@ describe("Sidecar Outcomes - Dynamic Height Limit", () => {
     expect(content).toContain('process.stdout.removeListener("resize", onResize)');
   });
 
-  it("uses maxOutcomesToShow to slice observations", () => {
-    expect(content).toContain("observations.slice(0, maxOutcomesToShow)");
+  it("caps total outcomes (goals + observations) by maxOutcomesToShow", () => {
+    expect(content).toContain("outcomeItems.length >= maxOutcomesToShow");
+  });
+
+  it("app height is 20% taller than terminal", () => {
+    expect(content).toContain("Math.round(terminalHeight * 1.2) - 1");
   });
 });
 

@@ -500,10 +500,11 @@ const TickerScoresPanelBase = ({
         e(
           Box,
           { flexDirection: "row", gap: 1, alignItems: "center" },
-          // SPY % for market context
+          // SPY indicator with arrow (green ▲ / red ▼)
           spyChange !== null && e(Text, {
-            color: spyPositive ? "#22c55e" : "#ef4444"
-          }, `SPY ${spyChange >= 0 ? "+" : ""}${spyChange?.toFixed(1) || 0}%`),
+            color: spyPositive ? "#22c55e" : "#ef4444",
+            bold: true
+          }, `SPY ${spyPositive ? "▲" : "▼"} ${spyChange >= 0 ? "+" : ""}${spyChange?.toFixed(1) || 0}%`),
           spyChange !== null && e(Text, { color: "#334155" }, "│"),
           e(Text, { color: top3Count > 0 ? "#22c55e" : "#475569" },
             top3Count > 0 ? `${top3Count} buy` : "0 buy"),
@@ -651,8 +652,10 @@ const TickerScoresPanelBase = ({
           top3Count > 0
             ? e(Text, { color: "#22c55e", bold: true }, `${top3Count} BUY (≥${threshold})`)
             : e(Text, { color: "#64748b" }, `0 buy (need ≥${threshold})`),
-          spyChange !== null && e(Text, { color: spyPositive ? "#22c55e" : "#ef4444" },
-            `SPY ${spyChange >= 0 ? "+" : ""}${spyChange?.toFixed(2) || 0}%`),
+          spyChange !== null && e(Text, {
+            color: spyPositive ? "#22c55e" : "#ef4444",
+            bold: true
+          }, `SPY ${spyPositive ? "▲" : "▼"} ${spyChange >= 0 ? "+" : ""}${spyChange?.toFixed(2) || 0}%`),
           e(Text, { color: "#475569" }, `showing ${sortedTickers.length}`)
         )
       )

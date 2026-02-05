@@ -86,6 +86,7 @@ import { getSkillsLoader } from "./services/skills-loader.js";
 import { listSpreadsheets, readSpreadsheet, createSpreadsheet } from "./services/excel-manager.js";
 import { backupToFirebase, restoreFromFirebase, getBackupStatus } from "./services/firebase-storage.js";
 import { forceUpdate, checkVersion, consumeUpdateState } from "./services/auto-updater.js";
+import { startApiServer } from "./services/api-server-client.js";
 import { loadProfileSections, updateFromLinkedIn, updateFromHealth, updateFromPortfolio, getProfileSectionDisplay, getProfileOverview, PROFILE_SECTIONS } from "./services/profile-sections.js";
 import { getGitHubConfig, getGitHubStatus } from "./services/github.js";
 import { openUrl } from "./services/open-url.js";
@@ -720,6 +721,9 @@ const App = ({ updateConsoleTitle, updateState }) => {
     const init = async () => {
       // Load API keys from Firebase (Plaid, Google, Alpaca, OpenAI)
       await initializeRemoteConfig();
+
+      // Start API server for web app (background process on port 3000)
+      startApiServer().catch(err => console.error("[Boot] API server:", err.message));
 
       // Start cron manager — checks jobs every 60s
       const cronManager = getCronManager();

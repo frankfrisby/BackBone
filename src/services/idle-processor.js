@@ -167,6 +167,7 @@ class IdleProcessor extends EventEmitter {
     }
 
     if (this.currentStream) {
+      this.currentStream.removeAllListeners();
       this.currentStream.abort();
       this.currentStream = null;
     }
@@ -1145,6 +1146,7 @@ ${goal.tasks?.map(t => `- [ ] ${t}`).join("\n") || "- [ ] Define specific tasks"
    */
   pauseWork() {
     if (this.currentStream) {
+      this.currentStream.removeAllListeners();
       this.currentStream.abort();
       this.currentStream = null;
     }

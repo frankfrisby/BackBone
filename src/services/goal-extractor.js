@@ -229,11 +229,11 @@ export const processMessageForGoals = (message) => {
 
   // Load existing goals
   const goalsData = loadGoals();
-  const existingTitles = new Set(goalsData.goals.map(g => g.title.toLowerCase()));
+  const existingTitles = new Set((goalsData.goals || []).map(g => (g.title || "").toLowerCase()));
 
   // Filter out duplicates (similar titles)
   const newGoals = extracted.filter(g => {
-    const titleLower = g.title.toLowerCase();
+    const titleLower = (g.title || "").toLowerCase();
     // Check if we already have a similar goal
     for (const existing of existingTitles) {
       // Simple similarity check - if 80% of words match
@@ -391,7 +391,7 @@ export const formatGoalsDisplay = () => {
     summary.topGoals.forEach((goal, i) => {
       const urgencyIcon = goal.urgency === "high" ? "🔴" : goal.urgency === "medium" ? "🟡" : "🟢";
       const progressBar = "█".repeat(Math.floor(goal.progress / 10)) + "░".repeat(10 - Math.floor(goal.progress / 10));
-      output += `  ${i + 1}. ${urgencyIcon} ${goal.title.slice(0, 40)}\n`;
+      output += `  ${i + 1}. ${urgencyIcon} ${(goal.title || "Untitled").slice(0, 40)}\n`;
       output += `     [${progressBar}] ${goal.progress}%  (${goal.category})\n`;
     });
     output += "\n";

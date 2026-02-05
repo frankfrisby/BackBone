@@ -761,7 +761,7 @@ export class AutonomousEngine extends EventEmitter {
           const contextData = await this.getContext();
           const evaluation = await this.goalManager.evaluateCriteria(this.currentGoal, contextData);
 
-          if (evaluation.complete) {
+          if (evaluation && evaluation.complete) {
             // Goal criteria met - complete it
             if (this.narrator) {
               this.narrator.observe("Goal criteria met - completing goal");
@@ -771,7 +771,7 @@ export class AutonomousEngine extends EventEmitter {
           }
 
           // Check if partially complete and should notify
-          if (evaluation.completedCount > 0 && evaluation.completedCount < evaluation.totalCount) {
+          if (evaluation && evaluation.completedCount > 0 && evaluation.completedCount < evaluation.totalCount) {
             if (this.narrator) {
               this.narrator.observe(`Progress: ${evaluation.completedCount}/${evaluation.totalCount} criteria met`);
             }

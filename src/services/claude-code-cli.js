@@ -736,7 +736,7 @@ export const runClaudeCodeStreaming = async (prompt, options = {}) => {
     emitter.emit("data", text);
   });
 
-  proc.on("close", (code) => {
+  proc.on("close", async (code) => {
     // Process any remaining buffered line
     if (lineBuffer.trim()) processStreamLine(lineBuffer);
     console.log(`[ClaudeCodeCLI] Process closed with code: ${code}`);
@@ -781,12 +781,15 @@ export const runClaudeCodeStreaming = async (prompt, options = {}) => {
       });
 
       // Forward all events from retry to original emitter
-      retryEmitter.then(retry => {
+      try {
+        const retry = await retryEmitter;
         retry.on("data", (d) => emitter.emit("data", d));
         retry.on("tool", (t) => emitter.emit("tool", t));
         retry.on("complete", (c) => emitter.emit("complete", { ...c, model: FALLBACK_MODEL, wasRetry: true }));
         retry.on("error", (e) => emitter.emit("error", e));
-      });
+      } catch (retryErr) {
+        emitter.emit("error", { error: retryErr.message || "Retry failed", model: FALLBACK_MODEL });
+      }
 
       return;
     }
@@ -817,6 +820,9 @@ export const runClaudeCodeStreaming = async (prompt, options = {}) => {
       if (timeoutId) clearTimeout(timeoutId);
     });
   }
+
+  // Track pending actions for interactive approval
+  const pendingActions = new Map();
 
   // Add methods for interactive control
   emitter.approve = (actionId) => {

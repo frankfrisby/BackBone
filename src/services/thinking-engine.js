@@ -609,6 +609,13 @@ function loadBacklog() {
     lastUpdated: null,
     stats: { totalGenerated: 0, totalGraduated: 0, totalDismissed: 0 }
   };
+  // Ensure stats object always exists
+  if (!data.stats) {
+    data.stats = { totalGenerated: 0, totalGraduated: 0, totalDismissed: 0 };
+  }
+  if (!Array.isArray(data.items)) data.items = [];
+  if (!Array.isArray(data.graduatedToGoals)) data.graduatedToGoals = [];
+  if (!Array.isArray(data.dismissed)) data.dismissed = [];
   return data;
 }
 
@@ -624,8 +631,9 @@ function addToBacklog(items) {
 
   for (const item of items) {
     // Check for duplicates (by similar title)
+    if (!item.title) continue;
     const isDuplicate = backlog.items.some(
-      existing => existing.title.toLowerCase() === item.title.toLowerCase()
+      existing => (existing.title || "").toLowerCase() === item.title.toLowerCase()
     );
 
     if (!isDuplicate) {
@@ -1072,10 +1080,16 @@ class ThinkingEngine extends EventEmitter {
       let result;
 
       const jsonMatch = content.match(/```json\n?([\s\S]*?)\n?```/);
-      if (jsonMatch) {
-        result = JSON.parse(jsonMatch[1]);
-      } else {
-        result = JSON.parse(content);
+      try {
+        if (jsonMatch) {
+          result = JSON.parse(jsonMatch[1]);
+        } else {
+          result = JSON.parse(content);
+        }
+      } catch (parseErr) {
+        console.error(`[ThinkingEngine] Failed to parse AI response as JSON: ${parseErr.message}`);
+        console.error(`[ThinkingEngine] Raw content (first 300 chars): ${content.slice(0, 300)}`);
+        throw new Error(`Invalid JSON in AI response: ${parseErr.message}`);
       }
 
       // 4. Update thesis

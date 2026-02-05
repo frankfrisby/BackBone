@@ -72,8 +72,28 @@ class WhatsAppNotifications extends EventEmitter {
   async initialize(userId) {
     this.userId = userId;
 
-    // Get verified phone number
-    const phone = getVerifiedPhone(userId);
+    // First try local phone verification
+    let phone = getVerifiedPhone(userId);
+
+    // If no local phone, try to get from Firestore (set by WhatsApp webhook)
+    if (!phone) {
+      try {
+        const { getRealtimeMessaging } = await import("./realtime-messaging.js");
+        const messaging = getRealtimeMessaging();
+        if (messaging.userId === userId || !messaging.userId) {
+          // Ensure messaging is initialized for this user
+          if (!messaging.userId) await messaging.initialize(userId);
+          const userDoc = await messaging.getUserDocument();
+          if (userDoc?.whatsappPhone) {
+            phone = userDoc.whatsappPhone;
+            console.log(`[WhatsAppNotifications] Got phone from Firestore: ${phone}`);
+          }
+        }
+      } catch (err) {
+        console.log(`[WhatsAppNotifications] Could not fetch phone from Firestore: ${err.message}`);
+      }
+    }
+
     if (phone) {
       this.phoneNumber = phone;
       this.enabled = true;

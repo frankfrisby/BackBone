@@ -836,6 +836,42 @@ app.get("/api/vapi/status", async (req, res) => {
   }
 });
 
+// ── WhatsApp Webhook (Twilio) ─────────────────────────────────
+app.post("/api/whatsapp/webhook", async (req, res) => {
+  try {
+    const { getTwilioWhatsAppService } = await import("./services/twilio-whatsapp.js");
+    const whatsapp = getTwilioWhatsAppService();
+
+    // Handle incoming message from Twilio
+    const messageData = whatsapp.handleIncomingMessage(req.body);
+
+    // Get messaging gateway to process the message and generate response
+    const { getMessagingGateway } = await import("./services/messaging-gateway.js");
+    const gateway = getMessagingGateway();
+
+    // Process the message and get AI response
+    const response = await gateway.handleIncomingMessage({
+      content: messageData.content,
+      from: messageData.from,
+      userId: messageData.userId,
+      channel: "whatsapp"
+    }, "whatsapp");
+
+    // Return TwiML response
+    if (response && response.content) {
+      res.type("text/xml");
+      res.send(whatsapp.generateResponse(response.content));
+    } else {
+      res.type("text/xml");
+      res.send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
+    }
+  } catch (err) {
+    console.error("[WhatsApp Webhook] Error:", err.message);
+    res.type("text/xml");
+    res.send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
+  }
+});
+
 // ── Start Server ─────────────────────────────────────────────
 
 server.on("error", (err) => {

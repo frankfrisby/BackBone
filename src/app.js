@@ -842,6 +842,31 @@ const App = ({ updateConsoleTitle, updateState }) => {
         console.error("[App] Startup briefing check failed:", e.message);
       }
 
+      // Startup catch-up: send evening brief if missed today
+      try {
+        const today = new Date().toISOString().split("T")[0];
+        const briefStatePath = path.join(process.cwd(), "data", "daily-brief-state.json");
+        let eveningLastSent = null;
+        if (fs.existsSync(briefStatePath)) {
+          const state = JSON.parse(fs.readFileSync(briefStatePath, "utf-8"));
+          eveningLastSent = state.evening?.lastSentDate || null;
+        }
+        if (eveningLastSent !== today) {
+          const now = new Date();
+          const hour = now.getHours();
+          // Only auto-send if it's after 19:45 (7:45 PM) and before midnight
+          if (hour >= 20) {
+            console.log("[App] Startup catch-up: evening brief not sent today, sending now...");
+            const result = await generateAndDeliverBrief("evening");
+            if (result.success) {
+              console.log("[App] Startup catch-up: evening brief sent");
+            }
+          }
+        }
+      } catch (e) {
+        console.error("[App] Evening briefing catch-up failed:", e.message);
+      }
+
       // Run API health check to verify tokens are available
       // This clears quota exceeded state if tokens were added
       try {

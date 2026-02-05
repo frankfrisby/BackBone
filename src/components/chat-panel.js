@@ -69,22 +69,25 @@ const ChatPanelBase = ({ commands, onSubmit, onTypingChange, modelInfo, compact 
     onTypingChangeRef.current = onTypingChange;
   }, [onSubmit, onTypingChange]);
 
-  // Compute matches based on current display
+  // Only compute matches when input is a command (starts with /)
+  // This avoids expensive calculations for regular chat input
+  const isCommandInput = displayValue.startsWith("/");
   const matches = useMemo(() =>
-    buildMatches(displayValue, commands),
-    [displayValue, commands]
+    isCommandInput ? buildMatches(displayValue, commands) : [],
+    [displayValue, commands, isCommandInput]
   );
 
-  const showPalette = displayValue.startsWith("/") && matches.length > 0;
+  const showPalette = isCommandInput && matches.length > 0;
 
   const updateScheduledRef = useRef(false);
   const syncDisplay = useCallback(() => {
     if (updateScheduledRef.current) return;
     updateScheduledRef.current = true;
-    setTimeout(() => {
+    // Use setImmediate pattern for minimal latency while preventing render spam
+    setImmediate(() => {
       updateScheduledRef.current = false;
       setDisplayValue(inputRef.current);
-    }, 30);
+    });
   }, []);
 
   // Signal typing started
@@ -224,7 +227,7 @@ const ChatPanelBase = ({ commands, onSubmit, onTypingChange, modelInfo, compact 
         countLabel: "matches",
         compact: true
       }),
-      // Input line — auto-expands with content, compact by default
+      // Input line — full width, auto-expands with content
       e(
         Box,
         {
@@ -232,12 +235,18 @@ const ChatPanelBase = ({ commands, onSubmit, onTypingChange, modelInfo, compact 
           borderStyle: "round",
           borderColor,
           paddingX: 1,
-          minHeight: 1
+          minHeight: 1,
+          width: "100%",
+          flexGrow: 1
         },
         e(Text, { color: promptColor, bold: true }, isCommand ? "⟩ " : "› "),
-        isEmpty
-          ? e(Text, { color: "#64748b" }, 'Ask anything, / for commands, /talk to chat')
-          : e(Text, { color: "#f8fafc", wrap: "wrap" }, displayValue),
+        e(
+          Box,
+          { flexGrow: 1 },
+          isEmpty
+            ? e(Text, { color: "#64748b" }, 'Ask anything, / for commands, /talk to chat')
+            : e(Text, { color: "#f8fafc", wrap: "wrap" }, displayValue)
+        ),
         e(Text, { color: "#ffffff" }, "▌")
       )
     );

@@ -340,7 +340,7 @@ export const sendPushNotification = async (type, payload = {}) => {
     savePushLog(log);
 
     // Handle failed tokens (remove invalid ones)
-    if (response.failureCount > 0) {
+    if (response.failureCount > 0 && Array.isArray(response.responses)) {
       const failedTokens = [];
       response.responses.forEach((resp, idx) => {
         if (!resp.success && resp.error?.code === "messaging/registration-token-not-registered") {

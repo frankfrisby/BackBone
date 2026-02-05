@@ -69,6 +69,7 @@ export async function createSpreadsheet(nameOrPath, { sheetName = "Sheet1", head
     const added = ws.addRow(row);
     // Apply formulas if defined
     for (const [key, template] of Object.entries(formulas)) {
+      if (!template) continue;
       const colIndex = headers.findIndex(h => h.key === key) + 1;
       if (colIndex > 0) {
         const cell = added.getCell(colIndex);
@@ -163,6 +164,9 @@ export async function appendToSpreadsheet(nameOrPath, newRows, sheetName) {
 
   if (!fs.existsSync(filePath)) {
     // Derive headers from first row keys
+    if (!newRows || newRows.length === 0) {
+      throw new Error("Cannot create spreadsheet: no rows provided");
+    }
     const keys = Object.keys(newRows[0] || {});
     const headers = keys.map(k => ({ name: k, key: k, width: 18 }));
     return createSpreadsheet(nameOrPath, { sheetName: sheetName || "Sheet1", headers, rows: newRows });

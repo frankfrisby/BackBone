@@ -772,7 +772,7 @@ const Top3DisplayBase = ({ tickers = [], spyPositive = null }) => {
         },
         e(Text, { color: "#f59e0b", bold: true }, `${i + 1}.`),
         e(Text, { color: "#f8fafc", bold: true }, ticker.symbol),
-        e(Text, { color: getSignalColor(ticker.score) }, ticker.score.toFixed(1))
+        e(Text, { color: getSignalColor(ticker.score) }, (ticker.score ?? 0).toFixed(1))
       )
     )
   );
@@ -875,7 +875,7 @@ const TickerSummaryLineBase = ({
         },
         e(Text, { color: isQualified ? "#f59e0b" : "#475569" }, `${i + 1}.`),
         e(Text, { color: isQualified ? "#f8fafc" : color, bold: isQualified }, ticker.symbol),
-        e(Text, { color }, ticker.score.toFixed(1))
+        e(Text, { color }, (ticker.score ?? 0).toFixed(1))
       );
     }),
     // Status dots section (to right of tickers)

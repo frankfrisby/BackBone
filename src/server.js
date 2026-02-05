@@ -277,9 +277,16 @@ app.get("/api/life-scores", async (req, res) => {
 // Trade execution
 app.post("/api/trade", async (req, res) => {
   try {
-    const { symbol, action, quantity } = req.body;
+    const { symbol, action, quantity } = req.body || {};
     if (!symbol || !action || !quantity) {
       return res.status(400).json({ error: "Missing symbol, action, or quantity" });
+    }
+    const qty = Number(quantity);
+    if (!Number.isFinite(qty) || qty <= 0 || qty > 100000) {
+      return res.status(400).json({ error: "Quantity must be a positive number (max 100000)" });
+    }
+    if (!["buy", "sell"].includes(action)) {
+      return res.status(400).json({ error: "Action must be 'buy' or 'sell'" });
     }
     const { getAlpacaConfig } = await import("./services/alpaca.js");
     const config = getAlpacaConfig();
@@ -359,7 +366,8 @@ app.post("/api/register-push", async (req, res) => {
     let tokens = [];
     try {
       if (fs.existsSync(tokensPath)) {
-        tokens = JSON.parse(fs.readFileSync(tokensPath, "utf8"));
+        const parsed = JSON.parse(fs.readFileSync(tokensPath, "utf8"));
+        tokens = Array.isArray(parsed) ? parsed : [];
       }
     } catch { /* ignore */ }
     if (!tokens.includes(token)) {
@@ -828,12 +836,33 @@ app.get("/api/vapi/status", async (req, res) => {
 
 // ── Start Server ─────────────────────────────────────────────
 
+server.on("error", (err) => {
+  if (err.code === "EADDRINUSE") {
+    console.error(`[Server] Port ${PORT} is already in use. Exiting.`);
+    process.exit(1);
+  }
+  console.error("[Server] Startup error:", err.message);
+});
+
 server.listen(PORT, () => {
   console.log(`BACKBONE backend listening on ${PORT}`);
   if (WebSocketServer) {
     console.log(`WebSocket available at ws://localhost:${PORT}/ws`);
   }
 });
+
+// Graceful shutdown
+const shutdown = (signal) => {
+  console.log(`\n[Server] ${signal} received, shutting down...`);
+  server.close(() => {
+    console.log("[Server] HTTP server closed");
+    process.exit(0);
+  });
+  // Force exit after 5 seconds if connections don't close
+  setTimeout(() => process.exit(1), 5000).unref();
+};
+process.on("SIGINT", () => shutdown("SIGINT"));
+process.on("SIGTERM", () => shutdown("SIGTERM"));
 
 // ── LinkedIn Scheduler ───────────────────────────────────────
 

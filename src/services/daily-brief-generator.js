@@ -624,11 +624,11 @@ export function formatMorningWhatsApp(brief) {
   }
 
   // Goals (truncate titles for WhatsApp readability)
-  if (brief.goals) {
+  if (brief.goals?.goals?.length > 0) {
     msg += `\n*GOALS*\n`;
     brief.goals.goals.slice(0, 4).forEach((g, i) => {
-      const title = g.title.length > 50 ? g.title.slice(0, 50) + "..." : g.title;
-      msg += `${i + 1}. ${title} (${g.progress}%)\n`;
+      const title = (g.title || "Untitled").length > 50 ? g.title.slice(0, 50) + "..." : (g.title || "Untitled");
+      msg += `${i + 1}. ${title} (${g.progress || 0}%)\n`;
     });
   }
 
@@ -708,7 +708,7 @@ export function formatEveningWhatsApp(brief) {
   if (brief.systemActivity?.length > 0) {
     const meaningfulHighlights = [];
     brief.systemActivity.forEach(item => {
-      item.highlights.forEach(h => {
+      (item.highlights || []).forEach(h => {
         // Skip internal status messages
         if (!/Claude Code|Claude Engine|Mobile Dashboard|Life Engine|Not Available|Ready|Idle/i.test(h.trim())) {
           meaningfulHighlights.push(h);

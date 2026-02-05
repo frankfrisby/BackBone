@@ -32,7 +32,8 @@ export const NOTIFICATION_TYPE = {
   MONEY: "money",               // Financial transaction
   PEOPLE: "people",             // Interaction with someone
   SYSTEM: "system",             // System login/connection
-  MORNING_BRIEF: "morning_brief", // Daily briefing
+  MORNING_BRIEF: "morning_brief", // Daily morning briefing
+  EVENING_BRIEF: "evening_brief", // Daily evening briefing
   BREAKTHROUGH: "breakthrough", // Achievement/milestone
   REMINDER: "reminder",         // General reminder
   ALERT: "alert"                // Important alert
@@ -429,13 +430,13 @@ class WhatsAppNotifications extends EventEmitter {
 
     let result;
     if (options.mediaUrl) {
-      result = await this._sendWithMedia(NOTIFICATION_TYPE.MORNING_BRIEF, messageText, options.mediaUrl, {
+      result = await this._sendWithMedia(NOTIFICATION_TYPE.EVENING_BRIEF, messageText, options.mediaUrl, {
         identifier: `evening_${today}`,
         priority: NOTIFICATION_PRIORITY.NORMAL,
         allowDuplicate: false
       });
     } else {
-      result = await this.send(NOTIFICATION_TYPE.MORNING_BRIEF, messageText, {
+      result = await this.send(NOTIFICATION_TYPE.EVENING_BRIEF, messageText, {
         identifier: `evening_${today}`,
         priority: NOTIFICATION_PRIORITY.NORMAL,
         allowDuplicate: false

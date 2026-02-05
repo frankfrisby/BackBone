@@ -980,8 +980,11 @@ const App = ({ updateConsoleTitle, updateState }) => {
       const msUntilSync = nextSync.getTime() - Date.now();
 
       return setTimeout(async () => {
-        await syncOuraData();
-        // Schedule the next sync after this one completes
+        try {
+          await syncOuraData();
+        } catch (e) {
+          console.error("[Oura] Scheduled sync failed:", e.message);
+        }
         scheduleNextSync();
       }, msUntilSync);
     };
@@ -1030,7 +1033,11 @@ const App = ({ updateConsoleTitle, updateState }) => {
       const msUntilSync = next6am.getTime() - now.getTime();
 
       return setTimeout(async () => {
-        await pcService.fetchAll();
+        try {
+          await pcService.fetchAll();
+        } catch (e) {
+          console.error("[PC] Scheduled sync failed:", e.message);
+        }
         scheduleNextSync();
       }, msUntilSync);
     };

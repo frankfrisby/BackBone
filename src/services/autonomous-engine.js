@@ -823,6 +823,21 @@ export class AutonomousEngine extends EventEmitter {
             // Otherwise continue the loop - Claude Code will handle chaining
           } else {
             // Goal failed or incomplete
+            const errorStr = result.error || '';
+            const isBillingError = errorStr.toLowerCase().includes('credit balance') ||
+                                   errorStr.toLowerCase().includes('billing') ||
+                                   errorStr.toLowerCase().includes('insufficient');
+
+            if (isBillingError) {
+              // Stop immediately on billing errors - don't retry
+              console.log("[AutonomousEngine] Billing error detected, stopping execution loop");
+              if (this.narrator) {
+                this.narrator.observe(`Paused: API billing issue - check credits`);
+              }
+              this.pause();
+              return;
+            }
+
             if (this.narrator) {
               this.narrator.observe(`Working on issue: ${result.error || 'retrying'}`);
             }

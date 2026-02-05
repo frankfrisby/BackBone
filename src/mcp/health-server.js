@@ -15,9 +15,22 @@ import path from "path";
 
 const DATA_DIR = path.join(process.cwd(), "data");
 const OURA_CACHE = path.join(DATA_DIR, "oura-cache.json");
+const OURA_TOKEN_FILE = path.join(DATA_DIR, "oura-token.json");
+
+// Load Oura token — env var first, fallback to config file (MCP child processes don't inherit .env)
+const getOuraToken = () => {
+  if (process.env.OURA_ACCESS_TOKEN) return process.env.OURA_ACCESS_TOKEN;
+  try {
+    if (fs.existsSync(OURA_TOKEN_FILE)) {
+      const config = JSON.parse(fs.readFileSync(OURA_TOKEN_FILE, "utf-8"));
+      return config.token || config.accessToken || config.access_token || null;
+    }
+  } catch { /* ignore */ }
+  return null;
+};
 
 const getOuraHeaders = () => ({
-  Authorization: `Bearer ${process.env.OURA_ACCESS_TOKEN}`,
+  Authorization: `Bearer ${getOuraToken()}`,
   "Content-Type": "application/json",
 });
 
@@ -102,8 +115,8 @@ const saveCache = (cache) => {
 
 // Fetch helpers
 async function fetchOura(endpoint, params = {}) {
-  if (!process.env.OURA_ACCESS_TOKEN) {
-    return { error: "OURA_ACCESS_TOKEN not configured" };
+  if (!getOuraToken()) {
+    return { error: "OURA_ACCESS_TOKEN not configured (set env var or data/oura-token.json)" };
   }
 
   const url = new URL(`${OURA_BASE}/${endpoint}`);

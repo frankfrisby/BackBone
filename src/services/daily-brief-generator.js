@@ -205,9 +205,10 @@ function buildPortfolioSection() {
     section.dayPLPercent = lastEquity ? Math.round(((section.equity - lastEquity) / lastEquity) * 10000) / 100 : null;
   }
 
-  // Positions from alpaca cache
+  // Positions from alpaca cache (filter out zero-value positions like CVRs)
   if (alpacaCache?.positions && Array.isArray(alpacaCache.positions)) {
     section.topPositions = alpacaCache.positions
+      .filter(p => parseFloat(p.market_value) > 0)
       .sort((a, b) => Math.abs(parseFloat(b.market_value) || 0) - Math.abs(parseFloat(a.market_value) || 0))
       .slice(0, 5)
       .map(p => ({
@@ -222,10 +223,19 @@ function buildPortfolioSection() {
   // Recent trades (last 24 hours) — tradesLog is an array of trade entries
   if (Array.isArray(tradesLog)) {
     const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+    const seen = new Set();
     section.recentTrades = tradesLog
       .filter(t => new Date(t.timestamp || t.date || t.created_at).getTime() > cutoff)
-      .slice(-5)
+      .slice(-10)
       .reverse()
+      .filter(t => {
+        // Deduplicate by symbol+side+qty
+        const key = `${t.symbol}_${t.side || t.action}_${t.qty || t.quantity}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      .slice(0, 5)
       .map(t => ({
         symbol: t.symbol,
         side: t.side || t.action,
@@ -578,9 +588,9 @@ export function formatMorningWhatsApp(brief) {
     if (p.equity) msg += ` $${Number(p.equity).toLocaleString()}`;
     msg += "\n";
     if (p.dayPL != null) {
-      const plSign = p.dayPL >= 0 ? "+" : "";
+      const plSign = p.dayPL >= 0 ? "+" : "-";
       msg += `Day P&L: ${plSign}$${Math.abs(p.dayPL).toFixed(2)}`;
-      if (p.dayPLPercent != null) msg += ` (${plSign}${p.dayPLPercent.toFixed(1)}%)`;
+      if (p.dayPLPercent != null) msg += ` (${p.dayPLPercent >= 0 ? "+" : ""}${p.dayPLPercent.toFixed(1)}%)`;
       msg += "\n";
     }
     if (p.topPositions?.length > 0) {
@@ -591,11 +601,12 @@ export function formatMorningWhatsApp(brief) {
     }
   }
 
-  // Goals
+  // Goals (truncate titles for WhatsApp readability)
   if (brief.goals) {
     msg += `\n*GOALS*\n`;
     brief.goals.goals.slice(0, 4).forEach((g, i) => {
-      msg += `${i + 1}. ${g.title} (${g.progress}%)\n`;
+      const title = g.title.length > 50 ? g.title.slice(0, 50) + "..." : g.title;
+      msg += `${i + 1}. ${title} (${g.progress}%)\n`;
     });
   }
 
@@ -642,41 +653,52 @@ export function formatEveningWhatsApp(brief) {
   if (brief.portfolio) {
     const p = brief.portfolio;
     if (p.dayPL != null) {
-      const plSign = p.dayPL >= 0 ? "+" : "";
+      const plSign = p.dayPL >= 0 ? "+" : "-";
       msg += `Day P&L: ${plSign}$${Math.abs(p.dayPL).toFixed(2)}`;
-      if (p.dayPLPercent != null) msg += ` (${plSign}${p.dayPLPercent.toFixed(1)}%)`;
+      if (p.dayPLPercent != null) msg += ` (${p.dayPLPercent >= 0 ? "+" : ""}${p.dayPLPercent.toFixed(1)}%)`;
       msg += "\n";
     }
     if (p.equity) msg += `Portfolio: $${Number(p.equity).toLocaleString()}\n`;
   }
 
-  // Health / Activity
+  // Health / Activity (only show if there's actual data)
   if (brief.health) {
-    msg += `\n*HEALTH*\n`;
     const parts = [];
     if (brief.health.activity?.steps) parts.push(`Steps: ${Number(brief.health.activity.steps).toLocaleString()}`);
     if (brief.health.activity?.calories) parts.push(`Calories: ${Number(brief.health.activity.calories).toLocaleString()}`);
     if (brief.health.activity?.score) parts.push(`Activity Score: ${brief.health.activity.score}`);
     if (brief.health.sleep?.score) parts.push(`Last Night Sleep: ${brief.health.sleep.score}`);
-    msg += parts.join("\n") + "\n";
+    if (parts.length > 0) {
+      msg += `\n*HEALTH*\n${parts.join("\n")}\n`;
+    }
   }
 
   // Goals progress
   if (brief.goals?.goals?.length > 0) {
     msg += `\n*GOALS PROGRESS*\n`;
     brief.goals.goals.slice(0, 4).forEach(g => {
-      msg += `${g.title}: ${g.progress}%\n`;
+      const title = g.title.length > 50 ? g.title.slice(0, 50) + "..." : g.title;
+      msg += `${title}: ${g.progress}%\n`;
     });
   }
 
-  // System activity
+  // System activity (filter out internal status entries)
   if (brief.systemActivity?.length > 0) {
-    msg += `\n*BACKBONE WORKED ON*\n`;
+    const meaningfulHighlights = [];
     brief.systemActivity.forEach(item => {
       item.highlights.forEach(h => {
-        msg += `- ${h}\n`;
+        // Skip internal status messages
+        if (!/Claude Code|Claude Engine|Mobile Dashboard|Life Engine|Not Available|Ready|Idle/i.test(h.trim())) {
+          meaningfulHighlights.push(h);
+        }
       });
     });
+    if (meaningfulHighlights.length > 0) {
+      msg += `\n*BACKBONE WORKED ON*\n`;
+      meaningfulHighlights.slice(0, 5).forEach(h => {
+        msg += `- ${h}\n`;
+      });
+    }
   }
 
   // Tomorrow's calendar

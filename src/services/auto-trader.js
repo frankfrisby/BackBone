@@ -1,7 +1,7 @@
 import fetch from "node-fetch";
 import fs from "fs";
 import path from "path";
-import { getAlpacaConfig } from "./alpaca.js";
+import { getAlpacaConfig, fetchAccount } from "./alpaca.js";
 import { TRADING_CONFIG, TRADING_RULES, isGoodMomentum, isProtectedPosition, getActionFromScore } from "./trading-algorithms.js";
 import { SCORE_THRESHOLDS, getSignalFromScore } from "./score-engine.js";
 import { showNotificationTitle } from "./terminal-resize.js";
@@ -705,9 +705,30 @@ export const executeBuy = async (symbol, price, reason) => {
   }
 
   // Calculate quantity based on max position size
-  const quantity = Math.floor(config.maxPositionSize / price);
+  let quantity = Math.floor(config.maxPositionSize / price);
   if (quantity < 1) {
     return { success: false, error: "Position size too small" };
+  }
+
+  // Check buying power before placing order
+  try {
+    const account = await fetchAccount(alpacaConfig);
+    const buyingPower = parseFloat(account.buying_power) || 0;
+    const orderCost = quantity * price;
+
+    if (buyingPower < price) {
+      return { success: false, error: `Insufficient buying power ($${buyingPower.toFixed(2)} available, need $${price.toFixed(2)} minimum)` };
+    }
+
+    // Reduce quantity to fit buying power (leave $10 buffer)
+    if (orderCost > buyingPower - 10) {
+      quantity = Math.floor((buyingPower - 10) / price);
+      if (quantity < 1) {
+        return { success: false, error: `Insufficient buying power ($${buyingPower.toFixed(2)} available, order would cost $${orderCost.toFixed(2)})` };
+      }
+    }
+  } catch (acctErr) {
+    return { success: false, error: `Failed to check buying power: ${acctErr.message}` };
   }
 
   try {
@@ -799,6 +820,12 @@ export const executeSell = async (symbol, price, quantity, reason) => {
     return { success: false, error: "Alpaca not configured" };
   }
 
+  // Validate quantity is a valid positive number
+  const qty = parseInt(quantity, 10);
+  if (!qty || qty < 1 || isNaN(qty)) {
+    return { success: false, error: `Invalid sell quantity: ${quantity}` };
+  }
+
   try {
     const response = await fetch(`${alpacaConfig.baseUrl}/v2/orders`, {
       method: "POST",
@@ -809,7 +836,7 @@ export const executeSell = async (symbol, price, quantity, reason) => {
       },
       body: JSON.stringify({
         symbol,
-        qty: quantity.toString(),
+        qty: qty.toString(),
         side: "sell",
         type: "market",
         time_in_force: "day"

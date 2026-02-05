@@ -589,6 +589,8 @@ async function handleHealth() {
           bpm: latestHR.bpm || null,
           source: latestHR.source || null
         } : null,
+        hrv: latestReadiness?.contributors?.hrv_balance || null,
+        rhr: latestReadiness?.contributors?.resting_heart_rate || null,
         lastUpdated: latest.fetchedAt || latest.savedAt || null
       };
     }

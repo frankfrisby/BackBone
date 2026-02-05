@@ -438,7 +438,11 @@ export class RealtimeMessaging extends EventEmitter {
    * Process an incoming message
    */
   async processMessage(messageId, message) {
-    console.log(`[RealtimeMessaging] Processing message: ${message.content?.substring(0, 50)}...`);
+    // Detect if message came from WhatsApp (could be "whatsapp" or "twilio_whatsapp")
+    const isWhatsApp = message.channel?.includes("whatsapp") ||
+                       message.source?.includes("whatsapp") ||
+                       message.channel === "twilio_whatsapp";
+    console.log(`[RealtimeMessaging] Processing ${isWhatsApp ? "WhatsApp" : "app"} message: ${message.content?.substring(0, 50)}...`);
 
     // Mark as processing
     await this.updateMessageStatus(messageId, MESSAGE_STATUS.PROCESSING);
@@ -473,11 +477,14 @@ export class RealtimeMessaging extends EventEmitter {
         };
       }
 
-      // Send the response
+      // Send the response — set sendToWhatsApp:true for WhatsApp messages
+      // This triggers the Firebase Function to send via Twilio as a backup
       const sent = await this.sendMessage(response.content, {
         type: response.type || MESSAGE_TYPE.AI,
         replyTo: messageId,
-        metadata: response.metadata
+        metadata: response.metadata,
+        sendToWhatsApp: isWhatsApp,
+        channel: isWhatsApp ? "twilio_whatsapp_response" : undefined
       });
 
       // Mark original as completed
@@ -526,6 +533,7 @@ export class RealtimeMessaging extends EventEmitter {
       metadata: options.metadata || {},
       error: options.error || null,
       sendToWhatsApp: options.sendToWhatsApp || false,
+      channel: options.channel || null,
       createdAt: new Date().toISOString(),
       fromAI: true
     };

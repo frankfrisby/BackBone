@@ -1499,7 +1499,10 @@ const App = ({ updateConsoleTitle, updateState }) => {
         // Set up message handler — classify, route, and respond
         realtimeMessaging.setMessageHandler(async (message) => {
           // Detect actual channel from message (app vs whatsapp vs unknown)
-          const msgChannel = message.channel === "whatsapp" || message.source === "whatsapp"
+          // WhatsApp messages come with channel: "twilio_whatsapp" from Firebase webhook
+          const msgChannel = message.channel?.includes("whatsapp") ||
+                             message.source?.includes("whatsapp") ||
+                             message.channel === "twilio_whatsapp"
             ? MESSAGE_CHANNEL.WHATSAPP
             : MESSAGE_CHANNEL.APP;
 

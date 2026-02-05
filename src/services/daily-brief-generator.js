@@ -266,22 +266,35 @@ function buildHealthSection() {
     const oura = loadOuraData();
     if (!oura) return null;
 
+    // Oura data structure: { latest: { sleep: [...], readiness: [...], activity: [...], heartRate: [...] } }
+    const latest = oura.latest || oura;
+    const sleepArr = Array.isArray(latest.sleep) ? latest.sleep : [];
+    const readinessArr = Array.isArray(latest.readiness) ? latest.readiness : [];
+    const activityArr = Array.isArray(latest.activity) ? latest.activity : [];
+    const hrArr = Array.isArray(latest.heartRate) ? latest.heartRate : [];
+
+    // Get the most recent entry from each array
+    const sleep = sleepArr.at(-1);
+    const readiness = readinessArr.at(-1);
+    const activity = activityArr.at(-1);
+    const hr = hrArr.at(-1);
+
     return {
       sleep: {
-        score: oura.sleep?.score || oura.sleep?.sleepScore || null,
-        duration: oura.sleep?.duration || null,
-        efficiency: oura.sleep?.efficiency || null
+        score: sleep?.score || null,
+        duration: sleep?.total_sleep_duration || null,
+        efficiency: sleep?.contributors?.efficiency || null
       },
       readiness: {
-        score: oura.readiness?.score || null
+        score: readiness?.score || null
       },
       activity: {
-        score: oura.activity?.score || null,
-        steps: oura.activity?.steps || null,
-        calories: oura.activity?.calories || null
+        score: activity?.score || null,
+        steps: activity?.steps || null,
+        calories: activity?.total_calories || activity?.active_calories || null
       },
-      hrv: oura.hrv || null,
-      rhr: oura.rhr || null
+      hrv: hr?.hrv?.avg || null,
+      rhr: hr?.resting_heart_rate || null
     };
   } catch {
     return null;

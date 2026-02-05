@@ -732,7 +732,34 @@ app.get("/linkedin/profile", (req, res) => {
   res.json(sync);
 });
 
-// ── Vapi Voice AI Webhook Routes ────────────────────────────
+// ── Vapi Voice AI Routes ─────────────────────────────────────
+
+app.post("/api/vapi/call", async (req, res) => {
+  try {
+    const { getVapiService } = await import("./services/vapi-service.js");
+    const vapiService = getVapiService();
+    await vapiService.initialize();
+    const { customPrompt } = req.body || {};
+    const result = await vapiService.callUser(customPrompt || undefined);
+    res.json({ success: true, callId: result?.id || result, status: "initiated" });
+  } catch (err) {
+    console.error("Vapi call error:", err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post("/api/vapi/end", async (req, res) => {
+  try {
+    const { getVapiService } = await import("./services/vapi-service.js");
+    const vapiService = getVapiService();
+    const { callId } = req.body || {};
+    await vapiService.endCall(callId || undefined);
+    res.json({ success: true, status: "ended" });
+  } catch (err) {
+    console.error("Vapi end error:", err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
 
 app.post("/api/vapi/webhook", async (req, res) => {
   try {

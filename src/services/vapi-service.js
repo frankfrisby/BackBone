@@ -18,6 +18,7 @@ import path from "path";
 import fetch from "node-fetch";
 import { fetchVapiConfig } from "./firebase-config.js";
 import { loadUserSettings } from "./user-settings.js";
+import { getAlpacaConfig } from "./alpaca.js";
 
 const DATA_DIR = path.join(process.cwd(), "data");
 const MEMORY_DIR = path.join(process.cwd(), "memory");
@@ -26,26 +27,17 @@ const TRANSCRIPTS_DIR = path.join(DATA_DIR, "call-transcripts");
 // Firebase Cloud Function webhook URL — no ngrok needed
 const CLOUD_WEBHOOK_URL = "https://us-central1-backboneai.cloudfunctions.net/vapiWebhook";
 
-// Alpaca API helpers
-const ALPACA_PAPER_URL = "https://paper-api.alpaca.markets";
-const ALPACA_LIVE_URL = "https://api.alpaca.markets";
-
-const getAlpacaHeaders = () => ({
-  "APCA-API-KEY-ID": process.env.ALPACA_KEY,
-  "APCA-API-SECRET-KEY": process.env.ALPACA_SECRET,
-  "Content-Type": "application/json",
-});
-
-const getAlpacaBaseUrl = () => {
-  try {
-    const configPath = path.join(DATA_DIR, "alpaca-config.json");
-    if (fs.existsSync(configPath)) {
-      const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
-      return config.mode === "live" ? ALPACA_LIVE_URL : ALPACA_PAPER_URL;
-    }
-  } catch {}
-  return ALPACA_PAPER_URL;
+// Alpaca API helpers — use shared config loader (supports data/alpaca-config.json fallback)
+const getAlpacaHeaders = () => {
+  const config = getAlpacaConfig();
+  return {
+    "APCA-API-KEY-ID": config.key,
+    "APCA-API-SECRET-KEY": config.secret,
+    "Content-Type": "application/json",
+  };
 };
+
+const getAlpacaBaseUrl = () => getAlpacaConfig().baseUrl;
 
 // Tool definitions sent to Vapi assistant
 const VAPI_TOOL_DEFINITIONS = [
@@ -673,6 +665,144 @@ export class VapiService extends EventEmitter {
       });
       fs.writeFileSync(logPath, JSON.stringify(log, null, 2));
     } catch {}
+  }
+
+  /**
+   * Execute a tool call from Vapi webhook (Cole calling functions during conversation)
+   */
+  async executeToolCall(toolName, params, toolCallId) {
+    console.log(`[Vapi] Tool call: ${toolName}`, params);
+
+    try {
+      switch (toolName) {
+        case "get_portfolio": {
+          const res = await fetch(`${getAlpacaBaseUrl()}/v2/account`, { headers: getAlpacaHeaders() });
+          if (!res.ok) return { error: `Alpaca API error: ${res.status}` };
+          const account = await res.json();
+          return {
+            equity: account.equity,
+            buyingPower: account.buying_power,
+            cash: account.cash,
+            dayPL: (parseFloat(account.equity) - parseFloat(account.last_equity)).toFixed(2),
+          };
+        }
+
+        case "get_positions": {
+          const res = await fetch(`${getAlpacaBaseUrl()}/v2/positions`, { headers: getAlpacaHeaders() });
+          if (!res.ok) return { error: `Alpaca API error: ${res.status}` };
+          const positions = await res.json();
+          return positions.map(p => ({
+            symbol: p.symbol,
+            qty: p.qty,
+            avgEntry: p.avg_entry_price,
+            currentPrice: p.current_price,
+            marketValue: p.market_value,
+            unrealizedPL: p.unrealized_pl,
+            unrealizedPLPercent: p.unrealized_plpc,
+          }));
+        }
+
+        case "buy_stock": {
+          const { symbol, qty } = params;
+          if (!symbol || !qty) return { error: "Missing symbol or qty" };
+          const res = await fetch(`${getAlpacaBaseUrl()}/v2/orders`, {
+            method: "POST",
+            headers: getAlpacaHeaders(),
+            body: JSON.stringify({ symbol: symbol.toUpperCase(), qty: Number(qty), side: "buy", type: "market", time_in_force: "day" }),
+          });
+          const order = await res.json();
+          if (!res.ok) return { error: order.message || `Order failed: ${res.status}` };
+          return { success: true, orderId: order.id, symbol: order.symbol, qty: order.qty, side: "buy", status: order.status };
+        }
+
+        case "sell_stock": {
+          const { symbol, qty } = params;
+          if (!symbol || !qty) return { error: "Missing symbol or qty" };
+          const res = await fetch(`${getAlpacaBaseUrl()}/v2/orders`, {
+            method: "POST",
+            headers: getAlpacaHeaders(),
+            body: JSON.stringify({ symbol: symbol.toUpperCase(), qty: Number(qty), side: "sell", type: "market", time_in_force: "day" }),
+          });
+          const order = await res.json();
+          if (!res.ok) return { error: order.message || `Order failed: ${res.status}` };
+          return { success: true, orderId: order.id, symbol: order.symbol, qty: order.qty, side: "sell", status: order.status };
+        }
+
+        case "get_goals": {
+          const goalsPath = path.join(DATA_DIR, "goals.json");
+          if (!fs.existsSync(goalsPath)) return { goals: [] };
+          const goals = JSON.parse(fs.readFileSync(goalsPath, "utf-8"));
+          return Array.isArray(goals) ? goals.filter(g => g.status === "active").slice(0, 10) : [];
+        }
+
+        case "get_health_summary": {
+          const ouraPath = path.join(DATA_DIR, "oura-data.json");
+          if (!fs.existsSync(ouraPath)) return { error: "No health data available" };
+          const oura = JSON.parse(fs.readFileSync(ouraPath, "utf-8"));
+          const sleep = oura.sleep?.at(-1) || {};
+          const readiness = oura.readiness?.at(-1) || {};
+          const activity = oura.activity?.at(-1) || {};
+          return {
+            sleep: { score: sleep.score, duration: sleep.total_sleep_duration, efficiency: sleep.efficiency },
+            readiness: { score: readiness.score },
+            activity: { score: activity.score, steps: activity.steps, calories: activity.total_calories },
+          };
+        }
+
+        case "get_calendar_events": {
+          try {
+            const { getCalendarEvents } = await import("./email.js");
+            const events = await getCalendarEvents();
+            return events?.slice(0, 10) || [];
+          } catch {
+            return { error: "Calendar not available" };
+          }
+        }
+
+        case "web_search": {
+          const { query } = params;
+          if (!query) return { error: "Missing search query" };
+          // Use a simple fetch to search (limited without API key)
+          return { note: `Web search for "${query}" - use BACKBONE's web tools for full results`, query };
+        }
+
+        case "send_email": {
+          const { to, subject, body } = params;
+          if (!to || !subject) return { error: "Missing email fields" };
+          // Safety: create draft only, don't send
+          try {
+            const draftsDir = path.join(DATA_DIR, "email-drafts");
+            if (!fs.existsSync(draftsDir)) fs.mkdirSync(draftsDir, { recursive: true });
+            const draftPath = path.join(draftsDir, `draft_${Date.now()}.json`);
+            fs.writeFileSync(draftPath, JSON.stringify({ to, subject, body, createdAt: new Date().toISOString() }, null, 2));
+            return { success: true, message: `Email draft saved. To: ${to}, Subject: ${subject}` };
+          } catch (err) {
+            return { error: `Failed to save draft: ${err.message}` };
+          }
+        }
+
+        case "get_life_scores": {
+          const scoresPath = path.join(DATA_DIR, "life-scores.json");
+          if (!fs.existsSync(scoresPath)) return { error: "No life scores available" };
+          return JSON.parse(fs.readFileSync(scoresPath, "utf-8"));
+        }
+
+        case "run_task": {
+          const { description } = params;
+          if (!description) return { error: "Missing task description" };
+          const taskId = `task_${Date.now()}`;
+          this.backgroundTasks.set(taskId, { description, status: "queued", startedAt: new Date().toISOString(), result: null });
+          // Don't block the call — just queue it
+          return { taskId, status: "queued", message: `Task "${description}" has been queued for background execution.` };
+        }
+
+        default:
+          return { error: `Unknown tool: ${toolName}` };
+      }
+    } catch (err) {
+      console.error(`[Vapi] Tool call ${toolName} failed:`, err.message);
+      return { error: err.message };
+    }
   }
 
   /**

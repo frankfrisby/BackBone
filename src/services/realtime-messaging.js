@@ -302,12 +302,17 @@ export class RealtimeMessaging extends EventEmitter {
     this.nextPollTime = Date.now() + interval;
     this.emit("poll-scheduled", { nextPollTime: this.nextPollTime, interval });
 
-    // Schedule next poll
+    // Schedule next poll — ensure schedulePoll is ALWAYS called to prevent staleness
     this.pollTimeout = setTimeout(async () => {
       if (this.listening) {
         this.lastPollTime = Date.now();
-        await this.checkForNewMessages();
-        this.schedulePoll(); // Schedule the next one
+        try {
+          await this.checkForNewMessages();
+        } catch (err) {
+          console.error("[RealtimeMessaging] Poll error:", err.message);
+        }
+        // Always schedule next poll even if there was an error
+        this.schedulePoll();
       }
     }, interval);
   }
@@ -713,13 +718,33 @@ export class RealtimeMessaging extends EventEmitter {
   }
 
   /**
-   * Fetch with optional auth header
+   * Fetch with optional auth header — refreshes token if expired
    */
   async fetchWithAuth(url, options = {}) {
     const headers = { ...options.headers };
 
+    // Refresh auth token if needed (tokens expire after 1 hour)
     if (this.authToken) {
-      headers["Authorization"] = `Bearer ${this.authToken}`;
+      try {
+        const user = loadFirebaseUser();
+        if (user?.idToken && user.idToken !== this.authToken) {
+          // Token was refreshed elsewhere, update our copy
+          this.authToken = user.idToken;
+        } else if (user?.tokenExpiresAt) {
+          const expiresAt = new Date(user.tokenExpiresAt).getTime();
+          const isExpired = Number.isFinite(expiresAt) && Date.now() > expiresAt - 60000; // 1 min buffer
+          if (isExpired) {
+            console.log("[RealtimeMessaging] Auth token expired, clearing...");
+            this.authToken = null; // Will use API key auth instead
+          }
+        }
+      } catch {
+        // Ignore token refresh errors
+      }
+
+      if (this.authToken) {
+        headers["Authorization"] = `Bearer ${this.authToken}`;
+      }
     }
 
     return fetch(url, { ...options, headers });

@@ -464,7 +464,8 @@ export const saveConfig = (newConfig) => {
 export const loadTradesLog = () => {
   try {
     if (fs.existsSync(TRADES_LOG)) {
-      tradesLog = JSON.parse(fs.readFileSync(TRADES_LOG, "utf-8"));
+      const parsed = JSON.parse(fs.readFileSync(TRADES_LOG, "utf-8"));
+      tradesLog = Array.isArray(parsed) ? parsed : [];
     }
   } catch (error) {
     tradesLog = [];

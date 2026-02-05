@@ -369,7 +369,7 @@ function buildActionItems() {
 
   // From goals due soon
   try {
-    const goals = getGoalTracker().getActive();
+    const goals = getGoalTracker()?.getActive() || [];
     goals.forEach(g => {
       if (g.dueDate) {
         const daysUntil = (new Date(g.dueDate) - new Date()) / (1000 * 60 * 60 * 24);
@@ -699,8 +699,8 @@ export function formatEveningWhatsApp(brief) {
   if (brief.goals?.goals?.length > 0) {
     msg += `\n*GOALS PROGRESS*\n`;
     brief.goals.goals.slice(0, 4).forEach(g => {
-      const title = g.title.length > 50 ? g.title.slice(0, 50) + "..." : g.title;
-      msg += `${title}: ${g.progress}%\n`;
+      const title = (g.title || "Untitled").length > 50 ? (g.title || "Untitled").slice(0, 50) + "..." : (g.title || "Untitled");
+      msg += `${title}: ${g.progress || 0}%\n`;
     });
   }
 

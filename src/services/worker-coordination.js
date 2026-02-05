@@ -282,7 +282,11 @@ class WorkerCoordinationManager extends EventEmitter {
 
     this.checkInterval = setInterval(async () => {
       if (this.mode === WORKER_MODE.VIEWER) {
-        await this.checkLeaderStatus();
+        try {
+          await this.checkLeaderStatus();
+        } catch (err) {
+          console.error("[WorkerCoordination] Leader check failed:", err.message);
+        }
       }
     }, WORKER_TIMEOUT);
   }

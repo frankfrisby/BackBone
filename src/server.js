@@ -20,6 +20,7 @@ const PORT = Number.parseInt(process.env.PORT || "3000", 10);
 const REDIRECT_URI = process.env.LINKEDIN_REDIRECT_URI || "http://localhost:3000/linkedin/callback";
 
 app.use(express.json());
+app.use(express.urlencoded({ extended: true })); // For Twilio webhooks (form data)
 
 // ── CORS for web app ────────────────────────────────────────
 app.use((req, res, next) => {
@@ -842,29 +843,49 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
     const { getTwilioWhatsAppService } = await import("./services/twilio-whatsapp.js");
     const whatsapp = getTwilioWhatsAppService();
 
-    // Handle incoming message from Twilio
-    const messageData = whatsapp.handleIncomingMessage(req.body);
+    // Handle incoming message from Twilio (form-urlencoded data)
+    const messageData = whatsapp.handleWebhook(req.body);
+    console.log("[WhatsApp Webhook] Received message from:", messageData.from, "Content:", messageData.content?.slice(0, 100));
 
-    // Get messaging gateway to process the message and generate response
-    const { getMessagingGateway } = await import("./services/messaging-gateway.js");
-    const gateway = getMessagingGateway();
-
-    // Process the message and get AI response
-    const response = await gateway.handleIncomingMessage({
-      content: messageData.content,
-      from: messageData.from,
-      userId: messageData.userId,
-      channel: "whatsapp"
-    }, "whatsapp");
-
-    // Return TwiML response
-    if (response && response.content) {
-      res.type("text/xml");
-      res.send(whatsapp.generateResponse(response.content));
-    } else {
+    // Skip empty messages
+    if (!messageData.content || !messageData.content.trim()) {
       res.type("text/xml");
       res.send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
+      return;
     }
+
+    // Process with Claude directly for a quick response
+    let responseText = "Message received. I'll look into that.";
+    try {
+      const { sendMessage } = await import("./services/claude.js");
+      const prompt = `You are BACKBONE, a personal AI assistant. The user sent this message via WhatsApp:
+
+"${messageData.content}"
+
+Respond briefly and helpfully (max 160 chars for SMS-friendly response). If they're asking about portfolio, health, goals, or schedule, say you'll check and get back to them.`;
+
+      const aiResponse = await sendMessage(prompt, { format: "text", maxTokens: 200 });
+      if (aiResponse && typeof aiResponse === "string") {
+        responseText = aiResponse.slice(0, 300);
+      }
+    } catch (aiErr) {
+      console.error("[WhatsApp Webhook] AI response failed:", aiErr.message);
+      // Fall back to acknowledgment
+    }
+
+    // Also send via WhatsApp service (in case TwiML doesn't work)
+    try {
+      const userPhone = messageData.from;
+      if (userPhone) {
+        await whatsapp.sendMessage(userPhone, responseText);
+      }
+    } catch (sendErr) {
+      console.log("[WhatsApp Webhook] Direct send failed, relying on TwiML:", sendErr.message);
+    }
+
+    // Return TwiML response
+    res.type("text/xml");
+    res.send(whatsapp.generateResponse(responseText));
   } catch (err) {
     console.error("[WhatsApp Webhook] Error:", err.message);
     res.type("text/xml");

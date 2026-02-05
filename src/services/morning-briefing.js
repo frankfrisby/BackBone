@@ -17,7 +17,7 @@
 import fs from "fs";
 import path from "path";
 import { getOuraConfig, buildOuraHealthSummary } from "./oura.js";
-import { loadGoals } from "./goals.js";
+import { loadGoals } from "./goal-extractor.js";
 import { listProjects } from "./projects.js";
 
 const DATA_DIR = path.join(process.cwd(), "data");

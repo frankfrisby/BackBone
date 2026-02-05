@@ -12,7 +12,15 @@
 
 import { EventEmitter } from "events";
 import { getCredentials as getClaudeOAuthCredentials, hasValidCredentials as hasClaudeOAuth } from "./claude-oauth.js";
-import { isProviderConfigured, getProviderConfig } from "./model-config.js";
+import { PROVIDERS, isProviderConfigured } from "./model-key-setup.js";
+
+// Build provider config with API key from env
+const getProviderConfig = (provider) => {
+  const p = PROVIDERS[provider];
+  if (!p) return null;
+  const apiKey = process.env[p.envKey] || null;
+  return { ...p, apiKey };
+};
 
 // Model definitions with priority
 const MODELS = {

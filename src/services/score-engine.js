@@ -159,14 +159,14 @@ export const calculateMACDScore = (macdData) => {
 
   if (macdLine != null && macdSignal != null && macdMin60d != null && macdMax60d != null) {
     if (macdLine < 0 && macdSignal < 0 && macdLine > macdSignal) {
-      const denom = Math.abs(macdMin60d);
-      if (denom > 0) {
+      const denom = Math.abs(macdMin60d) || 0;
+      if (denom > 0 && isFinite(denom)) {
         const ratio = Math.max(0, Math.min(1, 1 - (Math.abs(macdLine) / denom)));
         score = Math.max(0, Math.min(1, ratio));
       }
     } else if (macdLine > 0 && macdSignal > 0 && macdLine < macdSignal) {
-      const denom = Math.abs(macdMax60d);
-      if (denom > 0) {
+      const denom = Math.abs(macdMax60d) || 0;
+      if (denom > 0 && isFinite(denom)) {
         const ratio = Math.max(0, Math.min(1, 1 - (Math.abs(macdLine) / denom)));
         score = -Math.max(0, Math.min(1, ratio));
       }

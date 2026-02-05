@@ -558,7 +558,7 @@ export const evaluateBuySignal = (ticker, options = {}) => {
   if (config.protectMomentum && positions.length > 0) {
     const protectedPositions = positions.filter(p => {
       const plPercent = parseFloat(p.unrealized_plpc || 0) * 100;
-      return plPercent >= config.protectedPositionPercent;
+      return !isNaN(plPercent) && plPercent >= config.protectedPositionPercent;
     });
 
     if (protectedPositions.length > 0) {
@@ -617,8 +617,9 @@ export const evaluateSellSignal = (ticker, position = null) => {
   let isExtreme = false;
   let isTechnicalOverride = false;
 
-  // Get position P&L if available
-  const plPercent = position ? parseFloat(position.unrealized_plpc || 0) * 100 : 0;
+  // Get position P&L if available (guard against NaN from bad API data)
+  const plPercentRaw = position ? parseFloat(position.unrealized_plpc || 0) * 100 : 0;
+  const plPercent = isNaN(plPercentRaw) ? 0 : plPercentRaw;
   const isProtected = plPercent >= config.protectedPositionPercent;
   const isGoodMomentum = plPercent >= config.goodMomentumPercent;
 
@@ -1063,7 +1064,7 @@ export const monitorAndTrade = async (tickers, positions = []) => {
   };
 
   // Filter out CVR positions (corporate actions/rights - don't count toward limit)
-  const tradablePositions = positions.filter(p => !p.symbol.includes('CVR'));
+  const tradablePositions = positions.filter(p => p.symbol && !p.symbol.includes('CVR'));
 
   // Get current position symbols
   const positionSymbols = tradablePositions.map(p => p.symbol);

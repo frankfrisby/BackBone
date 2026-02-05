@@ -265,6 +265,20 @@ class DashboardSync {
       return this.authToken;
     }
 
+    // Prevent concurrent refresh attempts
+    if (this._refreshingToken) {
+      return this._refreshingToken;
+    }
+
+    this._refreshingToken = this._doTokenRefresh();
+    try {
+      return await this._refreshingToken;
+    } finally {
+      this._refreshingToken = null;
+    }
+  }
+
+  async _doTokenRefresh() {
     const user = loadFirebaseUser();
     if (!user) return null;
 

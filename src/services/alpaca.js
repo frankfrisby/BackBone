@@ -174,7 +174,13 @@ export const submitOrder = async (config, order) => {
   });
 
   if (!response.ok) {
-    const message = await response.text();
+    let message;
+    try {
+      const errBody = await response.json();
+      message = errBody.message || errBody.error || JSON.stringify(errBody);
+    } catch {
+      message = await response.text().catch(() => "");
+    }
     throw new Error(message || `Order failed: ${response.status}`);
   }
 

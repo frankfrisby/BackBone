@@ -15,6 +15,18 @@ import path from "path";
 
 const DATA_DIR = path.join(process.cwd(), "data");
 const CALENDAR_CACHE = path.join(DATA_DIR, "calendar-cache.json");
+const GOOGLE_TOKEN_FILE = path.join(DATA_DIR, "google-email-tokens.json");
+
+// Load Google tokens from config file (MCP child processes don't inherit .env vars)
+const loadGoogleTokens = () => {
+  try {
+    if (fs.existsSync(GOOGLE_TOKEN_FILE)) {
+      return JSON.parse(fs.readFileSync(GOOGLE_TOKEN_FILE, "utf-8"));
+    }
+  } catch { /* ignore */ }
+  return null;
+};
+const getCalToken = () => process.env.GOOGLE_CALENDAR_TOKEN || loadGoogleTokens()?.access_token || null;
 
 // Tool definitions
 const TOOLS = [
@@ -58,7 +70,7 @@ const TOOLS = [
 
 // Google Calendar API helpers
 const getGoogleHeaders = () => ({
-  Authorization: `Bearer ${process.env.GOOGLE_CALENDAR_TOKEN}`,
+  Authorization: `Bearer ${getCalToken()}`,
   "Content-Type": "application/json",
 });
 
@@ -74,7 +86,7 @@ const OUTLOOK_BASE = "https://graph.microsoft.com/v1.0/me";
 
 // Detect which provider is configured
 const getCalendarProvider = () => {
-  if (process.env.GOOGLE_CALENDAR_TOKEN) return "google";
+  if (getCalToken()) return "google";
   if (process.env.OUTLOOK_ACCESS_TOKEN) return "outlook";
   return null;
 };

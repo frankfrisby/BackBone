@@ -15,6 +15,18 @@ import path from "path";
 
 const DATA_DIR = path.join(process.cwd(), "data");
 const EMAIL_CACHE = path.join(DATA_DIR, "email-cache.json");
+const GOOGLE_TOKEN_FILE = path.join(DATA_DIR, "google-email-tokens.json");
+
+// Load Google tokens from config file (MCP child processes don't inherit .env vars)
+const loadGoogleTokens = () => {
+  try {
+    if (fs.existsSync(GOOGLE_TOKEN_FILE)) {
+      return JSON.parse(fs.readFileSync(GOOGLE_TOKEN_FILE, "utf-8"));
+    }
+  } catch { /* ignore */ }
+  return null;
+};
+const getGmailToken = () => process.env.GMAIL_ACCESS_TOKEN || loadGoogleTokens()?.access_token || null;
 
 // Tool definitions
 const TOOLS = [
@@ -55,7 +67,7 @@ const TOOLS = [
 
 // Gmail API helpers
 const getGmailHeaders = () => ({
-  Authorization: `Bearer ${process.env.GMAIL_ACCESS_TOKEN}`,
+  Authorization: `Bearer ${getGmailToken()}`,
   "Content-Type": "application/json",
 });
 
@@ -71,7 +83,7 @@ const OUTLOOK_BASE = "https://graph.microsoft.com/v1.0/me";
 
 // Detect which provider is configured
 const getEmailProvider = () => {
-  if (process.env.GMAIL_ACCESS_TOKEN) return "gmail";
+  if (getGmailToken()) return "gmail";
   if (process.env.OUTLOOK_ACCESS_TOKEN) return "outlook";
   return null;
 };

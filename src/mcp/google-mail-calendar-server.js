@@ -16,6 +16,20 @@ import path from "path";
 const DATA_DIR = path.join(process.cwd(), "data");
 const EMAIL_CACHE = path.join(DATA_DIR, "email-cache.json");
 const DRAFT_LOG = path.join(DATA_DIR, "email-draft-log.json");
+const GOOGLE_TOKEN_FILE = path.join(DATA_DIR, "google-email-tokens.json");
+
+// Load Google tokens from config file (MCP child processes don't inherit .env vars)
+const loadGoogleTokens = () => {
+  try {
+    if (fs.existsSync(GOOGLE_TOKEN_FILE)) {
+      return JSON.parse(fs.readFileSync(GOOGLE_TOKEN_FILE, "utf-8"));
+    }
+  } catch { /* ignore */ }
+  return null;
+};
+
+const getGmailToken = () => process.env.GMAIL_ACCESS_TOKEN || loadGoogleTokens()?.access_token || null;
+const getCalendarToken = () => process.env.GOOGLE_CALENDAR_TOKEN || loadGoogleTokens()?.access_token || null;
 
 // Tool definitions
 const TOOLS = [
@@ -159,14 +173,14 @@ const TOOLS = [
 // === PROVIDER HELPERS ===
 
 const getGmailHeaders = () => ({
-  Authorization: `Bearer ${process.env.GMAIL_ACCESS_TOKEN}`,
+  Authorization: `Bearer ${getGmailToken()}`,
   "Content-Type": "application/json",
 });
 
 const GMAIL_BASE = "https://gmail.googleapis.com/gmail/v1/users/me";
 
 const getGoogleCalHeaders = () => ({
-  Authorization: `Bearer ${process.env.GOOGLE_CALENDAR_TOKEN}`,
+  Authorization: `Bearer ${getCalendarToken()}`,
   "Content-Type": "application/json",
 });
 
@@ -180,13 +194,13 @@ const getOutlookHeaders = () => ({
 const OUTLOOK_BASE = "https://graph.microsoft.com/v1.0/me";
 
 const getEmailProvider = () => {
-  if (process.env.GMAIL_ACCESS_TOKEN) return "gmail";
+  if (getGmailToken()) return "gmail";
   if (process.env.OUTLOOK_ACCESS_TOKEN) return "outlook";
   return null;
 };
 
 const getCalendarProvider = () => {
-  if (process.env.GOOGLE_CALENDAR_TOKEN) return "google";
+  if (getCalendarToken()) return "google";
   if (process.env.OUTLOOK_ACCESS_TOKEN) return "outlook";
   return null;
 };

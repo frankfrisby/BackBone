@@ -185,6 +185,7 @@ function buildWorldSnapshot() {
 function buildPortfolioSection() {
   const tradesLog = loadJson(path.join(DATA_DIR, "trades-log.json"));
   const tickersCache = loadJson(path.join(DATA_DIR, "tickers-cache.json"));
+  const alpacaCache = loadJson(path.join(DATA_DIR, "alpaca-cache.json"));
 
   const section = {
     equity: null,
@@ -195,49 +196,52 @@ function buildPortfolioSection() {
     signals: []
   };
 
-  // Try to read portfolio from alpaca cache or trades log
-  if (tradesLog?.portfolio) {
-    section.equity = tradesLog.portfolio.equity;
-    section.dayPL = tradesLog.portfolio.dayPL;
-    section.dayPLPercent = tradesLog.portfolio.dayPLPercent;
+  // Try alpaca cache first (written by server.js on live fetch)
+  if (alpacaCache?.account) {
+    const acct = alpacaCache.account;
+    section.equity = parseFloat(acct.equity) || null;
+    const lastEquity = parseFloat(acct.last_equity) || section.equity;
+    section.dayPL = lastEquity ? Math.round((section.equity - lastEquity) * 100) / 100 : null;
+    section.dayPLPercent = lastEquity ? Math.round(((section.equity - lastEquity) / lastEquity) * 10000) / 100 : null;
   }
 
-  // Top positions
-  if (tradesLog?.positions) {
-    section.topPositions = tradesLog.positions
-      .filter(p => p.status === "open")
-      .sort((a, b) => Math.abs(b.marketValue || 0) - Math.abs(a.marketValue || 0))
+  // Positions from alpaca cache
+  if (alpacaCache?.positions && Array.isArray(alpacaCache.positions)) {
+    section.topPositions = alpacaCache.positions
+      .sort((a, b) => Math.abs(parseFloat(b.market_value) || 0) - Math.abs(parseFloat(a.market_value) || 0))
       .slice(0, 5)
       .map(p => ({
         symbol: p.symbol,
-        qty: p.qty,
-        marketValue: p.marketValue,
-        unrealizedPL: p.unrealizedPL,
-        unrealizedPLPercent: p.unrealizedPLPercent
+        qty: parseFloat(p.qty) || 0,
+        marketValue: parseFloat(p.market_value) || 0,
+        unrealizedPL: parseFloat(p.unrealized_pl) || 0,
+        unrealizedPLPercent: parseFloat(p.unrealized_plpc) ? (parseFloat(p.unrealized_plpc) * 100) : 0
       }));
   }
 
-  // Recent trades (last 24 hours)
-  if (tradesLog?.trades) {
+  // Recent trades (last 24 hours) — tradesLog is an array of trade entries
+  if (Array.isArray(tradesLog)) {
     const cutoff = Date.now() - 24 * 60 * 60 * 1000;
-    section.recentTrades = tradesLog.trades
-      .filter(t => new Date(t.timestamp || t.date).getTime() > cutoff)
-      .slice(0, 5)
+    section.recentTrades = tradesLog
+      .filter(t => new Date(t.timestamp || t.date || t.created_at).getTime() > cutoff)
+      .slice(-5)
+      .reverse()
       .map(t => ({
         symbol: t.symbol,
         side: t.side || t.action,
         qty: t.qty || t.quantity,
-        price: t.price,
-        time: t.timestamp || t.date
+        price: t.price || t.filled_avg_price,
+        time: t.timestamp || t.date || t.created_at
       }));
   }
 
-  // Top buy signals
-  if (tickersCache?.tickers) {
-    section.signals = tickersCache.tickers
-      .filter(t => (t.score || 0) >= 70)
+  // Top buy signals — tickersCache is a flat array of ticker objects, score is 0-10
+  const tickers = Array.isArray(tickersCache) ? tickersCache : (tickersCache?.tickers || []);
+  if (tickers.length > 0) {
+    section.signals = tickers
+      .filter(t => (t.score || 0) >= 7)
       .sort((a, b) => (b.score || 0) - (a.score || 0))
-      .slice(0, 3)
+      .slice(0, 5)
       .map(t => ({ symbol: t.symbol, score: t.score, price: t.price || t.lastPrice }));
   }
 

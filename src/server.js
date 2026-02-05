@@ -414,6 +414,14 @@ async function handlePortfolio() {
         const lastEquity = parseFloat(account.last_equity) || equity;
         const dayPL = equity - lastEquity;
         const dayPLPercent = lastEquity > 0 ? (dayPL / lastEquity) * 100 : 0;
+        // Cache for brief generator
+        try {
+          const cachePath = path.resolve("data/alpaca-cache.json");
+          const cache = fs.existsSync(cachePath) ? JSON.parse(fs.readFileSync(cachePath, "utf8")) : {};
+          cache.account = account;
+          cache.updatedAt = new Date().toISOString();
+          fs.writeFileSync(cachePath, JSON.stringify(cache, null, 2));
+        } catch { /* ignore cache write failure */ }
         return {
           equity,
           buyingPower: parseFloat(account.buying_power) || 0,
@@ -457,6 +465,14 @@ async function handlePositions() {
     if (config.ready) {
       const positions = await fetchPositions(config);
       if (Array.isArray(positions)) {
+        // Cache for brief generator
+        try {
+          const cachePath = path.resolve("data/alpaca-cache.json");
+          const cache = fs.existsSync(cachePath) ? JSON.parse(fs.readFileSync(cachePath, "utf8")) : {};
+          cache.positions = positions;
+          cache.positionsUpdatedAt = new Date().toISOString();
+          fs.writeFileSync(cachePath, JSON.stringify(cache, null, 2));
+        } catch { /* ignore cache write failure */ }
         return positions.map(p => ({
           symbol: p.symbol,
           qty: parseFloat(p.qty) || 0,

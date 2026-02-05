@@ -258,9 +258,16 @@ async function buildConsolidatedContext() {
     const oura = readJsonSafe("oura-data.json") || readJsonSafe("oura-cache.json");
     if (oura) {
       sections.push("\n## Health");
-      if (oura.sleep?.score) sections.push(`Sleep Score: ${oura.sleep.score}`);
-      if (oura.readiness?.score) sections.push(`Readiness: ${oura.readiness.score}`);
-      if (oura.activity?.score) sections.push(`Activity: ${oura.activity.score}`);
+      const latest = oura.latest || oura;
+      const sleepArr = Array.isArray(latest.sleep) ? latest.sleep : [];
+      const readinessArr = Array.isArray(latest.readiness) ? latest.readiness : [];
+      const activityArr = Array.isArray(latest.activity) ? latest.activity : [];
+      const lastSleep = sleepArr.at(-1);
+      const lastReadiness = readinessArr.at(-1);
+      const lastActivity = activityArr.at(-1);
+      if (lastSleep?.score) sections.push(`Sleep Score: ${lastSleep.score}`);
+      if (lastReadiness?.score) sections.push(`Readiness: ${lastReadiness.score}`);
+      if (lastActivity?.score) sections.push(`Activity: ${lastActivity.score}`);
     }
   }
 

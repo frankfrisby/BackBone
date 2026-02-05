@@ -621,15 +621,22 @@ const App = ({ updateConsoleTitle, updateState }) => {
       const dayName = now.toLocaleDateString("en-US", { weekday: "long" });
       const dateStr = now.toLocaleDateString("en-US", { month: "long", day: "numeric" });
 
-      // Gather health data
+      // Gather health data (Oura structure: { latest: { sleep: [...], readiness: [...] } })
       let health = null;
       try {
         const oura = loadOuraData();
-        if (oura?.sleep) {
-          health = {
-            sleepScore: oura.sleep.score || oura.sleep.sleepScore || null,
-            readiness: oura.readiness?.score || null
-          };
+        if (oura) {
+          const latest = oura.latest || oura;
+          const sleepArr = Array.isArray(latest.sleep) ? latest.sleep : [];
+          const readinessArr = Array.isArray(latest.readiness) ? latest.readiness : [];
+          const lastSleep = sleepArr.at(-1);
+          const lastReadiness = readinessArr.at(-1);
+          if (lastSleep || lastReadiness) {
+            health = {
+              sleepScore: lastSleep?.score || null,
+              readiness: lastReadiness?.score || null
+            };
+          }
         }
       } catch (e) { /* no health data */ }
 

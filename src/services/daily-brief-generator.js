@@ -159,10 +159,11 @@ function buildWorldSnapshot() {
     }));
   }
 
-  // Market summary
-  const tickersCache = loadJson(path.join(DATA_DIR, "tickers-cache.json"));
-  if (tickersCache?.tickers?.length > 0) {
-    const tickers = tickersCache.tickers;
+  // Market summary — tickersCache is a flat array or { tickers: [...] }
+  const tickersCacheRaw = loadJson(path.join(DATA_DIR, "tickers-cache.json"));
+  const tickersForMarket = Array.isArray(tickersCacheRaw) ? tickersCacheRaw : (tickersCacheRaw?.tickers || []);
+  if (tickersForMarket.length > 0) {
+    const tickers = tickersForMarket;
     const gainers = [...tickers].filter(t => (t.changePercent || 0) > 0).sort((a, b) => b.changePercent - a.changePercent).slice(0, 3);
     const losers = [...tickers].filter(t => (t.changePercent || 0) < 0).sort((a, b) => a.changePercent - b.changePercent).slice(0, 3);
     const avgChange = tickers.reduce((s, t) => s + (t.changePercent || 0), 0) / tickers.length;
@@ -385,26 +386,34 @@ function buildActionItems() {
     });
   } catch { /* ignore */ }
 
-  // From health data
+  // From health data (Oura structure: { latest: { sleep: [...], readiness: [...] } })
   try {
     const oura = loadOuraData();
-    if (oura?.sleep?.score && oura.sleep.score < 65) {
-      actions.push({
-        type: "health",
-        priority: "important",
-        text: "Prioritize rest today",
-        detail: `Sleep score was ${oura.sleep.score} — consider an earlier bedtime`,
-        category: "health"
-      });
-    }
-    if (oura?.readiness?.score && oura.readiness.score >= 85) {
-      actions.push({
-        type: "health",
-        priority: "useful",
-        text: "Great day for a workout",
-        detail: `Readiness score ${oura.readiness.score} — your body is ready for a challenge`,
-        category: "health"
-      });
+    if (oura) {
+      const latest = oura.latest || oura;
+      const sleepArr = Array.isArray(latest.sleep) ? latest.sleep : [];
+      const readinessArr = Array.isArray(latest.readiness) ? latest.readiness : [];
+      const sleepScore = sleepArr.at(-1)?.score;
+      const readinessScore = readinessArr.at(-1)?.score;
+
+      if (sleepScore && sleepScore < 65) {
+        actions.push({
+          type: "health",
+          priority: "important",
+          text: "Prioritize rest today",
+          detail: `Sleep score was ${sleepScore} — consider an earlier bedtime`,
+          category: "health"
+        });
+      }
+      if (readinessScore && readinessScore >= 85) {
+        actions.push({
+          type: "health",
+          priority: "useful",
+          text: "Great day for a workout",
+          detail: `Readiness score ${readinessScore} — your body is ready for a challenge`,
+          category: "health"
+        });
+      }
     }
   } catch { /* ignore */ }
 

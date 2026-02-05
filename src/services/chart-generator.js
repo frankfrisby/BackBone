@@ -82,21 +82,17 @@ export async function generatePortfolioChart(tradingHistory) {
         data.push(parseFloat(last.equity) || 0);
       }
     } else {
-      // Fallback: try to load from trades-log
+      // Fallback: try alpaca-cache for current equity as a single data point
       try {
         const fs = await import("fs");
         const path = await import("path");
-        const logPath = path.default.join(process.cwd(), "data", "trades-log.json");
-        if (fs.default.existsSync(logPath)) {
-          const log = JSON.parse(fs.default.readFileSync(logPath, "utf-8"));
-          if (log.equityHistory && log.equityHistory.length > 0) {
-            return generatePortfolioChart(log.equityHistory);
-          }
-          // Single-point fallback from current portfolio
-          if (log.portfolio?.equity) {
+        const cachePath = path.default.join(process.cwd(), "data", "alpaca-cache.json");
+        if (fs.default.existsSync(cachePath)) {
+          const cache = JSON.parse(fs.default.readFileSync(cachePath, "utf-8"));
+          if (cache.account?.equity) {
             const today = new Date();
             labels = [`${today.getMonth() + 1}/${today.getDate()}`];
-            data = [parseFloat(log.portfolio.equity)];
+            data = [parseFloat(cache.account.equity)];
           }
         }
       } catch { /* ignore */ }

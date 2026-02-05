@@ -137,9 +137,13 @@ async function handleSleep() {
   }
 
   const oura = readData("oura-data.json");
-  if (oura?.sleep) {
-    const latest = Array.isArray(oura.sleep) ? oura.sleep[oura.sleep.length - 1] : oura.sleep;
-    return `Sleep Score: ${latest.score || "N/A"}\nTotal Sleep: ${latest.total_sleep_duration ? Math.round(latest.total_sleep_duration / 3600) + "h" : "N/A"}\nEfficiency: ${latest.efficiency || "N/A"}%`;
+  if (oura) {
+    const root = oura.latest || oura;
+    const sleepArr = Array.isArray(root.sleep) ? root.sleep : [];
+    const latest = sleepArr.at(-1);
+    if (latest) {
+      return `Sleep Score: ${latest.score || "N/A"}\nTotal Sleep: ${latest.total_sleep_duration ? Math.round(latest.total_sleep_duration / 3600) + "h" : "N/A"}\nEfficiency: ${latest.contributors?.efficiency || latest.efficiency || "N/A"}%`;
+    }
   }
   return "No sleep data available. Connect your Oura ring for sleep tracking.";
 }

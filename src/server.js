@@ -546,15 +546,14 @@ async function handleHealth() {
     if (fs.existsSync(dataPath)) {
       const raw = JSON.parse(fs.readFileSync(dataPath, "utf8"));
 
-      // Extract the latest scores from history entries
+      // Extract the latest scores
       const getLatest = (arr) => {
         if (!Array.isArray(arr) || arr.length === 0) return null;
         return arr[arr.length - 1];
       };
 
-      // Handle both flat format and history array format
-      const history = raw.history || [raw];
-      const latest = history[history.length - 1] || {};
+      // Prefer raw.latest (most recent fetch), fallback to last history entry
+      const latest = raw.latest || (raw.history ? raw.history[raw.history.length - 1] : raw) || {};
 
       const latestSleep = getLatest(latest.sleep);
       const latestReadiness = getLatest(latest.readiness);

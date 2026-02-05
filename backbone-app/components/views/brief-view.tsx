@@ -854,7 +854,7 @@ export function BriefView() {
                   </div>
                   <span
                     className={`text-[10px] font-bold px-2 py-0.5 rounded-md tabular-nums ${
-                      sig.score >= 70
+                      sig.score >= 7
                         ? "bg-green-500/15 text-green-400"
                         : "bg-amber-500/15 text-amber-400"
                     }`}

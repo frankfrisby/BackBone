@@ -6,8 +6,8 @@ import { SparklineChart } from "./sparkline-chart.js";
 const e = React.createElement;
 
 const scoreColor = (score) => {
-  if (score >= 80) return "#22c55e";
-  if (score >= 65) return "#eab308";
+  if (score >= 8) return "#22c55e";
+  if (score >= 5) return "#eab308";
   return "#f97316";
 };
 

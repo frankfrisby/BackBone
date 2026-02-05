@@ -39,10 +39,11 @@ async function fetchPositions() {
 }
 
 function ScoreBar({ score }: { score: number }) {
+  // Scores are 0-10 scale
   const color =
-    score >= 70
+    score >= 7
       ? "bg-green-500"
-      : score >= 40
+      : score >= 4
       ? "bg-yellow-500"
       : "bg-red-500";
   return (
@@ -50,19 +51,19 @@ function ScoreBar({ score }: { score: number }) {
       <div className="flex-1 h-1 bg-[#1a1a1a] rounded-full overflow-hidden">
         <div
           className={`h-full rounded-full ${color} transition-all duration-700`}
-          style={{ width: `${score}%` }}
+          style={{ width: `${(score / 10) * 100}%` }}
         />
       </div>
       <span
         className={`text-[12px] font-semibold tabular-nums ${
-          score >= 70
+          score >= 7
             ? "text-green-400"
-            : score >= 40
+            : score >= 4
             ? "text-yellow-400"
             : "text-red-400"
         }`}
       >
-        {score}
+        {score.toFixed(1)}
       </span>
     </div>
   );

@@ -14,14 +14,14 @@ interface TickersData {
 }
 
 function getScoreColor(score: number): string {
-  if (score >= 70) return "text-green-400";
-  if (score >= 40) return "text-yellow-400";
+  if (score >= 7) return "text-green-400";
+  if (score >= 4) return "text-yellow-400";
   return "text-red-400";
 }
 
 function getScoreBg(score: number): string {
-  if (score >= 70) return "bg-green-500/10";
-  if (score >= 40) return "bg-yellow-500/10";
+  if (score >= 7) return "bg-green-500/10";
+  if (score >= 4) return "bg-yellow-500/10";
   return "bg-red-500/10";
 }
 

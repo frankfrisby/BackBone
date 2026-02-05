@@ -184,8 +184,8 @@ function findContactById(contactId) {
 function findContactByName(name) {
   const lower = name.toLowerCase();
   const all = getAllContacts();
-  return all.find(c => c.name.toLowerCase() === lower) ||
-    all.find(c => c.name.toLowerCase().includes(lower));
+  return all.find(c => c.name && c.name.toLowerCase() === lower) ||
+    all.find(c => c.name && c.name.toLowerCase().includes(lower));
 }
 
 // === TOOL IMPLEMENTATIONS ===

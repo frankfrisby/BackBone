@@ -305,7 +305,7 @@ function addGoal(args) {
   writeJson(GOALS_PATH, data);
 
   // Also create goal directory
-  const slug = args.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  const slug = (args.title || "untitled").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
   const goalDir = path.join(DATA_DIR, "goals", slug);
   if (!fs.existsSync(goalDir)) {
     fs.mkdirSync(goalDir, { recursive: true });

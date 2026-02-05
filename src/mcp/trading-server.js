@@ -310,7 +310,7 @@ async function getTradingSignals() {
 
     const { tickers } = await response.json();
     const positions = await getPositions();
-    const positionSymbols = Array.isArray(positions) ? positions.map(p => p.symbol) : [];
+    const positionSymbols = Array.isArray(positions) ? positions.map(p => p.symbol).filter(Boolean) : [];
 
     const signals = {
       buySignals: [],
@@ -366,7 +366,7 @@ async function analyzePositionTool(symbol) {
       return { error: positions.error };
     }
 
-    const position = positions.find(p => p.symbol.toUpperCase() === symbol.toUpperCase());
+    const position = positions.find(p => p.symbol && p.symbol.toUpperCase() === symbol.toUpperCase());
     if (!position) {
       return { error: `No position found for ${symbol}` };
     }
@@ -377,7 +377,7 @@ async function analyzePositionTool(symbol) {
       const response = await fetch("http://localhost:3001/api/tickers");
       if (response.ok) {
         const { tickers } = await response.json();
-        ticker = tickers.find(t => t.symbol.toUpperCase() === symbol.toUpperCase());
+        ticker = tickers.find(t => t.symbol && t.symbol.toUpperCase() === symbol.toUpperCase());
       }
     } catch {
       // Yahoo Finance server not running, use basic data

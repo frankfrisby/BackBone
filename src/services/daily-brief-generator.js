@@ -27,6 +27,7 @@ import { getWhatsAppNotifications } from "./whatsapp-notifications.js";
 import { sendPush, PUSH_TYPE } from "./push-notifications.js";
 import { getUpcomingEvents } from "./email-calendar-service.js";
 import { generatePortfolioChart, generateTickerScoresChart } from "./chart-generator.js";
+import { getGoalsWithProgress, getGoalBasedRecommendations } from "./core-goals-parser.js";
 
 const DATA_DIR = path.join(process.cwd(), "data");
 const MEMORY_DIR = path.join(process.cwd(), "memory");
@@ -459,6 +460,42 @@ function buildLifeScoresSection() {
   }
 }
 
+/**
+ * Build core goals progress section
+ * Shows progress toward the user's fundamental goals (wealth, income, career)
+ */
+function buildCoreGoalsSection() {
+  try {
+    const goalsWithProgress = getGoalsWithProgress();
+    if (!goalsWithProgress || goalsWithProgress.length === 0) return null;
+
+    return goalsWithProgress.map(g => ({
+      id: g.id,
+      title: g.title,
+      type: g.type,
+      progress: g.progress,
+      progressDetails: g.progressDetails,
+      priority: g.priority,
+      metrics: g.metrics,
+      deadline: g.timeline?.deadline
+    }));
+  } catch (error) {
+    console.error("[DailyBrief] Core goals section error:", error.message);
+    return null;
+  }
+}
+
+/**
+ * Build goal-based action recommendations
+ */
+function buildGoalActions() {
+  try {
+    return getGoalBasedRecommendations();
+  } catch {
+    return [];
+  }
+}
+
 // ── Main Generator ──────────────────────────────────────────────
 
 /**
@@ -482,6 +519,8 @@ export function generateDailyBrief() {
   const calendar = buildCalendarSection();
   const actionItems = buildActionItems();
   const lifeScores = buildLifeScoresSection();
+  const coreGoals = buildCoreGoalsSection();
+  const goalActions = buildGoalActions();
 
   // Determine brief "mood" based on data
   let mood = "neutral";
@@ -529,8 +568,12 @@ export function generateDailyBrief() {
     actionItems: actionItems.length > 0 ? actionItems : null,
     lifeScores,
 
+    // NEW: Core goals progress (wealth, income, career)
+    coreGoals: coreGoals && coreGoals.length > 0 ? coreGoals : null,
+    goalActions: goalActions && goalActions.length > 0 ? goalActions : null,
+
     // Summary line for notifications
-    summary: buildSummaryLine({ health, goals, portfolio, actionItems, worldSnapshot })
+    summary: buildSummaryLine({ health, goals, portfolio, actionItems, worldSnapshot, coreGoals })
   };
 
   return brief;
@@ -560,195 +603,623 @@ function buildSummaryLine({ health, goals, portfolio, actionItems, worldSnapshot
 // ── Rich WhatsApp Formatters ─────────────────────────────────────
 
 /**
+ * Generate a personalized opening based on health and day context
+ */
+function generateMorningOpening(brief) {
+  const now = new Date();
+  const dayName = now.toLocaleDateString("en-US", { weekday: "long" });
+  const hour = now.getHours();
+
+  // Day-specific context
+  const isMonday = now.getDay() === 1;
+  const isFriday = now.getDay() === 5;
+  const isWeekend = now.getDay() === 0 || now.getDay() === 6;
+
+  // Health-based personalization
+  const sleepScore = brief.health?.sleep?.score;
+  const readinessScore = brief.health?.readiness?.score;
+
+  let opening = "";
+
+  if (isWeekend) {
+    opening = sleepScore >= 80
+      ? `Happy ${dayName}. You're well-rested — a good day to recharge or tackle something ambitious.`
+      : `Happy ${dayName}. Take it easy today; your body could use the rest.`;
+  } else if (isMonday) {
+    opening = readinessScore >= 80
+      ? `Good morning. Fresh week, strong start — your readiness is high at ${readinessScore}.`
+      : `Good morning. New week ahead. Start steady; your body's still warming up.`;
+  } else if (isFriday) {
+    opening = `Good morning. Friday's here — one more strong push to close out the week.`;
+  } else if (sleepScore && sleepScore >= 85) {
+    opening = `Good morning. Excellent sleep last night (${sleepScore}) — you're primed for a focused day.`;
+  } else if (sleepScore && sleepScore < 65) {
+    opening = `Good morning. Sleep was rough (${sleepScore}). Consider lighter cognitive load today.`;
+  } else if (readinessScore && readinessScore >= 85) {
+    opening = `Good morning. Your body is ready (${readinessScore}) — great day for challenging work or exercise.`;
+  } else {
+    opening = `Good morning. Here's what you need to know for ${dayName}.`;
+  }
+
+  return opening;
+}
+
+/**
+ * Generate health narrative with actionable insights
+ */
+function formatHealthNarrative(health) {
+  if (!health) return null;
+
+  const sleep = health.sleep?.score;
+  const readiness = health.readiness?.score;
+  const hrv = health.hrv;
+  const activity = health.activity?.score;
+
+  let narrative = "*YOUR BODY*\n";
+
+  // Sleep insight
+  if (sleep) {
+    if (sleep >= 85) {
+      narrative += `Sleep: ${sleep} — excellent recovery. Deep work sessions will be effective today.\n`;
+    } else if (sleep >= 70) {
+      narrative += `Sleep: ${sleep} — solid rest. You should feel steady throughout the day.\n`;
+    } else if (sleep >= 55) {
+      narrative += `Sleep: ${sleep} — below baseline. Prioritize important tasks in the morning.\n`;
+    } else {
+      narrative += `Sleep: ${sleep} — poor night. Keep today's agenda light if possible.\n`;
+    }
+  }
+
+  // Readiness insight
+  if (readiness) {
+    if (readiness >= 85) {
+      narrative += `Readiness: ${readiness} — your body is primed for physical or mental challenges.\n`;
+    } else if (readiness >= 70) {
+      narrative += `Readiness: ${readiness} — good to go for normal activities.\n`;
+    } else if (readiness < 60) {
+      narrative += `Readiness: ${readiness} — take it easy; recovery mode recommended.\n`;
+    }
+  }
+
+  // HRV context (if significantly different from baseline)
+  if (hrv) {
+    narrative += `HRV: ${hrv}ms — `;
+    if (hrv >= 50) {
+      narrative += "strong autonomic balance.\n";
+    } else if (hrv >= 30) {
+      narrative += "within normal range.\n";
+    } else {
+      narrative += "lower than ideal; stress or fatigue likely.\n";
+    }
+  }
+
+  return narrative;
+}
+
+/**
+ * Generate market narrative with context
+ */
+function formatMarketNarrative(worldSnapshot, portfolio) {
+  if (!worldSnapshot?.marketSummary) return null;
+
+  const ms = worldSnapshot.marketSummary;
+  const avgChange = ms.avgChange || 0;
+  const isMarketUp = avgChange >= 0;
+
+  let narrative = "*MARKETS*\n";
+
+  // Market direction with context
+  if (Math.abs(avgChange) < 0.3) {
+    narrative += `Markets are flat this morning (${avgChange >= 0 ? "+" : ""}${avgChange.toFixed(2)}%) — no strong directional move.`;
+  } else if (avgChange >= 1.5) {
+    narrative += `Strong rally underway — SPY up ${avgChange.toFixed(2)}%. Risk-on sentiment.`;
+  } else if (avgChange <= -1.5) {
+    narrative += `Selloff in progress — SPY down ${Math.abs(avgChange).toFixed(2)}%. Consider defensive positioning.`;
+  } else if (avgChange >= 0.5) {
+    narrative += `Markets trending higher (SPY +${avgChange.toFixed(2)}%) — mild bullish tone.`;
+  } else if (avgChange <= -0.5) {
+    narrative += `Markets under pressure (SPY ${avgChange.toFixed(2)}%) — cautious positioning warranted.`;
+  } else {
+    const sign = avgChange >= 0 ? "+" : "";
+    narrative += `SPY ${sign}${avgChange.toFixed(2)}% — mixed signals.`;
+  }
+
+  // Top movers with context
+  if (ms.topGainers?.length > 0) {
+    const topGainer = ms.topGainers[0];
+    narrative += `\nLeading: ${topGainer.symbol} +${topGainer.change}%`;
+    if (ms.topGainers.length > 1) {
+      narrative += `, ${ms.topGainers[1].symbol} +${ms.topGainers[1].change}%`;
+    }
+  }
+
+  if (ms.topLosers?.length > 0) {
+    const topLoser = ms.topLosers[0];
+    narrative += `\nLagging: ${topLoser.symbol} ${topLoser.change}%`;
+  }
+
+  narrative += "\n";
+  return narrative;
+}
+
+/**
+ * Generate portfolio narrative with P&L context
+ */
+function formatPortfolioNarrative(portfolio) {
+  if (!portfolio) return null;
+
+  let narrative = "*PORTFOLIO*\n";
+
+  // Equity and P&L
+  if (portfolio.equity) {
+    narrative += `Value: $${Number(portfolio.equity).toLocaleString()}`;
+
+    if (portfolio.dayPL != null) {
+      const plSign = portfolio.dayPL >= 0 ? "+" : "";
+      const plAbs = Math.abs(portfolio.dayPL);
+
+      if (Math.abs(portfolio.dayPLPercent || 0) >= 3) {
+        narrative += ` — *${plSign}$${plAbs.toFixed(0)}* significant move`;
+      } else if (portfolio.dayPL >= 0) {
+        narrative += ` (${plSign}$${plAbs.toFixed(0)} today)`;
+      } else {
+        narrative += ` (${plSign}$${plAbs.toFixed(0)} today)`;
+      }
+    }
+    narrative += "\n";
+  }
+
+  // Positions summary
+  if (portfolio.topPositions?.length > 0) {
+    narrative += "Holdings: ";
+    const positionParts = portfolio.topPositions.slice(0, 3).map(pos => {
+      let part = `${pos.symbol}`;
+      if (pos.unrealizedPLPercent) {
+        const sign = pos.unrealizedPLPercent >= 0 ? "+" : "";
+        part += ` (${sign}${pos.unrealizedPLPercent.toFixed(1)}%)`;
+      }
+      return part;
+    });
+    narrative += positionParts.join(", ") + "\n";
+  }
+
+  // Active signals worth noting
+  if (portfolio.signals?.length > 0) {
+    const strongSignals = portfolio.signals.filter(s => s.score >= 8);
+    if (strongSignals.length > 0) {
+      narrative += `Strong signals: ${strongSignals.map(s => `${s.symbol} (${s.score.toFixed(1)})`).join(", ")}\n`;
+    }
+  }
+
+  return narrative;
+}
+
+/**
+ * Generate goals narrative with focus on what matters today
+ */
+function formatGoalsNarrative(goals, actionItems) {
+  if (!goals?.goals?.length && !actionItems?.length) return null;
+
+  let narrative = "*TODAY'S FOCUS*\n";
+
+  // Urgent items first
+  const urgent = (actionItems || []).filter(a => a.priority === "urgent");
+  if (urgent.length > 0) {
+    narrative += "⚡ Priority: ";
+    narrative += urgent.map(a => a.text).join("; ") + "\n";
+  }
+
+  // Active goals with meaningful progress context
+  if (goals?.goals?.length > 0) {
+    const activeGoals = goals.goals.filter(g => (g.progress || 0) < 100);
+    if (activeGoals.length > 0) {
+      narrative += "Goals in progress:\n";
+      activeGoals.slice(0, 3).forEach(g => {
+        const title = (g.title || "Untitled").length > 45
+          ? (g.title || "Untitled").slice(0, 45) + "..."
+          : (g.title || "Untitled");
+        const progress = g.progress || 0;
+
+        if (progress === 0) {
+          narrative += `• ${title} — not started\n`;
+        } else if (progress >= 75) {
+          narrative += `• ${title} — ${progress}%, nearly complete\n`;
+        } else {
+          narrative += `• ${title} — ${progress}%\n`;
+        }
+      });
+    }
+  }
+
+  return narrative;
+}
+
+/**
+ * Generate calendar narrative
+ */
+function formatCalendarNarrative(calendar) {
+  if (!calendar || calendar.length === 0) return null;
+
+  let narrative = "*SCHEDULE*\n";
+
+  if (calendar.length === 1) {
+    const ev = calendar[0];
+    narrative += `${ev.time} — ${ev.title}\n`;
+  } else {
+    calendar.slice(0, 4).forEach(ev => {
+      narrative += `${ev.time} — ${ev.title}\n`;
+    });
+  }
+
+  return narrative;
+}
+
+/**
+ * Generate news with relevance filtering
+ */
+function formatNewsNarrative(worldSnapshot) {
+  if (!worldSnapshot?.headlines?.length) return null;
+
+  let narrative = "*WORTH KNOWING*\n";
+
+  // Pick the most relevant headlines (max 3)
+  worldSnapshot.headlines.slice(0, 3).forEach(h => {
+    // Truncate long titles
+    const title = h.title.length > 60 ? h.title.slice(0, 60) + "..." : h.title;
+    narrative += `• ${title}\n`;
+  });
+
+  return narrative;
+}
+
+/**
+ * Format core goals progress for WhatsApp
+ * Shows progress toward wealth, income, career goals
+ */
+function formatCoreGoalsNarrative(coreGoals, goalActions) {
+  if (!coreGoals || coreGoals.length === 0) return null;
+
+  let narrative = "*GOAL PROGRESS*\n";
+
+  for (const goal of coreGoals) {
+    const icon = goal.id === "wealth" ? "💰" :
+                 goal.id === "income" ? "📦" :
+                 goal.id === "career" ? "🚀" : "🎯";
+
+    if (goal.id === "wealth" && goal.progressDetails) {
+      const d = goal.progressDetails;
+      const currentStr = d.current >= 1000 ? `$${(d.current / 1000).toFixed(1)}K` : `$${Math.round(d.current)}`;
+      const targetStr = d.target >= 1000000 ? `$${(d.target / 1000000).toFixed(0)}M` : `$${(d.target / 1000).toFixed(0)}K`;
+      narrative += `${icon} ${currentStr} → ${targetStr} (${goal.progress.toFixed(1)}%)\n`;
+      if (d.requiredDaily > 0) {
+        narrative += `   _Need $${Math.round(d.requiredDaily).toLocaleString()}/day avg_\n`;
+      }
+    } else if (goal.id === "income") {
+      const currentStr = goal.metrics?.current > 0 ? `$${goal.metrics.current.toLocaleString()}` : "$0";
+      const targetStr = `$${(goal.metrics?.target / 1000).toFixed(0)}K`;
+      narrative += `${icon} ${currentStr}/mo → ${targetStr}/mo (${goal.progress.toFixed(0)}%)\n`;
+    } else if (goal.id === "career") {
+      narrative += `${icon} ${goal.title}: ${goal.progress.toFixed(0)}%\n`;
+      if (goal.progressDetails?.nextMilestone) {
+        narrative += `   _Next: ${goal.progressDetails.nextMilestone.label}_\n`;
+      }
+    } else {
+      // Generic goal format
+      narrative += `${icon} ${goal.title}: ${goal.progress?.toFixed(0) || 0}%\n`;
+    }
+  }
+
+  // Add top action if available
+  if (goalActions && goalActions.length > 0) {
+    const topAction = goalActions[0];
+    narrative += `\n_Focus: ${topAction.action}_`;
+  }
+
+  return narrative;
+}
+
+/**
+ * Generate thoughtful closing
+ */
+function generateMorningClosing(brief) {
+  const sleepScore = brief.health?.sleep?.score;
+  const readinessScore = brief.health?.readiness?.score;
+  const hasUrgent = (brief.actionItems || []).some(a => a.priority === "urgent");
+  const marketUp = (brief.worldSnapshot?.marketSummary?.avgChange || 0) >= 0.5;
+
+  if (hasUrgent) {
+    return "_Focus on what matters most first._";
+  } else if (readinessScore >= 85 && sleepScore >= 80) {
+    return "_High energy day — make it count._";
+  } else if (sleepScore && sleepScore < 60) {
+    return "_Be kind to yourself today._";
+  } else if (marketUp) {
+    return "_Stay focused. Good luck today._";
+  } else {
+    return "_Make it a good one._";
+  }
+}
+
+/**
  * Format a rich morning brief for WhatsApp with bold sections and data.
+ * This version is thoughtful, contextual, and well-written.
  */
 export function formatMorningWhatsApp(brief) {
   const now = new Date();
-  const dayName = now.toLocaleDateString("en-US", { weekday: "long" });
-  const dateStr = now.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+  const dateStr = now.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 
-  let msg = `*BACKBONE Morning Brief*\n_${dayName}, ${dateStr}_\n`;
+  // Build the message with narrative sections
+  let msg = `*BACKBONE*\n_${dateStr}_\n\n`;
 
-  // Health
-  if (brief.health) {
-    const parts = [];
-    if (brief.health.sleep?.score) parts.push(`Sleep ${brief.health.sleep.score}`);
-    if (brief.health.readiness?.score) parts.push(`Readiness ${brief.health.readiness.score}`);
-    if (brief.health.hrv) parts.push(`HRV ${brief.health.hrv}ms`);
-    if (parts.length > 0) {
-      msg += `\n*HEALTH*\n${parts.join(" | ")}\n`;
-    }
-  }
+  // Opening — personalized based on health and day
+  msg += generateMorningOpening(brief) + "\n";
 
-  // Calendar
-  if (brief.calendar && brief.calendar.length > 0) {
-    msg += `\n*TODAY'S CALENDAR*\n`;
-    brief.calendar.slice(0, 5).forEach(ev => {
-      msg += `${ev.time}  ${ev.title}\n`;
-    });
-  }
+  // Health narrative
+  const healthSection = formatHealthNarrative(brief.health);
+  if (healthSection) msg += "\n" + healthSection;
 
-  // Markets
-  if (brief.worldSnapshot?.marketSummary) {
-    const ms = brief.worldSnapshot.marketSummary;
-    const sign = (ms.avgChange || 0) >= 0 ? "+" : "";
-    msg += `\n*MARKETS*\n`;
-    msg += `SPY ${sign}${ms.avgChange || 0}%`;
-    if (ms.topGainers?.length > 0) {
-      msg += ` | Top: ${ms.topGainers.slice(0, 2).map(t => `${t.symbol} +${t.change}%`).join(", ")}`;
-    }
-    if (ms.topLosers?.length > 0) {
-      msg += `\nBottom: ${ms.topLosers.slice(0, 2).map(t => `${t.symbol} ${t.change}%`).join(", ")}`;
-    }
-    msg += "\n";
-  }
+  // Calendar — what's on the schedule
+  const calendarSection = formatCalendarNarrative(brief.calendar);
+  if (calendarSection) msg += "\n" + calendarSection;
 
-  // Portfolio
-  if (brief.portfolio) {
-    const p = brief.portfolio;
-    msg += `\n*PORTFOLIO*`;
-    if (p.equity) msg += ` $${Number(p.equity).toLocaleString()}`;
-    msg += "\n";
-    if (p.dayPL != null) {
-      const plSign = p.dayPL >= 0 ? "+" : "-";
-      msg += `Day P&L: ${plSign}$${Math.abs(p.dayPL).toFixed(2)}`;
-      if (p.dayPLPercent != null) msg += ` (${p.dayPLPercent >= 0 ? "+" : ""}${p.dayPLPercent.toFixed(1)}%)`;
-      msg += "\n";
-    }
-    if (p.topPositions?.length > 0) {
-      msg += `Positions: ${p.topPositions.map(pos => `${pos.symbol} ${pos.qty} shares`).join(", ")}\n`;
-    }
-    if (p.signals?.length > 0) {
-      msg += `Signals: ${p.signals.map(s => `${s.symbol} (${s.score})`).join(" | ")}\n`;
-    }
-  }
+  // Core goals progress (wealth, income, career)
+  const coreGoalsSection = formatCoreGoalsNarrative(brief.coreGoals, brief.goalActions);
+  if (coreGoalsSection) msg += "\n" + coreGoalsSection;
 
-  // Goals (truncate titles for WhatsApp readability)
-  if (brief.goals?.goals?.length > 0) {
-    msg += `\n*GOALS*\n`;
-    brief.goals.goals.slice(0, 4).forEach((g, i) => {
-      const title = (g.title || "Untitled").length > 50 ? g.title.slice(0, 50) + "..." : (g.title || "Untitled");
-      msg += `${i + 1}. ${title} (${g.progress || 0}%)\n`;
-    });
-  }
+  // Markets narrative
+  const marketSection = formatMarketNarrative(brief.worldSnapshot, brief.portfolio);
+  if (marketSection) msg += "\n" + marketSection;
 
-  // News
-  if (brief.worldSnapshot?.headlines?.length > 0) {
-    msg += `\n*NEWS*\n`;
-    brief.worldSnapshot.headlines.slice(0, 3).forEach(h => {
-      msg += `- ${h.title} (${h.source})\n`;
-    });
-  }
+  // Portfolio narrative
+  const portfolioSection = formatPortfolioNarrative(brief.portfolio);
+  if (portfolioSection) msg += "\n" + portfolioSection;
 
-  // Action items
-  if (brief.actionItems && brief.actionItems.length > 0) {
-    msg += `\n*ACTION ITEMS*\n`;
-    brief.actionItems.slice(0, 3).forEach(a => {
-      msg += `- ${a.text}${a.detail ? ` (${a.detail})` : ""}\n`;
-    });
-  }
+  // Goals and focus (discrete goals/tasks)
+  const goalsSection = formatGoalsNarrative(brief.goals, brief.actionItems);
+  if (goalsSection) msg += "\n" + goalsSection;
 
-  msg += `\n_Have a productive day._`;
+  // News worth knowing
+  const newsSection = formatNewsNarrative(brief.worldSnapshot);
+  if (newsSection) msg += "\n" + newsSection;
+
+  // Thoughtful closing
+  msg += "\n" + generateMorningClosing(brief);
+
   return msg;
 }
 
 /**
- * Format a rich evening brief for WhatsApp.
+ * Generate evening opening based on the day's activity
  */
-export function formatEveningWhatsApp(brief) {
+function generateEveningOpening(brief) {
   const now = new Date();
   const dayName = now.toLocaleDateString("en-US", { weekday: "long" });
-  const dateStr = now.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+  const isFriday = now.getDay() === 5;
+  const isWeekend = now.getDay() === 0 || now.getDay() === 6;
 
-  let msg = `*BACKBONE Evening Brief*\n_${dayName}, ${dateStr}_\n`;
+  const hadTrades = brief.portfolio?.recentTrades?.length > 0;
+  const dayPL = brief.portfolio?.dayPL || 0;
+  const activityScore = brief.health?.activity?.score;
+  const steps = brief.health?.activity?.steps || 0;
 
-  // Today's trades
-  if (brief.portfolio?.recentTrades?.length > 0) {
-    msg += `\n*TODAY'S TRADES*\n`;
-    brief.portfolio.recentTrades.forEach(t => {
-      const side = (t.side || "buy").toUpperCase();
-      msg += `${side} ${t.qty} ${t.symbol} @ $${Number(t.price).toFixed(2)}\n`;
-    });
+  if (isFriday) {
+    return dayPL >= 0
+      ? `Week's done. Green close on ${dayName} — enjoy the weekend.`
+      : `Week's wrapped. Markets didn't cooperate, but rest up for next week.`;
   }
 
-  // Portfolio summary
-  if (brief.portfolio) {
-    const p = brief.portfolio;
-    if (p.dayPL != null) {
-      const plSign = p.dayPL >= 0 ? "+" : "-";
-      msg += `Day P&L: ${plSign}$${Math.abs(p.dayPL).toFixed(2)}`;
-      if (p.dayPLPercent != null) msg += ` (${p.dayPLPercent >= 0 ? "+" : ""}${p.dayPLPercent.toFixed(1)}%)`;
-      msg += "\n";
+  if (isWeekend) {
+    return `${dayName} evening. Hope you had a good one.`;
+  }
+
+  if (hadTrades && dayPL > 50) {
+    return `Strong ${dayName}. Portfolio up and moves were made.`;
+  } else if (hadTrades && dayPL < -50) {
+    return `Tough ${dayName} in the markets. Tomorrow's a new day.`;
+  } else if (activityScore && activityScore >= 80) {
+    return `Active ${dayName} — ${steps.toLocaleString()} steps. Your body worked today.`;
+  } else if (steps >= 8000) {
+    return `Good movement today — ${steps.toLocaleString()} steps logged.`;
+  } else {
+    return `${dayName}'s wrapping up. Here's how it went.`;
+  }
+}
+
+/**
+ * Format day's trades with context
+ */
+function formatTradesNarrative(portfolio) {
+  if (!portfolio?.recentTrades?.length) return null;
+
+  let narrative = "*TRADES*\n";
+
+  const trades = portfolio.recentTrades;
+  const totalValue = trades.reduce((sum, t) => sum + (parseFloat(t.price) * parseFloat(t.qty || 0)), 0);
+
+  trades.forEach(t => {
+    const side = (t.side || "buy").toUpperCase();
+    const value = parseFloat(t.price) * parseFloat(t.qty || 0);
+    narrative += `${side} ${t.qty} ${t.symbol} @ $${Number(t.price).toFixed(2)}`;
+    if (value >= 100) {
+      narrative += ` ($${value.toFixed(0)})`;
     }
-    if (p.equity) msg += `Portfolio: $${Number(p.equity).toLocaleString()}\n`;
-  }
+    narrative += "\n";
+  });
 
-  // Health / Activity (only show if there's actual data)
-  if (brief.health) {
-    const parts = [];
-    if (brief.health.activity?.steps) parts.push(`Steps: ${Number(brief.health.activity.steps).toLocaleString()}`);
-    if (brief.health.activity?.calories) parts.push(`Calories: ${Number(brief.health.activity.calories).toLocaleString()}`);
-    if (brief.health.activity?.score) parts.push(`Activity Score: ${brief.health.activity.score}`);
-    if (brief.health.sleep?.score) parts.push(`Last Night Sleep: ${brief.health.sleep.score}`);
-    if (parts.length > 0) {
-      msg += `\n*HEALTH*\n${parts.join("\n")}\n`;
+  return narrative;
+}
+
+/**
+ * Format evening portfolio summary
+ */
+function formatEveningPortfolioNarrative(portfolio) {
+  if (!portfolio) return null;
+
+  let narrative = "*PORTFOLIO*\n";
+
+  if (portfolio.dayPL != null) {
+    const plSign = portfolio.dayPL >= 0 ? "+" : "";
+    const dayResult = Math.abs(portfolio.dayPL) >= 100
+      ? `$${Math.abs(portfolio.dayPL).toFixed(0)}`
+      : `$${Math.abs(portfolio.dayPL).toFixed(2)}`;
+
+    if (portfolio.dayPL >= 50) {
+      narrative += `Day: ${plSign}${dayResult} — solid gains\n`;
+    } else if (portfolio.dayPL <= -50) {
+      narrative += `Day: ${plSign}${dayResult} — gave some back\n`;
+    } else if (portfolio.dayPL >= 0) {
+      narrative += `Day: ${plSign}${dayResult} — held steady\n`;
+    } else {
+      narrative += `Day: ${plSign}${dayResult} — minor pullback\n`;
     }
   }
 
-  // Goals progress
-  if (brief.goals?.goals?.length > 0) {
-    msg += `\n*GOALS PROGRESS*\n`;
-    brief.goals.goals.slice(0, 4).forEach(g => {
-      const title = (g.title || "Untitled").length > 50 ? (g.title || "Untitled").slice(0, 50) + "..." : (g.title || "Untitled");
-      msg += `${title}: ${g.progress || 0}%\n`;
-    });
+  if (portfolio.equity) {
+    narrative += `Total: $${Number(portfolio.equity).toLocaleString()}\n`;
   }
 
-  // System activity (filter out internal status entries)
-  if (brief.systemActivity?.length > 0) {
-    const meaningfulHighlights = [];
-    brief.systemActivity.forEach(item => {
-      (item.highlights || []).forEach(h => {
-        // Skip internal status messages
-        if (!/Claude Code|Claude Engine|Mobile Dashboard|Life Engine|Not Available|Ready|Idle/i.test(h.trim())) {
-          meaningfulHighlights.push(h);
-        }
-      });
-    });
-    if (meaningfulHighlights.length > 0) {
-      msg += `\n*BACKBONE WORKED ON*\n`;
-      meaningfulHighlights.slice(0, 5).forEach(h => {
-        msg += `- ${h}\n`;
-      });
+  return narrative;
+}
+
+/**
+ * Format evening activity summary
+ */
+function formatEveningActivityNarrative(health) {
+  if (!health) return null;
+
+  const activity = health.activity;
+  const steps = activity?.steps;
+  const calories = activity?.calories;
+  const activityScore = activity?.score;
+
+  if (!steps && !activityScore) return null;
+
+  let narrative = "*ACTIVITY*\n";
+
+  if (steps) {
+    if (steps >= 10000) {
+      narrative += `${steps.toLocaleString()} steps — excellent movement\n`;
+    } else if (steps >= 7000) {
+      narrative += `${steps.toLocaleString()} steps — good day\n`;
+    } else if (steps >= 4000) {
+      narrative += `${steps.toLocaleString()} steps — moderate activity\n`;
+    } else {
+      narrative += `${steps.toLocaleString()} steps — light day\n`;
     }
   }
 
-  // Tomorrow's calendar
+  if (activityScore) {
+    narrative += `Activity score: ${activityScore}\n`;
+  }
+
+  return narrative;
+}
+
+/**
+ * Format tomorrow preview
+ */
+function formatTomorrowPreview() {
   try {
     const tomorrow = getUpcomingEvents(5);
     const tomorrowDate = new Date();
     tomorrowDate.setDate(tomorrowDate.getDate() + 1);
     const tomorrowStr = tomorrowDate.toISOString().split("T")[0];
+    const tomorrowDayName = tomorrowDate.toLocaleDateString("en-US", { weekday: "long" });
+
     const tomorrowEvents = (tomorrow || []).filter(ev => {
       const evDate = new Date(ev.start).toISOString().split("T")[0];
       return evDate === tomorrowStr;
     });
-    if (tomorrowEvents.length > 0) {
-      msg += `\n*TOMORROW*\n`;
-      tomorrowEvents.slice(0, 3).forEach(ev => {
-        const time = new Date(ev.start).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
-        msg += `${time}  ${(ev.summary || ev.subject || "Event").slice(0, 40)}\n`;
-      });
-    }
-  } catch { /* ignore */ }
 
-  // Top ticker scores
-  if (brief.portfolio?.signals?.length > 0) {
-    msg += `\n*TOP SCORES*\n`;
-    msg += brief.portfolio.signals.map(s => `${s.symbol} ${s.score}`).join(" | ") + "\n";
+    if (tomorrowEvents.length === 0) return null;
+
+    let narrative = `*${tomorrowDayName.toUpperCase()}*\n`;
+    tomorrowEvents.slice(0, 3).forEach(ev => {
+      const time = new Date(ev.start).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+      const title = (ev.summary || ev.subject || "Event").slice(0, 40);
+      narrative += `${time} — ${title}\n`;
+    });
+
+    return narrative;
+  } catch {
+    return null;
   }
+}
 
-  msg += `\n_Good night. Rest well._`;
+/**
+ * Format ticker watchlist for evening
+ */
+function formatEveningWatchlist(portfolio) {
+  if (!portfolio?.signals?.length) return null;
+
+  const strongSignals = portfolio.signals.filter(s => s.score >= 7.5);
+  if (strongSignals.length === 0) return null;
+
+  let narrative = "*WATCHING*\n";
+  narrative += strongSignals.map(s => `${s.symbol} (${s.score.toFixed(1)})`).join("  ") + "\n";
+
+  return narrative;
+}
+
+/**
+ * Generate evening closing
+ */
+function generateEveningClosing(brief) {
+  const sleepScore = brief.health?.sleep?.score;
+  const activityScore = brief.health?.activity?.score;
+  const dayPL = brief.portfolio?.dayPL || 0;
+  const now = new Date();
+  const isFriday = now.getDay() === 5;
+
+  if (isFriday) {
+    return "_Enjoy the weekend. Recharge well._";
+  } else if (activityScore && activityScore >= 85) {
+    return "_Active day behind you. Sleep will come easy._";
+  } else if (sleepScore && sleepScore < 65) {
+    return "_Prioritize sleep tonight._";
+  } else if (dayPL >= 100) {
+    return "_Good day locked in. Rest up._";
+  } else {
+    return "_Rest well. Tomorrow's a new opportunity._";
+  }
+}
+
+/**
+ * Format a rich evening brief for WhatsApp.
+ * This version is thoughtful and summarizes the day with context.
+ */
+export function formatEveningWhatsApp(brief) {
+  const now = new Date();
+  const dateStr = now.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+
+  let msg = `*BACKBONE*\n_${dateStr} Evening_\n\n`;
+
+  // Opening — contextual based on the day
+  msg += generateEveningOpening(brief) + "\n";
+
+  // Trades (if any)
+  const tradesSection = formatTradesNarrative(brief.portfolio);
+  if (tradesSection) msg += "\n" + tradesSection;
+
+  // Portfolio summary
+  const portfolioSection = formatEveningPortfolioNarrative(brief.portfolio);
+  if (portfolioSection) msg += "\n" + portfolioSection;
+
+  // Activity summary
+  const activitySection = formatEveningActivityNarrative(brief.health);
+  if (activitySection) msg += "\n" + activitySection;
+
+  // Tomorrow preview
+  const tomorrowSection = formatTomorrowPreview();
+  if (tomorrowSection) msg += "\n" + tomorrowSection;
+
+  // Watchlist
+  const watchlistSection = formatEveningWatchlist(brief.portfolio);
+  if (watchlistSection) msg += "\n" + watchlistSection;
+
+  // Thoughtful closing
+  msg += "\n" + generateEveningClosing(brief);
+
   return msg;
 }
 
@@ -797,7 +1268,19 @@ export async function pushBriefToFirestore(brief) {
 export async function sendBriefToWhatsApp(brief, type = "morning", chartUrl = null) {
   try {
     const whatsapp = getWhatsAppNotifications();
-    if (!whatsapp.enabled) return { success: false, error: "WhatsApp not enabled" };
+
+    // Try to initialize WhatsApp if not enabled yet
+    if (!whatsapp.enabled) {
+      const user = loadFirebaseUser();
+      if (user?.localId) {
+        await whatsapp.initialize(user.localId);
+        console.log(`[DailyBrief] WhatsApp initialized for ${type} brief, enabled: ${whatsapp.enabled}`);
+      }
+    }
+
+    if (!whatsapp.enabled) {
+      return { success: false, error: "WhatsApp not enabled — no verified phone" };
+    }
 
     const options = chartUrl ? { mediaUrl: chartUrl } : {};
 

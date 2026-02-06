@@ -5,6 +5,8 @@ import { getAlpacaConfig, fetchAccount } from "./alpaca.js";
 import { TRADING_CONFIG, TRADING_RULES, isGoodMomentum, isProtectedPosition, getActionFromScore } from "./trading-algorithms.js";
 import { SCORE_THRESHOLDS, getSignalFromScore } from "./score-engine.js";
 import { showNotificationTitle } from "./terminal-resize.js";
+import { loadParsedGoals, getGoalsWithProgress } from "./core-goals-parser.js";
+import { getTickerGoalBoost, checkGoalGuardrails } from "./goal-alignment-scorer.js";
 
 // Note: Trailing stop manager is imported dynamically to avoid circular dependency
 let trailingStopManager = null;
@@ -27,6 +29,178 @@ const getMomentumDrift = async () => {
 // SPY intraday bars cache (2-minute TTL)
 let spyIntradayCache = { bars: null, timestamp: 0 };
 const SPY_CACHE_TTL = 2 * 60 * 1000; // 2 minutes
+
+// Bad market items - inverse ETFs and defensive positions that DO WELL when market is DOWN
+// These are the ONLY items allowed to be bought when SPY is negative
+const BAD_MARKET_ITEMS = [
+  "SH",    // ProShares Short S&P 500
+  "SDS",   // ProShares UltraShort S&P 500 (2x)
+  "SPXU",  // ProShares UltraPro Short S&P 500 (3x)
+  "SQQQ",  // ProShares UltraPro Short QQQ (3x)
+  "PSQ",   // ProShares Short QQQ
+  "QID",   // ProShares UltraShort QQQ (2x)
+  "DOG",   // ProShares Short Dow 30
+  "DXD",   // ProShares UltraShort Dow 30 (2x)
+  "SDOW",  // ProShares UltraPro Short Dow 30 (3x)
+  "RWM",   // ProShares Short Russell 2000
+  "TWM",   // ProShares UltraShort Russell 2000 (2x)
+  "SRTY",  // ProShares UltraPro Short Russell 2000 (3x)
+  "VIXY",  // ProShares VIX Short-Term Futures
+  "UVXY",  // ProShares Ultra VIX Short-Term Futures (1.5x)
+  "VXX",   // iPath Series B S&P 500 VIX Short-Term Futures
+  "TZA",   // Direxion Daily Small Cap Bear 3X
+  "FAZ",   // Direxion Daily Financial Bear 3X
+  "SOXS",  // Direxion Daily Semiconductor Bear 3X
+  "LABD",  // Direxion Daily S&P Biotech Bear 3X
+  "EDZ",   // Direxion Daily Emerging Markets Bear 3X
+];
+
+// Pending buy orders - queue with 5-minute delay
+// Structure: { symbol, price, reason, queuedAt, executeAfter }
+let pendingBuys = [];
+const BUY_DELAY_MS = 5 * 60 * 1000; // 5 minutes
+
+/**
+ * Check if a symbol is a "bad market item" (inverse/defensive)
+ */
+const isBadMarketItem = (symbol) => {
+  return BAD_MARKET_ITEMS.includes(symbol?.toUpperCase());
+};
+
+/**
+ * Get wealth goal context for trading decisions
+ * Returns timeline-based risk tolerance and required growth rate
+ */
+const getWealthGoalContext = () => {
+  try {
+    const goalsWithProgress = getGoalsWithProgress();
+    const wealthGoal = goalsWithProgress.find(g => g.id === "wealth" || g.type === "financial");
+
+    if (!wealthGoal) {
+      return { hasWealthGoal: false };
+    }
+
+    const details = wealthGoal.progressDetails || {};
+    const daysRemaining = details.daysRemaining || 730; // Default 2 years
+
+    // Risk tolerance based on timeline and required growth
+    // If required daily growth is very high (>1%), need aggressive approach
+    const requiredDailyPercent = details.requiredDailyPercent || 0;
+    let riskTolerance = "moderate";
+
+    if (requiredDailyPercent > 1.0) {
+      // Need >1%/day - aggressive is necessary but may not be realistic
+      riskTolerance = "aggressive";
+    } else if (daysRemaining > 365) {
+      riskTolerance = "aggressive"; // More than a year = aggressive
+    } else if (daysRemaining > 180) {
+      riskTolerance = "moderate";   // 6-12 months = moderate
+    } else {
+      riskTolerance = "conservative"; // < 6 months = conservative
+    }
+
+    return {
+      hasWealthGoal: true,
+      currentEquity: details.current || 0,
+      targetEquity: details.target || 1000000,
+      daysRemaining,
+      requiredDailyGrowth: details.requiredDaily || 0,
+      requiredDailyPercent: requiredDailyPercent,
+      progress: wealthGoal.progress || 0,
+      riskTolerance
+    };
+  } catch (error) {
+    console.error("[AutoTrader] Wealth goal context error:", error.message);
+    return { hasWealthGoal: false };
+  }
+};
+
+/**
+ * Queue a buy order with 5-minute delay
+ */
+const queueBuy = (symbol, price, reason, spyPositive) => {
+  const now = Date.now();
+  const executeAfter = now + BUY_DELAY_MS;
+
+  // Check if already queued
+  const existing = pendingBuys.find(p => p.symbol === symbol);
+  if (existing) {
+    console.log(`[AutoTrader] ${symbol} already queued, skipping duplicate`);
+    return { queued: false, reason: "Already in queue" };
+  }
+
+  pendingBuys.push({
+    symbol,
+    price,
+    reason,
+    spyPositive,
+    queuedAt: now,
+    executeAfter
+  });
+
+  console.log(`[AutoTrader] Queued BUY ${symbol} @ $${price.toFixed(2)} — will execute in 5 minutes`);
+  return { queued: true, executeAfter };
+};
+
+/**
+ * Process pending buys that have passed the 5-minute delay
+ */
+export const processPendingBuys = async () => {
+  const now = Date.now();
+  const ready = pendingBuys.filter(p => now >= p.executeAfter);
+
+  if (ready.length === 0) {
+    return { processed: 0, results: [] };
+  }
+
+  const results = [];
+
+  for (const pending of ready) {
+    console.log(`[AutoTrader] Processing delayed buy: ${pending.symbol}`);
+
+    // Re-check market conditions before executing
+    const currentSpyData = await fetchSpyIntradayBars();
+    const currentSpyPositive = currentSpyData ?
+      (currentSpyData[currentSpyData.length - 1]?.c > currentSpyData[0]?.c) : pending.spyPositive;
+
+    // If market turned bad and this isn't a bad market item, cancel
+    if (!currentSpyPositive && !isBadMarketItem(pending.symbol)) {
+      console.log(`[AutoTrader] Cancelling ${pending.symbol} — market turned negative`);
+      results.push({ symbol: pending.symbol, success: false, reason: "Market turned negative" });
+      continue;
+    }
+
+    // Execute the buy
+    const result = await executeBuyImmediate(pending.symbol, pending.price, pending.reason);
+    results.push({ symbol: pending.symbol, ...result });
+  }
+
+  // Remove processed items from queue
+  pendingBuys = pendingBuys.filter(p => now < p.executeAfter);
+
+  return { processed: results.length, results };
+};
+
+/**
+ * Get pending buys status
+ */
+export const getPendingBuys = () => {
+  const now = Date.now();
+  return pendingBuys.map(p => ({
+    ...p,
+    remainingMs: Math.max(0, p.executeAfter - now),
+    remainingSeconds: Math.max(0, Math.round((p.executeAfter - now) / 1000))
+  }));
+};
+
+/**
+ * Cancel a pending buy
+ */
+export const cancelPendingBuy = (symbol) => {
+  const before = pendingBuys.length;
+  pendingBuys = pendingBuys.filter(p => p.symbol !== symbol);
+  return before > pendingBuys.length;
+};
 
 /**
  * Fetch SPY 1-minute intraday bars from Yahoo Finance
@@ -166,15 +340,27 @@ const checkSpyDirection = async (dailyChangePercent) => {
 
   let allow, reason;
 
-  if (weightedAvg >= -0.05) {
+  // Count positive timeframes for "consistent uptrend" check
+  const positiveTimeframes = Object.values(tfDetails).filter(v => v > 0).length;
+  const totalTimeframes = Object.keys(tfDetails).length;
+  const isConsistentlyUp = positiveTimeframes >= Math.ceil(totalTimeframes * 0.6); // 60%+ of timeframes positive
+
+  // STRICT RULE: SPY negative daily → only allow if CONSISTENTLY moving up
+  // "Consistently up" means:
+  // 1. Weighted average is POSITIVE (not just flat)
+  // 2. At least 60% of timeframes are positive
+  // 3. Current 5m trend is positive
+  if (weightedAvg > 0.05 && isConsistentlyUp && fiveMinChange > 0) {
     allow = true;
-    reason = `SPY ${dailyChangePercent.toFixed(2)}% daily but intraday flat/positive (wAvg ${weightedAvg >= 0 ? "+" : ""}${weightedAvg.toFixed(3)}%)`;
-  } else if (isRecovering) {
+    reason = `SPY ${dailyChangePercent.toFixed(2)}% daily but CONSISTENTLY recovering (wAvg +${weightedAvg.toFixed(3)}%, ${positiveTimeframes}/${totalTimeframes} TFs positive)`;
+  } else if (isRecovering && weightedAvg > 0) {
+    // Strong recovery: range position good AND weighted avg positive AND 5m up
     allow = true;
-    reason = `SPY ${dailyChangePercent.toFixed(2)}% daily, recovering (range ${(rangePosition * 100).toFixed(0)}%, 5m +${fiveMinChange.toFixed(2)}%)`;
+    reason = `SPY ${dailyChangePercent.toFixed(2)}% daily, strong recovery (range ${(rangePosition * 100).toFixed(0)}%, wAvg +${weightedAvg.toFixed(3)}%)`;
   } else {
+    // SPY is negative and NOT consistently moving up → BLOCK ALL BUYS
     allow = false;
-    reason = `SPY ${dailyChangePercent.toFixed(2)}% daily, intraday weak (wAvg ${weightedAvg.toFixed(3)}%, range ${(rangePosition * 100).toFixed(0)}%)`;
+    reason = `SPY ${dailyChangePercent.toFixed(2)}% daily, NOT consistently up (wAvg ${weightedAvg >= 0 ? "+" : ""}${weightedAvg.toFixed(3)}%, ${positiveTimeframes}/${totalTimeframes} TFs positive) — blocking buys`;
   }
 
   return {
@@ -422,6 +608,12 @@ const DEFAULT_CONFIG = {
   onlyOneTradePerTickerPerDay: true, // One trade per ticker per day
 };
 
+// Anti-churning: minimum hold period (in milliseconds)
+// Positions must be held for at least 3 calendar days before selling
+// Exception: EXTREME_SELL (score <= 1.5) and trailing stops bypass this
+const MIN_HOLD_PERIOD_MS = 3 * 24 * 60 * 60 * 1000; // 3 days = 72 hours
+const MAX_ROTATIONS_PER_WEEK = 4; // Max sell+buy cycles in a 7-day window
+
 // In-memory state
 let config = { ...DEFAULT_CONFIG };
 let tradesLog = [];
@@ -483,6 +675,77 @@ const logTrade = (trade) => {
   } catch (error) {
     console.error("Error saving trade log:", error.message);
   }
+};
+
+/**
+ * Check if a position has been held long enough to sell (anti-churning)
+ * Returns { canSell, holdTimeMs, holdDays, reason }
+ *
+ * Looks at trades-log.json for the most recent BUY of this symbol.
+ * If bought less than MIN_HOLD_PERIOD_MS ago, blocks the sell.
+ *
+ * Exceptions (always allowed to sell):
+ * - EXTREME_SELL signals (score <= 1.5) — emergency exit
+ * - Trailing stop triggers — capital preservation
+ */
+const checkHoldPeriod = (symbol, isExtremeSell = false, isTrailingStop = false) => {
+  // Emergency exits always allowed
+  if (isExtremeSell || isTrailingStop) {
+    return {
+      canSell: true,
+      reason: isExtremeSell ? "Extreme sell override" : "Trailing stop override",
+      holdTimeMs: 0,
+      holdDays: 0
+    };
+  }
+
+  // Find the most recent buy for this symbol
+  const recentBuy = [...tradesLog]
+    .reverse()
+    .find(t => t.symbol === symbol && t.side === "buy");
+
+  if (!recentBuy) {
+    // No buy record found — allow sell (position may predate logging)
+    return { canSell: true, reason: "No buy record found", holdTimeMs: 0, holdDays: 0 };
+  }
+
+  const buyTime = new Date(recentBuy.timestamp).getTime();
+  const holdTimeMs = Date.now() - buyTime;
+  const holdDays = holdTimeMs / (24 * 60 * 60 * 1000);
+
+  if (holdTimeMs < MIN_HOLD_PERIOD_MS) {
+    const remainingHours = ((MIN_HOLD_PERIOD_MS - holdTimeMs) / (60 * 60 * 1000)).toFixed(1);
+    return {
+      canSell: false,
+      reason: `Hold period: ${holdDays.toFixed(1)} days (min 3.0). ${remainingHours}h remaining`,
+      holdTimeMs,
+      holdDays
+    };
+  }
+
+  return { canSell: true, reason: `Held ${holdDays.toFixed(1)} days (>= 3.0)`, holdTimeMs, holdDays };
+};
+
+/**
+ * Check rotation frequency (anti-churning)
+ * Counts sell+buy pairs in the last 7 days.
+ * If >= MAX_ROTATIONS_PER_WEEK, blocks new buys (not sells).
+ */
+const checkRotationFrequency = () => {
+  const oneWeekAgo = Date.now() - (7 * 24 * 60 * 60 * 1000);
+  const recentSells = tradesLog.filter(t =>
+    t.side === "sell" && new Date(t.timestamp).getTime() > oneWeekAgo
+  );
+
+  if (recentSells.length >= MAX_ROTATIONS_PER_WEEK) {
+    return {
+      allowed: false,
+      reason: `Rotation limit: ${recentSells.length} sells in last 7 days (max ${MAX_ROTATIONS_PER_WEEK}). Slow down.`,
+      rotations: recentSells.length
+    };
+  }
+
+  return { allowed: true, rotations: recentSells.length };
 };
 
 /**
@@ -682,10 +945,11 @@ export const evaluateSellSignal = (ticker, position = null) => {
 };
 
 /**
- * Execute buy order via Alpaca
+ * Execute buy order via Alpaca (IMMEDIATE - no delay)
+ * Used internally after 5-minute queue delay passes
  * Enforces market hours (9:30 AM - 4:00 PM ET)
  */
-export const executeBuy = async (symbol, price, reason) => {
+const executeBuyImmediate = async (symbol, price, reason) => {
   if (!config.enabled) {
     return { success: false, error: "Auto-trading not enabled" };
   }
@@ -794,6 +1058,66 @@ export const executeBuy = async (symbol, price, reason) => {
     return { success: true, order, trade };
   } catch (error) {
     return { success: false, error: error.message };
+  }
+};
+
+/**
+ * Execute buy order with market condition check and 5-minute delay
+ *
+ * Rules:
+ * 1. If market is bad (SPY negative), ONLY allow buying bad market items (inverse ETFs)
+ * 2. All buys are queued with a 5-minute delay to confirm signal persistence
+ * 3. Re-checks market conditions before executing after delay
+ */
+export const executeBuy = async (symbol, price, reason, options = {}) => {
+  const { spyPositive = null, skipDelay = false } = options;
+
+  // Check if this is a bad market item
+  const isDefensive = isBadMarketItem(symbol);
+
+  // Get current SPY direction if not provided
+  let marketPositive = spyPositive;
+  if (marketPositive === null) {
+    const spyBars = await fetchSpyIntradayBars();
+    if (spyBars && spyBars.length > 1) {
+      marketPositive = spyBars[spyBars.length - 1]?.c > spyBars[0]?.c;
+    } else {
+      marketPositive = true; // Default to allow if can't determine
+    }
+  }
+
+  // RULE: In bad market, only allow defensive positions
+  if (!marketPositive && !isDefensive) {
+    console.log(`[AutoTrader] BLOCKED: ${symbol} — market is negative, only inverse/defensive ETFs allowed`);
+    return {
+      success: false,
+      blocked: true,
+      error: `Market is negative — only defensive positions (SH, SQQQ, etc.) allowed. ${symbol} is not a defensive ETF.`
+    };
+  }
+
+  // If skipDelay is true, execute immediately (for manual overrides)
+  if (skipDelay) {
+    console.log(`[AutoTrader] Executing ${symbol} immediately (skipDelay=true)`);
+    return await executeBuyImmediate(symbol, price, reason);
+  }
+
+  // Queue the buy with 5-minute delay
+  const queueResult = queueBuy(symbol, price, reason, marketPositive);
+
+  if (queueResult.queued) {
+    const executeTime = new Date(queueResult.executeAfter).toLocaleTimeString();
+    return {
+      success: true,
+      queued: true,
+      message: `BUY ${symbol} queued — will execute at ${executeTime} (5-minute delay)`,
+      executeAfter: queueResult.executeAfter
+    };
+  } else {
+    return {
+      success: false,
+      error: queueResult.reason
+    };
   }
 };
 
@@ -1034,6 +1358,12 @@ export const monitorAndTrade = async (tickers, positions = []) => {
     };
   }
 
+  // Process any pending buys that have passed the 5-minute delay
+  const pendingBuysResult = await processPendingBuys();
+  if (pendingBuysResult.processed > 0) {
+    console.log(`[AutoTrader] Processed ${pendingBuysResult.processed} delayed buy(s)`);
+  }
+
   // Get SPY data from tickers array
   const spyTicker = tickers.find(t => t.symbol === "SPY");
   const spyChange = spyTicker?.changePercent || 0;
@@ -1044,6 +1374,9 @@ export const monitorAndTrade = async (tickers, positions = []) => {
 
   // Determine buy threshold based on SPY direction
   const effectiveBuyThreshold = spyPositive ? config.buyThresholdSPYPositive : config.buyThreshold;
+
+  // Get wealth goal context for trading decisions
+  const wealthContext = getWealthGoalContext();
 
   const results = {
     monitored: true,
@@ -1060,7 +1393,12 @@ export const monitorAndTrade = async (tickers, positions = []) => {
     executed: [],
     skipped: [],
     protected: [],
-    reasoning: []   // Human-readable explanation of every decision
+    reasoning: [],   // Human-readable explanation of every decision
+    wealthGoal: wealthContext.hasWealthGoal ? {
+      progress: wealthContext.progress,
+      requiredDaily: wealthContext.requiredDailyGrowth,
+      riskTolerance: wealthContext.riskTolerance
+    } : null
   };
 
   // Filter out CVR positions (corporate actions/rights - don't count toward limit)
@@ -1092,6 +1430,13 @@ export const monitorAndTrade = async (tickers, positions = []) => {
   }
   results.reasoning.push(`Positions: ${tradablePositions.length}/${config.maxTotalPositions} (${positionSymbols.join(", ") || "none"})`);
 
+  // --- REASONING: Wealth goal context ---
+  if (wealthContext.hasWealthGoal) {
+    const dailyReq = wealthContext.requiredDailyGrowth || 0;
+    results.reasoning.push(`WEALTH GOAL: $${Math.round(wealthContext.currentEquity).toLocaleString()} → $${Math.round(wealthContext.targetEquity).toLocaleString()} (${wealthContext.progress.toFixed(1)}%)`);
+    results.reasoning.push(`Required: $${Math.round(dailyReq).toLocaleString()}/day | Risk tolerance: ${wealthContext.riskTolerance}`);
+  }
+
   // Top scorers summary
   const topSummary = sortedTickers.slice(0, 5).map(t =>
     `${t.symbol} ${t.score.toFixed(1)}${positionSymbols.includes(t.symbol) ? " (held)" : ""}`
@@ -1108,6 +1453,7 @@ export const monitorAndTrade = async (tickers, positions = []) => {
   // No client-side polling needed — Alpaca triggers the sell automatically.
 
   // STEP 0.5: Check for momentum drift (avg of timeframes < -0.75%)
+  // ANTI-CHURN: Momentum drift sells are subject to hold period check
   try {
     const md = await getMomentumDrift();
     const driftAnalysis = md.getPositionsWithMomentumDrift(positions, sortedTickers);
@@ -1119,6 +1465,13 @@ export const monitorAndTrade = async (tickers, positions = []) => {
 
       const position = positions.find(p => p.symbol === drift.symbol);
       if (!position) continue;
+
+      // ANTI-CHURN: Check hold period before drift sell
+      const holdCheck = checkHoldPeriod(drift.symbol, false, false);
+      if (!holdCheck.canSell) {
+        results.reasoning.push(`HOLD ${drift.symbol}: momentum drift detected BUT ${holdCheck.reason}`);
+        continue;
+      }
 
       results.sellSignals.push({
         action: "MOMENTUM_DRIFT",
@@ -1165,6 +1518,13 @@ export const monitorAndTrade = async (tickers, positions = []) => {
       // Check if stagnant AND score is not strong (< 7.0)
       // Don't sell stagnant tickers with high scores - they might be consolidating before a move
       if (md.isStagnantTicker(ticker) && ticker.score < 7.0) {
+        // ANTI-CHURN: Check hold period before stagnant sell
+        const holdCheck = checkHoldPeriod(position.symbol, false, false);
+        if (!holdCheck.canSell) {
+          results.reasoning.push(`HOLD ${position.symbol}: stagnant detected BUT ${holdCheck.reason}`);
+          continue;
+        }
+
         results.sellSignals.push({
           action: "STAGNANT",
           symbol: position.symbol,
@@ -1209,6 +1569,18 @@ export const monitorAndTrade = async (tickers, positions = []) => {
     const sellEval = evaluateSellSignal(ticker, position);
 
     if (sellEval.action === "SELL" || sellEval.action === "EXTREME_SELL") {
+      // ANTI-CHURN: Check hold period (extreme sells bypass)
+      const holdCheck = checkHoldPeriod(
+        ticker.symbol,
+        sellEval.isExtreme,  // Extreme sells always allowed
+        false                // Not a trailing stop
+      );
+
+      if (!holdCheck.canSell) {
+        results.reasoning.push(`HOLD ${ticker.symbol}: sell signal (score ${ticker.score.toFixed(1)}) BUT ${holdCheck.reason}`);
+        continue;
+      }
+
       results.sellSignals.push(sellEval);
 
       const sellResult = await executeSell(
@@ -1239,8 +1611,14 @@ export const monitorAndTrade = async (tickers, positions = []) => {
     }
   }
 
+  // ANTI-CHURN: Check rotation frequency before allowing buys
+  const rotationCheck = checkRotationFrequency();
+  if (!rotationCheck.allowed) {
+    results.reasoning.push(`ROTATION LIMIT: ${rotationCheck.reason}`);
+  }
+
   // STEP 2: Evaluate top 3 for buy signals (only if SPY allows)
-  if (spyCheck.allow) {
+  if (spyCheck.allow && rotationCheck.allowed) {
     for (const ticker of sortedTickers) {
       // Skip if in blacklist
       if (config.blacklist.includes(ticker.symbol)) {
@@ -1280,13 +1658,24 @@ export const monitorAndTrade = async (tickers, positions = []) => {
           const buyResult = await executeBuy(
             ticker.symbol,
             ticker.price,
-            `${buyEval.isExtreme ? "EXTREME: " : ""}Top ${top3BuyTickers.indexOf(ticker.symbol) + 1}: ${buyEval.signals.join(", ")}`
+            `${buyEval.isExtreme ? "EXTREME: " : ""}Top ${top3BuyTickers.indexOf(ticker.symbol) + 1}: ${buyEval.signals.join(", ")}`,
+            { spyPositive }
           );
 
           if (buyResult.success) {
-            results.executed.push(buyResult.trade);
-            results.reasoning.push(`EXECUTED BUY ${ticker.symbol}: ${buyEval.signals.join(", ")}`);
-            buyCount++;
+            if (buyResult.queued) {
+              // Buy is queued with 5-minute delay
+              results.reasoning.push(`QUEUED BUY ${ticker.symbol}: ${buyResult.message}`);
+            } else if (buyResult.trade) {
+              // Immediate execution (rare - only with skipDelay)
+              results.executed.push(buyResult.trade);
+              results.reasoning.push(`EXECUTED BUY ${ticker.symbol}: ${buyEval.signals.join(", ")}`);
+              buyCount++;
+            }
+          } else if (buyResult.blocked) {
+            // Blocked due to bad market conditions
+            results.skipped.push({ symbol: ticker.symbol, reason: buyResult.error });
+            results.reasoning.push(`BLOCKED BUY ${ticker.symbol}: ${buyResult.error}`);
           } else {
             results.skipped.push({ symbol: ticker.symbol, reason: buyResult.error });
             results.reasoning.push(`FAILED BUY ${ticker.symbol}: ${buyResult.error}`);
@@ -1303,8 +1692,13 @@ export const monitorAndTrade = async (tickers, positions = []) => {
       }
     }
   } else {
-    // SPY blocked — skip all buys
-    results.reasoning.push(`SPY BLOCK: ${spyCheck.reason} — all buys skipped`);
+    // SPY blocked or rotation limit hit — skip all buys
+    if (!spyCheck.allow) {
+      results.reasoning.push(`SPY BLOCK: ${spyCheck.reason} — all buys skipped`);
+    }
+    if (!rotationCheck.allowed) {
+      results.reasoning.push(`ROTATION BLOCK: ${rotationCheck.reason} — all buys skipped`);
+    }
     if (top3BuyTickers.length > 0) {
       results.reasoning.push(`Blocked candidates: ${top3BuyTickers.join(", ")}`);
     }
@@ -1333,6 +1727,7 @@ export const getTradingStatus = () => {
   loadConfig();
   const marketStatus = isMarketOpen();
   const nextEval = getNextEvaluationTime();
+  const rotationCheck = checkRotationFrequency();
 
   return {
     enabled: config.enabled,
@@ -1345,6 +1740,12 @@ export const getTradingStatus = () => {
     sellThreshold: config.sellThreshold,
     dailyTradeCount,
     maxDailyTrades: config.maxDailyTrades,
+    antiChurn: {
+      minHoldPeriodDays: MIN_HOLD_PERIOD_MS / (24 * 60 * 60 * 1000),
+      maxRotationsPerWeek: MAX_ROTATIONS_PER_WEEK,
+      currentRotations: rotationCheck.rotations,
+      rotationLimitHit: !rotationCheck.allowed
+    },
     recentTrades: tradesLog.slice(-10),
     config
   };
@@ -1357,6 +1758,11 @@ export const setTradingEnabled = (enabled) => {
   saveConfig({ enabled });
   return { enabled };
 };
+
+/**
+ * Get hold period status for a position (exported for MCP/UI)
+ */
+export { checkHoldPeriod, checkRotationFrequency };
 
 // Initialize on load
 loadConfig();

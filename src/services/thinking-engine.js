@@ -5,6 +5,8 @@ import { sendMessage } from "./claude.js";
 import { getActivityTracker } from "./activity-tracker.js";
 import { developPlan, initPlanFields, getUnplannedGoals } from "./goal-planner.js";
 import { getSkillGapDetector } from "./skill-gap-detector.js";
+import { ensureGoalsParsed, loadParsedGoals } from "./core-goals-parser.js";
+import { calculateCombinedScore } from "./goal-alignment-scorer.js";
 
 /**
  * Thinking Engine - The brain that actually thinks and acts
@@ -637,13 +639,34 @@ function addToBacklog(items) {
     );
 
     if (!isDuplicate) {
+      // Calculate goal-aligned score
+      // Weight: 40% belief alignment (impactScore), 60% goal alignment
+      const beliefScore = item.impactScore || 50;
+      let goalAlignment = null;
+      let combinedScore = beliefScore;
+
+      try {
+        const parsedGoals = loadParsedGoals();
+        if (parsedGoals?.goals?.length > 0) {
+          const scoring = calculateCombinedScore(item, beliefScore, parsedGoals);
+          combinedScore = scoring.combinedScore;
+          goalAlignment = {
+            score: scoring.goalScore,
+            primaryGoal: scoring.primaryGoal,
+            affectsGoals: scoring.affectsGoals
+          };
+        }
+      } catch { /* ignore goal scoring errors */ }
+
       backlog.items.push({
         id: `backlog_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
         title: item.title,
         description: item.description,
         source: item.source || "thinking-engine", // news, content, role-model, user-desire
         relatedBeliefs: item.relatedBeliefs || [],
-        impactScore: item.impactScore || 50, // 0-100
+        impactScore: Math.round(combinedScore), // Now goal-weighted 0-100
+        beliefScore: beliefScore, // Original belief-only score
+        goalAlignment: goalAlignment, // Goal alignment details
         urgency: item.urgency || "low", // low, medium, high, critical
         isTimeSensitive: item.isTimeSensitive || false,
         suggestedProject: item.suggestedProject || null,
@@ -1006,6 +1029,13 @@ class ThinkingEngine extends EventEmitter {
     const interval = getAdaptiveCycleInterval();
     const { percentage } = calculateDataCompleteness();
     console.log(`[ThinkingEngine] Started — Knowledge Profile ${percentage}%, interval ${interval / 60000} min`);
+
+    // Ensure core goals are parsed
+    ensureGoalsParsed().then(parsed => {
+      if (parsed?.goals?.length > 0) {
+        console.log(`[ThinkingEngine] Core goals loaded: ${parsed.goals.map(g => g.title).join(", ")}`);
+      }
+    }).catch(() => {});
 
     // Run first cycle after a short delay
     setTimeout(() => this.runCycle(), 10000);

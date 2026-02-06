@@ -1,0 +1,166 @@
+{
+  "version": "1.0.0",
+  "description": "BACKBONE Tools Registry - Discoverable tools for AI assistants",
+  "tools": [
+    {
+      "id": "add-conviction",
+      "name": "Add Research Conviction",
+      "description": "Add a high-conviction ticker based on research. Boosts the ticker's score for 2 weeks.",
+      "category": "trading",
+      "file": "add-conviction.js",
+      "inputs": {
+        "symbol": { "type": "string", "required": true, "description": "Stock ticker symbol (e.g., NVDA)" },
+        "conviction": { "type": "number", "required": true, "description": "Conviction level 0.1-1.0 (1.0 = max)" },
+        "reason": { "type": "string", "required": true, "description": "Research notes/reason" }
+      },
+      "examples": [
+        { "symbol": "NVDA", "conviction": 0.9, "reason": "Strong AI chip demand, datacenter growth" },
+        { "symbol": "PLTR", "conviction": 0.7, "reason": "Government contracts expanding, AI platform adoption" }
+      ]
+    },
+    {
+      "id": "get-convictions",
+      "name": "Get Research Convictions",
+      "description": "List all active research convictions with their effective boosts",
+      "category": "trading",
+      "file": "get-convictions.js",
+      "inputs": {}
+    },
+    {
+      "id": "analyze-ticker",
+      "name": "Analyze Ticker",
+      "description": "Get comprehensive analysis of a ticker including score breakdown, technicals, and conviction status",
+      "category": "trading",
+      "file": "analyze-ticker.js",
+      "inputs": {
+        "symbol": { "type": "string", "required": true, "description": "Stock ticker symbol" }
+      }
+    },
+    {
+      "id": "research-stock",
+      "name": "Research Stock",
+      "description": "Deep research a stock using web search, news, and financial data. Returns structured findings.",
+      "category": "research",
+      "file": "research-stock.js",
+      "inputs": {
+        "symbol": { "type": "string", "required": true, "description": "Stock ticker symbol" },
+        "depth": { "type": "string", "default": "standard", "description": "Research depth: quick, standard, deep" }
+      }
+    },
+    {
+      "id": "morning-brief",
+      "name": "Generate Morning Brief",
+      "description": "Generate and optionally deliver the morning brief",
+      "category": "daily",
+      "file": "morning-brief.js",
+      "inputs": {
+        "deliver": { "type": "boolean", "default": false, "description": "Whether to deliver via WhatsApp" }
+      }
+    },
+    {
+      "id": "portfolio-summary",
+      "name": "Portfolio Summary",
+      "description": "Get current portfolio status including positions, P&L, and signals",
+      "category": "trading",
+      "file": "portfolio-summary.js",
+      "inputs": {}
+    },
+    {
+      "id": "health-check",
+      "name": "Health Check",
+      "description": "Get latest health data from Oura (sleep, readiness, activity)",
+      "category": "health",
+      "file": "health-check.js",
+      "inputs": {}
+    },
+    {
+      "id": "goal-progress",
+      "name": "Goal Progress",
+      "description": "Get progress on active goals",
+      "category": "goals",
+      "file": "goal-progress.js",
+      "inputs": {
+        "category": { "type": "string", "description": "Filter by category (optional)" }
+      }
+    },
+    {
+      "id": "world-pulse",
+      "name": "World Pulse",
+      "description": "Get real-time snapshot of markets, news, and world events. The AI's eyes on what's happening.",
+      "category": "world",
+      "file": "world-pulse.js",
+      "inputs": {
+        "focus": { "type": "string", "default": "all", "description": "Focus area: markets, news, or all" }
+      },
+      "examples": [
+        { "focus": "all" },
+        { "focus": "markets" }
+      ]
+    },
+    {
+      "id": "market-monitor",
+      "name": "Market Monitor",
+      "description": "Monitor markets for significant events and generate alerts. Detects large SPY moves, extreme signals, position impacts.",
+      "category": "world",
+      "file": "market-monitor.js",
+      "inputs": {
+        "checkPositions": { "type": "boolean", "default": true, "description": "Check held positions for moves" },
+        "threshold": { "type": "string", "default": "normal", "description": "Alert threshold: low, normal, high" }
+      }
+    },
+    {
+      "id": "fetch-news",
+      "name": "Fetch News",
+      "description": "Fetch latest news from financial and world sources. Updates the news cache for other tools.",
+      "category": "world",
+      "file": "fetch-news.js",
+      "inputs": {
+        "category": { "type": "string", "default": "all", "description": "News category: markets, business, tech, all" },
+        "maxArticles": { "type": "number", "default": 20, "description": "Maximum articles to fetch" }
+      }
+    },
+    {
+      "id": "send-alert",
+      "name": "Send Alert",
+      "description": "Send a proactive message to the user via WhatsApp. Use when discovering something important.",
+      "category": "messaging",
+      "file": "send-alert.js",
+      "inputs": {
+        "message": { "type": "string", "required": true, "description": "The alert message to send" },
+        "type": { "type": "string", "default": "alert", "description": "Alert type: alert, trade, market, news, health, goal, breakthrough" },
+        "priority": { "type": "string", "default": "normal", "description": "Priority: low, normal, high, urgent" },
+        "context": { "type": "string", "description": "Additional context to append" }
+      },
+      "examples": [
+        { "message": "SPY down 2% - consider defensive positioning", "type": "market", "priority": "high" },
+        { "message": "NVDA hit extreme buy signal (9.2)", "type": "trade", "priority": "urgent" }
+      ]
+    },
+    {
+      "id": "prediction-research",
+      "name": "Prediction Research",
+      "description": "Manage the automated ticker prediction research system. Runs at 8 PM daily, evaluates half the universe every 2 days.",
+      "category": "trading",
+      "file": "prediction-research.js",
+      "inputs": {
+        "action": { "type": "string", "default": "status", "description": "Action: status, run, research, get, clear" },
+        "symbol": { "type": "string", "description": "Ticker symbol (required for research/get actions)" }
+      },
+      "examples": [
+        { "action": "status" },
+        { "action": "run" },
+        { "action": "research", "symbol": "NVDA" },
+        { "action": "get", "symbol": "AAPL" }
+      ]
+    }
+  ],
+  "categories": {
+    "trading": "Stock trading, portfolio, and market analysis tools",
+    "research": "Deep research and analysis tools",
+    "health": "Health and wellness tracking tools",
+    "goals": "Goal tracking and life management tools",
+    "daily": "Daily briefing and routine tools",
+    "world": "World awareness - markets, news, and global events monitoring",
+    "messaging": "Proactive messaging and alerts to the user"
+  }
+}

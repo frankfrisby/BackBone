@@ -369,6 +369,80 @@ Only suggest actions that are genuinely useful based on the data. If there's not
     return this.think(question);
   }
 
+  /**
+   * Simple chat interface for quick responses
+   * Used by realtime messaging and WhatsApp handlers
+   *
+   * @param {string} message - The user's message
+   * @param {Object} options - Options (userId, channel, systemPrompt)
+   * @returns {Object} { content, success }
+   */
+  async chat(message, options = {}) {
+    try {
+      const context = await this.gatherContext();
+      const systemPrompt = options.systemPrompt || this.buildSystemPrompt(context);
+
+      // Add user message to thread
+      this.thread.messages.push({
+        role: "user",
+        content: message,
+        timestamp: new Date().toISOString(),
+        channel: options.channel || "app"
+      });
+
+      // Trim thread if too long
+      if (this.thread.messages.length > MAX_THREAD_MESSAGES) {
+        this.thread.messages = this.thread.messages.slice(-MAX_THREAD_MESSAGES);
+      }
+
+      // Build recent conversation context
+      const recentMessages = this.thread.messages.slice(-5).map(m =>
+        `${m.role === "user" ? "User" : "AI"}: ${m.content}`
+      ).join("\n\n");
+
+      // Build full prompt with context
+      const fullPrompt = `${systemPrompt}
+
+Recent conversation:
+${recentMessages}
+
+User's latest message: ${message}
+
+Respond helpfully and concisely:`;
+
+      // Send to AI (sendMessage expects a string, not array)
+      const response = await sendMessage(fullPrompt, {
+        taskType: TASK_TYPES.REASONING,
+        maxTokens: 1000
+      });
+
+      // Extract content from response
+      const content = response?.response || response?.content || response?.message?.content ||
+        (typeof response === "string" ? response : "I couldn't generate a response.");
+
+      // Add response to thread
+      this.thread.messages.push({
+        role: "assistant",
+        content,
+        timestamp: new Date().toISOString()
+      });
+
+      this.thread.lastUpdated = new Date().toISOString();
+      this.thread.totalMessages++;
+      this.saveThread();
+
+      return { content, success: true };
+
+    } catch (error) {
+      console.error("[AIBrain] Chat error:", error.message);
+      return {
+        content: `I encountered an error: ${error.message}`,
+        success: false,
+        error: error.message
+      };
+    }
+  }
+
   // ═══════════════════════════════════════════════════════════════════════════
   // GOAL-DRIVEN ACTION GENERATION - For autonomous engine
   // ═══════════════════════════════════════════════════════════════════════════

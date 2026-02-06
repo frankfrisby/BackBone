@@ -1,7 +1,91 @@
 import fetch from "node-fetch";
+import fs from "fs";
+import path from "path";
 import { getAPIQuotaMonitor } from "./api-quota-monitor.js";
 import { hasValidCredentials as hasCodexCredentials } from "./codex-oauth.js";
 import { getClaudeCodeStatus, runClaudeCodeStreaming } from "./claude-code-cli.js";
+
+// ═══════════════════════════════════════════════════════════════════════════
+// RATE LIMIT TRACKING - Track "wait until" times for each model
+// ═══════════════════════════════════════════════════════════════════════════
+
+const RATE_LIMIT_FILE = path.join(process.cwd(), "data", "ai-rate-limits.json");
+
+// In-memory rate limit state
+let rateLimits = {};
+
+// Load rate limits from disk
+const loadRateLimits = () => {
+  try {
+    if (fs.existsSync(RATE_LIMIT_FILE)) {
+      rateLimits = JSON.parse(fs.readFileSync(RATE_LIMIT_FILE, "utf-8"));
+    }
+  } catch {
+    rateLimits = {};
+  }
+};
+
+// Save rate limits to disk
+const saveRateLimits = () => {
+  try {
+    fs.writeFileSync(RATE_LIMIT_FILE, JSON.stringify(rateLimits, null, 2));
+  } catch { /* ignore */ }
+};
+
+// Check if model is rate limited
+const isRateLimited = (modelId) => {
+  const limit = rateLimits[modelId];
+  if (!limit) return false;
+  const waitUntil = new Date(limit.waitUntil).getTime();
+  return Date.now() < waitUntil;
+};
+
+// Set rate limit for a model
+const setRateLimit = (modelId, waitUntilTime) => {
+  rateLimits[modelId] = {
+    waitUntil: waitUntilTime,
+    setAt: new Date().toISOString()
+  };
+  saveRateLimits();
+  console.log(`[MultiAI] Rate limit set for ${modelId} until ${waitUntilTime}`);
+};
+
+// Clear rate limit for a model
+const clearRateLimit = (modelId) => {
+  delete rateLimits[modelId];
+  saveRateLimits();
+};
+
+// Parse rate limit time from error message
+const parseRateLimitTime = (errorMessage) => {
+  // Look for patterns like "try again in 30 seconds", "wait until 2026-02-06T19:00:00"
+  const secondsMatch = errorMessage.match(/(\d+)\s*seconds?/i);
+  if (secondsMatch) {
+    return new Date(Date.now() + parseInt(secondsMatch[1], 10) * 1000).toISOString();
+  }
+
+  const minutesMatch = errorMessage.match(/(\d+)\s*minutes?/i);
+  if (minutesMatch) {
+    return new Date(Date.now() + parseInt(minutesMatch[1], 10) * 60 * 1000).toISOString();
+  }
+
+  const hoursMatch = errorMessage.match(/(\d+)\s*hours?/i);
+  if (hoursMatch) {
+    return new Date(Date.now() + parseInt(hoursMatch[1], 10) * 60 * 60 * 1000).toISOString();
+  }
+
+  // ISO timestamp
+  const isoMatch = errorMessage.match(/(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})/);
+  if (isoMatch) {
+    return isoMatch[1];
+  }
+
+  // Default: 5 minutes
+  return new Date(Date.now() + 5 * 60 * 1000).toISOString();
+};
+
+// Initialize rate limits
+loadRateLimits();
 
 /**
  * Parse OpenAI API error response and return a clean message
@@ -125,6 +209,16 @@ export const MODELS = {
     description: "Balanced performance",
     maxTokens: 4096,
     contextWindow: 200000
+  },
+  CLAUDE_OPUS_46: {
+    id: "claude-opus-4-6-20260115",  // Hypothetical Opus 4.6 model ID
+    name: "Claude Opus 4.6",
+    shortName: "Opus 4.6",
+    icon: "◈",
+    color: "#b91c1c",
+    description: "Latest maximum capability",
+    maxTokens: 8192,
+    contextWindow: 300000
   },
   CLAUDE_OPUS: {
     id: "claude-opus-4-5-20251101",
@@ -563,6 +657,140 @@ const detectTaskType = (message) => {
   return TASK_TYPES.STANDARD;
 };
 
+// ═══════════════════════════════════════════════════════════════════════════
+// SMART FALLBACK CHAIN
+// Order: Opus 4.6 → Opus 4.5 → Claude CLI → GPT 5.3 Codex → GPT 5.2 → Sonnet 4
+// ═══════════════════════════════════════════════════════════════════════════
+
+const FALLBACK_CHAIN = [
+  { key: "opus46", modelInfo: MODELS.CLAUDE_OPUS_46, type: "claude" },
+  { key: "opus45", modelInfo: MODELS.CLAUDE_OPUS, type: "claude" },
+  { key: "claudeCli", modelInfo: MODELS.CLAUDE_CODE_CLI, type: "claudeCli" },
+  { key: "codex53", modelInfo: MODELS.GPT52_CODEX, type: "openai" },
+  { key: "gpt52", modelInfo: MODELS.GPT52, type: "openai" },
+  { key: "sonnet4", modelInfo: MODELS.CLAUDE_SONNET, type: "claude" },
+];
+
+/**
+ * Try sending to a model with rate limit awareness
+ * Returns { success, response, error, rateLimited }
+ */
+const tryModel = async (modelEntry, message, context, taskType) => {
+  const modelId = modelEntry.modelInfo.id;
+
+  // Check if rate limited
+  if (isRateLimited(modelId)) {
+    const limit = rateLimits[modelId];
+    console.log(`[MultiAI] ${modelEntry.modelInfo.name} rate limited until ${limit.waitUntil}`);
+    return { success: false, rateLimited: true, waitUntil: limit.waitUntil };
+  }
+
+  try {
+    let response;
+
+    if (modelEntry.type === "claudeCli") {
+      const status = await getClaudeCodeStatus();
+      if (!status.ready) {
+        return { success: false, error: "Claude CLI not ready" };
+      }
+      response = await sendToClaudeCodeCLI(message, context, taskType);
+      currentModel = modelEntry.modelInfo;
+      return { success: true, response };
+    }
+
+    if (modelEntry.type === "claude") {
+      const config = getMultiAIConfig();
+      if (!config.claude.ready) {
+        return { success: false, error: "Claude API not configured" };
+      }
+      response = await sendToClaude(message, context, modelEntry.modelInfo.id);
+      currentModel = modelEntry.modelInfo;
+      return { success: true, response };
+    }
+
+    if (modelEntry.type === "openai") {
+      const config = getMultiAIConfig();
+      if (modelEntry.key === "codex53" && !config.gptCodex?.ready) {
+        return { success: false, error: "Codex not available" };
+      }
+      if (!config.gpt52?.ready && !config.gptCodex?.ready) {
+        return { success: false, error: "OpenAI not configured" };
+      }
+
+      const modelConfig = modelEntry.key === "codex53" ? config.gptCodex : config.gpt52;
+      const result = await sendToOpenAI(message, context, modelConfig, taskType);
+      currentModel = modelEntry.modelInfo;
+      return { success: true, response: result.content };
+    }
+
+    return { success: false, error: "Unknown model type" };
+
+  } catch (error) {
+    const errorMsg = error.message || String(error);
+
+    // Check for rate limit / wait time in error
+    if (errorMsg.includes("rate") || errorMsg.includes("wait") ||
+        errorMsg.includes("limit") || errorMsg.includes("quota") ||
+        errorMsg.includes("billing") || errorMsg.includes("overloaded")) {
+      const waitUntil = parseRateLimitTime(errorMsg);
+      setRateLimit(modelId, waitUntil);
+      return { success: false, rateLimited: true, waitUntil, error: errorMsg };
+    }
+
+    // Check for model not found
+    if (errorMsg.includes("model_not_found") || errorMsg.includes("not found") ||
+        errorMsg.includes("does not exist")) {
+      console.log(`[MultiAI] ${modelEntry.modelInfo.name} not available: ${errorMsg}`);
+      // Set a longer rate limit for unavailable models
+      setRateLimit(modelId, new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString());
+      return { success: false, error: errorMsg };
+    }
+
+    return { success: false, error: errorMsg };
+  }
+};
+
+/**
+ * Smart send with automatic fallback chain
+ */
+const sendWithFallback = async (message, context, taskType) => {
+  const errors = [];
+
+  for (const modelEntry of FALLBACK_CHAIN) {
+    console.log(`[MultiAI] Trying ${modelEntry.modelInfo.name}...`);
+
+    const result = await tryModel(modelEntry, message, context, taskType);
+
+    if (result.success) {
+      // Clear any old rate limit since it worked
+      clearRateLimit(modelEntry.modelInfo.id);
+
+      return {
+        model: modelEntry.key,
+        modelInfo: modelEntry.modelInfo,
+        taskType,
+        response: result.response
+      };
+    }
+
+    errors.push({
+      model: modelEntry.modelInfo.name,
+      error: result.error,
+      rateLimited: result.rateLimited,
+      waitUntil: result.waitUntil
+    });
+
+    console.log(`[MultiAI] ${modelEntry.modelInfo.name} failed: ${result.error || "rate limited"}`);
+  }
+
+  // All models failed
+  const errorSummary = errors.map(e =>
+    `${e.model}: ${e.rateLimited ? `wait until ${e.waitUntil}` : e.error}`
+  ).join("; ");
+
+  throw new Error(`All AI models failed: ${errorSummary}`);
+};
+
 /**
  * Intelligent routing - picks the best model for the task
  */
@@ -575,149 +803,35 @@ export const sendMessage = async (message, context = {}, taskType = "auto") => {
   }
   lastTaskType = taskType;
 
-  // Prefer Claude Code CLI for all queries when available
-  const claudeCodeStatus = await getClaudeCodeStatus();
-  if (claudeCodeStatus.ready) {
-    currentModel = MODELS.CLAUDE_CODE_CLI;
-    const response = await sendToClaudeCodeCLI(message, context, taskType);
-    return {
-      model: "claude-code",
-      modelInfo: MODELS.CLAUDE_CODE_CLI,
-      taskType,
-      response
+  // Use smart fallback chain for all requests
+  // Fallback order: Opus 4.6 → Opus 4.5 → Claude CLI → Codex 5.3 → GPT 5.2 → Sonnet 4
+  return sendWithFallback(message, context, taskType);
+};
+
+/**
+ * Get current rate limit status for all models
+ */
+export const getRateLimitStatus = () => {
+  const status = {};
+  for (const entry of FALLBACK_CHAIN) {
+    const modelId = entry.modelInfo.id;
+    const limit = rateLimits[modelId];
+    status[entry.key] = {
+      name: entry.modelInfo.name,
+      rateLimited: isRateLimited(modelId),
+      waitUntil: limit?.waitUntil || null
     };
   }
+  return status;
+};
 
-  // Route to appropriate model
-  let modelConfig;
-  let modelKey;
-
-  switch (taskType) {
-    case TASK_TYPES.INSTANT:
-    case TASK_TYPES.ROUTING:
-      // Use GPT-5 Mini for fast routing decisions and quick tasks
-      if (config.gptMini.ready) {
-        modelConfig = config.gptMini;
-        modelKey = "gpt-5-mini";
-        currentModel = MODELS.GPT5_MINI;
-      } else if (config.gptNano?.ready) {
-        // Fall back to Nano for simple tasks
-        modelConfig = config.gptNano;
-        modelKey = "gpt-5-nano";
-        currentModel = MODELS.GPT5_NANO;
-      }
-      break;
-
-    case TASK_TYPES.RESEARCH:
-      // Use GPT-5.2 Pro for in-depth research and analysis
-      if (config.gptPro?.ready) {
-        modelConfig = config.gptPro;
-        modelKey = "gpt-5.2-pro";
-        currentModel = MODELS.GPT52_PRO;
-      } else if (config.gpt52?.ready) {
-        // Fall back to GPT-5.2 if Pro not available
-        modelConfig = config.gpt52;
-        modelKey = "gpt-5.2";
-        currentModel = MODELS.GPT52;
-      } else if (config.claude.ready) {
-        currentModel = MODELS.CLAUDE_OPUS;
-        return {
-          model: "claude",
-          modelInfo: MODELS.CLAUDE_OPUS,
-          taskType,
-          response: await sendToClaude(message, context)
-        };
-      }
-      break;
-
-    case TASK_TYPES.CODING:
-      // Use GPT-5.2 Codex for coding tasks (if Pro/Max subscription available)
-      if (config.gptCodex?.ready) {
-        modelConfig = config.gptCodex;
-        modelKey = "gpt-5.2-codex";
-        currentModel = MODELS.GPT52_CODEX;
-      } else if (config.gpt52?.ready) {
-        // Fall back to GPT-5.2 for coding
-        modelConfig = config.gpt52;
-        modelKey = "gpt-5.2";
-        currentModel = MODELS.GPT52;
-      } else if (config.claude.ready) {
-        currentModel = MODELS.CLAUDE_SONNET;
-        return {
-          model: "claude",
-          modelInfo: MODELS.CLAUDE_SONNET,
-          taskType,
-          response: await sendToClaude(message, context)
-        };
-      }
-      break;
-
-    case TASK_TYPES.COMPLEX:
-    case TASK_TYPES.AGENTIC:
-      // Use GPT-5.2 Codex for complex/agentic tasks (best available)
-      if (config.gptCodex?.ready) {
-        modelConfig = config.gptCodex;
-        modelKey = "gpt-5.2-codex";
-        currentModel = MODELS.GPT52_CODEX;
-      } else if (config.gptPro?.ready) {
-        modelConfig = config.gptPro;
-        modelKey = "gpt-5.2-pro";
-        currentModel = MODELS.GPT52_PRO;
-      } else if (config.gpt52?.ready) {
-        modelConfig = config.gpt52;
-        modelKey = "gpt-5.2";
-        currentModel = MODELS.GPT52;
-      } else if (config.claude.ready) {
-        currentModel = MODELS.CLAUDE_OPUS;
-        return {
-          model: "claude",
-          modelInfo: MODELS.CLAUDE_OPUS,
-          taskType,
-          response: await sendToClaude(message, context)
-        };
-      }
-      break;
-
-    case TASK_TYPES.STANDARD:
-    default:
-      // PREFER Codex for all tasks when available, fall back to GPT-5.2
-      if (config.gptCodex?.ready) {
-        modelConfig = config.gptCodex;
-        modelKey = "gpt-5.2-codex";
-        currentModel = MODELS.GPT52_CODEX;
-      } else if (config.gpt52?.ready) {
-        modelConfig = config.gpt52;
-        modelKey = "gpt-5.2";
-        currentModel = MODELS.GPT52;
-      } else if (config.gptMini?.ready) {
-        modelConfig = config.gptMini;
-        modelKey = "gpt-5-mini";
-        currentModel = MODELS.GPT5_MINI;
-      } else if (config.claude.ready) {
-        currentModel = MODELS.CLAUDE_SONNET;
-        return {
-          model: "claude",
-          modelInfo: MODELS.CLAUDE_SONNET,
-          taskType,
-          response: await sendToClaude(message, context)
-        };
-      }
-      break;
-  }
-
-  if (!modelConfig) {
-    throw new Error("No AI models available. Add OPENAI_API_KEY or ANTHROPIC_API_KEY to .env");
-  }
-
-  const result = await sendToOpenAI(message, context, modelConfig, taskType);
-
-  return {
-    model: modelKey,
-    modelInfo: currentModel,
-    taskType,
-    response: result.content,
-    usage: result.usage
-  };
+/**
+ * Clear all rate limits (for testing/reset)
+ */
+export const clearAllRateLimits = () => {
+  rateLimits = {};
+  saveRateLimits();
+  console.log("[MultiAI] All rate limits cleared");
 };
 
 // Legacy exports for compatibility

@@ -354,6 +354,75 @@ app.post("/api/videos", async (req, res) => {
   }
 });
 
+// ── Autonomous Engine ─────────────────────────────────────────
+let autonomousLoop = null;
+
+app.get("/api/engine/status", async (req, res) => {
+  try {
+    if (!autonomousLoop) {
+      res.json({ running: false, status: "not_started" });
+      return;
+    }
+    res.json(autonomousLoop.getStatus());
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/engine/start", async (req, res) => {
+  try {
+    if (autonomousLoop && autonomousLoop.running) {
+      res.json({ ok: false, message: "Engine already running" });
+      return;
+    }
+    const { getAutonomousLoop } = await import("./services/autonomous-loop.js");
+    autonomousLoop = await getAutonomousLoop();
+    autonomousLoop.start(); // Don't await - runs in background
+    res.json({ ok: true, message: "Engine started" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/engine/stop", async (req, res) => {
+  try {
+    if (!autonomousLoop || !autonomousLoop.running) {
+      res.json({ ok: false, message: "Engine not running" });
+      return;
+    }
+    await autonomousLoop.stop();
+    res.json({ ok: true, message: "Engine stopped" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/engine/pause", async (req, res) => {
+  try {
+    if (!autonomousLoop) {
+      res.json({ ok: false, message: "Engine not started" });
+      return;
+    }
+    autonomousLoop.pause();
+    res.json({ ok: true, message: "Engine paused" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/engine/resume", async (req, res) => {
+  try {
+    if (!autonomousLoop) {
+      res.json({ ok: false, message: "Engine not started" });
+      return;
+    }
+    autonomousLoop.resume();
+    res.json({ ok: true, message: "Engine resumed" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Push notification token registration
 app.post("/api/register-push", async (req, res) => {
   try {
@@ -636,13 +705,56 @@ async function handleLifeScores() {
 
 async function handleGoals() {
   const dataPath = path.resolve("data/goals.json");
+  const parsedGoalsPath = path.resolve("data/parsed-goals.json");
+
   try {
+    // Load goals
+    let goals = [];
     if (fs.existsSync(dataPath)) {
       const data = JSON.parse(fs.readFileSync(dataPath, "utf8"));
-      return Array.isArray(data) ? data : data.goals || [];
+      goals = Array.isArray(data) ? data : data.goals || [];
     }
-  } catch { /* ignore */ }
-  return [];
+
+    // Load core goals (parsed)
+    let coreGoals = [];
+    if (fs.existsSync(parsedGoalsPath)) {
+      const parsed = JSON.parse(fs.readFileSync(parsedGoalsPath, "utf8"));
+      coreGoals = parsed.goals || [];
+    }
+
+    // Load projects and group by goal
+    const { getProjectManager } = await import("./services/project-manager.js");
+    const pm = getProjectManager();
+    const projectsByGoal = pm.getProjectsByGoal();
+
+    // Attach projects to goals
+    const goalsWithProjects = goals.map(goal => ({
+      ...goal,
+      projects: projectsByGoal[goal.id] || projectsByGoal[goal.title] || []
+    }));
+
+    // Attach projects to core goals and calculate overall completion
+    const coreGoalsWithProjects = coreGoals.map(goal => {
+      const projects = projectsByGoal[goal.id] || projectsByGoal[goal.title] || [];
+      const avgCompletion = projects.length > 0
+        ? Math.round(projects.reduce((sum, p) => sum + p.completion, 0) / projects.length)
+        : 0;
+      return {
+        ...goal,
+        completion: avgCompletion,
+        projects
+      };
+    });
+
+    return {
+      goals: goalsWithProjects,
+      coreGoals: coreGoalsWithProjects,
+      unassigned: projectsByGoal["unassigned"] || []
+    };
+  } catch (err) {
+    console.error("handleGoals error:", err);
+    return { goals: [], coreGoals: [], unassigned: [] };
+  }
 }
 
 async function handleCalendar() {
@@ -840,52 +952,104 @@ app.get("/api/vapi/status", async (req, res) => {
 // ── WhatsApp Webhook (Twilio) ─────────────────────────────────
 app.post("/api/whatsapp/webhook", async (req, res) => {
   try {
-    const { getTwilioWhatsAppService } = await import("./services/twilio-whatsapp.js");
-    const whatsapp = getTwilioWhatsAppService();
+    const { getTwilioWhatsApp } = await import("./services/twilio-whatsapp.js");
+    const whatsapp = getTwilioWhatsApp();
+
+    // Initialize if needed
+    if (!whatsapp.initialized) {
+      await whatsapp.initialize();
+    }
 
     // Handle incoming message from Twilio (form-urlencoded data)
     const messageData = whatsapp.handleWebhook(req.body);
-    console.log("[WhatsApp Webhook] Received message from:", messageData.from, "Content:", messageData.content?.slice(0, 100));
+    const userPhone = messageData.from;
+    const userMessage = messageData.content?.trim();
+
+    console.log("[WhatsApp Webhook] Received from:", userPhone, "Content:", userMessage?.slice(0, 100));
 
     // Skip empty messages
-    if (!messageData.content || !messageData.content.trim()) {
+    if (!userMessage) {
       res.type("text/xml");
       res.send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
       return;
     }
 
-    // Process with Claude directly for a quick response
-    let responseText = "Message received. I'll look into that.";
+    // Send immediate acknowledgment
+    res.type("text/xml");
+    res.send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
+
+    // Send "working on it" update
+    await whatsapp.sendMessage(userPhone, "Got it. Working on that now...");
+
+    // Process the request with full context
     try {
+      // Load user context
+      const dataDir = path.join(process.cwd(), "data");
+      let context = {};
+
+      // Portfolio
+      try {
+        const alpaca = JSON.parse(fs.readFileSync(path.join(dataDir, "alpaca-cache.json"), "utf-8"));
+        context.portfolio = {
+          equity: alpaca.account?.equity,
+          cash: alpaca.account?.cash,
+          positions: alpaca.positions?.filter(p => !p.symbol.includes("CVR")).map(p => ({
+            symbol: p.symbol,
+            qty: p.qty,
+            value: p.market_value,
+            pl: p.unrealized_pl
+          }))
+        };
+      } catch {}
+
+      // Life scores
+      try {
+        context.lifeScores = JSON.parse(fs.readFileSync(path.join(dataDir, "life-scores.json"), "utf-8"));
+      } catch {}
+
+      // Top tickers
+      try {
+        const tickers = JSON.parse(fs.readFileSync(path.join(dataDir, "tickers-cache.json"), "utf-8"));
+        context.topTickers = (tickers.tickers || tickers).slice(0, 5).map(t => ({
+          symbol: t.symbol,
+          score: t.score,
+          change: t.changePercent
+        }));
+      } catch {}
+
+      // Health
+      try {
+        const oura = JSON.parse(fs.readFileSync(path.join(dataDir, "oura-data.json"), "utf-8"));
+        const latest = oura.latest || oura.history?.[oura.history.length - 1];
+        context.health = {
+          sleep: latest?.sleep?.[latest.sleep.length - 1]?.score,
+          readiness: latest?.readiness?.[latest.readiness.length - 1]?.score
+        };
+      } catch {}
+
+      // Build prompt for Claude
       const { sendMessage } = await import("./services/claude.js");
-      const prompt = `You are BACKBONE, a personal AI assistant. The user sent this message via WhatsApp:
+      const prompt = `You are BACKBONE, a personal AI assistant for an executive. The user sent this via WhatsApp:
 
-"${messageData.content}"
+"${userMessage}"
 
-Respond briefly and helpfully (max 160 chars for SMS-friendly response). If they're asking about portfolio, health, goals, or schedule, say you'll check and get back to them.`;
+USER CONTEXT:
+${JSON.stringify(context, null, 2)}
 
-      const aiResponse = await sendMessage(prompt, { format: "text", maxTokens: 200 });
+Respond in a conversational but information-dense way. Use *bold* for emphasis, bullet points where helpful. Max 1500 chars. Be specific with numbers from the context. If they ask about markets, mention top tickers. If about health, mention scores. If about portfolio, mention positions and P&L.`;
+
+      const aiResponse = await sendMessage(prompt, { format: "text", maxTokens: 1000 });
+
       if (aiResponse && typeof aiResponse === "string") {
-        responseText = aiResponse.slice(0, 300);
+        await whatsapp.sendMessage(userPhone, aiResponse.slice(0, 1500));
+        console.log("[WhatsApp Webhook] Sent full response to", userPhone);
+      } else {
+        await whatsapp.sendMessage(userPhone, "Processed your request but couldn't generate a response. Try again?");
       }
     } catch (aiErr) {
-      console.error("[WhatsApp Webhook] AI response failed:", aiErr.message);
-      // Fall back to acknowledgment
+      console.error("[WhatsApp Webhook] AI processing failed:", aiErr.message);
+      await whatsapp.sendMessage(userPhone, `Hit a snag: ${aiErr.message.slice(0, 100)}. Try again in a moment.`);
     }
-
-    // Also send via WhatsApp service (in case TwiML doesn't work)
-    try {
-      const userPhone = messageData.from;
-      if (userPhone) {
-        await whatsapp.sendMessage(userPhone, responseText);
-      }
-    } catch (sendErr) {
-      console.log("[WhatsApp Webhook] Direct send failed, relying on TwiML:", sendErr.message);
-    }
-
-    // Return TwiML response
-    res.type("text/xml");
-    res.send(whatsapp.generateResponse(responseText));
   } catch (err) {
     console.error("[WhatsApp Webhook] Error:", err.message);
     res.type("text/xml");

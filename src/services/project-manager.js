@@ -4,11 +4,17 @@
  * Projects are stored in the `projects/` directory (gitignored).
  * Each project is a directory containing:
  * - PROJECT.md - Main project file with description, updates, status
+ * - CRITERIA.md - Success criteria with completion tracking
  * - research/ - Research notes and findings
  * - documents/ - Generated documents
  * - data/ - Any data files
  *
  * On reset, projects are moved to projects/.backup/ with 7-day retention.
+ *
+ * COMPLETION TRACKING:
+ * - Each project has a completion percentage (0-100%)
+ * - Completion is calculated from CRITERIA.md if it exists
+ * - Projects are grouped by their parent goal
  */
 
 import fs from "fs";
@@ -735,6 +741,244 @@ class ProjectManager extends EventEmitter {
   }
 }
 
+  /**
+   * Calculate completion percentage for a project
+   * Reads CRITERIA.md if it exists, otherwise estimates from tasks
+   * @param {string} projectPath - Path to project directory
+   * @returns {number} Completion percentage (0-100)
+   */
+  calculateCompletion(projectPath) {
+    // First check for CRITERIA.md
+    const criteriaPath = path.join(projectPath, "CRITERIA.md");
+    if (fs.existsSync(criteriaPath)) {
+      const content = fs.readFileSync(criteriaPath, "utf-8");
+      const completionMatch = content.match(/\*\*(?:Current )?Completion\*\*:\s*(\d+)%/);
+      if (completionMatch) {
+        return parseInt(completionMatch[1]);
+      }
+
+      // Calculate from checkboxes if no explicit completion
+      const checked = (content.match(/- \[x\]/gi) || []).length;
+      const total = (content.match(/- \[[ x]\]/gi) || []).length;
+      if (total > 0) {
+        return Math.round((checked / total) * 100);
+      }
+    }
+
+    // Fall back to PROJECT.md task count
+    const projectMd = path.join(projectPath, "PROJECT.md");
+    if (fs.existsSync(projectMd)) {
+      const content = fs.readFileSync(projectMd, "utf-8");
+      const checked = (content.match(/- \[x\]/gi) || []).length;
+      const total = (content.match(/- \[[ x]\]/gi) || []).length;
+      if (total > 0) {
+        return Math.round((checked / total) * 100);
+      }
+
+      // Check for explicit completion in PROJECT.md
+      const completionMatch = content.match(/\*\*Completion\*\*:\s*(\d+)%/);
+      if (completionMatch) {
+        return parseInt(completionMatch[1]);
+      }
+    }
+
+    return 0;
+  }
+
+  /**
+   * Get the parent goal ID for a project
+   * @param {string} projectPath - Path to project directory
+   * @returns {string|null} Goal ID or null
+   */
+  getProjectGoalId(projectPath) {
+    const projectMd = path.join(projectPath, "PROJECT.md");
+    if (!fs.existsSync(projectMd)) {
+      return null;
+    }
+
+    const content = fs.readFileSync(projectMd, "utf-8");
+
+    // Check for Goal field
+    const goalMatch = content.match(/\*\*Goal\*\*:\s*([^\n]+)/);
+    if (goalMatch && goalMatch[1].trim() !== "none" && goalMatch[1].trim() !== "") {
+      return goalMatch[1].trim();
+    }
+
+    // Check for GoalId field
+    const goalIdMatch = content.match(/\*\*GoalId\*\*:\s*([^\n]+)/);
+    if (goalIdMatch) {
+      return goalIdMatch[1].trim();
+    }
+
+    return null;
+  }
+
+  /**
+   * List all projects with completion percentages
+   * @returns {Array} List of projects with completion info
+   */
+  listProjectsWithCompletion() {
+    const projects = this.listProjects();
+
+    return projects.map(project => ({
+      ...project,
+      completion: this.calculateCompletion(project.path),
+      goalId: this.getProjectGoalId(project.path)
+    }));
+  }
+
+  /**
+   * Get projects grouped by goal with completion percentages
+   * This is the main function for UI display
+   * @returns {Object} Projects grouped by goal ID
+   */
+  getProjectsByGoal() {
+    const projects = this.listProjectsWithCompletion();
+    const byGoal = {};
+
+    for (const project of projects) {
+      const goalId = project.goalId || "unassigned";
+      if (!byGoal[goalId]) {
+        byGoal[goalId] = [];
+      }
+      byGoal[goalId].push({
+        id: project.safeName,
+        name: project.name,
+        status: project.status,
+        completion: project.completion,
+        modifiedAt: project.modifiedAt
+      });
+    }
+
+    // Sort projects within each goal by completion (lowest first for priority)
+    for (const goalId of Object.keys(byGoal)) {
+      byGoal[goalId].sort((a, b) => a.completion - b.completion);
+    }
+
+    return byGoal;
+  }
+
+  /**
+   * Update completion percentage in PROJECT.md
+   * @param {string} projectName - Project name
+   * @param {number} completion - Completion percentage (0-100)
+   */
+  updateCompletion(projectName, completion) {
+    const project = this.loadProject(projectName);
+    if (!project || !fs.existsSync(project.mdPath)) {
+      return null;
+    }
+
+    let content = fs.readFileSync(project.mdPath, "utf-8");
+
+    // Check if Completion field exists
+    if (content.includes("**Completion:**")) {
+      content = content.replace(/\*\*Completion:\*\* \d+%/, `**Completion:** ${completion}%`);
+    } else {
+      // Add after Status line
+      content = content.replace(
+        /(\*\*Status:\*\* [^\n]+)/,
+        `$1\n**Completion:** ${completion}%`
+      );
+    }
+
+    fs.writeFileSync(project.mdPath, content, "utf-8");
+    return project;
+  }
+
+  /**
+   * Set the parent goal for a project
+   * @param {string} projectName - Project name
+   * @param {string} goalId - Goal ID to link to
+   */
+  setProjectGoal(projectName, goalId) {
+    const project = this.loadProject(projectName);
+    if (!project || !fs.existsSync(project.mdPath)) {
+      return null;
+    }
+
+    let content = fs.readFileSync(project.mdPath, "utf-8");
+
+    // Check if Goal field exists
+    if (content.includes("**Goal:**")) {
+      content = content.replace(/\*\*Goal:\*\* [^\n]+/, `**Goal:** ${goalId}`);
+    } else {
+      // Add after Status line
+      content = content.replace(
+        /(\*\*Status:\*\* [^\n]+)/,
+        `$1\n**Goal:** ${goalId}`
+      );
+    }
+
+    fs.writeFileSync(project.mdPath, content, "utf-8");
+    this.addUpdate("link", `Linked to goal: ${goalId}`);
+    return project;
+  }
+
+  /**
+   * Get summary for goals view display
+   * Returns data formatted for UI rendering
+   * @returns {Object} Summary with goals and their projects
+   */
+  async getGoalsViewData() {
+    const projectsByGoal = this.getProjectsByGoal();
+
+    // Load goals data
+    const goalsPath = path.join(process.cwd(), "data", "goals.json");
+    let goals = [];
+    if (fs.existsSync(goalsPath)) {
+      try {
+        goals = JSON.parse(fs.readFileSync(goalsPath, "utf-8"));
+      } catch (e) {
+        console.error("Failed to load goals:", e);
+      }
+    }
+
+    // Also check parsed-goals.json for core goals
+    const parsedGoalsPath = path.join(process.cwd(), "data", "parsed-goals.json");
+    let coreGoals = [];
+    if (fs.existsSync(parsedGoalsPath)) {
+      try {
+        const parsed = JSON.parse(fs.readFileSync(parsedGoalsPath, "utf-8"));
+        coreGoals = parsed.goals || [];
+      } catch (e) {
+        console.error("Failed to load parsed goals:", e);
+      }
+    }
+
+    // Build the view data
+    const viewData = {
+      coreGoals: coreGoals.map(goal => {
+        const projects = projectsByGoal[goal.id] || projectsByGoal[goal.title] || [];
+        const avgCompletion = projects.length > 0
+          ? Math.round(projects.reduce((sum, p) => sum + p.completion, 0) / projects.length)
+          : 0;
+
+        return {
+          id: goal.id,
+          title: goal.title,
+          type: goal.type,
+          completion: avgCompletion,
+          projects: projects
+        };
+      }),
+      goals: goals.map(goal => {
+        const projects = projectsByGoal[goal.id] || projectsByGoal[goal.title] || [];
+        return {
+          id: goal.id,
+          title: goal.title,
+          category: goal.category,
+          progress: goal.progress || 0,
+          projects: projects
+        };
+      }),
+      unassigned: projectsByGoal["unassigned"] || []
+    };
+
+    return viewData;
+  }
+}
+
 // Singleton instance
 let instance = null;
 
@@ -745,6 +989,20 @@ export const getProjectManager = () => {
     instance.cleanupOldBackups();
   }
   return instance;
+};
+
+/**
+ * Quick access to projects by goal (for API/UI)
+ */
+export const getProjectsByGoal = () => {
+  return getProjectManager().getProjectsByGoal();
+};
+
+/**
+ * Quick access to goals view data (for API/UI)
+ */
+export const getGoalsViewData = async () => {
+  return getProjectManager().getGoalsViewData();
 };
 
 export default ProjectManager;

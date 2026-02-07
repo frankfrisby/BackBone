@@ -78,10 +78,32 @@ const getGoalVisualState = (goal) => {
 };
 
 /**
- * Single Goal Display
+ * Progress bar helper
+ * Returns a visual progress bar like: ████░░░░░░ 45%
+ */
+const getProgressBar = (percent, width = 8) => {
+  const filled = Math.round((percent / 100) * width);
+  const empty = width - filled;
+  return "█".repeat(filled) + "░".repeat(empty);
+};
+
+/**
+ * Get color for percentage
+ */
+const getPercentColor = (percent) => {
+  if (percent >= 90) return "#22c55e"; // Green
+  if (percent >= 70) return "#84cc16"; // Lime
+  if (percent >= 50) return "#f59e0b"; // Amber
+  if (percent >= 25) return "#f97316"; // Orange
+  return "#64748b"; // Gray
+};
+
+/**
+ * Single Goal Display with Completion Percentage
  * Format:
- *   ● Goal title (max 2 lines)
- *     Project Name (max 2 lines)
+ *   ● Goal title [75%]
+ *     └ Project Name [25%]
+ *     └ Project 2 [50%]
  *
  * Indicators:
  *   ● Solid dot - pending, active, completed, failed
@@ -115,47 +137,59 @@ const GoalLine = memo(({ goal, isWorking = false, blinkVisible = true, isFirst =
   const rawTitle = goal.title || "Untitled Goal";
   const title = truncateToLines(rawTitle, 2);
 
-  // Project name - shown below in gray (max 2 lines)
-  const rawProject = goal.project || goal.projectName || goal.category || "General";
-  const projectName = truncateToLines(rawProject, 2);
+  // Goal completion percentage
+  const goalCompletion = goal.completion ?? goal.progress ?? 0;
 
-  // Add on-hold reason if available
-  let statusNote = "";
-  if (visualState === "on_hold" || visualState === "partial") {
-    try {
-      const goalManager = getGoalManager();
-      const status = goalManager.getGoalStatus(goal.id);
-      if (status && status.holdInfo?.reason) {
-        statusNote = ` (${status.holdInfo.reason.replace(/_/g, " ")})`;
-      } else if (visualState === "partial") {
-        statusNote = " (partial)";
-      }
-    } catch (e) {
-      // Ignore
-    }
-  }
+  // Projects under this goal (with their own completion %)
+  const projects = goal.projects || [];
 
   // In private mode, mask goal content
   const displayTitle = privateMode ? "[goal hidden]" : title;
-  const displayProject = privateMode ? "[project]" : (projectName + statusNote);
 
   return e(
     Box,
-    { flexDirection: "row", marginBottom: 1 },
-    // Left column: indicator (fixed width for grid alignment)
+    { flexDirection: "column", marginBottom: 1 },
+    // Goal row with percentage
     e(
       Box,
-      { width: 2, flexShrink: 0 },
-      e(Text, { color: indicatorColor }, indicator)
+      { flexDirection: "row" },
+      // Left column: indicator (fixed width for grid alignment)
+      e(
+        Box,
+        { width: 2, flexShrink: 0 },
+        e(Text, { color: indicatorColor }, indicator)
+      ),
+      // Right column: goal text with percentage
+      e(
+        Box,
+        { flexDirection: "row", flexGrow: 1 },
+        // Goal title
+        e(Text, { color: privateMode ? "#475569" : "#94a3b8", wrap: "wrap" }, displayTitle),
+        // Goal completion percentage
+        goalCompletion > 0 && e(Text, { color: getPercentColor(goalCompletion) }, ` ${goalCompletion}%`)
+      )
     ),
-    // Right column: goal text and project (can wrap)
-    e(
+    // Projects under this goal (indented)
+    projects.length > 0 && projects.slice(0, 2).map((proj, i) =>
+      e(
+        Box,
+        { key: proj.id || `proj-${i}`, flexDirection: "row", marginLeft: 2 },
+        e(Text, { color: "#475569" }, "└ "),
+        e(Text, { color: "#475569", wrap: "wrap" },
+          privateMode ? "[project]" : truncateToLines(proj.name || proj.title || "Project", 1, 20)
+        ),
+        e(Text, { color: getPercentColor(proj.completion || 0) },
+          ` ${proj.completion || 0}%`
+        )
+      )
+    ),
+    // If no projects, show category
+    projects.length === 0 && e(
       Box,
-      { flexDirection: "column", flexGrow: 1 },
-      // Goal title (light gray, can wrap)
-      e(Text, { color: privateMode ? "#475569" : "#94a3b8", wrap: "wrap" }, displayTitle),
-      // Project name below in darker gray
-      e(Text, { color: "#475569", dimColor: true, wrap: "wrap" }, displayProject)
+      { flexDirection: "row", marginLeft: 2 },
+      e(Text, { color: "#475569", dimColor: true },
+        privateMode ? "[category]" : (goal.category || goal.project || "General")
+      )
     )
   );
 });
@@ -266,24 +300,35 @@ const SmartGoalsPanelBase = ({
       const tracker = getGoalTracker();
       const allGoals = tracker.getAll();
 
+      // Get project manager for completion data
+      let projectManager;
+      let projectsByGoal = {};
+      try {
+        projectManager = getProjectManager();
+        projectsByGoal = projectManager.getProjectsByGoal();
+      } catch (e) {
+        // Project manager not available
+      }
+
       // Reactivate completed goals whose project is still active/working
       try {
-        const projectManager = getProjectManager();
-        const projects = projectManager.listProjects();
-        const activeProjectNames = new Set(
-          projects
-            .filter(p => {
-              const s = (p.status || "").toLowerCase();
-              return s.includes("active") || s.includes("progress") || s.includes("working");
-            })
-            .map(p => p.name.toLowerCase())
-        );
+        if (projectManager) {
+          const projects = projectManager.listProjects();
+          const activeProjectNames = new Set(
+            projects
+              .filter(p => {
+                const s = (p.status || "").toLowerCase();
+                return s.includes("active") || s.includes("progress") || s.includes("working");
+              })
+              .map(p => p.name.toLowerCase())
+          );
 
-        for (const goal of allGoals) {
-          if (goal.status === "completed" && goal.project) {
-            const goalProjectName = goal.project.toLowerCase();
-            if (activeProjectNames.has(goalProjectName)) {
-              tracker.reopenGoal(goal.id);
+          for (const goal of allGoals) {
+            if (goal.status === "completed" && goal.project) {
+              const goalProjectName = goal.project.toLowerCase();
+              if (activeProjectNames.has(goalProjectName)) {
+                tracker.reopenGoal(goal.id);
+              }
             }
           }
         }
@@ -302,24 +347,52 @@ const SmartGoalsPanelBase = ({
         return (a.priority || 5) - (b.priority || 5);
       });
 
+      // Attach projects with completion % to each goal
+      const goalsWithProjects = sortedGoals.map(goal => {
+        // Find projects for this goal
+        const goalProjects = projectsByGoal[goal.id] || projectsByGoal[goal.title] || [];
+
+        // Calculate goal completion from projects (average) or use existing progress
+        let goalCompletion = goal.progress || 0;
+        if (goalProjects.length > 0) {
+          const avgCompletion = Math.round(
+            goalProjects.reduce((sum, p) => sum + (p.completion || 0), 0) / goalProjects.length
+          );
+          goalCompletion = Math.max(goalCompletion, avgCompletion);
+        }
+
+        return {
+          ...goal,
+          completion: goalCompletion,
+          projects: goalProjects
+        };
+      });
+
       // If no active/on-hold goals, fall back to default projects
-      let displayGoals = sortedGoals;
-      const hasActiveOrHold = sortedGoals.some(g => g.status === "active" || g.status === "on_hold");
+      let displayGoals = goalsWithProjects;
+      const hasActiveOrHold = goalsWithProjects.some(g => g.status === "active" || g.status === "on_hold");
       if (!hasActiveOrHold) {
         try {
-          const projectManager = getProjectManager();
-          const projects = projectManager.listProjects();
-          const fallback = projects
-            .slice(0, 3)
-            .map((p) => ({
-              id: `project-${p.safeName || p.name}`,
-              title: p.name,
-              project: p.name,
-              // Default projects are never done - always show half-circle (◐)
-              status: "partial"
-            }));
-          if (fallback.length > 0) {
-            displayGoals = fallback;
+          if (projectManager) {
+            const projectsWithCompletion = projectManager.listProjectsWithCompletion();
+            const fallback = projectsWithCompletion
+              .slice(0, 3)
+              .map((p) => ({
+                id: `project-${p.safeName || p.name}`,
+                title: p.name,
+                project: p.name,
+                completion: p.completion || 0,
+                projects: [{
+                  id: p.safeName,
+                  name: p.name,
+                  completion: p.completion || 0
+                }],
+                // Default projects are never done - always show half-circle (◐)
+                status: "partial"
+              }));
+            if (fallback.length > 0) {
+              displayGoals = fallback;
+            }
           }
         } catch (e) {
           // Ignore fallback errors

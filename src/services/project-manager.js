@@ -739,7 +739,6 @@ class ProjectManager extends EventEmitter {
 
     this.addUpdate("task", `Added: ${task}`);
   }
-}
 
   /**
    * Calculate completion percentage for a project

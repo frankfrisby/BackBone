@@ -14,11 +14,13 @@ import { fileURLToPath } from "url";
 import { EngineState, saveState, loadState, logThinking, createCheckpoint } from "./state-persistence.js";
 import { TaskQueue, Task, PRIORITY, TASK_STATUS, getTaskQueue, saveTaskQueue } from "./task-queue.js";
 import { sendMessage, TASK_TYPES } from "./multi-ai.js";
+import { getGoalIntelligence } from "./goal-intelligence.js";
+import { getDataDir, getMemoryDir, getProjectsDir } from "./paths.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const MEMORY_DIR = path.join(__dirname, "../../memory");
-const PROJECTS_DIR = path.join(__dirname, "../../projects");
-const DATA_DIR = path.join(__dirname, "../../data");
+const MEMORY_DIR = getMemoryDir();
+const PROJECTS_DIR = getProjectsDir();
+const DATA_DIR = getDataDir();
 
 /**
  * Configuration
@@ -509,7 +511,7 @@ Provide a brief verification report.`;
   }
 
   /**
-   * REFLECT phase - Learn from completed work
+   * REFLECT phase - Learn from completed work + run goal intelligence
    */
   async reflect() {
     console.log("[AutonomousLoop] Reflecting...");
@@ -521,6 +523,8 @@ Provide a brief verification report.`;
     const completed = this.queue.completedTasks.slice(0, 10);
 
     if (completed.length === 0) {
+      // Even without completed tasks, run goal intelligence cycle
+      await this.runGoalIntelligenceCycle();
       return;
     }
 
@@ -554,7 +558,23 @@ Be concise and actionable.`;
     this.lastReflection = new Date();
     this.emit("reflected", { insights });
 
+    // Run goal intelligence cycle (learn, evaluate, plan, propose)
+    await this.runGoalIntelligenceCycle();
+
     return insights;
+  }
+
+  /**
+   * Run the goal intelligence cycle — learn, evaluate, plan, propose
+   */
+  async runGoalIntelligenceCycle() {
+    try {
+      const gi = getGoalIntelligence();
+      const result = await gi.runCycle();
+      console.log(`[AutonomousLoop] Goal intelligence cycle #${result.cycleCount} complete`);
+    } catch (e) {
+      console.error("[AutonomousLoop] Goal intelligence cycle failed:", e.message);
+    }
   }
 
   /**

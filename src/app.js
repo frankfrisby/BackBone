@@ -148,6 +148,7 @@ import { analyzeAllPositions, getPositionContext, explainWhyHeld } from "./servi
 
 // New autonomous system imports
 import { getAutonomousEngine, AI_ACTION_STATUS, AI_ACTION_TYPES, EXECUTION_TOOLS } from "./services/autonomous-engine.js";
+import { getEngineSupervisor } from "./services/engine-supervisor.js";
 import { getGoalManager, WORK_PHASES, GOAL_PRIORITY } from "./services/goal-manager.js";
 import { getToolExecutor, TOOL_TYPES, EXECUTION_STATUS } from "./services/tool-executor.js";
 import { getClaudeOrchestrator, EVALUATION_DECISION, ORCHESTRATION_STATE } from "./services/claude-orchestrator.js";
@@ -163,6 +164,7 @@ import { getLifeEngine } from "./services/life-engine.js";
 import { getMobileService } from "./services/mobile.js";
 import { sendWhatsAppMessage, isPhoneVerified } from "./services/phone-auth.js";
 import { getChatActionsManager, RISK_LEVEL, ACTION_CATEGORY, CONFIRMATION_STATUS } from "./services/chat-actions.js";
+import { getSessionState, startFreshSession, recordAction, getResumeSummary } from "./services/session-state.js";
 import { WorkLogPanel } from "./components/work-log-panel.js";
 import { GoalProgressPanel } from "./components/goal-progress-panel.js";
 import { SmartGoalsPanel } from "./components/goals-panel.js";
@@ -410,8 +412,13 @@ async function _handleComplexMessage(userMessage, userId, aiBrain, channel = "ap
     if (!isReady) {
       console.log(`[App] Claude Code not ready, falling back to aiBrain.chat() for ${channel}`);
       const systemPrompt = buildContextualSystemPrompt(channel);
-      const response = await aiBrain.chat(userMessage, { userId, channel, systemPrompt });
-      return response.content;
+      try {
+        const response = await aiBrain.chat(userMessage, { userId, channel, systemPrompt });
+        return response.content;
+      } catch {
+        const result = await sendMultiAI(userMessage, { systemPrompt }, "auto");
+        return result.response;
+      }
     }
 
     const prompt = _buildMessageCLIPrompt(userMessage, channel);
@@ -436,14 +443,24 @@ async function _handleComplexMessage(userMessage, userId, aiBrain, channel = "ap
     // Fallback if execution didn't produce usable output
     console.log(`[App] Claude Code output not usable, falling back to aiBrain.chat() for ${channel}`);
     const systemPrompt = buildContextualSystemPrompt(channel);
-    const response = await aiBrain.chat(userMessage, { userId, channel, systemPrompt });
-    return response.content;
+    try {
+      const response = await aiBrain.chat(userMessage, { userId, channel, systemPrompt });
+      return response.content;
+    } catch {
+      const result = await sendMultiAI(userMessage, { systemPrompt }, "auto");
+      return result.response;
+    }
 
   } catch (error) {
     console.error(`[App] Complex ${channel} handler error:`, error.message);
     const systemPrompt = buildContextualSystemPrompt(channel);
-    const response = await aiBrain.chat(userMessage, { userId, channel, systemPrompt });
-    return response.content;
+    try {
+      const response = await aiBrain.chat(userMessage, { userId, channel, systemPrompt });
+      return response.content;
+    } catch {
+      const result = await sendMultiAI(userMessage, { systemPrompt }, "auto");
+      return result.response;
+    }
   }
 }
 
@@ -503,6 +520,18 @@ function _extractFinalResponse(output) {
   return lastAssistantText || output.substring(output.length - 1500);
 }
 
+function _isClaudeRateLimited(text) {
+  if (!text) return false;
+  const lower = text.toLowerCase();
+  return lower.includes("rate limit") ||
+    lower.includes("rate_limit") ||
+    lower.includes("429") ||
+    lower.includes("overloaded") ||
+    lower.includes("capacity") ||
+    lower.includes("too many requests") ||
+    lower.includes("quota exceeded");
+}
+
 const App = ({ updateConsoleTitle, updateState }) => {
   // Pre-render phase: render main view first (invisible) to set terminal rows, then show splash
   const [preRenderPhase, setPreRenderPhase] = useState(true);
@@ -519,6 +548,10 @@ const App = ({ updateConsoleTitle, updateState }) => {
     }, 500);
     return () => clearInterval(interval);
   }, []);
+
+  // Engine supervisor status for header display
+  const [engineHeaderStatus, setEngineHeaderStatus] = useState({ status: "stopped", uptimeStr: "0m", color: "#64748b" });
+  const engineSupervisorRef = useRef(null);
   const [activeCommand, setActiveCommand] = useState("/account");
   const [lastAction, setLastAction] = useState("Ready");
   // Persistent trade status: { type: "trade"|"no-trade", text: "Bought HIMS", color: "green"|"red" }
@@ -732,6 +765,14 @@ const App = ({ updateConsoleTitle, updateState }) => {
       // Start API server for web app (background process on port 3000)
       startApiServer().catch(err => console.error("[Boot] API server:", err.message));
 
+      // Initialize session state tracking
+      const sessionState = getSessionState();
+      const sessionInfo = sessionState.startSession();
+      if (sessionInfo.hasState && sessionInfo.isResume) {
+        const summary = sessionState.getResumeSummary();
+        console.log(`[Session] Resuming: ${summary.session.actionCount} actions, last: ${summary.workingOn || summary.currentGoal?.title || "none"}`);
+      }
+
       // Start cron manager — checks jobs every 60s
       const cronManager = getCronManager();
       cronManager.start();
@@ -806,6 +847,62 @@ const App = ({ updateConsoleTitle, updateState }) => {
           }
         } catch (e) {
           console.error("[Cron] Evening brief failed:", e.message);
+        }
+      });
+
+      // Prediction research - 8 PM primary run
+      cronManager.on("run:runPredictionResearch", async () => {
+        try {
+          const { runDailyPredictionResearch } = await import("./services/ticker-prediction-research.js");
+          const result = await runDailyPredictionResearch();
+          if (result.success) {
+            console.log(`[Cron] Prediction research: ${result.success}/${result.total} tickers researched`);
+          }
+        } catch (e) {
+          console.error("[Cron] Prediction research failed:", e.message);
+        }
+      });
+
+      // Prediction research fallback - 4 AM if primary missed
+      cronManager.on("run:runPredictionResearchFallback", async () => {
+        try {
+          const { getTickerPredictionResearch } = await import("./services/ticker-prediction-research.js");
+          const predictionService = getTickerPredictionResearch();
+
+          // Only run if primary didn't run yesterday/today
+          if (predictionService.needsFallbackRun()) {
+            console.log("[Cron] Prediction research fallback triggered - primary missed");
+            const result = await predictionService.runDailyResearch();
+            if (result.success) {
+              console.log(`[Cron] Prediction research fallback: ${result.success}/${result.total} tickers`);
+            }
+          } else {
+            console.log("[Cron] Prediction research fallback skipped - primary already ran");
+          }
+        } catch (e) {
+          console.error("[Cron] Prediction research fallback failed:", e.message);
+        }
+      });
+
+      // Overnight research - continuous 8 PM to 6 AM
+      cronManager.on("run:runOvernightResearch", async () => {
+        try {
+          const { getOvernightResearch } = await import("./services/overnight-research.js");
+          const overnightService = getOvernightResearch();
+
+          // Check if already running
+          if (overnightService.isRunning) {
+            console.log("[Cron] Overnight research already running");
+            return;
+          }
+
+          console.log("[Cron] Starting overnight research service");
+          // Start in background - it will run continuously until 6 AM
+          overnightService.start().catch(e => {
+            console.error("[Cron] Overnight research error:", e.message);
+          });
+        } catch (e) {
+          console.error("[Cron] Overnight research start failed:", e.message);
         }
       });
 
@@ -1161,6 +1258,12 @@ const App = ({ updateConsoleTitle, updateState }) => {
         return next;
       });
     }
+    if (key.ctrl && input === "f") {
+      // Ctrl+F: Start fresh session (clear session state)
+      startFreshSession();
+      setMessages([]);
+      setLastAction("Started fresh session");
+    }
     if (key.ctrl && key.shift && lower === "s") {
       // Ctrl+Shift+S: Open onboarding/setup wizard
       setShowOnboarding(true);
@@ -1409,6 +1512,42 @@ const App = ({ updateConsoleTitle, updateState }) => {
   const unifiedMessageLog = useMemo(() => getUnifiedMessageLog(), []);
   const whatsappNotifications = useMemo(() => getWhatsAppNotifications(), []);
 
+  // ── Broadcast CLI responses to WhatsApp + Firebase ──
+  // Sends AI responses to WhatsApp for mobile reading and saves to Firebase for persistence
+  const broadcastResponse = useCallback(async (responseText, source = "cli") => {
+    if (!responseText || responseText.length < 10) return;
+
+    // 1. Save to Firebase (Firestore) so user can read later
+    try {
+      if (realtimeMessaging?.userId) {
+        await realtimeMessaging.sendMessage(responseText, {
+          type: "ai",
+          metadata: { source, timestamp: new Date().toISOString() }
+        });
+      }
+    } catch (err) {
+      // Non-fatal — don't break the response flow
+      console.error("[Broadcast] Firebase save failed:", err.message);
+    }
+
+    // 2. Send to WhatsApp (truncate long responses for SMS readability)
+    try {
+      if (whatsappNotifications?.enabled && whatsappNotifications?.phoneNumber) {
+        const { getTwilioWhatsApp } = await import("./services/twilio-whatsapp.js");
+        const whatsapp = getTwilioWhatsApp();
+        if (whatsapp.initialized || await whatsapp.initialize?.()) {
+          // Truncate to 1500 chars for WhatsApp readability
+          const truncated = responseText.length > 1500
+            ? responseText.slice(0, 1500) + "..."
+            : responseText;
+          await whatsapp.sendMessage(whatsappNotifications.phoneNumber, truncated);
+        }
+      }
+    } catch (err) {
+      console.error("[Broadcast] WhatsApp send failed:", err.message);
+    }
+  }, [realtimeMessaging, whatsappNotifications]);
+
   // WhatsApp poll countdown state
   const [whatsappPollCountdown, setWhatsappPollCountdown] = useState(null);
   const [whatsappPollingMode, setWhatsappPollingMode] = useState("idle");
@@ -1479,9 +1618,37 @@ const App = ({ updateConsoleTitle, updateState }) => {
     return () => clearTimeout(timer);
   }, [showOnboarding, autonomousEngine, goalManager, aiBrain, toolExecutor]);
 
+  // ===== ENGINE SUPERVISOR — continuous running monitor =====
+  useEffect(() => {
+    if (showOnboarding) return;
+
+    const supervisor = getEngineSupervisor();
+    engineSupervisorRef.current = supervisor;
+
+    // Start supervisor (tracks sessions, gaps, auto-restart)
+    supervisor.start(autonomousEngine);
+
+    // Poll status every 5 seconds for header display
+    const updateStatus = () => {
+      try {
+        const status = supervisor.getHeaderStatus();
+        setEngineHeaderStatus(status);
+      } catch {}
+    };
+    updateStatus();
+    const statusInterval = setInterval(updateStatus, 5000);
+
+    return () => {
+      clearInterval(statusInterval);
+      supervisor.stop();
+    };
+  }, [showOnboarding, autonomousEngine]);
+
   // ===== WHATSAPP / REALTIME MESSAGING =====
   // Initialize realtime messaging and poll countdown
   const realtimeMessagingInitRef = useRef(false);
+  const hourlyReconcileTimeoutRef = useRef(null);
+  const hourlyReconcileIntervalRef = useRef(null);
 
   useEffect(() => {
     if (realtimeMessagingInitRef.current) return;
@@ -1592,6 +1759,27 @@ const App = ({ updateConsoleTitle, updateState }) => {
         // Start listening for messages
         await realtimeMessaging.startListening();
 
+        // Reconcile any pending WhatsApp replies on startup
+        await realtimeMessaging.reconcileWhatsAppReplies();
+
+        // Schedule hourly reconciliation on the hour
+        const scheduleHourlyReconcile = () => {
+          const now = new Date();
+          const next = new Date(now);
+          next.setMinutes(0, 0, 0);
+          if (next <= now) {
+            next.setHours(next.getHours() + 1);
+          }
+          const delay = next.getTime() - now.getTime();
+          hourlyReconcileTimeoutRef.current = setTimeout(async () => {
+            await realtimeMessaging.reconcileWhatsAppReplies();
+            hourlyReconcileIntervalRef.current = setInterval(async () => {
+              await realtimeMessaging.reconcileWhatsAppReplies();
+            }, 60 * 60 * 1000);
+          }, delay);
+        };
+        scheduleHourlyReconcile();
+
         realtimeMessagingInitRef.current = true;
         console.log("[App] Realtime messaging initialized");
       } catch (err) {
@@ -1601,7 +1789,17 @@ const App = ({ updateConsoleTitle, updateState }) => {
 
     // Delay to let other systems start
     const timer = setTimeout(initMessaging, 2000);
-    return () => clearTimeout(timer);
+    return () => {
+      clearTimeout(timer);
+      if (hourlyReconcileTimeoutRef.current) {
+        clearTimeout(hourlyReconcileTimeoutRef.current);
+        hourlyReconcileTimeoutRef.current = null;
+      }
+      if (hourlyReconcileIntervalRef.current) {
+        clearInterval(hourlyReconcileIntervalRef.current);
+        hourlyReconcileIntervalRef.current = null;
+      }
+    };
   }, [firebaseUser?.uid, showOnboarding, realtimeMessaging, whatsappNotifications, unifiedMessageLog, aiBrain]);
 
   // ===== PROACTIVE ENGINE → EXTERNAL CHANNELS =====
@@ -2735,14 +2933,18 @@ const App = ({ updateConsoleTitle, updateState }) => {
 
       // ===== QUOTA MONITOR EVENTS =====
       quotaMonitor.on("quota-exceeded", ({ provider, errorMessage }) => {
-        setQuotaExceeded(prev => ({
-          ...prev,
-          [provider]: true,
-          showAlert: true,
-          provider
-        }));
-        workLog.logError(LOG_SOURCE.SYSTEM, `${provider.toUpperCase()} Quota Exceeded`, "Add credits to continue using AI");
-        activityTracker.addObservation(`API quota exceeded - add credits at billing page`);
+        setQuotaExceeded(prev => {
+          // Only log and show alert if not already flagged (prevent repeated noise)
+          if (prev[provider]) return prev;
+          workLog.logError(LOG_SOURCE.SYSTEM, `${provider.toUpperCase()} Quota Exceeded`, "Using fallback models — add credits when ready");
+          activityTracker.addObservation(`${provider} API credits exhausted — system using fallback chain`);
+          return {
+            ...prev,
+            [provider]: true,
+            showAlert: true,
+            provider
+          };
+        });
       });
 
       quotaMonitor.on("quota-cleared", ({ provider }) => {
@@ -2825,6 +3027,26 @@ const App = ({ updateConsoleTitle, updateState }) => {
     const onStatus = (statusText) => {
       // Show status updates in the ENGINE panel
       if (statusText) {
+        // Filter out raw JSON responses (from Vapi, MCP, etc.)
+        const trimmed = statusText.trim();
+        if (trimmed.startsWith("{") || trimmed.startsWith("[") || trimmed.includes('"type":"')) {
+          // Skip raw JSON - don't display
+          return;
+        }
+
+        // Detect billing errors and pause engine
+        const lower = trimmed.toLowerCase();
+        if (lower.includes("credit balance") || lower.includes("billing") || lower.includes("insufficient")) {
+          // Billing error - pause and show clear message
+          setActionStreamingTitle("Billing Issue");
+          setActionStreamingText("⚠️ API credit balance is too low.\n\nCheck your Anthropic billing at:\nhttps://console.anthropic.com/settings/billing");
+          setCliStreaming(false);
+          // Pause the autonomous engine
+          const engine = getAutonomousEngine();
+          if (engine) engine.pause();
+          return;
+        }
+
         setCliStreaming(true);
         setActionStreamingText((prev) => {
           const lines = prev.split("\n").slice(-20); // Keep last 20 lines
@@ -3795,11 +4017,46 @@ Execute this task and provide concrete results.`);
       console.log(`[Backbone] Goal created from chat: ${goal.title}`);
     };
 
+    const handleActionConfirmationNeeded = async ({ actionId, message, stepIndex }) => {
+      const confirmationMessage = [
+        `Confirmation needed before step ${stepIndex + 1}:`,
+        message,
+        "",
+        'Reply "yes" to proceed or "no" to cancel.'
+      ].join("\n");
+
+      setMessages((prev) => [
+        ...prev,
+        { role: "assistant", content: confirmationMessage, timestamp: new Date() }
+      ]);
+      unifiedMessageLog.addAssistantMessage(confirmationMessage, MESSAGE_CHANNEL.CHAT, {
+        actionId,
+        stepIndex,
+        type: "action_confirmation"
+      });
+      setLastAction("Awaiting confirmation");
+
+      // Proactively notify external channels when available
+      if (firebaseUser?.uid) {
+        const routing = selectChannel(confirmationMessage, {
+          isProactive: true,
+          priority: 3,
+          userId: firebaseUser.uid
+        });
+        await routeResponse(confirmationMessage, routing.channel, {
+          chunks: routing.chunks,
+          userId: firebaseUser.uid,
+          pushTitle: "BACKBONE Confirmation"
+        });
+      }
+    };
+
     chatActions.on("action-progress", handleActionProgress);
     chatActions.on("action-started", handleActionStarted);
     chatActions.on("action-completed", handleActionCompleted);
     chatActions.on("action-failed", handleActionFailed);
     chatActions.on("goal-created", handleGoalCreated);
+    chatActions.on("action-confirmation-needed", handleActionConfirmationNeeded);
 
     return () => {
       chatActions.off("action-progress", handleActionProgress);
@@ -3807,8 +4064,9 @@ Execute this task and provide concrete results.`);
       chatActions.off("action-completed", handleActionCompleted);
       chatActions.off("action-failed", handleActionFailed);
       chatActions.off("goal-created", handleGoalCreated);
+      chatActions.off("action-confirmation-needed", handleActionConfirmationNeeded);
     };
-  }, []);
+  }, [firebaseUser?.uid, unifiedMessageLog]);
 
   // Save memory periodically
   useEffect(() => {
@@ -3878,6 +4136,11 @@ Execute this task and provide concrete results.`);
 
       // Check if any AI model is available
       if (!claudeConfig.ready && !multiAIConfig.ready) {
+        unifiedMessageLog.addAssistantMessage(
+          "No AI model configured. Add ANTHROPIC_API_KEY or OPENAI_API_KEY to your .env file.",
+          MESSAGE_CHANNEL.CHAT,
+          { source: "system" }
+        );
         setMessages((prev) => [
           ...prev,
           {
@@ -3890,6 +4153,9 @@ Execute this task and provide concrete results.`);
       }
 
       // Add user message and show conversation immediately
+      unifiedMessageLog.addUserMessage(userMessage, MESSAGE_CHANNEL.CHAT, {
+        source: "cli"
+      });
       setMessages((prev) => [
         ...prev,
         {
@@ -3905,6 +4171,9 @@ Execute this task and provide concrete results.`);
       trackUserQuery(userMessage, QUERY_SOURCE.CLI, {
         conversationId: Date.now().toString()
       });
+
+      // Wake engine from rest if it's sleeping (user query takes priority)
+      try { autonomousEngine.wakeFromRest(); } catch {}
 
       // Add to recent user queries for conversation display
       const queryId = `query-${Date.now()}`;
@@ -4000,11 +4269,23 @@ Execute this task and provide concrete results.`);
             if (event.type === "stdout") {
               extractToolEvents(event.text, "claude-code");
               const displayText = (event.output || "").slice(-500);
-              setActionStreamingText(displayText || "Processing...");
+              // Filter out raw JSON and billing errors
+              const trimmed = displayText.trim();
+              if (!trimmed.startsWith("{") && !trimmed.startsWith("[") && !trimmed.includes('"type":"')) {
+                if (trimmed.toLowerCase().includes("credit balance")) {
+                  setActionStreamingText("⚠️ API credit balance is too low");
+                } else {
+                  setActionStreamingText(displayText || "Processing...");
+                }
+              }
             } else if (event.type === "stderr") {
               extractToolEvents(event.text, "claude-code");
               const displayText = (event.error || "").slice(-500);
-              if (displayText) setActionStreamingText(displayText);
+              // Filter out raw JSON
+              const trimmed = (displayText || "").trim();
+              if (displayText && !trimmed.startsWith("{") && !trimmed.startsWith("[")) {
+                setActionStreamingText(displayText);
+              }
             } else if (event.type === "done") {
               // Don't clear streaming text here — let the result handler below
               // add the final message, which will naturally replace the streaming display.
@@ -4026,8 +4307,11 @@ Execute this task and provide concrete results.`);
         const errorText = (result.error || "").trim();
 
         // Check if we got a meaningful response
-        if (result.success && outputText) {
+        if (result.success && outputText && !_isClaudeRateLimited(outputText)) {
           const resultMessage = outputText.slice(-2000);
+          unifiedMessageLog.addAssistantMessage(resultMessage, MESSAGE_CHANNEL.CHAT, {
+            source: "claude-code"
+          });
           setMessages((prev) => [
             ...prev,
             {
@@ -4044,6 +4328,9 @@ Execute this task and provide concrete results.`);
             category: conversationTracker.categorizeMessage(userMessage)
           });
 
+          // Broadcast to WhatsApp + Firebase
+          broadcastResponse(resultMessage, "claude-code");
+
           // Keep last streaming output visible - don't clear actionStreamingText
           setActionStreamingTitle("Completed");
           setIsProcessing(false);
@@ -4052,8 +4339,86 @@ Execute this task and provide concrete results.`);
           return;
         }
 
-        // Claude Code CLI returned empty or failed - do not fall back to API
+        // Claude Code CLI returned empty or failed
         const fallbackMessage = errorText || "Claude Code CLI returned no response.";
+        const rateLimited = _isClaudeRateLimited(fallbackMessage) || _isClaudeRateLimited(outputText);
+
+        if (rateLimited) {
+          setActionStreamingTitle("Claude Code rate limited — switching to Codex");
+          setCliStreaming(false);
+          setIsProcessing(true);
+          try {
+            const result = await sendMultiAI(userMessage, {
+              user: fileContext.user,
+              linkedIn: fileContext.linkedIn,
+              profile: fileContext.profile,
+              portfolio: {
+                equity: portfolio.equity,
+                cash: portfolio.cash,
+                dayPL: portfolio.dayPL,
+                dayPLPercent: portfolio.dayPLPercent,
+                positions: portfolio.positions?.slice(0, 5)
+              },
+              goals: fileContext.goals || profile.goals,
+              lifeScores: fileContext.lifeScores,
+              projects: fileContext.projects,
+              topTickers: tickers.slice(0, 5).map((t) => ({ symbol: t.symbol, score: t.score })),
+              health: ouraHealth?.today || ouraHealth || null,
+              netWorth: plaidData?.netWorth ? {
+                total: plaidData.netWorth.total,
+                assets: plaidData.netWorth.assets,
+                liabilities: plaidData.netWorth.liabilities,
+                accounts: plaidData.accountCount
+              } : null,
+              education: profile.education || null,
+              userContext: savedUserContext,
+              conversationHistory: fileContext.conversationHistory,
+              recentMessages: messages.slice(-5).map(m => ({ role: m.role, content: m.content.slice(0, 300) }))
+            }, "auto");
+
+            let resolvedModelInfo = result.modelInfo || null;
+            if (resolvedModelInfo) {
+              resolvedModelInfo = buildModelDisplayInfo(resolvedModelInfo, result.taskType) || { ...resolvedModelInfo, taskType: result.taskType };
+              setCurrentModelInfo(resolvedModelInfo);
+            }
+            unifiedMessageLog.addAssistantMessage(result.response, MESSAGE_CHANNEL.CHAT, {
+              source: "openai"
+            });
+            setMessages((prev) => [
+              ...prev,
+              {
+                role: "assistant",
+                content: result.response,
+                timestamp: new Date(),
+                model: result.model,
+                modelInfo: resolvedModelInfo || result.modelInfo
+              }
+            ]);
+
+            // Broadcast to WhatsApp + Firebase
+            broadcastResponse(result.response, "openai-fallback");
+          } catch (error) {
+            unifiedMessageLog.addAssistantMessage(`Error: ${error.message}`, MESSAGE_CHANNEL.CHAT, {
+              source: "openai"
+            });
+            setMessages((prev) => [
+              ...prev,
+              {
+                role: "assistant",
+                content: `Error: ${error.message}`,
+                timestamp: new Date()
+              }
+            ]);
+          }
+          setIsProcessing(false);
+          setCliStreaming(false);
+          engineState.setStatus("idle");
+          return;
+        }
+
+        unifiedMessageLog.addSystemMessage(`Claude CLI: ${fallbackMessage}`, {
+          source: "claude-code"
+        });
         setMessages((prev) => [
           ...prev,
           {
@@ -4128,6 +4493,10 @@ Execute this task and provide concrete results.`);
                   displayName: chunk.model?.includes("opus") ? "Opus 4.5" :
                                chunk.model?.includes("sonnet") ? "Sonnet" : "Claude Code"
                 };
+                unifiedMessageLog.addAssistantMessage(fullText, MESSAGE_CHANNEL.CHAT, {
+                  source: "claude-api",
+                  model: chunk.model || "claude"
+                });
                 setMessages((prev) => [
                   ...prev,
                   {
@@ -4145,7 +4514,13 @@ Execute this task and provide concrete results.`);
                 conversationTracker.record(userMessage, fullText, {
                   category: conversationTracker.categorizeMessage(userMessage)
                 });
+
+                // Broadcast to WhatsApp + Firebase
+                broadcastResponse(fullText, "claude-api");
               } else if (chunk.type === "error") {
+                unifiedMessageLog.addAssistantMessage(`Error: ${chunk.error}`, MESSAGE_CHANNEL.CHAT, {
+                  source: "claude-api"
+                });
                 setMessages((prev) => [
                   ...prev,
                   {
@@ -4162,6 +4537,9 @@ Execute this task and provide concrete results.`);
             context
           );
         } catch (error) {
+          unifiedMessageLog.addAssistantMessage(`Error: ${error.message}`, MESSAGE_CHANNEL.CHAT, {
+            source: "claude-api"
+          });
           setMessages((prev) => [
             ...prev,
             {
@@ -4184,6 +4562,9 @@ Execute this task and provide concrete results.`);
             resolvedModelInfo = buildModelDisplayInfo(resolvedModelInfo, result.taskType) || { ...resolvedModelInfo, taskType: result.taskType };
             setCurrentModelInfo(resolvedModelInfo);
           }
+          unifiedMessageLog.addAssistantMessage(result.response, MESSAGE_CHANNEL.CHAT, {
+            source: "openai"
+          });
           setMessages((prev) => [
             ...prev,
             {
@@ -4201,6 +4582,9 @@ Execute this task and provide concrete results.`);
           conversationTracker.record(userMessage, result.response, {
             category: conversationTracker.categorizeMessage(userMessage)
           });
+
+          // Broadcast to WhatsApp + Firebase
+          broadcastResponse(result.response, "openai");
 
           // Check if user is expressing goals/priorities and offer to create goals
           const goalIndicators = [
@@ -4224,6 +4608,9 @@ Execute this task and provide concrete results.`);
             }, 1500);
           }
         } catch (error) {
+          unifiedMessageLog.addAssistantMessage(`Error: ${error.message}`, MESSAGE_CHANNEL.CHAT, {
+            source: "openai"
+          });
           setMessages((prev) => [
             ...prev,
             {
@@ -4863,6 +5250,13 @@ Execute this task and provide concrete results.`);
     if (idleProcessorRef.current) {
       idleProcessorRef.current.recordUserActivity();
     }
+
+    // Record action in session state for persistence
+    recordAction({
+      type: resolved.startsWith("/") ? "command" : "query",
+      description: resolved.slice(0, 100),
+      metadata: { timestamp: new Date().toISOString() }
+    });
 
     if (setupOverlay.active) {
       closeSetupOverlay();
@@ -9385,6 +9779,10 @@ Folder: ${result.action.id}`,
       // Check if this is a response to a pending confirmation
       if (pendingConfirmation && chatActions.isConfirmationResponse(trimmed)) {
         setLastAction("Processing confirmation...");
+        unifiedMessageLog.addUserMessage(trimmed, MESSAGE_CHANNEL.CHAT, {
+          source: "cli",
+          confirmationResponse: true
+        });
         setMessages((prev) => [
           ...prev,
           { role: "user", content: trimmed, timestamp: new Date() }
@@ -9394,6 +9792,9 @@ Folder: ${result.action.id}`,
           const confirmResult = await chatActions.processConfirmationResponse(trimmed);
           if (confirmResult.handled) {
             setPendingConfirmation(null);
+            unifiedMessageLog.addAssistantMessage(confirmResult.response, MESSAGE_CHANNEL.CHAT, {
+              source: "confirmation"
+            });
             setMessages((prev) => [
               ...prev,
               { role: "assistant", content: confirmResult.response, timestamp: new Date() }
@@ -9415,6 +9816,10 @@ Folder: ${result.action.id}`,
       if (awaitingPriority) {
         const priority = chatActions.parsePriorityResponse(trimmed);
         if (priority !== null) {
+          unifiedMessageLog.addUserMessage(trimmed, MESSAGE_CHANNEL.CHAT, {
+            source: "cli",
+            priorityResponse: true
+          });
           setMessages((prev) => [
             ...prev,
             { role: "user", content: trimmed, timestamp: new Date() }
@@ -9426,10 +9831,21 @@ Folder: ${result.action.id}`,
             if (awaitingPriority.goal) {
               awaitingPriority.goal.priority = priority;
               await goalManager.setCurrentGoal(awaitingPriority.goal);
+              // Track goal in session state for persistence
+              getSessionState().setCurrentGoal({
+                title: awaitingPriority.goal.title,
+                priority,
+                category: awaitingPriority.goal.category,
+                setAt: new Date().toISOString()
+              });
             }
+            const priorityMessage = `Got it! I've set this as ${["", "urgent", "high", "medium", "low"][priority]} priority and added it to your goals.`;
+            unifiedMessageLog.addAssistantMessage(priorityMessage, MESSAGE_CHANNEL.CHAT, {
+              source: "priority"
+            });
             setMessages((prev) => [
               ...prev,
-              { role: "assistant", content: `Got it! I've set this as ${["", "urgent", "high", "medium", "low"][priority]} priority and added it to your goals.`, timestamp: new Date() }
+              { role: "assistant", content: priorityMessage, timestamp: new Date() }
             ]);
           } catch (e) {
             console.error("[Backbone] Failed to update priority:", e.message);
@@ -9448,6 +9864,10 @@ Folder: ${result.action.id}`,
 
         if (actionResult.isActionable) {
           // Add user message
+          unifiedMessageLog.addUserMessage(trimmed, MESSAGE_CHANNEL.CHAT, {
+            source: "cli",
+            actionRequest: true
+          });
           setMessages((prev) => [
             ...prev,
             { role: "user", content: trimmed, timestamp: new Date() }
@@ -9457,6 +9877,9 @@ Folder: ${result.action.id}`,
           if (actionResult.needsPriority) {
             // AI wants to ask about priority
             setAwaitingPriority({ goal: actionResult.goal, analysis: actionResult.analysis });
+            unifiedMessageLog.addAssistantMessage(actionResult.response, MESSAGE_CHANNEL.CHAT, {
+              source: "priority"
+            });
             setMessages((prev) => [
               ...prev,
               { role: "assistant", content: actionResult.response, timestamp: new Date() }
@@ -9468,6 +9891,9 @@ Folder: ${result.action.id}`,
           if (actionResult.needsConfirmation) {
             // Action needs user confirmation
             setPendingConfirmation(actionResult.pendingAction);
+            unifiedMessageLog.addAssistantMessage(actionResult.response, MESSAGE_CHANNEL.CHAT, {
+              source: "confirmation"
+            });
             setMessages((prev) => [
               ...prev,
               { role: "assistant", content: actionResult.response, timestamp: new Date() }
@@ -9478,6 +9904,9 @@ Folder: ${result.action.id}`,
 
           if (actionResult.executed) {
             // Action was executed (low/medium risk)
+            unifiedMessageLog.addAssistantMessage(actionResult.response, MESSAGE_CHANNEL.CHAT, {
+              source: "action"
+            });
             setMessages((prev) => [
               ...prev,
               { role: "assistant", content: actionResult.response, timestamp: new Date() }
@@ -9486,6 +9915,9 @@ Folder: ${result.action.id}`,
 
             // If there's also a goal, mention it
             if (actionResult.goal) {
+              unifiedMessageLog.addAssistantMessage(`Added to goals: "${actionResult.goal.title}"`, MESSAGE_CHANNEL.CHAT, {
+                source: "goals"
+              });
               setMessages((prev) => [
                 ...prev,
                 { role: "assistant", content: `Added to goals: "${actionResult.goal.title}"`, timestamp: new Date(), isGoalNotice: true }
@@ -10331,7 +10763,25 @@ Folder: ${result.action.id}`,
               : e(Box, { flexDirection: "row" },
                   e(Text, { color: "#ef4444", bold: true }, "OFFLINE "),
                   e(Text, { color: "#ef4444" }, "✕")
-                )
+                ),
+            // Engine running status — shows uptime and pulsing indicator
+            e(Text, { color: "#475569" }, " · "),
+            e(Box, { flexDirection: "row" },
+              e(Text, { color: engineHeaderStatus.color, bold: true },
+                engineHeaderStatus.status === "running" ? "ENGINE " :
+                engineHeaderStatus.status === "resting" ? "RESTING " :
+                engineHeaderStatus.status === "stalled" ? "STALLED " :
+                engineHeaderStatus.status === "paused" ? "PAUSED " : "ENGINE OFF "
+              ),
+              e(Text, { color: engineHeaderStatus.status === "running"
+                ? (pulsingDotVisible ? "#22c55e" : "#14532d")
+                : engineHeaderStatus.status === "resting"
+                ? (pulsingDotVisible ? "#3b82f6" : "#1e3a5f")
+                : engineHeaderStatus.color }, "●"),
+              engineHeaderStatus.status === "resting" && engineHeaderStatus.restStatus
+                ? e(Text, { color: "#64748b" }, ` ${engineHeaderStatus.restStatus.remainingMin}/${engineHeaderStatus.restStatus.totalRestMin}m`)
+                : engineHeaderStatus.uptimeStr && e(Text, { color: "#64748b" }, ` ${engineHeaderStatus.uptimeStr}`)
+            )
           ),
           // Right: Profile completeness + User name and profession from LinkedIn
           e(
@@ -10385,7 +10835,7 @@ Folder: ${result.action.id}`,
           const targetPerson = getTargetPerson(connectedData);
           const progressData = getProgressResearch().getProgressComparison();
 
-          const userName = firebaseUserDisplay ? firebaseUserDisplay.split(" ")[0] : "Frank";
+          const userName = linkedInProfile?.name?.split(" ")[0] || firebaseUserName?.split(" ")[0] || "Frank";
           const userScore = progressData?.user?.score || 0;
           const targetName = targetPerson.name;
           const targetScore = targetPerson.score;
@@ -10631,7 +11081,7 @@ Folder: ${result.action.id}`,
         // CHAT INPUT - Compact mode (no header/footer)
         e(
           Box,
-          { marginTop: 1 },
+          { marginTop: 1, width: "100%", flexGrow: 1 },
           setupOverlay.active
             ? e(SetupOverlay, { title: "Setup", tabs: [], onCancel: closeSetupOverlay, onComplete: closeSetupOverlay })
             : e(ChatPanel, { commands: COMMANDS, onSubmit, onTypingChange: handleTypingChange, modelInfo: currentModelInfo, compact: true })
@@ -10668,7 +11118,7 @@ Folder: ${result.action.id}`,
             ...(() => {
               const outcomeItems = [];
 
-              // 1. Completed goals (green dots)
+              // 1. Completed goals (green dots with 100%)
               try {
                 const completedGoals = getGoalTracker().getAll().filter(g => g.status === "completed");
                 for (const goal of completedGoals) {
@@ -10679,7 +11129,8 @@ Folder: ${result.action.id}`,
                     Box,
                     { key: `cg-${outcomeItems.length}`, flexDirection: "row", marginBottom: 1 },
                     e(Text, { color: "#22c55e" }, "●  "),
-                    e(Text, { color: "#22c55e", wrap: "wrap" }, label.slice(0, 80))
+                    e(Text, { color: "#22c55e", wrap: "wrap" }, label.slice(0, 70)),
+                    e(Text, { color: "#22c55e", bold: true }, " 100%")
                   ));
                 }
               } catch (err) { /* ignore */ }
@@ -10827,6 +11278,23 @@ Folder: ${result.action.id}`,
           e(Text, { color: "#38bdf8" }, "Ctrl+S"),
           e(Text, { color: "#64748b" }, "setup"),
           e(Text, { color: "#334155" }, "|"),
+          // Session state indicator with Ctrl+F hint
+          (() => {
+            const sessionState = getSessionState();
+            const hasState = sessionState.hasResumableState();
+            const stats = sessionState.getStats();
+            if (hasState) {
+              return [
+                e(Text, { key: "session-icon", color: "#22c55e" }, "●"),
+                e(Text, { key: "session-count", color: "#64748b" }, `${stats.actionCount}`),
+                e(Text, { key: "session-sep", color: "#334155" }, "|"),
+                e(Text, { key: "fresh-key", color: "#38bdf8" }, "^F"),
+                e(Text, { key: "fresh-label", color: "#64748b" }, "fresh"),
+                e(Text, { key: "sep2", color: "#334155" }, "|")
+              ];
+            }
+            return null;
+          })(),
           e(Text, { color: "#f59e0b" }, "/"),
           e(Text, { color: "#64748b" }, "cmds")
         )

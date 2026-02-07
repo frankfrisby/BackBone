@@ -10,6 +10,9 @@ import { getActionScheduler, ACTION_PRIORITY, ACTION_STATUS } from "./action-sch
 import { getProjectManager } from "./project-manager.js";
 import { getWorkerCoordination, WORKER_MODE } from "./worker-coordination.js";
 import { showActivityTitle, showNotificationTitle, restoreBaseTitle } from "./terminal-resize.js";
+import { getActionApproval, APPROVAL_REQUIRED_ACTIONS, APPROVAL_STATUS } from "./action-approval.js";
+import { getEngineHeartbeat } from "./engine-heartbeat.js";
+import { calculateDataCompleteness } from "./thinking-engine.js";
 
 /**
  * Autonomous Engine for BACKBONE
@@ -179,10 +182,132 @@ export class AutonomousEngine extends EventEmitter {
     this.maxActionsPerGoal = 50;
     this.actionCount = 0;
 
+    // Thinking / generation throttle
+    this.lastGoalGeneration = 0;
+    this.goalGenerationCooldownMs = 10 * 60 * 1000; // 10 minutes between generation attempts
+
+    // Work-rest cycle (long-horizon continuous operation)
+    // Rest period is DYNAMIC based on data completeness score:
+    //   < 15%  → 15 min  (new system, work hard to build foundation)
+    //  15-30%  → 30 min  (early, still aggressive)
+    //  30-50%  → 45 min  (growing, moderate pace)
+    //  50-70%  → 60 min  (maturing, standard pace)
+    //  70-85%  → 90 min  (mature, lighter maintenance)
+    //    85%+  → 120 min (very complete, maintenance mode)
+    this.restPeriodMs = this._calculateRestPeriod();
+    this.isResting = false;
+    this.restUntil = 0;               // timestamp when rest ends
+    this.restWakeResolve = null;       // resolve function to interrupt rest
+    this.lastSessionId = null;         // Claude Code session ID for --resume
+    this.cycleCount = 0;
+
     // Action scheduler and project integration
     this.actionScheduler = null;
     this.projectManager = null;
     this.currentProject = null;
+  }
+
+  /**
+   * Calculate rest period based on data completeness score.
+   * Lower completeness = shorter rest (more work to do).
+   * Higher completeness = longer rest (maintenance mode).
+   */
+  _calculateRestPeriod() {
+    try {
+      const { percentage } = calculateDataCompleteness();
+      let restMs;
+      if (percentage < 15)      restMs = 15 * 60 * 1000;   // 15 min
+      else if (percentage < 30) restMs = 30 * 60 * 1000;   // 30 min
+      else if (percentage < 50) restMs = 45 * 60 * 1000;   // 45 min
+      else if (percentage < 70) restMs = 60 * 60 * 1000;   // 60 min
+      else if (percentage < 85) restMs = 90 * 60 * 1000;   // 90 min
+      else                      restMs = 120 * 60 * 1000;  // 120 min
+      console.log(`[AutonomousEngine] Data completeness: ${percentage}% → rest ${Math.round(restMs / 60000)}m`);
+      return restMs;
+    } catch {
+      return 30 * 60 * 1000; // fallback 30 min
+    }
+  }
+
+  /**
+   * Interruptible rest — sleeps for restPeriodMs but wakes immediately
+   * if wakeFromRest() is called (e.g., user asks a question)
+   */
+  async restBetweenCycles(reason = "rate-limit cooldown") {
+    // Recalculate rest period each cycle (completeness changes as engine works)
+    this.restPeriodMs = this._calculateRestPeriod();
+    this.isResting = true;
+    this.restUntil = Date.now() + this.restPeriodMs;
+    this.setEngineState("resting");
+
+    const restMinutes = Math.round(this.restPeriodMs / 60000);
+    console.log(`[AutonomousEngine] Resting ${restMinutes}m (${reason})`);
+    if (this.narrator) {
+      this.narrator.observe(`Resting ${restMinutes}m — ${reason}`);
+    }
+    if (this.heartbeat) this.heartbeat.beat(`rest-start: ${reason}`);
+
+    // Log rest state for header display
+    this.emit("rest-start", { restUntil: this.restUntil, reason });
+
+    // Interruptible sleep — heartbeat continues during rest
+    const heartbeatDuringRest = setInterval(() => {
+      if (this.heartbeat) {
+        const remaining = Math.max(0, this.restUntil - Date.now());
+        const remainMin = Math.round(remaining / 60000);
+        this.heartbeat.beat(`resting: ${remainMin}m left`);
+      }
+    }, 60_000);
+
+    try {
+      await new Promise((resolve) => {
+        this.restWakeResolve = resolve;
+        setTimeout(() => {
+          this.restWakeResolve = null;
+          resolve("timeout");
+        }, this.restPeriodMs);
+      });
+    } finally {
+      clearInterval(heartbeatDuringRest);
+      this.isResting = false;
+      this.restUntil = 0;
+      this.emit("rest-end");
+    }
+
+    console.log("[AutonomousEngine] Rest complete, resuming work");
+    if (this.narrator) this.narrator.observe("Rest complete — resuming work");
+    if (this.heartbeat) this.heartbeat.beat("rest-end");
+  }
+
+  /**
+   * Wake from rest early — called when user sends a message
+   */
+  wakeFromRest() {
+    if (this.isResting && this.restWakeResolve) {
+      console.log("[AutonomousEngine] Woken from rest (user activity)");
+      if (this.narrator) this.narrator.observe("Woken from rest — user needs attention");
+      this.restWakeResolve("user-wake");
+      this.restWakeResolve = null;
+    }
+  }
+
+  /**
+   * Get rest status for UI
+   */
+  getRestStatus() {
+    if (!this.isResting) return null;
+    const remaining = Math.max(0, this.restUntil - Date.now());
+    const totalRestMin = Math.round(this.restPeriodMs / 60000);
+    let completeness = 0;
+    try { completeness = calculateDataCompleteness().percentage; } catch {}
+    return {
+      resting: true,
+      remainingMs: remaining,
+      remainingMin: Math.round(remaining / 60000),
+      totalRestMin,
+      completeness,
+      restUntil: new Date(this.restUntil).toISOString()
+    };
   }
 
   /**
@@ -343,9 +468,24 @@ export class AutonomousEngine extends EventEmitter {
   /**
    * Set the current goal directly
    * Also switches to the appropriate project context
+   * NEW: Requires user approval before starting significant goals
    */
-  async setCurrentGoal(goal) {
+  async setCurrentGoal(goal, options = {}) {
+    const { skipApproval = false, approved = false } = options;
+
+    // If approval is required and not yet approved, request it
+    if (goal && !skipApproval && !approved && !this.goalApprovals?.has(goal.id)) {
+      const approval = await this.requestGoalApproval(goal);
+      if (approval) {
+        // Wait for approval - don't start goal yet
+        this.pendingGoal = goal;
+        this.emit("awaiting-approval", { goal, approval });
+        return false;
+      }
+    }
+
     this.currentGoal = goal;
+    this.pendingGoal = null;
     this.actionHistory = [];
     this.actionCount = 0;
 
@@ -364,6 +504,88 @@ export class AutonomousEngine extends EventEmitter {
     }
 
     this.emit("goal-set", goal);
+    return true;
+  }
+
+  /**
+   * Request approval for a goal before starting it
+   */
+  async requestGoalApproval(goal) {
+    if (!goal) return null;
+
+    // Skip approval for research-only or low-impact goals
+    const lowImpactKeywords = ["research", "analyze", "review", "check", "monitor"];
+    const isLowImpact = lowImpactKeywords.some(k => goal.title?.toLowerCase().includes(k));
+    if (isLowImpact) return null;
+
+    // Build context explaining why this goal matters
+    const actionApproval = getActionApproval();
+    const beliefs = this.contextProviders.beliefs ? await this.contextProviders.beliefs() : [];
+    const goals = this.contextProviders.goals ? await this.contextProviders.goals() : [];
+
+    const context = actionApproval.buildActionContext({
+      title: goal.title,
+      description: goal.description || goal.title,
+      metadata: goal
+    }, { beliefs, goals });
+
+    // Determine the action type
+    let actionType = APPROVAL_REQUIRED_ACTIONS.START_GOAL;
+    if (goal.title?.toLowerCase().includes("apply")) {
+      actionType = APPROVAL_REQUIRED_ACTIONS.APPLY_TO_PROGRAM;
+    } else if (goal.title?.toLowerCase().includes("buy") || goal.title?.toLowerCase().includes("sell")) {
+      actionType = APPROVAL_REQUIRED_ACTIONS.TRADE_STOCK;
+    } else if (goal.title?.toLowerCase().includes("email") || goal.title?.toLowerCase().includes("message")) {
+      actionType = APPROVAL_REQUIRED_ACTIONS.SEND_MESSAGE;
+    }
+
+    // Request approval
+    const approval = await actionApproval.requestApproval({
+      type: actionType,
+      title: goal.title,
+      description: goal.description || `Start working on: ${goal.title}`,
+      context: {
+        whyMatters: context.whyMatters || `This goal is in your ${goal.category || "general"} category.`,
+        whyNow: context.whyNow || (goal.priority === 1 ? "This is your highest priority goal." : "This aligns with your current focus."),
+        bigPicture: context.bigPicture || "Part of your life optimization journey.",
+        benefits: goal.expectedOutcome || "Progress toward your goals.",
+        risks: "Time investment required."
+      },
+      urls: goal.urls || [],
+      metadata: { goalId: goal.id, category: goal.category, priority: goal.priority }
+    });
+
+    return approval;
+  }
+
+  /**
+   * Handle approval response for a pending goal
+   */
+  async handleApprovalResponse(approvalId, approved) {
+    if (!this.pendingGoal) return;
+
+    if (!this.goalApprovals) {
+      this.goalApprovals = new Set();
+    }
+
+    if (approved) {
+      // Mark goal as approved and start it
+      this.goalApprovals.add(this.pendingGoal.id);
+      await this.setCurrentGoal(this.pendingGoal, { approved: true });
+
+      if (this.narrator) {
+        this.narrator.observe(`Goal approved: ${this.pendingGoal.title}`);
+      }
+
+      this.emit("goal-approved", this.pendingGoal);
+    } else {
+      // Goal rejected - clear it
+      if (this.narrator) {
+        this.narrator.observe(`Goal rejected: ${this.pendingGoal.title}`);
+      }
+      this.emit("goal-rejected", this.pendingGoal);
+      this.pendingGoal = null;
+    }
   }
 
   /**
@@ -611,6 +833,11 @@ export class AutonomousEngine extends EventEmitter {
       this.loopInterval = null;
     }
 
+    // Stop heartbeat tracking
+    if (this.heartbeat) {
+      this.heartbeat.stop();
+    }
+
     this.emit("stopped");
   }
 
@@ -650,6 +877,36 @@ export class AutonomousEngine extends EventEmitter {
 
     this.emit("autonomous-started");
 
+    // Start heartbeat tracking
+    const heartbeat = getEngineHeartbeat();
+    heartbeat.start();
+    this.heartbeat = heartbeat;
+
+    // Restore last session ID for Claude Code --resume (context continuity)
+    try {
+      const sessionPath = path.join(DATA_DIR, "engine-session.json");
+      if (fs.existsSync(sessionPath)) {
+        const saved = JSON.parse(fs.readFileSync(sessionPath, "utf-8"));
+        if (saved.sessionId) {
+          this.lastSessionId = saved.sessionId;
+          console.log(`[AutonomousEngine] Restored session ${saved.sessionId.slice(0, 12)}... (cycle ${saved.cycleCount || 0})`);
+        }
+      }
+    } catch {}
+
+    // Watchdog: auto-restart loop if it stalls
+    heartbeat.on("stalled", ({ sinceLastBeatMin }) => {
+      console.log(`[AutonomousEngine] Watchdog detected stall (${sinceLastBeatMin}min). Restarting loop...`);
+      heartbeat.recordRestart(`Watchdog: stalled for ${sinceLastBeatMin} minutes`);
+      // Re-run the loop
+      if (this.running) {
+        this.runAutonomousLoop().catch(err => {
+          console.error("[AutonomousEngine] Loop restart failed:", err.message);
+          heartbeat.recordError("Loop restart failed: " + err.message);
+        });
+      }
+    });
+
     // Run the autonomous loop
     await this.runAutonomousLoop();
   }
@@ -659,18 +916,28 @@ export class AutonomousEngine extends EventEmitter {
    * Uses Claude Code CLI with GPT-5.2 supervision for goal execution
    */
   async runAutonomousLoop() {
-    // Initialize Claude Orchestrator
+    // Initialize Claude Orchestrator — reuse across cycles for session continuity
     const orchestrator = getClaudeOrchestrator({
       maxTurns: 30,
       evaluationInterval: 5000,
       timeout: 600000
     });
 
+    // Restore session ID from last run (enables --resume for context continuity)
+    if (this.lastSessionId) {
+      orchestrator.sessionId = this.lastSessionId;
+      console.log(`[AutonomousEngine] Resuming Claude session: ${this.lastSessionId.slice(0, 12)}...`);
+    }
+
     // Set up orchestrator event handlers
     this.setupOrchestratorEvents(orchestrator);
 
     while (this.running) {
       try {
+        // Heartbeat: engine is alive
+        if (this.heartbeat) this.heartbeat.beat("loop-iteration");
+        this.cycleCount++;
+
         // VIEWER MODE: Check if we should execute or just observe
         if (this.viewerMode) {
           // In viewer mode, just wait and sync state periodically
@@ -719,10 +986,64 @@ export class AutonomousEngine extends EventEmitter {
           }
 
           if (!this.currentGoal) {
-            // No goals available - wait and check again
-            this.setEngineState("idle");
-            await this.wait(5000);
-            continue;
+            // No goals available — THINK and GENERATE new ones
+            const timeSinceLastGen = Date.now() - this.lastGoalGeneration;
+            if (this.aiBrain && timeSinceLastGen > this.goalGenerationCooldownMs) {
+              this.setEngineState("thinking");
+              if (this.narrator) {
+                this.narrator.setState("THINKING");
+                this.narrator.observe("No active goals — thinking about what to work on...");
+              }
+              if (this.heartbeat) this.heartbeat.beat("generating-goals");
+
+              try {
+                console.log("[AutonomousEngine] No goals — generating from context...");
+                const suggestedGoals = await this.aiBrain.generateGoalsFromContext();
+                this.lastGoalGeneration = Date.now();
+
+                if (suggestedGoals && suggestedGoals.length > 0) {
+                  console.log(`[AutonomousEngine] Generated ${suggestedGoals.length} new goals`);
+                  for (const goal of suggestedGoals) {
+                    this.goalManager.addGoal(goal, false);
+                  }
+                  if (this.heartbeat) this.heartbeat.recordWork(`Generated ${suggestedGoals.length} new goals`);
+
+                  // Now pick the best one
+                  this.currentGoal = this.goalManager.selectNextGoal();
+                  if (this.currentGoal) {
+                    await this.goalManager.setCurrentGoal(this.currentGoal);
+                    if (this.narrator) {
+                      this.narrator.observe(`Created and starting: ${this.currentGoal.title}`);
+                    }
+                  }
+                } else {
+                  console.log("[AutonomousEngine] AI brain returned no goals — waiting 60s");
+                  if (this.narrator) this.narrator.observe("No ideas generated — will retry in 60s");
+                  this.setEngineState("idle");
+                  await this.wait(60000);
+                  continue;
+                }
+              } catch (genError) {
+                console.error("[AutonomousEngine] Goal generation failed:", genError.message);
+                if (this.heartbeat) this.heartbeat.recordError("Goal generation: " + genError.message);
+                this.lastGoalGeneration = Date.now(); // Prevent rapid retries
+                this.setEngineState("idle");
+                await this.wait(30000);
+                continue;
+              }
+            } else {
+              // Cooldown active — just wait
+              this.setEngineState("idle");
+              await this.wait(30000);
+              continue;
+            }
+
+            // If still no goal after generation, wait
+            if (!this.currentGoal) {
+              this.setEngineState("idle");
+              await this.wait(30000);
+              continue;
+            }
           }
 
           // Switch to project for this goal
@@ -791,13 +1112,44 @@ export class AutonomousEngine extends EventEmitter {
             this.narrator.observe(`Executing via Claude Code CLI...`);
           }
 
-          // Execute goal with Claude Orchestrator
-          const result = await orchestrator.executeGoal(this.currentGoal, {
-            workDir: process.cwd()
-          });
+          // Execute goal with Claude Orchestrator (15-min timeout to prevent infinite hangs)
+          const GOAL_TIMEOUT = 15 * 60 * 1000;
+          const result = await Promise.race([
+            orchestrator.executeGoal(this.currentGoal, { workDir: process.cwd() }),
+            new Promise((_, reject) =>
+              setTimeout(() => reject(new Error("Goal execution timeout (15min)")), GOAL_TIMEOUT)
+            )
+          ]).catch(err => ({
+            success: false,
+            error: err.message,
+            output: "Timed out"
+          }));
 
           // Signal Claude Code CLI has finished
           this.emit("claude-end", { success: result.success, goal: this.currentGoal });
+
+          // SAVE SESSION ID — enables --resume for context continuity across cycles
+          if (result.sessionId) {
+            this.lastSessionId = result.sessionId;
+            orchestrator.sessionId = result.sessionId;
+            // Persist to state file for crash recovery
+            try {
+              const statePath = path.join(DATA_DIR, "engine-session.json");
+              fs.writeFileSync(statePath, JSON.stringify({
+                sessionId: result.sessionId,
+                goalId: this.currentGoal?.id,
+                goalTitle: this.currentGoal?.title,
+                cycleCount: this.cycleCount,
+                savedAt: new Date().toISOString()
+              }, null, 2));
+            } catch {}
+          }
+
+          // Record heartbeat for completed work
+          if (this.heartbeat) {
+            const goalTitle = this.currentGoal?.title || this.currentGoal?.id || "unknown";
+            this.heartbeat.recordWork(`Goal: ${goalTitle} (${result.success ? "success" : "failed"})`);
+          }
 
           // Process result
           if (result.success) {
@@ -829,13 +1181,16 @@ export class AutonomousEngine extends EventEmitter {
                                    errorStr.toLowerCase().includes('insufficient');
 
             if (isBillingError) {
-              // Stop immediately on billing errors - don't retry
-              console.log("[AutonomousEngine] Billing error detected, stopping execution loop");
+              // Billing error — pause for 1 hour, then auto-resume (fallback models may work)
+              console.log("[AutonomousEngine] Billing error detected, pausing for 1 hour then auto-resuming");
               if (this.narrator) {
-                this.narrator.observe(`Paused: API billing issue - check credits`);
+                this.narrator.observe(`Billing issue — pausing 1h, will retry with fallback models`);
               }
-              this.pause();
-              return;
+              if (this.heartbeat) this.heartbeat.recordError("Billing error — 1h pause");
+              await this.wait(60 * 60 * 1000); // 1 hour
+              console.log("[AutonomousEngine] Auto-resuming after billing pause");
+              if (this.heartbeat) this.heartbeat.recordRestart("Auto-resume after billing pause");
+              continue; // Retry the loop — fallback chain in multi-ai.js should skip exhausted models
             }
 
             if (this.narrator) {
@@ -851,6 +1206,14 @@ export class AutonomousEngine extends EventEmitter {
               await this.completeCurrentGoal();
             }
             // Otherwise loop continues and tries again
+          }
+
+          // ── WORK-REST CYCLE ──
+          // After each Claude Code execution, rest to avoid rate limits.
+          // Rest is interruptible — wakeFromRest() skips it immediately.
+          // Session ID is preserved so --resume picks up context next cycle.
+          if (this.running && !this.isResting) {
+            await this.restBetweenCycles("work cycle complete — avoiding rate limits");
           }
 
         } else {
@@ -974,6 +1337,7 @@ export class AutonomousEngine extends EventEmitter {
       } catch (error) {
         console.error("[AutonomousEngine] Loop error:", error.message);
         this.emit("loop-error", error);
+        if (this.heartbeat) this.heartbeat.recordError(error.message);
 
         // Show error in terminal title (30 seconds)
         showNotificationTitle("error", `Error: ${error.message.slice(0, 30)}`, 30000);
@@ -1427,13 +1791,34 @@ export class AutonomousEngine extends EventEmitter {
 
     this.emit("goal-completed", completedGoal);
 
-    // Auto-select next goal (generates plan with GPT-5.2)
+    // Auto-select next goal — or generate new ones if none available
     if (this.goalManager) {
-      const nextGoal = this.goalManager.selectNextGoal();
+      let nextGoal = this.goalManager.selectNextGoal();
+
+      // No existing goals? Generate new ones from context
+      if (!nextGoal && this.aiBrain) {
+        try {
+          console.log("[AutonomousEngine] No next goal — generating from context...");
+          if (this.narrator) this.narrator.observe("Goal completed — thinking about what's next...");
+
+          const suggestedGoals = await this.aiBrain.generateGoalsFromContext();
+          this.lastGoalGeneration = Date.now();
+
+          if (suggestedGoals && suggestedGoals.length > 0) {
+            for (const goal of suggestedGoals) {
+              this.goalManager.addGoal(goal, false);
+            }
+            nextGoal = this.goalManager.selectNextGoal();
+            if (this.heartbeat) this.heartbeat.recordWork(`Generated ${suggestedGoals.length} new goals after completion`);
+          }
+        } catch (err) {
+          console.error("[AutonomousEngine] Post-completion goal gen failed:", err.message);
+        }
+      }
+
       if (nextGoal) {
         await this.goalManager.setCurrentGoal(nextGoal);
         this.currentGoal = nextGoal;
-        // Project switching happens in setCurrentGoal
         await this.switchToProjectForGoal(nextGoal);
       }
     }
@@ -1563,7 +1948,11 @@ export class AutonomousEngine extends EventEmitter {
       viewerMode: this.viewerMode || false,
       workerMode: workerStatus.mode,
       isViewer: workerStatus.isViewer,
-      isWorker: !workerStatus.isViewer
+      isWorker: !workerStatus.isViewer,
+      // Work-rest cycle
+      restStatus: this.getRestStatus(),
+      cycleCount: this.cycleCount,
+      hasSession: !!this.lastSessionId
     };
   }
 

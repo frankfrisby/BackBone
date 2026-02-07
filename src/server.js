@@ -423,6 +423,27 @@ app.post("/api/engine/resume", async (req, res) => {
   }
 });
 
+// Engine supervisor — continuity tracking
+app.get("/api/engine/supervisor", async (req, res) => {
+  try {
+    const { getEngineSupervisor } = await import("./services/engine-supervisor.js");
+    const supervisor = getEngineSupervisor();
+    res.json(supervisor.getFullStatus());
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/api/engine/continuity", async (req, res) => {
+  try {
+    const { getEngineSupervisor } = await import("./services/engine-supervisor.js");
+    const supervisor = getEngineSupervisor();
+    res.json(supervisor.getContinuityProof());
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Push notification token registration
 app.post("/api/register-push", async (req, res) => {
   try {

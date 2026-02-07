@@ -5,10 +5,22 @@ import { AppFooterBar } from "./app-footer-bar.js";
 const e = React.createElement;
 
 const BottomStatusBarBase = () => {
-  const state = useAppStoreMultiple([STATE_SLICES.UI, STATE_SLICES.USER, STATE_SLICES.TICKERS]);
+  const state = useAppStoreMultiple([
+    STATE_SLICES.UI,
+    STATE_SLICES.USER,
+    STATE_SLICES.TICKERS,
+    STATE_SLICES.PORTFOLIO,
+    STATE_SLICES.HEALTH,
+    STATE_SLICES.GOALS,
+    STATE_SLICES.ENGINE,
+  ]);
   const ui = state[STATE_SLICES.UI] || {};
   const user = state[STATE_SLICES.USER] || {};
   const tickers = state[STATE_SLICES.TICKERS] || {};
+  const portfolio = state[STATE_SLICES.PORTFOLIO] || {};
+  const health = state[STATE_SLICES.HEALTH] || {};
+  const goals = state[STATE_SLICES.GOALS] || {};
+  const engine = state[STATE_SLICES.ENGINE] || {};
 
   // Extract SPY data for footer display
   const tickerList = tickers.tickers || [];
@@ -25,6 +37,12 @@ const BottomStatusBarBase = () => {
     firebaseUser: user.firebaseUser,
     spyScore: spyData?.score ?? null,
     spyChange: spyData?.change ?? null,
+    // Data freshness
+    portfolioUpdated: portfolio.lastUpdated || null,
+    healthUpdated: health.ouraHealth?.lastUpdated || null,
+    tickersUpdated: tickers.tickerStatus?.lastRefresh || null,
+    goalsCount: goals.goals?.length || 0,
+    engineStatus: engine.status || null,
   });
 };
 

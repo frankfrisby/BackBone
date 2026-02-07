@@ -1,8 +1,8 @@
 /**
- * App Footer Bar Component - Tier, View Mode, Cron, Shortcuts
+ * App Footer Bar Component - Data States + Minimal Shortcuts
  *
- * Receives data as props from parent.
- * Displays tier indicator, view mode, cron status, and keyboard shortcuts.
+ * Shows data freshness states (portfolio, health, tickers, goals)
+ * and minimal keyboard shortcuts (Ctrl+S setup only).
  */
 
 import React, { memo } from "react";
@@ -11,36 +11,8 @@ import { getCronManager } from "../services/cron-manager.js";
 
 const e = React.createElement;
 
-// Model tiers configuration
-const MODEL_TIERS = {
-  low: { label: "Low", color: "#64748b" },
-  medium: { label: "Medium", color: "#f59e0b" },
-  high: { label: "High", color: "#22c55e" },
-};
-
-// View mode labels
-const VIEW_MODE_LABELS = {
-  core: "Core",
-  advanced: "Advanced",
-  minimal: "Minimal",
-};
-
-/**
- * App Footer Bar - Shows tier, view mode, cron, and keyboard shortcuts
- *
- * Props:
- * - currentTier: "low" | "medium" | "high"
- * - viewMode: "core" | "advanced" | "minimal"
- * - privateMode: boolean
- * - firebaseUser: User object or null
- */
 /**
  * Get SPY score color — maps 1-10 score to a color indicating market direction.
- * 8-10: bright green (bullish)
- * 6-7.9: green (positive)
- * 4-5.9: yellow (neutral/mixed)
- * 2-3.9: orange (bearish)
- * 0-1.9: red (very bearish)
  */
 const getSpyScoreColor = (score) => {
   if (score == null) return "#64748b";
@@ -51,6 +23,34 @@ const getSpyScoreColor = (score) => {
   return "#ef4444";
 };
 
+/**
+ * Format a timestamp as relative time (e.g., "2m ago", "1h ago", "3d ago")
+ */
+const formatAge = (timestamp) => {
+  if (!timestamp) return "never";
+  const ms = Date.now() - new Date(timestamp).getTime();
+  if (ms < 0) return "now";
+  const mins = Math.floor(ms / 60000);
+  if (mins < 1) return "now";
+  if (mins < 60) return `${mins}m`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h`;
+  const days = Math.floor(hrs / 24);
+  return `${days}d`;
+};
+
+/**
+ * Get freshness color — green if recent, yellow if stale, red if very old
+ */
+const getFreshnessColor = (timestamp, freshMins = 30, staleMins = 120) => {
+  if (!timestamp) return "#ef4444";
+  const ms = Date.now() - new Date(timestamp).getTime();
+  const mins = ms / 60000;
+  if (mins < freshMins) return "#22c55e";
+  if (mins < staleMins) return "#eab308";
+  return "#ef4444";
+};
+
 const AppFooterBarBase = ({
   currentTier = "medium",
   viewMode = "core",
@@ -58,8 +58,13 @@ const AppFooterBarBase = ({
   firebaseUser = null,
   spyScore = null,
   spyChange = null,
+  // Data freshness timestamps
+  portfolioUpdated = null,
+  healthUpdated = null,
+  tickersUpdated = null,
+  goalsCount = null,
+  engineStatus = null,
 }) => {
-  const tierConfig = MODEL_TIERS[currentTier] || MODEL_TIERS.medium;
   const spyColor = getSpyScoreColor(spyScore);
   const spyChangeColor = spyChange != null ? (spyChange >= 0 ? "#22c55e" : "#ef4444") : "#64748b";
 
@@ -77,63 +82,58 @@ const AppFooterBarBase = ({
       borderLeft: false,
       borderRight: false,
     },
-    // Left side: Tier, View mode, Cron, SPY
+    // Left side: Data states
     e(
       Box,
       { flexDirection: "row", gap: 2 },
-      e(Text, { color: "#64748b" }, "Tier:"),
-      e(Text, { color: tierConfig.color, bold: true }, tierConfig.label),
-      e(Text, { color: "#334155" }, "|"),
-      e(Text, { color: "#64748b" }, "View:"),
-      e(Text, { color: "#3b82f6", bold: true }, VIEW_MODE_LABELS[viewMode] || "Core"),
-      privateMode && e(Text, { color: "#f59e0b", bold: true }, " [PRIVATE]"),
-      e(Text, { color: "#334155" }, "|"),
-      (() => {
-        try {
-          const cronData = getCronManager().getDisplayData();
-          const nextJob = cronData.nextJob;
-          return [
-            e(Text, { key: "ci", color: "#64748b" }, "⏰"),
-            e(Text, { key: "cc", color: "#94a3b8" }, ` ${cronData.completedToday}/${cronData.todayCount}`),
-            nextJob && e(Text, { key: "cs", color: "#334155" }, " |"),
-            nextJob && e(Text, { key: "cn", color: "#f59e0b" }, ` ${nextJob.shortName}`),
-            nextJob?.time && e(Text, { key: "ct", color: "#94a3b8" }, ` ${nextJob.time}`)
-          ].filter(Boolean);
-        } catch {
-          return e(Text, { color: "#64748b" }, "⏰ --");
-        }
-      })(),
-      // SPY market prediction score
-      e(Text, { color: "#334155" }, "|"),
+      // SPY market score
       e(Text, { color: "#64748b" }, "SPY"),
       spyScore != null
         ? e(Text, { color: spyColor, bold: true }, ` ${spyScore.toFixed(1)}`)
         : e(Text, { color: "#475569" }, " --"),
       spyChange != null && e(Text, { color: spyChangeColor },
-        ` ${spyChange >= 0 ? "+" : ""}${spyChange.toFixed(1)}%`)
+        ` ${spyChange >= 0 ? "+" : ""}${spyChange.toFixed(1)}%`),
+      e(Text, { color: "#334155" }, "|"),
+      // Portfolio freshness
+      e(Text, { color: "#64748b" }, "Portfolio "),
+      e(Text, { color: getFreshnessColor(portfolioUpdated, 5, 30) },
+        formatAge(portfolioUpdated)),
+      e(Text, { color: "#334155" }, "|"),
+      // Health freshness
+      e(Text, { color: "#64748b" }, "Health "),
+      e(Text, { color: getFreshnessColor(healthUpdated, 60, 360) },
+        formatAge(healthUpdated)),
+      e(Text, { color: "#334155" }, "|"),
+      // Tickers freshness
+      e(Text, { color: "#64748b" }, "Tickers "),
+      e(Text, { color: getFreshnessColor(tickersUpdated, 10, 60) },
+        formatAge(tickersUpdated)),
+      e(Text, { color: "#334155" }, "|"),
+      // Cron status
+      (() => {
+        try {
+          const cronData = getCronManager().getDisplayData();
+          const nextJob = cronData.nextJob;
+          return [
+            e(Text, { key: "ci", color: "#64748b" }, "Cron"),
+            e(Text, { key: "cc", color: "#94a3b8" }, ` ${cronData.completedToday}/${cronData.todayCount}`),
+            nextJob?.time && e(Text, { key: "ct", color: "#94a3b8" }, ` ${nextJob.time}`)
+          ].filter(Boolean);
+        } catch {
+          return e(Text, { color: "#64748b" }, "Cron --");
+        }
+      })()
     ),
-    // Right side: Keyboard shortcuts
+    // Right side: Minimal shortcuts + login state
     e(
       Box,
-      { flexDirection: "row", gap: 3 },
-      e(Text, { color: "#475569" }, "Ctrl+T"),
-      e(Text, { color: "#64748b" }, "tier"),
-      e(Text, { color: "#334155" }, ""),
-      e(Text, { color: "#3b82f6" }, "Ctrl+U"),
-      e(Text, { color: "#64748b" }, "view"),
-      e(Text, { color: "#334155" }, ""),
-      e(Text, { color: "#38bdf8" }, "Ctrl+S"),
+      { flexDirection: "row", gap: 2 },
+      e(Text, { color: "#38bdf8" }, "^S"),
       e(Text, { color: "#64748b" }, "setup"),
-      e(Text, { color: "#334155" }, ""),
-      e(Text, { color: privateMode ? "#f59e0b" : "#475569" }, "Ctrl+R"),
-      e(Text, { color: privateMode ? "#f59e0b" : "#64748b" }, "private"),
-      e(Text, { color: "#334155" }, ""),
+      e(Text, { color: "#334155" }, "|"),
       firebaseUser
-        ? e(Text, { color: "#22c55e" }, "O logout")
-        : e(Text, { color: "#f97316" }, "L login"),
-      e(Text, { color: "#334155" }, ""),
-      e(Text, { color: "#475569" }, "/help"),
-      e(Text, { color: "#64748b" }, "commands")
+        ? e(Text, { color: "#22c55e" }, "logged in")
+        : e(Text, { color: "#f97316" }, "not logged in")
     )
   );
 };

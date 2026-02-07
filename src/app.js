@@ -258,6 +258,7 @@ import { RightSidebar } from "./components/right-sidebar.js";
 import { TopStatusBar } from "./components/top-status-bar.js";
 import { BottomStatusBar } from "./components/bottom-status-bar.js";
 
+import { dataFile, engineFile } from "./services/paths.js";
 // Note: Store sync removed - passing props directly to column components now
 
 const e = React.createElement;
@@ -695,7 +696,7 @@ const App = ({ updateConsoleTitle, updateState }) => {
       // Gather portfolio snapshot
       let portfolio = null;
       try {
-        const cachePath = path.join(process.cwd(), "data", "tickers-cache.json");
+        const cachePath = dataFile("tickers-cache.json");
         if (fs.existsSync(cachePath)) {
           const cache = JSON.parse(fs.readFileSync(cachePath, "utf-8"));
           const tickers = cache.tickers || [];
@@ -909,7 +910,7 @@ const App = ({ updateConsoleTitle, updateState }) => {
       // Startup catch-up: send daily brief if missed today
       try {
         const today = new Date().toISOString().split("T")[0];
-        const briefStatePath = path.join(process.cwd(), "data", "daily-brief-state.json");
+        const briefStatePath = dataFile("daily-brief-state.json");
         let morningLastSent = null;
         if (fs.existsSync(briefStatePath)) {
           const state = JSON.parse(fs.readFileSync(briefStatePath, "utf-8"));
@@ -942,7 +943,7 @@ const App = ({ updateConsoleTitle, updateState }) => {
       // Startup catch-up: send evening brief if missed today
       try {
         const today = new Date().toISOString().split("T")[0];
-        const briefStatePath = path.join(process.cwd(), "data", "daily-brief-state.json");
+        const briefStatePath = dataFile("daily-brief-state.json");
         let eveningLastSent = null;
         if (fs.existsSync(briefStatePath)) {
           const state = JSON.parse(fs.readFileSync(briefStatePath, "utf-8"));
@@ -1258,12 +1259,7 @@ const App = ({ updateConsoleTitle, updateState }) => {
         return next;
       });
     }
-    if (key.ctrl && input === "f") {
-      // Ctrl+F: Start fresh session (clear session state)
-      startFreshSession();
-      setMessages([]);
-      setLastAction("Started fresh session");
-    }
+    // Ctrl+F removed — fresh session was confusing and rarely used
     if (key.ctrl && key.shift && lower === "s") {
       // Ctrl+Shift+S: Open onboarding/setup wizard
       setShowOnboarding(true);
@@ -1460,7 +1456,7 @@ const App = ({ updateConsoleTitle, updateState }) => {
   }, [viewMode]);
 
   const userDisplayName = useMemo(() => {
-    return linkedInProfile?.name || profile?.name || process.env.USER_NAME || "Frank";
+    return linkedInProfile?.name || profile?.name || process.env.USER_NAME || "User";
   }, [linkedInProfile?.name, profile?.name]);
 
   const weightsRef = useRef(weights);
@@ -6706,7 +6702,7 @@ Folder: ${result.action.id}`,
           }
         ]);
         try {
-          const scriptPath = path.join(process.cwd(), "scripts", "voice-server.js");
+          const scriptPath = engineFile("scripts/voice-server.js");
           spawn("node", [scriptPath], {
             detached: true,
             stdio: "ignore",
@@ -10821,7 +10817,7 @@ Folder: ${result.action.id}`,
           Box,
           { flexDirection: "column", width: "75%", paddingX: 1, overflow: "hidden" },
 
-          // USER PROGRESS - Frank vs Target vs Average (all lined up)
+          // USER PROGRESS - User vs Target vs Average (all lined up)
           (() => {
           // Build connected data for person matching
           const connectedData = {
@@ -10835,7 +10831,7 @@ Folder: ${result.action.id}`,
           const targetPerson = getTargetPerson(connectedData);
           const progressData = getProgressResearch().getProgressComparison();
 
-          const userName = linkedInProfile?.name?.split(" ")[0] || firebaseUserName?.split(" ")[0] || "Frank";
+          const userName = linkedInProfile?.name?.split(" ")[0] || firebaseUserName?.split(" ")[0] || "User";
           const userScore = progressData?.user?.score || 0;
           const targetName = targetPerson.name;
           const targetScore = targetPerson.score;

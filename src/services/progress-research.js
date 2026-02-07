@@ -16,6 +16,7 @@ import { loadAlpacaConfig } from "./alpaca-setup.js";
 import { isPlaidConfigured } from "./plaid-service.js";
 import { isSignedIn } from "./firebase-auth.js";
 import { getUserAge, getAgeBenchmarks, getSimpleBenchmark } from "./age-benchmarks.js";
+import { getDataDir } from "./paths.js";
 import {
   getTargetPerson,
   getTargetPersonWithAI,
@@ -24,7 +25,7 @@ import {
   isAIMatchingInitialized
 } from "./person-matcher.js";
 
-const DATA_DIR = path.join(process.cwd(), "data");
+const DATA_DIR = getDataDir();
 const RESEARCH_CACHE_PATH = path.join(DATA_DIR, "progress_research.json");
 
 /**
@@ -397,142 +398,214 @@ class ProgressResearchService {
   }
 
   /**
-   * Calculate user's real progress based on their goals and connected data
+   * Calculate user's real progress based on their goals and connected data.
+   *
+   * SCORING METHODOLOGY (stable, not volatile):
+   * Score represents how well the user is doing across 5 fixed dimensions.
+   * Each dimension is scored 0-100 and weighted equally. Dimensions:
+   *   1. Goals (25%) - active goal progress + completed goals
+   *   2. Finance (25%) - portfolio value vs target, not daily change
+   *   3. Health (25%) - 7-day average Oura score, not single day
+   *   4. Career (15%) - LinkedIn engagement, career goals
+   *   5. Engagement (10%) - connected services, system usage
+   *
+   * The score is smoothed with previous day's score (EMA) to prevent swings.
+   *
    * @param {Object} connectedData - Optional data from connected services
    */
   calculateUserProgress(connectedData = {}) {
     const goalTracker = getGoalTracker();
-    const goals = goalTracker.getActive();
+    const activeGoals = goalTracker.getActive();
+    const allGoals = goalTracker.getAll?.() || [];
+    const completedGoals = allGoals.filter(g => g.status === "completed");
 
     const breakdown = {};
-    let totalWeight = 0;
-    let weightedSum = 0;
+    const dimensions = {};
 
-    // Weight by category
-    const weights = {
-      [GOAL_CATEGORY.FINANCE]: 1.0,
-      [GOAL_CATEGORY.HEALTH]: 1.0,
-      [GOAL_CATEGORY.CAREER]: 1.0,
-      [GOAL_CATEGORY.FAMILY]: 1.0,
-      [GOAL_CATEGORY.GROWTH]: 0.9,
-      [GOAL_CATEGORY.EDUCATION]: 0.9
-    };
+    // === DIMENSION 1: GOALS (25% weight) ===
+    const totalGoalCount = activeGoals.length + completedGoals.length;
+    let goalsScore = 0;
 
-    // If explicit goals exist, use them
-    if (goals.length > 0) {
-      for (const goal of goals) {
+    if (totalGoalCount > 0) {
+      // Active goals: calculate weighted progress
+      let goalProgressSum = 0;
+      let goalCount = 0;
+
+      for (const goal of activeGoals) {
         const progress = goalTracker.calculateProgress(goal);
-        const weight = weights[goal.category] || 1.0;
+        goalProgressSum += Math.min(1, Math.max(0, progress)); // clamp 0-1
+        goalCount++;
 
-        if (!breakdown[goal.category]) {
-          breakdown[goal.category] = {
-            goals: [],
-            avgProgress: 0,
-            weight
-          };
+        const cat = goal.category;
+        if (!breakdown[cat]) {
+          breakdown[cat] = { goals: [], avgProgress: 0, weight: 1.0 };
         }
-
-        breakdown[goal.category].goals.push({
+        breakdown[cat].goals.push({
           title: goal.title,
-          progress: Math.round(progress * 100),
+          progress: Math.round(Math.min(100, progress * 100)),
           current: goal.currentValue,
           target: goal.targetValue,
-          unit: goal.unit
+          unit: goal.unit,
+          status: "active"
         });
-
-        weightedSum += progress * weight;
-        totalWeight += weight;
       }
+
+      for (const goal of completedGoals) {
+        goalProgressSum += 1.0;
+        goalCount++;
+
+        const cat = goal.category;
+        if (!breakdown[cat]) {
+          breakdown[cat] = { goals: [], avgProgress: 0, weight: 1.0 };
+        }
+        breakdown[cat].goals.push({
+          title: goal.title,
+          progress: 100,
+          current: goal.targetValue,
+          target: goal.targetValue,
+          unit: goal.unit,
+          status: "completed"
+        });
+      }
+
+      goalsScore = goalCount > 0 ? (goalProgressSum / goalCount) * 100 : 0;
 
       // Calculate category averages
       for (const cat of Object.keys(breakdown)) {
         const catGoals = breakdown[cat].goals;
-        breakdown[cat].avgProgress = Math.round(
-          catGoals.reduce((sum, g) => sum + g.progress, 0) / catGoals.length
-        );
-      }
-    }
-
-    // Factor in connected data sources even without explicit goals
-    // This gives users a baseline score based on what we know about them
-    const { ouraHealth, portfolio, linkedInProfile } = connectedData;
-
-    // Health data (Oura) - good health scores contribute to progress
-    if (ouraHealth?.connected && ouraHealth?.today) {
-      const healthScore = ouraHealth.today.readinessScore || ouraHealth.today.sleepScore || 0;
-      if (healthScore > 0) {
-        const healthProgress = healthScore / 100; // Oura scores are 0-100
-        if (!breakdown[GOAL_CATEGORY.HEALTH]) {
-          breakdown[GOAL_CATEGORY.HEALTH] = { inferred: true, avgProgress: Math.round(healthProgress * 100) };
+        if (catGoals.length > 0) {
+          breakdown[cat].avgProgress = Math.round(
+            catGoals.reduce((sum, g) => sum + g.progress, 0) / catGoals.length
+          );
         }
-        weightedSum += healthProgress * 0.5; // Lower weight for inferred data
-        totalWeight += 0.5;
+      }
+    } else {
+      // No goals set — give 5% baseline for just being here
+      goalsScore = 5;
+    }
+    dimensions.goals = { score: Math.round(goalsScore), weight: 0.25 };
+
+    // === DIMENSION 2: FINANCE (25% weight) ===
+    const { ouraHealth, portfolio, linkedInProfile } = connectedData;
+    let financeScore = 10; // baseline: having awareness = 10%
+
+    if (portfolio?.connected) {
+      financeScore = 20; // Connected to trading = 20% baseline
+
+      if (portfolio?.equity) {
+        const equity = portfolio.equity;
+        // Score based on portfolio value milestones (not daily swings)
+        // $0 = 20%, $1K = 25%, $5K = 35%, $25K = 50%, $100K = 65%, $500K = 80%, $1M = 90%
+        if (equity >= 1000000) financeScore = 90;
+        else if (equity >= 500000) financeScore = 80;
+        else if (equity >= 100000) financeScore = 65;
+        else if (equity >= 25000) financeScore = 50;
+        else if (equity >= 5000) financeScore = 35;
+        else if (equity >= 1000) financeScore = 25;
+        else financeScore = 20;
       }
     }
 
-    // Financial data (Portfolio) - positive returns contribute to progress
-    if (portfolio?.connected && portfolio?.equity) {
-      // Estimate progress based on portfolio performance
-      const dayChangePct = portfolio.dayChangePct || 0;
-      // Normalize: +10% day = great (1.0), 0% = neutral (0.5), -10% = poor (0)
-      const financialProgress = Math.max(0, Math.min(1, 0.5 + (dayChangePct / 20)));
-      if (!breakdown[GOAL_CATEGORY.FINANCE]) {
-        breakdown[GOAL_CATEGORY.FINANCE] = { inferred: true, avgProgress: Math.round(financialProgress * 100) };
-      }
-      weightedSum += financialProgress * 0.5;
-      totalWeight += 0.5;
-    }
-
-    // Career data (LinkedIn) - having a profile contributes baseline progress
-    if (linkedInProfile?.connected) {
-      const careerProgress = 0.4; // 40% baseline for having career data
-      if (!breakdown[GOAL_CATEGORY.CAREER]) {
-        breakdown[GOAL_CATEGORY.CAREER] = { inferred: true, avgProgress: 40 };
-      }
-      weightedSum += careerProgress * 0.3;
-      totalWeight += 0.3;
-    }
-
-    // Plaid banking data - having connected accounts shows financial awareness
     if (connectedData.plaid?.connected) {
-      const plaidProgress = 0.35; // 35% for having banking connected
-      if (!breakdown[GOAL_CATEGORY.FINANCE]) {
-        breakdown[GOAL_CATEGORY.FINANCE] = { inferred: true, avgProgress: 35 };
-      }
-      weightedSum += plaidProgress * 0.4;
-      totalWeight += 0.4;
+      financeScore = Math.max(financeScore, 25); // Banking connected = at least 25%
     }
 
-    // Firebase login - baseline for being engaged with the system
-    if (connectedData.firebase?.connected) {
-      // Being logged in and using the system = 30% baseline engagement
-      const engagementProgress = 0.30;
-      if (!breakdown.engagement) {
-        breakdown.engagement = { inferred: true, avgProgress: 30 };
-      }
-      weightedSum += engagementProgress * 0.2;
-      totalWeight += 0.2;
+    // Boost for finance goals progress
+    if (breakdown[GOAL_CATEGORY.FINANCE]) {
+      const finGoalAvg = breakdown[GOAL_CATEGORY.FINANCE].avgProgress || 0;
+      financeScore = Math.max(financeScore, finGoalAvg);
     }
 
-    // No data at all - but still return hasData true if we have connected sources
+    dimensions.finance = { score: Math.round(Math.min(100, financeScore)), weight: 0.25 };
+
+    // === DIMENSION 3: HEALTH (25% weight) ===
+    let healthScore = 10; // baseline
+
+    if (ouraHealth?.connected) {
+      healthScore = 20; // Connected = 20%
+
+      // Use 7-day average if available, not single day score
+      if (ouraHealth?.weeklyAvg) {
+        // weeklyAvg is 0-100 Oura score
+        healthScore = Math.max(20, ouraHealth.weeklyAvg);
+      } else if (ouraHealth?.today) {
+        // Fallback to today but dampen volatility
+        const todayScore = ouraHealth.today.readinessScore || ouraHealth.today.sleepScore || 0;
+        // Blend toward 50% to reduce single-day swing (70% today + 30% neutral)
+        healthScore = Math.max(20, Math.round(todayScore * 0.7 + 50 * 0.3));
+      }
+    }
+
+    // Boost for health goals progress
+    if (breakdown[GOAL_CATEGORY.HEALTH]) {
+      const healthGoalAvg = breakdown[GOAL_CATEGORY.HEALTH].avgProgress || 0;
+      healthScore = Math.max(healthScore, healthGoalAvg);
+    }
+
+    dimensions.health = { score: Math.round(Math.min(100, healthScore)), weight: 0.25 };
+
+    // === DIMENSION 4: CAREER (15% weight) ===
+    let careerScore = 10; // baseline
+
+    if (linkedInProfile?.connected) {
+      careerScore = 30; // LinkedIn connected = 30%
+    }
+
+    // Boost for career goals progress
+    if (breakdown[GOAL_CATEGORY.CAREER]) {
+      const careerGoalAvg = breakdown[GOAL_CATEGORY.CAREER].avgProgress || 0;
+      careerScore = Math.max(careerScore, careerGoalAvg);
+    }
+
+    dimensions.career = { score: Math.round(Math.min(100, careerScore)), weight: 0.15 };
+
+    // === DIMENSION 5: ENGAGEMENT (10% weight) ===
+    let engagementScore = 5; // using the system at all = 5%
+
+    if (connectedData.firebase?.connected) engagementScore += 20;
+    if (portfolio?.connected) engagementScore += 15;
+    if (ouraHealth?.connected) engagementScore += 15;
+    if (linkedInProfile?.connected) engagementScore += 15;
+    if (connectedData.plaid?.connected) engagementScore += 10;
+    if (totalGoalCount > 0) engagementScore += 10;
+    if (totalGoalCount >= 3) engagementScore += 10;
+
+    dimensions.engagement = { score: Math.round(Math.min(100, engagementScore)), weight: 0.10 };
+
+    // === CALCULATE FINAL SCORE ===
+    let rawScore = 0;
+    for (const dim of Object.values(dimensions)) {
+      rawScore += dim.score * dim.weight;
+    }
+    rawScore = Math.round(rawScore);
+
+    // Smooth with EMA — blend 70% current calculation + 30% previous day's score
+    // This prevents day-to-day swings greater than ~5-7 points
+    const previousScore = this.cache.progressHistory?.length > 0
+      ? this.cache.progressHistory[this.cache.progressHistory.length - 1]?.score
+      : null;
+
+    const smoothedScore = previousScore != null
+      ? Math.round(rawScore * 0.7 + previousScore * 0.3)
+      : rawScore;
+
+    // Clamp to 1-99 range (never exactly 0 if using system, never 100 until perfect)
     const hasConnectedData = ouraHealth?.connected || portfolio?.connected ||
                              linkedInProfile?.connected || connectedData.plaid?.connected ||
                              connectedData.firebase?.connected;
 
-    if (totalWeight === 0 && !hasConnectedData) {
-      return { score: 0, hasGoals: false, hasData: false, breakdown: {} };
-    }
-
-    const overallScore = totalWeight > 0
-      ? Math.round((weightedSum / totalWeight) * 100)
+    const finalScore = hasConnectedData || totalGoalCount > 0
+      ? Math.max(1, Math.min(99, smoothedScore))
       : 0;
 
     return {
-      score: overallScore,
-      hasGoals: goals.length > 0,
-      hasData: hasConnectedData || goals.length > 0,
+      score: finalScore,
+      rawScore,
+      hasGoals: totalGoalCount > 0,
+      hasData: hasConnectedData || totalGoalCount > 0,
       breakdown,
-      goalCount: goals.length
+      dimensions,
+      goalCount: totalGoalCount
     };
   }
 
@@ -585,24 +658,45 @@ class ProgressResearchService {
   gatherConnectedData() {
     const connectedData = {};
 
-    // Check Oura health data
+    // Check Oura health data — include 7-day average for stable scoring
     try {
       if (isOuraConfigured()) {
         const ouraData = loadOuraData();
         if (ouraData?.today) {
+          // Calculate 7-day average from recent data for stability
+          let weeklyAvg = null;
+          try {
+            const recentScores = (ouraData.latest?.readiness || ouraData.latest?.sleep || [])
+              .slice(-7)
+              .map(d => d.score)
+              .filter(s => s != null && s > 0);
+            if (recentScores.length >= 3) {
+              weeklyAvg = Math.round(recentScores.reduce((a, b) => a + b, 0) / recentScores.length);
+            }
+          } catch (e) {}
+
           connectedData.ouraHealth = {
             connected: true,
-            today: ouraData.today
+            today: ouraData.today,
+            weeklyAvg
           };
         }
       }
     } catch (e) {}
 
-    // Check Alpaca portfolio
+    // Check Alpaca portfolio — include equity for milestone-based scoring
     try {
       const alpacaConfig = loadAlpacaConfig();
       if (alpacaConfig?.apiKey && !alpacaConfig.apiKey.includes("PASTE")) {
-        connectedData.portfolio = { connected: true };
+        let equity = null;
+        try {
+          const cachePath = path.join(DATA_DIR, "alpaca-cache.json");
+          if (fs.existsSync(cachePath)) {
+            const cache = JSON.parse(fs.readFileSync(cachePath, "utf-8"));
+            equity = cache.portfolio?.equity ? parseFloat(cache.portfolio.equity) : null;
+          }
+        } catch (e) {}
+        connectedData.portfolio = { connected: true, equity };
       }
     } catch (e) {}
 

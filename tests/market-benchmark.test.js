@@ -31,7 +31,7 @@ vi.mock("fs", () => ({
   mkdirSync: vi.fn()
 }));
 
-import MarketBenchmarkService, { BENCHMARKS } from "../src/services/market-benchmark.js";
+import MarketBenchmarkService, { BENCHMARKS } from "../src/services/research/market-benchmark.js";
 
 describe("MarketBenchmarkService", () => {
   let service;

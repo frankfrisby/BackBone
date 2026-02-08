@@ -47,7 +47,7 @@ vi.mock("fs", () => ({
   mkdirSync: vi.fn()
 }));
 
-import ConversationAnalysisEngine from "../src/services/conversation-analysis-engine.js";
+import ConversationAnalysisEngine from "../src/services/memory/conversation-analysis-engine.js";
 
 describe("ConversationAnalysisEngine", () => {
   let engine;

@@ -12,7 +12,7 @@ import {
   isClaudeCodeInstalled,
   getClaudeCodeStatus,
   getInstallInstructions,
-} from "../src/services/claude-code-cli.js";
+} from "../src/services/ai/claude-code-cli.js";
 
 // Claude Code Backend
 import {
@@ -22,7 +22,7 @@ import {
   STREAM_MESSAGE_TYPE,
   detectClaudeCode,
   createSessionManager,
-} from "../src/services/claude-code-backend.js";
+} from "../src/services/ai/claude-code-backend.js";
 
 // Engine State Manager
 import {
@@ -32,7 +32,7 @@ import {
   PROJECT_DOMAINS,
   getStateForActivity,
   isValidTransition,
-} from "../src/services/engine-state.js";
+} from "../src/services/engine/engine-state.js";
 
 // ─── Claude Code CLI ─────────────────────────────────────────────
 

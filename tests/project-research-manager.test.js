@@ -38,7 +38,7 @@ _No findings yet._
   readdirSync: vi.fn(() => [])
 }));
 
-import ProjectResearchManager from "../src/services/project-research-manager.js";
+import ProjectResearchManager from "../src/services/projects/project-research-manager.js";
 
 describe("ProjectResearchManager", () => {
   let manager;

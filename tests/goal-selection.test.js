@@ -174,4 +174,4 @@ describe('Goal Selection - First Goal Persistence', () => {
   });
 });
 
-console.log('Goal Selection Tests - Run with: npx vitest run src/tests/goal-selection.test.js');
+console.log('Goal Selection Tests - Run with: npx vitest run tests/goal-selection.test.js');

@@ -1,67 +1,71 @@
-# Dependencies
+# ============================================
+# BACKBONE Engine — .gitignore
+# ============================================
+# Code vs User Data boundary:
+#   CODE (tracked):  src/, apps/, bin/, tools/, skills/, scripts/, docs/, packages/
+#   USER DATA (ignored): data/, memory/, projects/, screenshots/
+# ============================================
+
+# ----- Dependencies -----
 node_modules/
-solutions/*/node_modules/
 
-# Environment files
-.env
-.env.local
-.env.*.local
-*.env
-
-# Data and cache (contents ignored, but .gitkeep files tracked)
+# ----- User Data (never committed) -----
+# These directories contain personal data and are mounted via paths.js
+# On new installs, they're created automatically or restored from Firebase backup
 data/*
 !data/.gitkeep
 memory/*
 !memory/.gitkeep
-threads/
-screenshots/*
-!screenshots/.gitkeep
 projects/*
 !projects/.gitkeep
+screenshots/*
+!screenshots/.gitkeep
 
-# Build outputs
-dist/
-build/
-*.log
-
-# Web app build artifacts
-apps/web/out/
-apps/web/node_modules/
-apps/web/.next/
-.firebase/
-
-# IDE and editor
-.idea/
-*.swp
-*.swo
-*~
-
-# OS files
-.DS_Store
-Thumbs.db
-desktop.ini
-
-# Chrome profile (for LinkedIn scraper)
-data/backbone-chrome-profile/
-
-# Temporary files
-*.tmp
-*.temp
-.cache/
-
-# Test coverage
-coverage/
-
-# Debug logs
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-
-# Keys and secrets (never commit these!)
+# ----- Environment & Secrets -----
+.env
+.env.local
+.env.*.local
+*.env
 *.pem
 *.key
 *.crt
 credentials.json
 tokens.json
-zig/
+
+# ----- Build Outputs -----
+dist/
+build/
+*.log
+
+# ----- Web App (apps/web/) -----
+apps/web/out/
+apps/web/node_modules/
+apps/web/.next/
+
+# ----- Firebase -----
+.firebase/
+
+# ----- IDE -----
+.idea/
+*.swp
+*.swo
+*~
+
+# ----- OS -----
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ----- Temporary -----
+*.tmp
+*.temp
+.cache/
 nul
+
+# ----- Test Coverage -----
+coverage/
+
+# ----- Debug Logs -----
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*

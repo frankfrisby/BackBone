@@ -22,7 +22,7 @@ vi.mock('fs', () => ({
 }));
 
 // Import after mocks
-import { PlaywrightService, getPlaywrightService } from '../services/integrations/playwright-service.js';
+import { PlaywrightService, getPlaywrightService } from '../src/services/integrations/playwright-service.js';
 
 describe('Playwright Service - Initialization', () => {
   let service;
@@ -191,4 +191,4 @@ describe('Playwright Service - Settings', () => {
   });
 });
 
-console.log('Playwright Service Tests - Run with: npx vitest run src/tests/playwright-service.test.js');
+console.log('Playwright Service Tests - Run with: npx vitest run tests/playwright-service.test.js');

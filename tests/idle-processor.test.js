@@ -50,7 +50,7 @@ describe("Idle State - Last Run Timestamp", () => {
   const content = fs.readFileSync(AGENT_PANEL_PATH, "utf-8");
 
   it("imports getClaudeEngine", () => {
-    expect(content).toContain('import { getClaudeEngine } from "../services/claude-engine.js"');
+    expect(content).toContain('import { getClaudeEngine } from "../src/services/ai/claude-engine.js"');
   });
 
   it("has formatLastRanTimestamp function", () => {

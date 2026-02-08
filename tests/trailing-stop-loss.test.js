@@ -34,9 +34,9 @@ import {
   shouldUpdateStops,
   applyStopToPosition,
   applyStopsToAllPositions,
-} from "../src/services/trailing-stop-manager.js";
+} from "../src/services/trading/trailing-stop-manager.js";
 
-import { getOrders, submitOrder, cancelOrder, fetchPositions, getAlpacaConfig } from "../src/services/alpaca.js";
+import { getOrders, submitOrder, cancelOrder, fetchPositions, getAlpacaConfig } from "../src/services/trading/alpaca.js";
 
 describe("Trailing Stop Manager", () => {
   beforeEach(() => {

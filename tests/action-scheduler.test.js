@@ -10,7 +10,7 @@ import {
   ACTION_STATUS,
   RECURRENCE,
   createScheduledAction
-} from '../services/action-scheduler.js';
+} from '../src/services/action-scheduler.js';
 
 // Mock fs module
 vi.mock('fs', () => ({
@@ -292,4 +292,4 @@ describe('Action Scheduler - Cancel', () => {
   });
 });
 
-console.log('Action Scheduler Tests - Run with: npx vitest run src/tests/action-scheduler.test.js');
+console.log('Action Scheduler Tests - Run with: npx vitest run tests/action-scheduler.test.js');

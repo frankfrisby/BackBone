@@ -34,7 +34,7 @@ vi.mock('../services/open-url.js', () => ({
 }));
 
 // Import after mocks
-import { PlaidService, getPlaidService, isPlaidConfigured, hasPlaidCredentials } from '../services/integrations/plaid-service.js';
+import { PlaidService, getPlaidService, isPlaidConfigured, hasPlaidCredentials } from '../src/services/integrations/plaid-service.js';
 
 describe('Plaid Service - Configuration', () => {
   let service;
@@ -315,4 +315,4 @@ describe('Plaid Service - Sandbox Environment', () => {
   });
 });
 
-console.log('Plaid Service Tests - Run with: npx vitest run src/tests/plaid-service.test.js');
+console.log('Plaid Service Tests - Run with: npx vitest run tests/plaid-service.test.js');

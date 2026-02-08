@@ -115,4 +115,4 @@ describe('Goal Status Indicators', () => {
   });
 });
 
-console.log('Goals Panel Tests - Run with: npx vitest run src/tests/goals-panel.test.js');
+console.log('Goals Panel Tests - Run with: npx vitest run tests/goals-panel.test.js');

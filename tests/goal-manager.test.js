@@ -72,7 +72,7 @@ import {
   HOLD_REASON,
   WORK_PHASES,
   GOAL_PRIORITY
-} from '../services/goals/goal-manager.js';
+} from '../src/services/goals/goal-manager.js';
 
 describe('Goal Manager - Constants', () => {
   it('should export GOAL_STATE with correct values', () => {
@@ -530,4 +530,4 @@ describe('Goal Manager - Action Recording', () => {
   });
 });
 
-console.log('Goal Manager Tests - Run with: npx vitest run src/tests/goal-manager.test.js');
+console.log('Goal Manager Tests - Run with: npx vitest run tests/goal-manager.test.js');

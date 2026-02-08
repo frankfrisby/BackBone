@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { getStartupEngine } from "../src/services/startup-engine.js";
+import { getStartupEngine } from "../src/services/engine/startup-engine.js";
 
 // Mock dependencies
 vi.mock("../src/services/claude-code-cli.js", () => ({

@@ -158,4 +158,4 @@ describe('Claude Code CLI - Path Validation', () => {
   });
 });
 
-console.log('Claude Code CLI Tests - Run with: npx vitest run src/tests/claude-code-cli.test.js');
+console.log('Claude Code CLI Tests - Run with: npx vitest run tests/claude-code-cli.test.js');

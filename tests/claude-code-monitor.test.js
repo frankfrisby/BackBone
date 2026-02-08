@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { getClaudeCodeMonitor } from "../src/services/claude-code-monitor.js";
+import { getClaudeCodeMonitor } from "../src/services/ai/claude-code-monitor.js";
 
 // Mock the dependencies
 vi.mock("../src/services/claude-code-cli.js", () => ({

@@ -10,12 +10,12 @@ import { describe, it, expect, beforeEach } from "vitest";
 import {
   getConversationTracker,
   TOPIC_CATEGORIES,
-} from "../src/services/conversation-tracker.js";
+} from "../src/services/memory/conversation-tracker.js";
 
 // Conversation Context
 import conversationContext, {
   processUserMessage,
-} from "../src/services/conversation-context.js";
+} from "../src/services/memory/conversation-context.js";
 const {
   processAndSaveContext,
   getContextSummary,
@@ -28,7 +28,7 @@ import {
   getUnifiedMessageLog,
   MESSAGE_CHANNEL,
   MESSAGE_ROLE,
-} from "../src/services/unified-message-log.js";
+} from "../src/services/messaging/unified-message-log.js";
 
 // ─── Conversation Tracker ────────────────────────────────────────
 

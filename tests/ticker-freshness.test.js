@@ -11,7 +11,7 @@ import path from "path";
 // Client functions
 import {
   fetchTickers,
-} from "../src/services/yahoo-client.js";
+} from "../src/services/trading/yahoo-client.js";
 
 // Ticker data lists and scoring
 import {
@@ -25,12 +25,12 @@ import {
 import {
   getSignalFromScore,
   SCORE_THRESHOLDS,
-} from "../src/services/score-engine.js";
+} from "../src/services/trading/score-engine.js";
 
 // Trading algorithms
 import {
   getActionFromScore,
-} from "../src/services/trading-algorithms.js";
+} from "../src/services/trading/trading-algorithms.js";
 
 const CACHE_PATH = path.join(process.cwd(), "data", "tickers-cache.json");
 

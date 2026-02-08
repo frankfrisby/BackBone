@@ -116,4 +116,4 @@ describe('Autonomous Engine - Action Count Limits', () => {
   });
 });
 
-console.log('Autonomous Engine Tests - Run with: npx vitest run src/tests/autonomous-engine.test.js');
+console.log('Autonomous Engine Tests - Run with: npx vitest run tests/autonomous-engine.test.js');

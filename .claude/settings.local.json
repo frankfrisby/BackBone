@@ -181,7 +181,9 @@
       "WebFetch(domain:alexgarcia.xyz)",
       "WebFetch(domain:markus.oberlehner.net)",
       "WebFetch(domain:snowan.gitbook.io)",
-      "Bash(git mv:*)"
+      "Bash(git mv:*)",
+      "Bash(git rm:*)",
+      "Bash(do git mv \"$f\" tests/)"
     ]
   },
   "enableAllProjectMcpServers": true,

@@ -1,0 +1,14 @@
+{
+  "entrypoint": "src/services/engine/thinking-engine.js",
+  "type": "engine",
+  "schedule": "*/15 * * * *",
+  "permissions": {
+    "skills": [],
+    "mcp": ["backbone-life", "backbone-news"],
+    "tools": [],
+    "filesystem": {
+      "read": ["data/", "memory/"],
+      "write": ["data/backlog.json", "data/thinking-log.json", "memory/thesis.md"]
+    }
+  }
+}

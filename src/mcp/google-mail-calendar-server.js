@@ -8,10 +8,15 @@ import fetch from "node-fetch";
 import fs from "fs";
 import path from "path";
 import { getDataDir } from "../services/paths.js";
+import { fetchGoogleConfig } from "../services/firebase/firebase-config.js";
 
 /**
  * BACKBONE Google Mail & Calendar MCP Server
  * Unified email + calendar with AI analysis and draft capabilities
+ *
+ * Token refresh: This server handles its own token refresh because MCP servers
+ * run as child processes that don't inherit .env vars or share the main process's
+ * auto-refresh timer. On every API call, we check expiry and refresh if needed.
  */
 
 const DATA_DIR = getDataDir();
@@ -19,7 +24,8 @@ const EMAIL_CACHE = path.join(DATA_DIR, "email-cache.json");
 const DRAFT_LOG = path.join(DATA_DIR, "email-draft-log.json");
 const GOOGLE_TOKEN_FILE = path.join(DATA_DIR, "google-email-tokens.json");
 
-// Load Google tokens from config file (MCP child processes don't inherit .env vars)
+// ── Token management with auto-refresh ──────────────────────────
+
 const loadGoogleTokens = () => {
   try {
     if (fs.existsSync(GOOGLE_TOKEN_FILE)) {
@@ -29,8 +35,93 @@ const loadGoogleTokens = () => {
   return null;
 };
 
-const getGmailToken = () => process.env.GMAIL_ACCESS_TOKEN || loadGoogleTokens()?.access_token || null;
-const getCalendarToken = () => process.env.GOOGLE_CALENDAR_TOKEN || loadGoogleTokens()?.access_token || null;
+const saveGoogleTokens = (tokens) => {
+  try {
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(GOOGLE_TOKEN_FILE, JSON.stringify({ ...tokens, savedAt: new Date().toISOString() }, null, 2));
+  } catch (err) {
+    console.error("[GoogleMCP] Failed to save tokens:", err.message);
+  }
+};
+
+const isTokenExpired = (tokens) => {
+  if (!tokens?.savedAt) return true;
+  const savedAt = new Date(tokens.savedAt).getTime();
+  const expiresIn = (tokens.expires_in || 3600) * 1000;
+  const fiveMinBuffer = 5 * 60 * 1000;
+  return Date.now() > savedAt + expiresIn - fiveMinBuffer;
+};
+
+/**
+ * Refresh Google access token using refresh_token.
+ * Fetches OAuth client credentials from Firebase (not env vars).
+ */
+const refreshAccessToken = async (tokens) => {
+  if (!tokens?.refresh_token) return null;
+
+  // Get OAuth client creds from Firebase (same pattern as trading/health servers)
+  let clientId, clientSecret;
+  try {
+    const googleConfig = await fetchGoogleConfig();
+    clientId = googleConfig?.clientId;
+    clientSecret = googleConfig?.clientSecret;
+  } catch {}
+
+  if (!clientId || !clientSecret) {
+    console.error("[GoogleMCP] Cannot refresh — no OAuth client credentials in Firebase (config/config_google)");
+    return null;
+  }
+
+  try {
+    const response = await fetch("https://oauth2.googleapis.com/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        client_id: clientId,
+        client_secret: clientSecret,
+        refresh_token: tokens.refresh_token,
+        grant_type: "refresh_token",
+      }),
+    });
+
+    if (!response.ok) {
+      console.error("[GoogleMCP] Token refresh failed:", response.status);
+      return null;
+    }
+
+    const newTokens = await response.json();
+    const merged = {
+      ...tokens,
+      access_token: newTokens.access_token,
+      expires_in: newTokens.expires_in || 3600,
+    };
+    saveGoogleTokens(merged);
+    console.error("[GoogleMCP] Token refreshed successfully");
+    return merged.access_token;
+  } catch (err) {
+    console.error("[GoogleMCP] Token refresh error:", err.message);
+    return null;
+  }
+};
+
+/**
+ * Get a valid access token — refreshes automatically if expired.
+ */
+const getValidToken = async () => {
+  const tokens = loadGoogleTokens();
+  if (!tokens?.access_token) return null;
+
+  if (isTokenExpired(tokens)) {
+    const refreshed = await refreshAccessToken(tokens);
+    return refreshed;
+  }
+
+  return tokens.access_token;
+};
+
+// Wrappers for backwards compat with the rest of this file
+const getGmailToken = () => loadGoogleTokens()?.access_token || null;
+const getCalendarToken = () => loadGoogleTokens()?.access_token || null;
 
 // Tool definitions
 const TOOLS = [
@@ -173,17 +264,16 @@ const TOOLS = [
 
 // === PROVIDER HELPERS ===
 
-const getGmailHeaders = () => ({
-  Authorization: `Bearer ${getGmailToken()}`,
+const makeAuthHeaders = (token) => ({
+  Authorization: `Bearer ${token}`,
   "Content-Type": "application/json",
 });
+
+// Sync fallbacks (used only for provider detection)
+const getGmailHeaders = () => makeAuthHeaders(getGmailToken());
+const getGoogleCalHeaders = () => makeAuthHeaders(getCalendarToken());
 
 const GMAIL_BASE = "https://gmail.googleapis.com/gmail/v1/users/me";
-
-const getGoogleCalHeaders = () => ({
-  Authorization: `Bearer ${getCalendarToken()}`,
-  "Content-Type": "application/json",
-});
 
 const GOOGLE_CALENDAR_BASE = "https://www.googleapis.com/calendar/v3";
 
@@ -247,9 +337,12 @@ const saveCache = (cache) => {
 
 async function getGmailEmails(limit = 10, unreadOnly = false) {
   try {
+    const token = await getValidToken();
+    if (!token) return { error: "Gmail token expired and could not be refreshed", hint: "Re-authenticate with Gmail" };
+    const headers = makeAuthHeaders(token);
     const query = unreadOnly ? "is:unread" : "";
     const url = `${GMAIL_BASE}/messages?maxResults=${limit}${query ? `&q=${encodeURIComponent(query)}` : ""}`;
-    const listResponse = await fetch(url, { headers: getGmailHeaders() });
+    const listResponse = await fetch(url, { headers });
 
     if (!listResponse.ok) {
       if (listResponse.status === 401) {
@@ -263,9 +356,7 @@ async function getGmailEmails(limit = 10, unreadOnly = false) {
 
     const emails = await Promise.all(
       messages.slice(0, limit).map(async (msg) => {
-        const detailResponse = await fetch(`${GMAIL_BASE}/messages/${msg.id}?format=metadata`, {
-          headers: getGmailHeaders(),
-        });
+        const detailResponse = await fetch(`${GMAIL_BASE}/messages/${msg.id}?format=metadata`, { headers });
         if (!detailResponse.ok) return null;
         const detail = await detailResponse.json();
 
@@ -293,9 +384,10 @@ async function getGmailEmails(limit = 10, unreadOnly = false) {
 
 async function getGmailUnreadCount() {
   try {
-    const response = await fetch(`${GMAIL_BASE}/labels/INBOX`, {
-      headers: getGmailHeaders(),
-    });
+    const token = await getValidToken();
+    if (!token) return { error: "Gmail token expired" };
+    const headers = makeAuthHeaders(token);
+    const response = await fetch(`${GMAIL_BASE}/labels/INBOX`, { headers });
 
     if (!response.ok) throw new Error(`Gmail API error: ${response.status}`);
 
@@ -312,8 +404,11 @@ async function getGmailUnreadCount() {
 
 async function searchGmailEmails(query, limit = 20) {
   try {
+    const token = await getValidToken();
+    if (!token) return { error: "Gmail token expired" };
+    const headers = makeAuthHeaders(token);
     const url = `${GMAIL_BASE}/messages?maxResults=${limit}&q=${encodeURIComponent(query)}`;
-    const listResponse = await fetch(url, { headers: getGmailHeaders() });
+    const listResponse = await fetch(url, { headers });
 
     if (!listResponse.ok) throw new Error(`Gmail API error: ${listResponse.status}`);
 
@@ -323,7 +418,7 @@ async function searchGmailEmails(query, limit = 20) {
     const emails = await Promise.all(
       messages.map(async (msg) => {
         const detailResponse = await fetch(`${GMAIL_BASE}/messages/${msg.id}?format=metadata`, {
-          headers: getGmailHeaders(),
+          headers,
         });
         if (!detailResponse.ok) return null;
         const detail = await detailResponse.json();
@@ -349,8 +444,11 @@ async function searchGmailEmails(query, limit = 20) {
 
 async function getGmailEmailBody(emailId) {
   try {
+    const token = await getValidToken();
+    if (!token) return { error: "Gmail token expired" };
+    const headers = makeAuthHeaders(token);
     const response = await fetch(`${GMAIL_BASE}/messages/${emailId}?format=full`, {
-      headers: getGmailHeaders(),
+      headers,
     });
 
     if (!response.ok) {
@@ -399,6 +497,9 @@ async function getGmailEmailBody(emailId) {
 
 async function createGmailDraft(to, subject, body) {
   try {
+    const token = await getValidToken();
+    if (!token) return { success: false, error: "Gmail token expired" };
+    const headers = makeAuthHeaders(token);
     const rawMessage = [
       `To: ${to}`,
       `Subject: ${subject}`,
@@ -411,7 +512,7 @@ async function createGmailDraft(to, subject, body) {
 
     const response = await fetch(`${GMAIL_BASE}/drafts`, {
       method: "POST",
-      headers: getGmailHeaders(),
+      headers,
       body: JSON.stringify({
         message: { raw: encodedMessage },
       }),
@@ -562,10 +663,13 @@ async function createOutlookDraft(to, subject, body) {
 
 async function getGoogleTodayEvents() {
   try {
+    const token = await getValidToken();
+    if (!token) return { error: "Google Calendar token expired" };
+    const headers = makeAuthHeaders(token);
     const timeMin = formatDate(startOfDay());
     const timeMax = formatDate(endOfDay());
     const url = `${GOOGLE_CALENDAR_BASE}/calendars/primary/events?timeMin=${encodeURIComponent(timeMin)}&timeMax=${encodeURIComponent(timeMax)}&singleEvents=true&orderBy=startTime`;
-    const response = await fetch(url, { headers: getGoogleCalHeaders() });
+    const response = await fetch(url, { headers });
 
     if (!response.ok) {
       if (response.status === 401) return { error: "Google Calendar token expired" };
@@ -593,10 +697,13 @@ async function getGoogleTodayEvents() {
 
 async function getGoogleUpcomingEvents(days = 7, limit = 20) {
   try {
+    const token = await getValidToken();
+    if (!token) return { error: "Google Calendar token expired" };
+    const headers = makeAuthHeaders(token);
     const timeMin = formatDate(new Date());
     const timeMax = formatDate(addDays(new Date(), days));
     const url = `${GOOGLE_CALENDAR_BASE}/calendars/primary/events?timeMin=${encodeURIComponent(timeMin)}&timeMax=${encodeURIComponent(timeMax)}&maxResults=${limit}&singleEvents=true&orderBy=startTime`;
-    const response = await fetch(url, { headers: getGoogleCalHeaders() });
+    const response = await fetch(url, { headers });
 
     if (!response.ok) throw new Error(`Google Calendar API error: ${response.status}`);
 
@@ -619,6 +726,9 @@ async function getGoogleUpcomingEvents(days = 7, limit = 20) {
 
 async function createGoogleEvent(title, startTime, endTime, description, location) {
   try {
+    const token = await getValidToken();
+    if (!token) return { success: false, error: "Google Calendar token expired" };
+    const headers = makeAuthHeaders(token);
     const event = {
       summary: title,
       start: { dateTime: startTime, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone },
@@ -629,7 +739,7 @@ async function createGoogleEvent(title, startTime, endTime, description, locatio
 
     const response = await fetch(`${GOOGLE_CALENDAR_BASE}/calendars/primary/events`, {
       method: "POST",
-      headers: getGoogleCalHeaders(),
+      headers,
       body: JSON.stringify(event),
     });
 
@@ -654,6 +764,9 @@ async function createGoogleEvent(title, startTime, endTime, description, locatio
 
 async function updateGoogleEvent(eventId, updates) {
   try {
+    const token = await getValidToken();
+    if (!token) return { success: false, error: "Google Calendar token expired" };
+    const headers = makeAuthHeaders(token);
     const patchBody = {};
     if (updates.title) patchBody.summary = updates.title;
     if (updates.description) patchBody.description = updates.description;
@@ -667,7 +780,7 @@ async function updateGoogleEvent(eventId, updates) {
 
     const response = await fetch(`${GOOGLE_CALENDAR_BASE}/calendars/primary/events/${eventId}`, {
       method: "PATCH",
-      headers: getGoogleCalHeaders(),
+      headers,
       body: JSON.stringify(patchBody),
     });
 
@@ -692,9 +805,12 @@ async function updateGoogleEvent(eventId, updates) {
 
 async function deleteGoogleEvent(eventId) {
   try {
+    const token = await getValidToken();
+    if (!token) return { success: false, error: "Google Calendar token expired" };
+    const headers = makeAuthHeaders(token);
     const response = await fetch(`${GOOGLE_CALENDAR_BASE}/calendars/primary/events/${eventId}`, {
       method: "DELETE",
-      headers: getGoogleCalHeaders(),
+      headers,
     });
 
     if (!response.ok) throw new Error(`Google Calendar API error: ${response.status}`);

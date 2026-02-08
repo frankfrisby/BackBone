@@ -434,6 +434,129 @@ export async function getChannelVideos(channelIdOrUrl, maxResults = 15) {
   return { channelId, videoCount: videos.length, videos };
 }
 
+// ─── Comments ────────────────────────────────────────────────────────
+
+/**
+ * Get top comments for a video using youtubei.js (InnerTube API).
+ * Returns sorted by top/relevance (YouTube default).
+ * Falls back to page scraping if InnerTube fails.
+ */
+export async function getVideoComments(videoIdOrUrl, maxResults = 50) {
+  const videoId = extractVideoId(videoIdOrUrl);
+  if (!videoId) throw new Error(`Invalid video ID or URL: ${videoIdOrUrl}`);
+
+  // Method 1: youtubei.js InnerTube
+  try {
+    const { Innertube } = await import("youtubei.js");
+    const yt = await Innertube.create({ retrieve_player: false });
+    const info = await yt.getInfo(videoId);
+    const thread = await info.getComments();
+
+    const comments = [];
+    const contents = thread?.contents || [];
+
+    for (const item of contents) {
+      if (comments.length >= maxResults) break;
+      const comment = item?.comment;
+      if (!comment) continue;
+
+      comments.push({
+        author: comment.author?.name || "",
+        authorChannelUrl: comment.author?.url || "",
+        text: comment.content?.text || "",
+        likes: comment.vote_count?.text || "0",
+        publishedTime: comment.published?.text || "",
+        isHearted: !!comment.is_hearted,
+        isPinned: !!comment.is_pinned,
+        replyCount: comment.reply_count || 0,
+      });
+    }
+
+    // If we need more and continuation is available
+    let continuation = thread;
+    while (comments.length < maxResults && continuation?.has_continuation) {
+      try {
+        continuation = await continuation.getContinuation();
+        for (const item of continuation?.contents || []) {
+          if (comments.length >= maxResults) break;
+          const comment = item?.comment;
+          if (!comment) continue;
+          comments.push({
+            author: comment.author?.name || "",
+            authorChannelUrl: comment.author?.url || "",
+            text: comment.content?.text || "",
+            likes: comment.vote_count?.text || "0",
+            publishedTime: comment.published?.text || "",
+            isHearted: !!comment.is_hearted,
+            isPinned: !!comment.is_pinned,
+            replyCount: comment.reply_count || 0,
+          });
+        }
+      } catch {
+        break;
+      }
+    }
+
+    return {
+      videoId,
+      commentCount: comments.length,
+      method: "innertube",
+      comments: comments.slice(0, maxResults),
+    };
+  } catch (e) {
+    console.error("[YouTube] InnerTube comments failed:", e.message);
+  }
+
+  // Method 2: Page scraping fallback
+  try {
+    return await getCommentsScrape(videoId, maxResults);
+  } catch (e) {
+    throw new Error(`Could not fetch comments for ${videoId}: ${e.message}`);
+  }
+}
+
+async function getCommentsScrape(videoId, maxResults) {
+  const resp = await fetch(`https://www.youtube.com/watch?v=${videoId}`, { headers: HEADERS });
+  const html = await resp.text();
+
+  const dataMatch = html.match(/var ytInitialData\s*=\s*({.*?});\s*<\/script>/s);
+  if (!dataMatch) throw new Error("Could not parse page data for comments");
+
+  const data = JSON.parse(dataMatch[1]);
+  const comments = [];
+
+  // Navigate to comment section in ytInitialData
+  const contents = data?.contents?.twoColumnWatchNextResults?.results?.results?.contents || [];
+  for (const section of contents) {
+    const items = section?.itemSectionRenderer?.contents;
+    if (!items) continue;
+    for (const item of items) {
+      const renderer = item?.commentThreadRenderer?.comment?.commentRenderer;
+      if (!renderer) continue;
+      if (comments.length >= maxResults) break;
+
+      comments.push({
+        author: renderer.authorText?.simpleText || "",
+        authorChannelUrl: renderer.authorEndpoint?.browseEndpoint?.canonicalBaseUrl || "",
+        text: renderer.contentText?.runs?.map(r => r.text).join("") || "",
+        likes: renderer.voteCount?.simpleText || "0",
+        publishedTime: renderer.publishedTimeText?.runs?.[0]?.text || "",
+        isHearted: !!renderer.actionButtons?.commentActionButtonsRenderer?.creatorHeart,
+        isPinned: !!renderer.pinnedCommentBadge,
+        replyCount: renderer.replyCount || 0,
+      });
+    }
+  }
+
+  return {
+    videoId,
+    commentCount: comments.length,
+    method: "scrape",
+    comments,
+    note: comments.length === 0 ? "Comments may require authentication or are disabled" : null,
+  };
+}
+
 // ─── Research ────────────────────────────────────────────────────────
 
 export async function researchVideo(videoIdOrUrl) {

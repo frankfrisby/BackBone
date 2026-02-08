@@ -1,0 +1,14 @@
+{
+  "entrypoint": "src/services/engine/autonomous-loop.js",
+  "type": "engine",
+  "schedule": "continuous",
+  "permissions": {
+    "skills": ["*"],
+    "mcp": ["*"],
+    "tools": ["*"],
+    "filesystem": {
+      "read": ["data/", "memory/", "projects/"],
+      "write": ["data/", "memory/", "projects/"]
+    }
+  }
+}

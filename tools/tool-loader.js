@@ -23,6 +23,7 @@
 
 import fs from "fs";
 import path from "path";
+import os from "os";
 import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -33,19 +34,65 @@ const toolCache = new Map();
 let indexCache = null;
 
 /**
- * Load the tools index
+ * Resolve the active user's tools directory via filesystem reads.
+ * Avoids importing paths.js (circular dep risk in tool context).
+ */
+function resolveUserToolsDir() {
+  try {
+    const root = process.env.BACKBONE_HOME || path.join(os.homedir(), ".backbone");
+    const activeUserPath = path.join(root, "active-user.json");
+    let uid = "default";
+    if (fs.existsSync(activeUserPath)) {
+      try { uid = JSON.parse(fs.readFileSync(activeUserPath, "utf-8")).uid || "default"; } catch {}
+    }
+    return path.join(root, "users", uid, "tools");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Load the tools index — merges engine tools + user tools.
+ * User tools with the same ID override engine tools.
  */
 export function loadIndex() {
   if (indexCache) return indexCache;
 
+  // 1. Load engine tools
+  let engineIndex = { tools: [], categories: {} };
   try {
-    const raw = fs.readFileSync(INDEX_PATH, "utf-8");
-    indexCache = JSON.parse(raw);
-    return indexCache;
+    engineIndex = JSON.parse(fs.readFileSync(INDEX_PATH, "utf-8"));
   } catch (error) {
-    console.error("[ToolLoader] Failed to load index:", error.message);
-    return { tools: [], categories: {} };
+    console.error("[ToolLoader] Failed to load engine index:", error.message);
   }
+
+  // 2. Load user tools
+  let userTools = [];
+  const userToolsDir = resolveUserToolsDir();
+  if (userToolsDir) {
+    const userToolsIndex = path.join(userToolsDir, "index.json");
+    if (fs.existsSync(userToolsIndex)) {
+      try {
+        const userIndex = JSON.parse(fs.readFileSync(userToolsIndex, "utf-8"));
+        userTools = (userIndex.tools || []).map(t => ({ ...t, _source: "user", _basePath: userToolsDir }));
+      } catch {}
+    }
+  }
+
+  // 3. Merge — user tools override engine tools by ID
+  const merged = new Map();
+  for (const t of engineIndex.tools || []) {
+    merged.set(t.id, { ...t, _source: "engine", _basePath: __dirname });
+  }
+  for (const t of userTools) {
+    merged.set(t.id, t);
+  }
+
+  indexCache = {
+    tools: Array.from(merged.values()),
+    categories: engineIndex.categories || {}
+  };
+  return indexCache;
 }
 
 /**
@@ -105,7 +152,8 @@ async function loadToolModule(toolId) {
     throw new Error(`Tool not found: ${toolId}`);
   }
 
-  const toolPath = path.join(__dirname, tool.file);
+  const basePath = tool._basePath || __dirname;
+  const toolPath = path.join(basePath, tool.file);
 
   if (!fs.existsSync(toolPath)) {
     throw new Error(`Tool file not found: ${tool.file}`);

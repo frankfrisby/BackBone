@@ -9,6 +9,7 @@
 
 import fs from "fs";
 import path from "path";
+import fetch from "node-fetch";
 import { sendMessage } from "../ai/claude.js";
 import { getActivityTracker } from "../ui/activity-tracker.js";
 import { getWhatsAppNotifications, NOTIFICATION_TYPE, NOTIFICATION_PRIORITY } from "../messaging/whatsapp-notifications.js";
@@ -118,27 +119,203 @@ function buildNewsQueries(context) {
   return [...new Set(queries)].slice(0, 5);
 }
 
+// ── RSS Feed Sources ────────────────────────────────────────────
+
+const RSS_SOURCES = {
+  googleNews: (query) =>
+    `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=en-US&gl=US&ceid=US:en`,
+  googleTopStories: () =>
+    "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en",
+  yahooFinance: (symbol) =>
+    `https://feeds.finance.yahoo.com/rss/2.0/headline?s=${encodeURIComponent(symbol)}&region=US&lang=en-US`,
+};
+
 /**
- * Fetch news using web search (simulated via AI analysis)
- * In production, this would use a news API or web scraping
+ * Parse RSS XML into structured items.
+ * Lightweight regex parser — no dependencies needed for RSS.
+ */
+function parseRSS(xml) {
+  const items = [];
+  const itemRegex = /<item>([\s\S]*?)<\/item>/gi;
+  let match;
+
+  while ((match = itemRegex.exec(xml)) !== null) {
+    const block = match[1];
+
+    const get = (tag) => {
+      const m = block.match(new RegExp(`<${tag}[^>]*>(?:<!\\[CDATA\\[)?(.*?)(?:\\]\\]>)?<\\/${tag}>`, "is"));
+      return m ? m[1].trim() : null;
+    };
+
+    const title = get("title");
+    const link = get("link");
+    const pubDate = get("pubDate");
+    const source = get("source");
+    const description = get("description");
+
+    if (title) {
+      items.push({
+        title: title.replace(/<[^>]+>/g, "").trim(),
+        link,
+        pubDate,
+        source: source?.replace(/<[^>]+>/g, "").trim() || null,
+        description: description
+          ? description.replace(/<[^>]+>/g, "").trim().slice(0, 300)
+          : null,
+      });
+    }
+  }
+
+  return items;
+}
+
+/**
+ * Fetch an RSS feed with timeout and error handling.
+ */
+async function fetchRSS(url, label = "") {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+
+    const response = await fetch(url, {
+      signal: controller.signal,
+      headers: { "User-Agent": "BACKBONE-Engine/1.0" },
+    });
+    clearTimeout(timeout);
+
+    if (!response.ok) {
+      console.error(`[NewsService] RSS fetch failed (${response.status}): ${label || url}`);
+      return [];
+    }
+
+    const xml = await response.text();
+    return parseRSS(xml);
+  } catch (err) {
+    if (err.name === "AbortError") {
+      console.error(`[NewsService] RSS timeout: ${label || url}`);
+    } else {
+      console.error(`[NewsService] RSS error (${label}): ${err.message}`);
+    }
+    return [];
+  }
+}
+
+/**
+ * Fetch real news for a search query via Google News RSS.
+ * Returns structured news items with real headlines, sources, and links.
  */
 async function fetchNewsForQuery(query) {
-  // For now, we'll use Claude to generate relevant news topics
-  // In production, integrate with NewsAPI, Google News, or similar
+  const url = RSS_SOURCES.googleNews(query);
+  const items = await fetchRSS(url, `Google News: ${query}`);
+
   return {
     query,
-    fetchedAt: new Date().toISOString()
+    items: items.slice(0, 8),
+    fetchedAt: new Date().toISOString(),
   };
 }
 
 /**
- * Analyze news with AI and generate backlog items
+ * Fetch stock-specific news from Yahoo Finance RSS.
+ */
+async function fetchStockNews(symbols) {
+  if (!symbols || symbols.length === 0) return [];
+
+  const allItems = [];
+  // Batch symbols in groups of 3 to limit requests
+  const batches = [];
+  for (let i = 0; i < symbols.length; i += 3) {
+    batches.push(symbols.slice(i, i + 3).join(","));
+  }
+
+  for (const batch of batches.slice(0, 3)) {
+    const url = RSS_SOURCES.yahooFinance(batch);
+    const items = await fetchRSS(url, `Yahoo Finance: ${batch}`);
+    allItems.push(...items.slice(0, 5));
+  }
+
+  return allItems;
+}
+
+/**
+ * Fetch Google News top stories.
+ */
+async function fetchTopStories() {
+  const url = RSS_SOURCES.googleTopStories();
+  const items = await fetchRSS(url, "Google Top Stories");
+  return items.slice(0, 10);
+}
+
+/**
+ * Analyze REAL news with AI and generate backlog items.
+ * newsData now contains actual headlines from Google News + Yahoo Finance RSS.
  */
 async function analyzeNewsWithAI(context, newsData) {
   const tracker = getActivityTracker();
   tracker.setState("thinking", "Analyzing news for insights...");
 
-  const prompt = `You are analyzing current news and market conditions to generate actionable ideas for the user.
+  // Flatten all fetched headlines into a single list
+  const allHeadlines = [];
+  for (const feed of newsData) {
+    for (const item of feed.items || []) {
+      allHeadlines.push({
+        headline: item.title,
+        source: item.source || "Unknown",
+        date: item.pubDate || null,
+        link: item.link || null,
+        description: item.description || null,
+      });
+    }
+  }
+
+  // Also include top stories and stock news if they were fetched
+  if (newsData._topStories) {
+    for (const item of newsData._topStories) {
+      allHeadlines.push({
+        headline: item.title,
+        source: item.source || "Google News",
+        date: item.pubDate || null,
+        link: item.link || null,
+      });
+    }
+  }
+  if (newsData._stockNews) {
+    for (const item of newsData._stockNews) {
+      allHeadlines.push({
+        headline: item.title,
+        source: item.source || "Yahoo Finance",
+        date: item.pubDate || null,
+        link: item.link || null,
+      });
+    }
+  }
+
+  // Dedupe by headline
+  const seen = new Set();
+  const uniqueHeadlines = allHeadlines.filter(h => {
+    const key = h.headline?.toLowerCase().trim();
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+
+  if (uniqueHeadlines.length === 0) {
+    console.log("[NewsService] No real headlines fetched — skipping AI analysis");
+    return null;
+  }
+
+  console.log(`[NewsService] Analyzing ${uniqueHeadlines.length} real headlines`);
+
+  // Build the headlines block for the prompt
+  const headlinesBlock = uniqueHeadlines.slice(0, 40).map((h, i) =>
+    `${i + 1}. "${h.headline}" — ${h.source}${h.date ? ` (${new Date(h.date).toLocaleDateString()})` : ""}`
+  ).join("\n");
+
+  const prompt = `You are analyzing REAL current news headlines to generate actionable ideas for the user.
+
+## Real News Headlines (fetched just now)
+
+${headlinesBlock}
 
 ## User Context
 
@@ -156,36 +333,33 @@ ${context.skills.length > 0 ? context.skills.join(", ") : "Diverse skill set"}
 
 ## Your Task
 
-Based on CURRENT market conditions, news, and trends (as of ${new Date().toLocaleDateString()}), generate 3-5 actionable backlog items that would be relevant to this user.
+Based on the REAL headlines above, do the following:
 
-Consider:
-1. Market movements that affect their holdings
-2. Industry trends relevant to their career/skills
-3. Health/wellness developments
-4. Economic policy changes
-5. Technology breakthroughs
-6. Investment opportunities aligned with their beliefs
+1. Write a brief market/world summary (2-3 sentences) based on the actual headlines
+2. Pick the 5-10 most relevant headlines for this user and explain WHY they matter
+3. Generate 3-5 ACTIONABLE backlog items the user should consider doing
 
-For each item, assess:
+For each backlog item, assess:
 - How relevant is this to their beliefs and holdings?
-- Is this time-sensitive (will it lose value if not acted on)?
-- What's the potential impact on their life?
+- Is this time-sensitive?
+- What's the potential impact?
 
 Respond in JSON:
 \`\`\`json
 {
-  "marketSummary": "Brief 1-2 sentence summary of current market conditions",
+  "marketSummary": "2-3 sentence summary based on real headlines above",
   "newsItems": [
     {
-      "headline": "Concise news headline or trend",
-      "relevance": "Why this matters to the user",
-      "source": "news"
+      "headline": "Exact headline from the list above",
+      "source": "Source name",
+      "relevance": "Why this matters to this specific user",
+      "link": "URL if available"
     }
   ],
   "backlogItems": [
     {
       "title": "Clear, actionable item (e.g., 'Review AMD position after earnings beat')",
-      "description": "What to do and why",
+      "description": "What to do and why, based on the news",
       "source": "news",
       "relatedBeliefs": ["which belief this supports"],
       "impactScore": 60,
@@ -194,11 +368,11 @@ Respond in JSON:
       "suggestedProject": null
     }
   ],
-  "insight": "One key observation or pattern worth noting"
+  "insight": "One key pattern or observation from today's news"
 }
 \`\`\`
 
-Focus on ACTIONABLE items that could become goals. Don't just report news - suggest what the user should DO about it.`;
+IMPORTANT: Only reference REAL headlines from the list above. Do not invent news.`;
 
   try {
     const response = await sendMessage([
@@ -382,8 +556,21 @@ export async function fetchAndAnalyzeNews() {
     const queries = buildNewsQueries(context);
     console.log(`[NewsService] Built ${queries.length} search queries`);
 
-    // 3. Fetch news data (placeholder for API integration)
-    const newsData = await Promise.all(queries.map(fetchNewsForQuery));
+    // 3. Fetch news from multiple sources in parallel
+    const [queryResults, topStories, stockNews] = await Promise.all([
+      Promise.all(queries.map(fetchNewsForQuery)),
+      fetchTopStories(),
+      fetchStockNews(context.topStocks),
+    ]);
+
+    // Attach supplemental feeds so analyzeNewsWithAI can use them
+    const newsData = queryResults;
+    newsData._topStories = topStories;
+    newsData._stockNews = stockNews;
+
+    const totalItems = queryResults.reduce((s, r) => s + (r.items?.length || 0), 0)
+      + topStories.length + stockNews.length;
+    console.log(`[NewsService] Fetched ${totalItems} total items (${queryResults.length} queries, ${topStories.length} top stories, ${stockNews.length} stock news)`);
 
     // 4. Analyze with AI
     const analysis = await analyzeNewsWithAI(context, newsData);

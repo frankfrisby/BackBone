@@ -183,7 +183,9 @@
       "WebFetch(domain:snowan.gitbook.io)",
       "Bash(git mv:*)",
       "Bash(git rm:*)",
-      "Bash(do git mv \"$f\" tests/)"
+      "Bash(do git mv \"$f\" tests/)",
+      "Bash(BACKBONE_HOME=\"C:\\\\Users\\\\frank\\\\.backbone\" node:*)",
+      "WebFetch(domain:cyberstrategyinstitute.com)"
     ]
   },
   "enableAllProjectMcpServers": true,

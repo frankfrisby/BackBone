@@ -9,6 +9,7 @@ import {
   searchYouTube,
   getTranscript,
   getVideoInfo,
+  getVideoComments,
   getChannelVideos,
   researchVideo,
   listResearch,
@@ -53,6 +54,18 @@ const TOOLS = [
       type: "object",
       properties: {
         videoId: { type: "string", description: "YouTube video ID or full URL" },
+      },
+      required: ["videoId"],
+    },
+  },
+  {
+    name: "get_video_comments",
+    description: "Get top comments for a YouTube video. Returns author, text, likes, and whether comments are hearted or pinned. Great for understanding audience sentiment and reactions.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        videoId: { type: "string", description: "YouTube video ID or full URL" },
+        maxResults: { type: "number", description: "Max comments to return (default 50, max 100)" },
       },
       required: ["videoId"],
     },
@@ -143,6 +156,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "get_video_info": {
         result = await getVideoInfo(args.videoId);
+        break;
+      }
+
+      case "get_video_comments": {
+        const max = Math.min(args.maxResults || 50, 100);
+        result = await getVideoComments(args.videoId, max);
         break;
       }
 

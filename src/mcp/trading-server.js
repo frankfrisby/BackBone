@@ -21,7 +21,10 @@ import {
   explainWhyHeld,
 } from "../services/trading/position-analyzer.js";
 import { getAlpacaConfig } from "../services/trading/alpaca.js";
-import { addConviction, getConvictions, removeConviction } from "../services/trading/yahoo-client.js";
+import { addConviction, getConvictions, removeConviction, fetchTickers, fetchTicker } from "../services/trading/yahoo-client.js";
+import { calculateTickerScore, rankTickers, SCORE_THRESHOLDS, getSignalFromScore } from "../services/trading/score-engine.js";
+import { getTickerPredictionResearch } from "../services/trading/ticker-prediction-research.js";
+import getRecessionScore from "../services/trading/recession-score.js";
 
 /**
  * BACKBONE Trading MCP Server
@@ -187,6 +190,79 @@ const TOOLS = [
         symbol: { type: "string", description: "Stock ticker symbol to remove conviction for" },
       },
       required: ["symbol"],
+    },
+  },
+  {
+    name: "get_stock_quote",
+    description: "Get real-time stock price and data for a single ticker. Returns price, change, volume, MACD, RSI, and technicals.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        symbol: { type: "string", description: "Stock ticker symbol (e.g., AAPL, NVDA, SPY)" },
+      },
+      required: ["symbol"],
+    },
+  },
+  {
+    name: "get_top_tickers",
+    description: "Get the top-ranked tickers by score. Returns the best buy candidates sorted by effective score (0-10 scale). Use count to control how many (default 10).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        count: { type: "number", description: "Number of top tickers to return (default 10)" },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "get_worst_tickers",
+    description: "Get the worst-ranked tickers by score. Returns the lowest scoring tickers sorted ascending. Useful for identifying sell candidates.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        count: { type: "number", description: "Number of worst tickers to return (default 10)" },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "get_ticker_score_breakdown",
+    description: "Get the full score breakdown for a ticker — all components that make up its effective score (technical, prediction, MACD, volume, price position, psychological, earnings, penalties).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        symbol: { type: "string", description: "Stock ticker symbol" },
+      },
+      required: ["symbol"],
+    },
+  },
+  {
+    name: "get_ticker_research",
+    description: "Get the overnight research evaluation for a ticker — includes prediction score (0-10) and a 4-8 sentence analysis explaining WHY the ticker scores that way. Shows catalysts, risks, sentiment, and sources.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        symbol: { type: "string", description: "Stock ticker symbol" },
+      },
+      required: ["symbol"],
+    },
+  },
+  {
+    name: "get_prediction_stats",
+    description: "Get statistics on the prediction research system — total predictions, average score, high/low score counts, staleness, last run time.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      required: [],
+    },
+  },
+  {
+    name: "get_recession_score",
+    description: "Get the current recession probability score (0-10). Based on macro research: consumer health, employment, Fed policy, housing, manufacturing, tech spending, energy.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      required: [],
     },
   },
 ];
@@ -573,6 +649,156 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     case "remove_research_conviction":
       result = await removeConviction(args.symbol);
       break;
+
+    case "get_stock_quote": {
+      try {
+        const ticker = await fetchTicker(args.symbol);
+        if (!ticker || ticker.error) {
+          result = { error: ticker?.error || `No data found for ${args.symbol}. Yahoo Finance server may not be running.` };
+        } else {
+          result = {
+            symbol: ticker.symbol,
+            price: ticker.price,
+            change: ticker.change,
+            changePercent: ticker.changePercent,
+            volume: ticker.volume,
+            avgVolume: ticker.avgVolume,
+            volumeSigma: ticker.volumeSigma,
+            macd: ticker.macd,
+            rsi: ticker.rsi,
+            score: ticker.score,
+            signal: ticker.score != null ? getSignalFromScore(ticker.score) : null,
+            earningsDate: ticker.earningsDate,
+            sector: ticker.sector,
+            marketCap: ticker.marketCap,
+          };
+        }
+      } catch (err) {
+        result = { error: err.message };
+      }
+      break;
+    }
+
+    case "get_top_tickers": {
+      try {
+        const count = args.count || 10;
+        const tickers = await fetchTickers();
+        if (!tickers || tickers.error) {
+          result = { error: tickers?.error || "Failed to fetch tickers. Yahoo Finance server may not be running." };
+          break;
+        }
+        const ranked = rankTickers(tickers);
+        const top = ranked.slice(0, count).map(t => ({
+          symbol: t.symbol,
+          score: t.score?.toFixed(2),
+          signal: getSignalFromScore(t.score),
+          price: t.price,
+          changePercent: t.changePercent,
+          volumeSigma: t.volumeSigma,
+          isTop3: t.isTop3,
+        }));
+        result = { count: top.length, tickers: top };
+      } catch (err) {
+        result = { error: err.message };
+      }
+      break;
+    }
+
+    case "get_worst_tickers": {
+      try {
+        const count = args.count || 10;
+        const tickers = await fetchTickers();
+        if (!tickers || tickers.error) {
+          result = { error: tickers?.error || "Failed to fetch tickers." };
+          break;
+        }
+        // Sort ascending by score (worst first)
+        const sorted = [...tickers]
+          .filter(t => t.score != null)
+          .sort((a, b) => a.score - b.score)
+          .slice(0, count)
+          .map(t => ({
+            symbol: t.symbol,
+            score: t.score?.toFixed(2),
+            signal: getSignalFromScore(t.score),
+            price: t.price,
+            changePercent: t.changePercent,
+          }));
+        result = { count: sorted.length, tickers: sorted };
+      } catch (err) {
+        result = { error: err.message };
+      }
+      break;
+    }
+
+    case "get_ticker_score_breakdown": {
+      try {
+        const ticker = await fetchTicker(args.symbol);
+        if (!ticker || ticker.error) {
+          result = { error: ticker?.error || `No data for ${args.symbol}` };
+          break;
+        }
+        const scoreResult = calculateTickerScore(ticker);
+        result = {
+          symbol: ticker.symbol,
+          effectiveScore: scoreResult.effectiveScore,
+          signal: getSignalFromScore(scoreResult.effectiveScore),
+          components: scoreResult.components,
+          thresholds: SCORE_THRESHOLDS,
+        };
+      } catch (err) {
+        result = { error: err.message };
+      }
+      break;
+    }
+
+    case "get_ticker_research": {
+      try {
+        const research = getTickerPredictionResearch();
+        const prediction = research.getPrediction(args.symbol);
+        if (!prediction) {
+          result = {
+            symbol: args.symbol.toUpperCase(),
+            error: "No research data found for this ticker. It may not have been researched yet in the overnight cycle.",
+          };
+        } else {
+          result = {
+            symbol: prediction.symbol || args.symbol.toUpperCase(),
+            predictionScore: prediction.predictionScore,
+            evaluation: prediction.evaluation,
+            sentiment: prediction.sentiment,
+            catalysts: prediction.catalysts,
+            risks: prediction.risks,
+            confidence: prediction.confidence,
+            sources: prediction.sources,
+            lastResearched: prediction.lastResearched,
+            group: prediction.group,
+          };
+        }
+      } catch (err) {
+        result = { error: err.message };
+      }
+      break;
+    }
+
+    case "get_prediction_stats": {
+      try {
+        const research = getTickerPredictionResearch();
+        result = research.getStats();
+      } catch (err) {
+        result = { error: err.message };
+      }
+      break;
+    }
+
+    case "get_recession_score": {
+      try {
+        result = getRecessionScore();
+      } catch (err) {
+        result = { error: err.message };
+      }
+      break;
+    }
 
     default:
       throw new Error(`Unknown tool: ${name}`);

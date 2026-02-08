@@ -2,17 +2,19 @@
  * Firebase Storage Service - Backup projects, memory, and data to Firebase Storage
  *
  * Uses the Firebase Storage REST API (no admin SDK required).
- * Backs up: projects/, memory/, data/user-skills/, data/spreadsheets/, data/goals/
+ * Backs up: projects/, memory/, skills/, mcp/, tools/, data/spreadsheets/, data/goals/
  */
 import fs from "fs";
 import path from "path";
 import { loadFirebaseConfig } from "./firebase-auth.js";
 
-import { getDataDir, getMemoryDir, getProjectsDir, getBackboneHome, dataFile } from "../paths.js";
+import { getDataDir, getMemoryDir, getProjectsDir, getBackboneHome, getUserSkillsDir, getUserMcpDir, getUserToolsDir, dataFile } from "../paths.js";
 const DATA_DIR = getDataDir();
 const MEMORY_DIR = getMemoryDir();
 const PROJECTS_DIR = getProjectsDir();
-const USER_SKILLS_DIR = path.join(DATA_DIR, "user-skills");
+const SKILLS_DIR = getUserSkillsDir();
+const MCP_DIR = getUserMcpDir();
+const TOOLS_DIR = getUserToolsDir();
 const SPREADSHEETS_DIR = path.join(DATA_DIR, "spreadsheets");
 const GOALS_DIR = path.join(DATA_DIR, "goals");
 const SYNC_STATE_PATH = path.join(DATA_DIR, "firebase-sync-state.json");
@@ -21,7 +23,9 @@ const SYNC_STATE_PATH = path.join(DATA_DIR, "firebase-sync-state.json");
 const BACKUP_DIRS = [
   { local: PROJECTS_DIR, remote: "projects" },
   { local: MEMORY_DIR, remote: "memory" },
-  { local: USER_SKILLS_DIR, remote: "user-skills" },
+  { local: SKILLS_DIR, remote: "skills" },
+  { local: MCP_DIR, remote: "mcp" },
+  { local: TOOLS_DIR, remote: "tools" },
   { local: SPREADSHEETS_DIR, remote: "spreadsheets" },
   { local: GOALS_DIR, remote: "goals" }
 ];

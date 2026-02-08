@@ -1,0 +1,16 @@
+{
+  "entrypoint": "src/services/engine/idle-processor.js",
+  "type": "engine",
+  "schedule": "idle",
+  "idleThreshold": 30000,
+  "maxSessionMs": 600000,
+  "permissions": {
+    "skills": ["*"],
+    "mcp": ["backbone-life", "backbone-news"],
+    "tools": ["research-stock", "goal-progress"],
+    "filesystem": {
+      "read": ["data/", "memory/", "projects/"],
+      "write": ["data/backlog.json", "data/idle-processor-state.json", "data/research-cache.json", "memory/"]
+    }
+  }
+}

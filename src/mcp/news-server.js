@@ -6,6 +6,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import fs from "fs";
 import path from "path";
+import fetch from "node-fetch";
 import { getDataDir, getMemoryDir } from "../services/paths.js";
 
 /**
@@ -125,6 +126,49 @@ function shouldFetchNews(forceRefresh = false) {
   return hoursSince >= 4;
 }
 
+// === RSS Helpers (lightweight, no extra deps) ===
+
+function parseRSS(xml) {
+  const items = [];
+  const itemRegex = /<item>([\s\S]*?)<\/item>/gi;
+  let match;
+  while ((match = itemRegex.exec(xml)) !== null) {
+    const block = match[1];
+    const get = (tag) => {
+      const m = block.match(new RegExp(`<${tag}[^>]*>(?:<!\\[CDATA\\[)?(.*?)(?:\\]\\]>)?<\\/${tag}>`, "is"));
+      return m ? m[1].trim() : null;
+    };
+    const title = get("title");
+    if (title) {
+      items.push({
+        title: title.replace(/<[^>]+>/g, "").trim(),
+        link: get("link"),
+        pubDate: get("pubDate"),
+        source: get("source")?.replace(/<[^>]+>/g, "").trim() || null,
+        description: get("description")?.replace(/<[^>]+>/g, "").trim().slice(0, 300) || null,
+      });
+    }
+  }
+  return items;
+}
+
+async function fetchRSS(url, label = "") {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+    const response = await fetch(url, {
+      signal: controller.signal,
+      headers: { "User-Agent": "BACKBONE-Engine/1.0" },
+    });
+    clearTimeout(timeout);
+    if (!response.ok) return [];
+    const xml = await response.text();
+    return parseRSS(xml);
+  } catch {
+    return [];
+  }
+}
+
 // === TOOL IMPLEMENTATIONS ===
 
 async function fetchLatestNews(forceRefresh = false) {
@@ -179,34 +223,31 @@ function getMarketSummary() {
 }
 
 async function researchTopic(topic, context = "") {
-  // Gather user context for relevance
   const userContext = getUserContext();
 
-  // Build research context
-  const research = {
-    topic,
-    userContext: {
-      beliefs: userContext.beliefNames,
-      stocks: userContext.topStocks,
-      skills: userContext.skills,
-    },
-    additionalContext: context,
-    requestedAt: new Date().toISOString(),
-  };
+  // Fetch REAL news for this topic via Google News RSS
+  const googleUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(topic)}&hl=en-US&gl=US&ceid=US:en`;
+  const liveItems = await fetchRSS(googleUrl, `Research: ${topic}`);
 
-  // Check if news cache has relevant data
+  const liveNews = liveItems.slice(0, 15).map(item => ({
+    headline: item.title,
+    source: item.source || "Google News",
+    date: item.pubDate || null,
+    link: item.link || null,
+    description: item.description || null,
+  }));
+
+  // Also check cached history for additional context
   const cache = readJson(NEWS_CACHE_PATH);
-  const relatedNews = [];
-
+  const cachedRelated = [];
   if (cache?.history) {
     for (const entry of cache.history.slice(0, 10)) {
-      const items = entry.newsItems || [];
-      for (const item of items) {
+      for (const item of entry.newsItems || []) {
         if (
           item.headline?.toLowerCase().includes(topic.toLowerCase()) ||
           item.relevance?.toLowerCase().includes(topic.toLowerCase())
         ) {
-          relatedNews.push(item);
+          cachedRelated.push(item);
         }
       }
     }
@@ -221,7 +262,8 @@ async function researchTopic(topic, context = "") {
 
   return {
     topic,
-    relatedNews: relatedNews.slice(0, 10),
+    liveNews,
+    cachedNews: cachedRelated.slice(0, 10),
     relatedBacklogItems: relatedBacklog,
     userRelevance: {
       matchesBeliefs: userContext.beliefNames.filter(b =>
@@ -232,10 +274,8 @@ async function researchTopic(topic, context = "") {
         topic.toUpperCase().includes(s)
       ),
     },
+    totalResults: liveNews.length + cachedRelated.length,
     researchedAt: new Date().toISOString(),
-    suggestion: relatedNews.length > 0 || relatedBacklog.length > 0
-      ? "Found existing data. Consider triggering a news fetch for fresh analysis."
-      : "No cached data found. Consider running fetch_latest_news for fresh analysis.",
   };
 }
 

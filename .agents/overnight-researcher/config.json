@@ -1,0 +1,16 @@
+{
+  "entrypoint": "src/services/trading/overnight-research.js",
+  "type": "engine",
+  "schedule": "cron",
+  "cron": "5 20 * * *",
+  "operatingHours": { "start": 20, "end": 4 },
+  "permissions": {
+    "skills": [],
+    "mcp": ["backbone-news", "backbone-trading"],
+    "tools": ["research-stock", "analyze-ticker"],
+    "filesystem": {
+      "read": ["data/"],
+      "write": ["data/macro-knowledge.json", "data/overnight-research-state.json", "data/prediction-cache.json", "data/prediction-research-state.json"]
+    }
+  }
+}

@@ -9,10 +9,12 @@ import http from "http";
 import { URL } from "url";
 import { openUrl } from "../open-url.js";
 
-import { getDataDir } from "../paths.js";
-const DATA_DIR = getDataDir();
-const FIREBASE_USER_PATH = path.join(DATA_DIR, "firebase-user.json");
-const FIREBASE_CONFIG_PATH = path.join(DATA_DIR, "firebase-config.json");
+import { getDataDir, dataFile, setActiveUser, clearActiveUser, ensureUserDirs, claimDefaultProfile } from "../paths.js";
+
+// Dynamic paths — re-resolve each call so they follow active user switches
+const getFirebaseUserPath = () => dataFile("firebase-user.json");
+const getFirebaseConfigPath = () => dataFile("firebase-config.json");
+
 
 const REDIRECT_PORT = 3847;
 
@@ -31,8 +33,8 @@ const DEFAULT_FIREBASE_CONFIG = {
  * Ensure data directory exists
  */
 const ensureDataDir = () => {
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
+  if (!fs.existsSync(getDataDir())) {
+    fs.mkdirSync(getDataDir(), { recursive: true });
   }
 };
 
@@ -51,8 +53,8 @@ export const loadFirebaseConfig = () => {
 
   // Try config file (allows override)
   try {
-    if (fs.existsSync(FIREBASE_CONFIG_PATH)) {
-      return JSON.parse(fs.readFileSync(FIREBASE_CONFIG_PATH, "utf-8"));
+    if (fs.existsSync(getFirebaseConfigPath())) {
+      return JSON.parse(fs.readFileSync(getFirebaseConfigPath(), "utf-8"));
     }
   } catch (error) {
     console.error("Failed to load Firebase config file:", error.message);
@@ -67,7 +69,7 @@ export const loadFirebaseConfig = () => {
  */
 export const saveFirebaseConfig = (config) => {
   ensureDataDir();
-  fs.writeFileSync(FIREBASE_CONFIG_PATH, JSON.stringify(config, null, 2));
+  fs.writeFileSync(getFirebaseConfigPath(), JSON.stringify(config, null, 2));
 };
 
 /**
@@ -573,12 +575,22 @@ export const signInWithGoogle = async () => {
  */
 export const saveFirebaseUser = (userData) => {
   try {
+    const uid = userData.localId || userData.uid;
+    if (uid) {
+      // If "default" profile exists and this user has no folder yet, claim it
+      claimDefaultProfile(uid);
+
+      // Switch active user so all paths resolve to this user's directory
+      setActiveUser(uid, userData.email, userData.displayName);
+      ensureUserDirs(uid);
+    }
+
     ensureDataDir();
     const toSave = {
       ...userData,
       savedAt: new Date().toISOString()
     };
-    fs.writeFileSync(FIREBASE_USER_PATH, JSON.stringify(toSave, null, 2));
+    fs.writeFileSync(getFirebaseUserPath(), JSON.stringify(toSave, null, 2));
     return true;
   } catch (error) {
     console.error("Failed to save Firebase user:", error.message);
@@ -592,8 +604,8 @@ export const saveFirebaseUser = (userData) => {
 export const loadFirebaseUser = () => {
   try {
     ensureDataDir();
-    if (fs.existsSync(FIREBASE_USER_PATH)) {
-      return JSON.parse(fs.readFileSync(FIREBASE_USER_PATH, "utf-8"));
+    if (fs.existsSync(getFirebaseUserPath())) {
+      return JSON.parse(fs.readFileSync(getFirebaseUserPath(), "utf-8"));
     }
   } catch (error) {
     console.error("Failed to load Firebase user:", error.message);
@@ -618,9 +630,11 @@ export const getCurrentFirebaseUser = () => {
  */
 export const signOutFirebase = () => {
   try {
-    if (fs.existsSync(FIREBASE_USER_PATH)) {
-      fs.unlinkSync(FIREBASE_USER_PATH);
+    if (fs.existsSync(getFirebaseUserPath())) {
+      fs.unlinkSync(getFirebaseUserPath());
     }
+    // Clear active user — paths revert to "default" profile
+    clearActiveUser();
     return true;
   } catch (error) {
     console.error("Failed to sign out:", error.message);

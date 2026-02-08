@@ -9,7 +9,8 @@ import App from "../src/app.js";
 import { loadLinkedInProfile } from "../src/services/integrations/linkedin-scraper.js";
 import { Writable } from "stream";
 import { checkForUpdates, consumeUpdateState } from "../src/services/setup/auto-updater.js";
-import { ensureUserDirs, dataFile, memoryFile, getDataDir, getBackboneHome, isLegacyInstall } from "../src/services/paths.js";
+import { ensureUserDirs, dataFile, memoryFile, getDataDir, getBackboneHome, getBackboneRoot, getEngineRoot, getActiveUserId, migrateToUserScoped, isLegacyInstall } from "../src/services/paths.js";
+import { mountAllExtensions } from "../src/services/mount-user-extensions.js";
 
 // ── Singleton lock — prevent multiple instances ────────────────
 const LOCK_FILE = dataFile(".backbone.lock");
@@ -67,12 +68,19 @@ const releaseLock = () => {
 
 // ── First-run scaffolding — create required directories and config ──
 const ensureFirstRun = () => {
-  // Create all user-data directories via centralized paths module
+  // Migrate flat ~/.backbone/{data,memory,...} → ~/.backbone/users/default/
+  // No-op if already migrated (dirs don't exist at root level)
+  migrateToUserScoped();
+
+  // Create all user-data directories (data, memory, projects, skills, mcp, tools)
   ensureUserDirs();
 
-  // Also ensure skills/ dir exists alongside the code (not user data)
-  const skillsDir = path.join(process.cwd(), "skills");
+  // Also ensure engine skills/ dir exists alongside the code
+  const skillsDir = path.join(getEngineRoot(), "skills");
   if (!fs.existsSync(skillsDir)) fs.mkdirSync(skillsDir, { recursive: true });
+
+  // Mount user extensions — merges user MCP/skills/tools with engine defaults
+  mountAllExtensions();
 
   // Seed essential data files if they don't exist
   const seeds = {

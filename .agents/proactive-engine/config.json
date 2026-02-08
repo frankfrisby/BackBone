@@ -1,0 +1,14 @@
+{
+  "entrypoint": "src/services/engine/proactive-engine.js",
+  "type": "engine",
+  "schedule": "event-driven",
+  "permissions": {
+    "skills": [],
+    "mcp": ["backbone-life", "backbone-news", "backbone-health", "backbone-trading"],
+    "tools": ["health-check", "portfolio-summary", "goal-progress"],
+    "filesystem": {
+      "read": ["data/", "memory/"],
+      "write": ["data/proactive_state.json"]
+    }
+  }
+}

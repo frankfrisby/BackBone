@@ -777,14 +777,14 @@ Be conservative. Only prune what's clearly stale.`;
 TASK: Analyze current goals and projects to detect missing skills and tools.
 
 Read data/goals.json to see active goals and their tasks.
-Read data/user-skills/index.json to see existing user skills.
+Read skills/index.json to see existing user skills.
 Read .mcp.json to see existing MCP servers.
 
 Then determine if any goals require capabilities the system doesn't have yet.
 
 For each gap found:
-1. Create a user skill markdown file in data/user-skills/<slug>.md following the standard skill format
-2. Update data/user-skills/index.json to register the new skill
+1. Create a user skill markdown file in skills/<slug>.md following the standard skill format
+2. Update skills/index.json to register the new skill
 3. If the gap requires an execution tool (API call, data processing), generate an MCP server in src/mcp/
 4. Register new MCP servers in .mcp.json
 

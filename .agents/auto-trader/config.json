@@ -1,0 +1,14 @@
+{
+  "entrypoint": "src/services/trading/auto-trader.js",
+  "type": "engine",
+  "schedule": "market-hours",
+  "permissions": {
+    "skills": [],
+    "mcp": ["backbone-trading"],
+    "tools": ["analyze-ticker", "portfolio-summary", "add-conviction", "get-convictions"],
+    "filesystem": {
+      "read": ["data/"],
+      "write": ["data/trades-log.json", "data/alpaca-cache.json", "data/auto-trader-state.json"]
+    }
+  }
+}

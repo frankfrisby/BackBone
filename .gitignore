@@ -3,29 +3,23 @@
 # ============================================
 # Code vs User Data boundary:
 #   CODE (tracked):  src/, apps/, bin/, tools/, skills/, scripts/, docs/, packages/
-#   USER DATA (ignored): data/, memory/, projects/, screenshots/
+#   USER DATA (ignored): lives at ~/.backbone/users/<uid>/
 # ============================================
 
 # ----- Dependencies -----
 node_modules/
 
-# ----- User Data (never committed) -----
-# These directories contain personal data and are mounted via paths.js
-# On new installs, they're created automatically or restored from Firebase backup
-data/*
-!data/.gitkeep
-memory/*
-!memory/.gitkeep
-projects/*
-!projects/.gitkeep
-screenshots/*
-!screenshots/.gitkeep
+# ----- User Data (engine creates these at ~/.backbone, NOT here) -----
+data/
+memory/
+projects/
+screenshots/
+_profiles/
 
 # ----- Environment & Secrets -----
 .env
 .env.local
 .env.*.local
-*.env
 *.pem
 *.key
 *.crt
@@ -37,7 +31,7 @@ dist/
 build/
 *.log
 
-# ----- Web App (apps/web/) -----
+# ----- Web App -----
 apps/web/out/
 apps/web/node_modules/
 apps/web/.next/
@@ -55,17 +49,15 @@ apps/web/.next/
 .DS_Store
 Thumbs.db
 desktop.ini
+nul
 
 # ----- Temporary -----
 *.tmp
 *.temp
 .cache/
-nul
 
 # ----- Test Coverage -----
 coverage/
 
-# ----- Debug Logs -----
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
+# ----- Stale config duplicates -----
+mcp-config.json

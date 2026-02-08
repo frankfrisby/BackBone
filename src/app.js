@@ -4239,7 +4239,7 @@ Execute this task and provide concrete results.`);
         // Add skills catalog (user skills have higher priority)
         const skillsList = getSkillsCatalog();
         if (skillsList) {
-          contextParts.push(`## Available Skills\n${skillsList}\n\nCustom user skills take priority over system skills. When a query matches a custom skill's description or "When to Use" section, read the full skill file from data/user-skills/ and follow its process.`);
+          contextParts.push(`## Available Skills\n${skillsList}\n\nCustom user skills take priority over system skills. When a query matches a custom skill's description or "When to Use" section, read the full skill file from skills/ and follow its process.`);
         }
 
         // Add saved user context
@@ -6702,7 +6702,7 @@ Folder: ${result.action.id}`,
           }
         ]);
         try {
-          const scriptPath = engineFile("scripts/voice-server.js");
+          const scriptPath = engineFile("dev/scripts/voice-server.js");
           spawn("node", [scriptPath], {
             detached: true,
             stdio: "ignore",
@@ -9311,8 +9311,8 @@ Folder: ${result.action.id}`,
           `The user wants to create a custom skill called "${skillName}". Help them define it by generating a structured skill file. ` +
           `Use this template format:\n\n` +
           `# ${skillName}\n\n## Category\n<category>\n\n## Tags\n<tags>\n\n## Description\n<description>\n\n## When to Use\n<when to use this skill>\n\n## Process\n<numbered steps>\n\n## Decision Framework\n<decision criteria>\n\n## My Preferences\n<preferences>\n\n## Examples\n<example interactions>\n\n` +
-          `Ask the user questions to fill in the details, then once you have enough info, save the skill by writing the file to data/user-skills/${getSkillsLoader()._slugify(skillName)}.md ` +
-          `and updating the index at data/user-skills/index.json. Tell the user when the skill is saved.`
+          `Ask the user questions to fill in the details, then once you have enough info, save the skill by writing the file to skills/${getSkillsLoader()._slugify(skillName)}.md ` +
+          `and updating the index at skills/index.json. Tell the user when the skill is saved.`
         );
         setLastAction("Creating skill...");
         return;
@@ -9341,8 +9341,8 @@ Folder: ${result.action.id}`,
         }
         handleAIMessage(
           `The user wants to edit their custom skill "${skillId}". Here is the current content:\n\n${content}\n\n` +
-          `Help them update it. Ask what they want to change, then save the updated version to data/user-skills/${skillId}.md ` +
-          `and update data/user-skills/index.json accordingly.`
+          `Help them update it. Ask what they want to change, then save the updated version to skills/${skillId}.md ` +
+          `and update skills/index.json accordingly.`
         );
         setLastAction("Editing skill...");
         return;
@@ -9365,8 +9365,8 @@ Folder: ${result.action.id}`,
         handleAIMessage(
           `Analyze our recent conversation history and identify repeated patterns, preferences, or decision frameworks that could be codified as custom skills. ` +
           `For each suggestion, provide:\n- Skill name\n- What it would encode\n- Why it would be useful\n\n` +
-          `Then ask the user which ones they want to create. For approved ones, save them to data/user-skills/ using the standard skill template format ` +
-          `and update data/user-skills/index.json.`
+          `Then ask the user which ones they want to create. For approved ones, save them to skills/ using the standard skill template format ` +
+          `and update skills/index.json.`
         );
         setLastAction("Learning skills...");
         return;

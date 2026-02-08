@@ -5,11 +5,11 @@ import fs from "fs";
 import path from "path";
 import { EventEmitter } from "events";
 
-import { getDataDir, getEngineRoot } from "../paths.js";
+import { getDataDir, getEngineRoot, getUserSkillsDir } from "../paths.js";
 const DATA_DIR = getDataDir();
 const SKILLS_DIR = path.join(getEngineRoot(), "skills");
 const SKILLS_INDEX_PATH = path.join(DATA_DIR, "skills-index.json");
-const USER_SKILLS_DIR = path.join(DATA_DIR, "user-skills");
+const USER_SKILLS_DIR = getUserSkillsDir();
 const USER_SKILLS_INDEX_PATH = path.join(USER_SKILLS_DIR, "index.json");
 
 const SKILL_REPOS = [

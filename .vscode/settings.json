@@ -1,0 +1,26 @@
+{
+  "editor.tabSize": 2,
+  "editor.insertSpaces": true,
+  "editor.formatOnSave": false,
+  "files.eol": "\n",
+  "files.exclude": {
+    "node_modules": true,
+    "data": true,
+    "memory": true,
+    "projects": true,
+    "screenshots": true,
+    "dist": true,
+    "apps/web/.next": true,
+    "apps/web/node_modules": true
+  },
+  "search.exclude": {
+    "node_modules": true,
+    "data": true,
+    "memory": true,
+    "projects": true,
+    "apps/web/.next": true,
+    "apps/web/node_modules": true,
+    "package-lock.json": true
+  },
+  "javascript.preferences.importModuleSpecifier": "relative"
+}

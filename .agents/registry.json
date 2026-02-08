@@ -1,0 +1,88 @@
+{
+  "version": "1.0.0",
+  "agents": [
+    {
+      "id": "autonomous-engine",
+      "name": "Autonomous Engine",
+      "description": "Continuous self-improving AI loop that thinks, researches, plans, executes, and reflects",
+      "entrypoint": "src/services/engine/autonomous-loop.js",
+      "type": "engine",
+      "status": "active"
+    },
+    {
+      "id": "goal-intelligence",
+      "name": "Goal Intelligence",
+      "description": "Learns from user, builds understanding, creates goals, re-evaluates, and proposes new goals",
+      "entrypoint": "src/services/engine/goal-intelligence.js",
+      "type": "engine",
+      "status": "active"
+    },
+    {
+      "id": "thinking-engine",
+      "name": "Thinking Engine",
+      "description": "Runs every 15 minutes to analyze beliefs, generate backlog items, and update thesis",
+      "entrypoint": "src/services/engine/thinking-engine.js",
+      "type": "engine",
+      "status": "active"
+    },
+    {
+      "id": "idle-processor",
+      "name": "Idle Processor",
+      "description": "Works on backlog items when user is idle, using Claude Code CLI",
+      "entrypoint": "src/services/engine/idle-processor.js",
+      "type": "engine",
+      "status": "active"
+    },
+    {
+      "id": "overnight-researcher",
+      "name": "Overnight Researcher",
+      "description": "Researches all 700+ tickers and macro themes from 8 PM to 4 AM",
+      "entrypoint": "src/services/trading/overnight-research.js",
+      "type": "research",
+      "status": "active",
+      "schedule": "20:05-04:00"
+    },
+    {
+      "id": "auto-trader",
+      "name": "Auto Trader",
+      "description": "Executes buy/sell signals based on prediction scores and trading algorithms",
+      "entrypoint": "src/services/trading/auto-trader.js",
+      "type": "trading",
+      "status": "active"
+    },
+    {
+      "id": "proactive-engine",
+      "name": "Proactive Engine",
+      "description": "Monitors disasters, markets, and geopolitical events for proactive alerts",
+      "entrypoint": "src/services/engine/proactive-engine.js",
+      "type": "engine",
+      "status": "active"
+    },
+    {
+      "id": "cron-manager",
+      "name": "Cron Manager",
+      "description": "Schedules and runs recurring tasks (ticker refresh, health sync, brief generation)",
+      "entrypoint": "src/services/cron-manager.js",
+      "type": "scheduler",
+      "status": "active"
+    }
+  ],
+  "skills": {
+    "directory": "skills/",
+    "userDirectory": "data/user-skills/",
+    "count": 29
+  },
+  "tools": {
+    "directory": "tools/",
+    "registry": "tools/index.json",
+    "loader": "tools/tool-loader.js"
+  },
+  "mcp": {
+    "directory": "src/mcp/",
+    "servers": [
+      "trading-server", "health-server", "news-server", "life-server",
+      "linkedin-server", "youtube-server", "projects-server", "vapi-server",
+      "email-server", "calendar-server", "contacts-server", "google-mail-calendar-server"
+    ]
+  }
+}

@@ -1,0 +1,18 @@
+#!/bin/sh
+# Pre-commit hook: prevent committing sensitive files
+
+# Check for .env files
+if git diff --cached --name-only | grep -E '\.env$|\.env\.local$|credentials\.json$|tokens\.json$'; then
+  echo "ERROR: Attempting to commit sensitive files (.env, credentials, tokens)"
+  echo "Remove them from staging: git reset HEAD <file>"
+  exit 1
+fi
+
+# Check for data/ directory files (user data should not be committed)
+if git diff --cached --name-only | grep -E '^data/[^.]' | grep -v '.gitkeep'; then
+  echo "WARNING: Attempting to commit files from data/ directory"
+  echo "User data should not be in git. Remove with: git reset HEAD data/"
+  exit 1
+fi
+
+echo "Pre-commit checks passed"

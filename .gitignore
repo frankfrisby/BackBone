@@ -24,14 +24,13 @@ dist/
 build/
 *.log
 
-# Web app build artifacts (backbone-app is deployed separately)
-backbone-app/out/
-backbone-app/node_modules/
-backbone-app/.next/
+# Web app build artifacts
+apps/web/out/
+apps/web/node_modules/
+apps/web/.next/
 .firebase/
 
 # IDE and editor
-.vscode/
 .idea/
 *.swp
 *.swo

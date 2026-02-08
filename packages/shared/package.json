@@ -1,0 +1,12 @@
+{
+  "name": "@backbone-ai/shared",
+  "version": "1.0.0",
+  "description": "Shared utilities for BACKBONE engine",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./paths": "./paths.js",
+    "./config": "./config.js"
+  }
+}

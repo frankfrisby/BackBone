@@ -3,11 +3,14 @@
  * Check Firebase for pending/unanswered messages
  */
 
-import { getRealtimeMessaging } from "../src/services/realtime-messaging.js";
+import { getRealtimeMessaging } from "../src/services/messaging/realtime-messaging.js";
+import { loadFirebaseUser } from "../src/services/firebase/firebase-auth.js";
 
 async function main() {
   const r = getRealtimeMessaging();
-  await r.initialize("OVT9OwtRQocYlhZqpOdIoxjYGy02");
+  const uid = loadFirebaseUser()?.localId;
+  if (!uid) { console.error("No Firebase user found."); process.exit(1); }
+  await r.initialize(uid);
 
   // Get conversation history
   const history = await r.getConversationHistory(50);

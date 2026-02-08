@@ -9,7 +9,7 @@ import {
   extractLinkedInProfile,
   saveLinkedInProfile,
   loadLinkedInProfile
-} from "../src/services/linkedin-scraper.js";
+} from "../src/services/integrations/linkedin-scraper.js";
 
 const main = async () => {
   console.log("===========================================");

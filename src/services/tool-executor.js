@@ -16,11 +16,12 @@ import path from "path";
 import { EventEmitter } from "events";
 import { spawn, exec } from "child_process";
 import { promisify } from "util";
-import { getPlaywrightService } from "./playwright-service.js";
-import { sendWhatsAppMessage } from "./phone-auth.js";
+import { getPlaywrightService } from "./integrations/playwright-service.js";
+import { sendWhatsAppMessage } from "./firebase/phone-auth.js";
 import { loadUserSettings } from "./user-settings.js";
-import { getCurrentFirebaseUser } from "./firebase-auth.js";
+import { getCurrentFirebaseUser } from "./firebase/firebase-auth.js";
 
+import { dataFile, getDataDir } from "./paths.js";
 const execAsync = promisify(exec);
 
 /**
@@ -731,7 +732,7 @@ export class ToolExecutor extends EventEmitter {
    */
   async executeReadProject(projectId, params = {}) {
     try {
-      const projectsPath = path.join(process.cwd(), "data", "projects.json");
+      const projectsPath = dataFile("projects.json");
 
       if (!fs.existsSync(projectsPath)) {
         return {
@@ -772,7 +773,7 @@ export class ToolExecutor extends EventEmitter {
    */
   async executeListProjects(filter, params = {}) {
     try {
-      const projectsPath = path.join(process.cwd(), "data", "projects.json");
+      const projectsPath = dataFile("projects.json");
 
       if (!fs.existsSync(projectsPath)) {
         return {
@@ -817,7 +818,7 @@ export class ToolExecutor extends EventEmitter {
    */
   async executeReadMemory(memoryKey, params = {}) {
     try {
-      const memoryDir = path.join(process.cwd(), "data", "memory");
+      const memoryDir = dataFile("memory");
 
       // If specific key requested
       if (memoryKey) {
@@ -870,7 +871,7 @@ export class ToolExecutor extends EventEmitter {
         throw new Error("Memory key is required");
       }
 
-      const memoryDir = path.join(process.cwd(), "data", "memory");
+      const memoryDir = dataFile("memory");
 
       // Ensure directory exists
       if (!fs.existsSync(memoryDir)) {
@@ -913,7 +914,7 @@ export class ToolExecutor extends EventEmitter {
    */
   async executeReadData(fileName, params = {}) {
     try {
-      const dataDir = path.join(process.cwd(), "data");
+      const dataDir = getDataDir();
 
       if (!fileName) {
         // List available data files
@@ -960,7 +961,7 @@ export class ToolExecutor extends EventEmitter {
    */
   async executeListGoals(filter, params = {}) {
     try {
-      const goalsPath = path.join(process.cwd(), "data", "goals.json");
+      const goalsPath = dataFile("goals.json");
 
       if (!fs.existsSync(goalsPath)) {
         return {
@@ -1007,7 +1008,7 @@ export class ToolExecutor extends EventEmitter {
    */
   async executeGetGoal(goalId, params = {}) {
     try {
-      const goalsPath = path.join(process.cwd(), "data", "goals.json");
+      const goalsPath = dataFile("goals.json");
 
       if (!fs.existsSync(goalsPath)) {
         return {

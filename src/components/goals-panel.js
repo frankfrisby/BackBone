@@ -19,10 +19,10 @@
 
 import React, { memo, useEffect, useState, useCallback, useRef } from "react";
 import { Box, Text } from "ink";
-import { getGoalTracker, GOAL_STATUS } from "../services/goal-tracker.js";
-import { generateGoalsFromData } from "../services/goal-generator.js";
-import { getProjectManager } from "../services/project-manager.js";
-import { getGoalManager, GOAL_STATE } from "../services/goal-manager.js";
+import { getGoalTracker, GOAL_STATUS } from "../services/goals/goal-tracker.js";
+import { generateGoalsFromData } from "../services/goals/goal-generator.js";
+import { getProjectManager } from "../services/projects/project-manager.js";
+import { getGoalManager, GOAL_STATE } from "../services/goals/goal-manager.js";
 
 const e = React.createElement;
 
@@ -56,6 +56,13 @@ const truncateToLines = (text, maxLines, charsPerLine = 30) => {
   const maxChars = maxLines * charsPerLine;
   if (!text || text.length <= maxChars) return text || "";
   return text.slice(0, maxChars - 3).trim() + "...";
+};
+
+const normalizePercent = (value) => {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return 0;
+  const normalized = num >= 0 && num <= 1 ? num * 100 : num;
+  return Math.max(0, Math.min(100, Math.round(normalized)));
 };
 
 /**
@@ -137,8 +144,9 @@ const GoalLine = memo(({ goal, isWorking = false, blinkVisible = true, isFirst =
   const rawTitle = goal.title || "Untitled Goal";
   const title = truncateToLines(rawTitle, 2);
 
-  // Goal completion percentage
-  const goalCompletion = goal.completion ?? goal.progress ?? 0;
+  // Goal completion percentage — completed goals always show 100%
+  const rawCompletion = basicStatus === "completed" ? 100 : (goal.completion ?? goal.progress ?? 0);
+  const goalCompletion = normalizePercent(rawCompletion);
 
   // Projects under this goal (with their own completion %)
   const projects = goal.projects || [];
@@ -165,24 +173,26 @@ const GoalLine = memo(({ goal, isWorking = false, blinkVisible = true, isFirst =
         { flexDirection: "row", flexGrow: 1 },
         // Goal title
         e(Text, { color: privateMode ? "#475569" : "#94a3b8", wrap: "wrap" }, displayTitle),
-        // Goal completion percentage
-        goalCompletion > 0 && e(Text, { color: getPercentColor(goalCompletion) }, ` ${goalCompletion}%`)
+        // Goal completion percentage — always show
+        e(Text, { color: getPercentColor(goalCompletion) }, ` ${goalCompletion}%`)
       )
     ),
     // Projects under this goal (indented)
-    projects.length > 0 && projects.slice(0, 2).map((proj, i) =>
-      e(
+    projects.length > 0 && projects.slice(0, 2).map((proj, i) => {
+      const projectCompletion = normalizePercent(proj.completion ?? proj.progress ?? 0);
+
+      return e(
         Box,
         { key: proj.id || `proj-${i}`, flexDirection: "row", marginLeft: 2 },
         e(Text, { color: "#475569" }, "└ "),
         e(Text, { color: "#475569", wrap: "wrap" },
           privateMode ? "[project]" : truncateToLines(proj.name || proj.title || "Project", 1, 20)
         ),
-        e(Text, { color: getPercentColor(proj.completion || 0) },
-          ` ${proj.completion || 0}%`
+        e(Text, { color: getPercentColor(projectCompletion) },
+          ` ${projectCompletion}%`
         )
-      )
-    ),
+      );
+    }),
     // If no projects, show category
     projects.length === 0 && e(
       Box,
@@ -353,10 +363,10 @@ const SmartGoalsPanelBase = ({
         const goalProjects = projectsByGoal[goal.id] || projectsByGoal[goal.title] || [];
 
         // Calculate goal completion from projects (average) or use existing progress
-        let goalCompletion = goal.progress || 0;
+        let goalCompletion = normalizePercent(goal.progress ?? 0);
         if (goalProjects.length > 0) {
           const avgCompletion = Math.round(
-            goalProjects.reduce((sum, p) => sum + (p.completion || 0), 0) / goalProjects.length
+            goalProjects.reduce((sum, p) => sum + normalizePercent(p.completion ?? p.progress ?? 0), 0) / goalProjects.length
           );
           goalCompletion = Math.max(goalCompletion, avgCompletion);
         }

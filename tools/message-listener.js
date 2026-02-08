@@ -8,10 +8,12 @@
  * Polls every 3 minutes in idle mode, 10 seconds when active.
  */
 
-import { getRealtimeMessaging, MESSAGE_TYPE, MESSAGE_STATUS } from "../src/services/realtime-messaging.js";
-import { getAIBrain } from "../src/services/ai-brain.js";
+import { getRealtimeMessaging, MESSAGE_TYPE, MESSAGE_STATUS } from "../src/services/messaging/realtime-messaging.js";
+import { getAIBrain } from "../src/services/ai/ai-brain.js";
+import { loadFirebaseUser } from "../src/services/firebase/firebase-auth.js";
 
-const USER_ID = "OVT9OwtRQocYlhZqpOdIoxjYGy02";
+const USER_ID = loadFirebaseUser()?.localId;
+if (!USER_ID) { console.error("No Firebase user found. Run backbone and sign in first."); process.exit(1); }
 
 // Simple AI response handler
 async function handleMessage(message) {

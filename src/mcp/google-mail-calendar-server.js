@@ -7,13 +7,14 @@ import {
 import fetch from "node-fetch";
 import fs from "fs";
 import path from "path";
+import { getDataDir } from "../services/paths.js";
 
 /**
  * BACKBONE Google Mail & Calendar MCP Server
  * Unified email + calendar with AI analysis and draft capabilities
  */
 
-const DATA_DIR = path.join(process.cwd(), "data");
+const DATA_DIR = getDataDir();
 const EMAIL_CACHE = path.join(DATA_DIR, "email-cache.json");
 const DRAFT_LOG = path.join(DATA_DIR, "email-draft-log.json");
 const GOOGLE_TOKEN_FILE = path.join(DATA_DIR, "google-email-tokens.json");

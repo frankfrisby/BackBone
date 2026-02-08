@@ -659,7 +659,8 @@ export async function loadUserContextFiles() {
   const fs = await import("fs");
   const path = await import("path");
 
-  const DATA_DIR = path.default.join(process.cwd(), "data");
+  const { getDataDir } = await import("./paths.js");
+  const DATA_DIR = getDataDir();
   const context = {};
 
   // Helper to safely load JSON

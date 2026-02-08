@@ -19,8 +19,9 @@
 import fs from "fs";
 import path from "path";
 
-const DATA_DIR = path.join(process.cwd(), "data");
-const MEMORY_DIR = path.join(process.cwd(), "memory");
+import { getDataDir, getMemoryDir } from "./paths.js";
+const DATA_DIR = getDataDir();
+const MEMORY_DIR = getMemoryDir();
 
 /**
  * Command patterns for direct routing (no AI needed)

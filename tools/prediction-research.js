@@ -7,7 +7,7 @@
  * - Research specific tickers
  */
 
-import { getTickerPredictionResearch } from "../src/services/ticker-prediction-research.js";
+import { getTickerPredictionResearch } from "../src/services/trading/ticker-prediction-research.js";
 
 export const metadata = {
   id: "prediction-research",

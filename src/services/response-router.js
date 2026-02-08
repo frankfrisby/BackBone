@@ -20,9 +20,9 @@
  *  | Long reply (> 1600 chars)                | WhatsApp chunked + push |
  */
 
-import { getWhatsAppNotifications, NOTIFICATION_PRIORITY } from "./whatsapp-notifications.js";
-import { sendPush } from "./push-notifications.js";
-import { MESSAGE_CHANNEL, getUnifiedMessageLog } from "./unified-message-log.js";
+import { getWhatsAppNotifications, NOTIFICATION_PRIORITY } from "./messaging/whatsapp-notifications.js";
+import { sendPush } from "./messaging/push-notifications.js";
+import { MESSAGE_CHANNEL, getUnifiedMessageLog } from "./messaging/unified-message-log.js";
 
 export const CHANNEL = {
   WHATSAPP: "whatsapp",
@@ -170,7 +170,7 @@ async function routeWhatsApp(content, context) {
  */
 async function routeVapi(content, context) {
   try {
-    const { getVapiService } = await import("./vapi-service.js");
+    const { getVapiService } = await import("./messaging/vapi-service.js");
     const vapi = getVapiService();
 
     const prompt = context.vapiPrompt ||

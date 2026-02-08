@@ -13,7 +13,8 @@ import path from "path";
 import fetch from "node-fetch";
 import { EventEmitter } from "events";
 
-const DATA_DIR = path.join(process.cwd(), "data");
+import { getDataDir } from "./paths.js";
+const DATA_DIR = getDataDir();
 const QUOTA_STATE_FILE = path.join(DATA_DIR, "api_quota_state.json");
 
 // Billing URLs

@@ -1,6 +1,10 @@
 import { spawn } from "child_process";
 import path from "path";
+import { fileURLToPath } from "url";
 import fetch from "node-fetch";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 /**
  * API Server Client
@@ -44,11 +48,10 @@ export const startApiServer = async () => {
 
     console.log("[API Server] Starting background server...");
 
-    const serverPath = path.join(process.cwd(), "src", "server.js");
+    const serverPath = path.resolve(__dirname, "..", "server.js");
 
     // Start server as detached process
     serverProcess = spawn("node", [serverPath], {
-      cwd: process.cwd(),
       detached: true,
       stdio: "ignore",
       env: { ...process.env }
@@ -88,7 +91,6 @@ export const stopApiServer = async () => {
     // Also try to kill any server on port 3000
     if (process.platform === "win32") {
       spawn("npx", ["kill-port", "3000"], {
-        cwd: process.cwd(),
         detached: true,
         stdio: "ignore",
         shell: true

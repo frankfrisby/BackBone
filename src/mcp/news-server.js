@@ -6,14 +6,15 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import fs from "fs";
 import path from "path";
+import { getDataDir, getMemoryDir } from "../services/paths.js";
 
 /**
  * BACKBONE News & Research MCP Server
  * Integrates with news-service.js for fetching, analyzing, and correlating news
  */
 
-const DATA_DIR = path.join(process.cwd(), "data");
-const MEMORY_DIR = path.join(process.cwd(), "memory");
+const DATA_DIR = getDataDir();
+const MEMORY_DIR = getMemoryDir();
 const NEWS_CACHE_PATH = path.join(DATA_DIR, "news-cache.json");
 const BELIEFS_PATH = path.join(DATA_DIR, "core-beliefs.json");
 const BACKLOG_PATH = path.join(DATA_DIR, "backlog.json");
@@ -143,7 +144,7 @@ async function fetchLatestNews(forceRefresh = false) {
 
   // Try to import and call news service
   try {
-    const newsService = await import("../services/news-service.js");
+    const newsService = await import("../services/research/news-service.js");
     const result = await newsService.fetchAndAnalyzeNews();
     return result;
   } catch (importError) {

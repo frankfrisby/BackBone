@@ -36,6 +36,19 @@ const STATUS_LABELS = {
   planning: "Planning"
 };
 
+const normalizePercent = (value) => {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return 0;
+  const normalized = num >= 0 && num <= 1 ? num * 100 : num;
+  return Math.max(0, Math.min(100, Math.round(normalized)));
+};
+
+const getPercentColor = (percent) => {
+  if (percent >= 70) return "#22c55e";
+  if (percent >= 40) return "#f59e0b";
+  return "#ef4444";
+};
+
 /**
  * Progress Bar - ████░░░░ style
  */
@@ -167,6 +180,7 @@ export const ProjectsPanel = ({ projects = [], title = "Projects", maxItems = 3,
         const color = STATUS_COLORS[status] || "#64748b";
         const icon = STATUS_ICONS[status] || "\u25CF";
         const statusLabel = STATUS_LABELS[status] || status;
+        const projectCompletion = normalizePercent(project.completion ?? project.progress ?? 0);
         const name = (project.name || project.title || `Project ${i + 1}`).slice(0, 18);
 
         return e(
@@ -182,8 +196,11 @@ export const ProjectsPanel = ({ projects = [], title = "Projects", maxItems = 3,
           // Row 2: status label
           e(
             Box,
-            { paddingLeft: 2 },
-            e(Text, { color, dimColor: status !== "working" }, statusLabel)
+            { flexDirection: "row", paddingLeft: 2 },
+            e(Text, { color, dimColor: status !== "working" }, statusLabel),
+            e(Text, { color: "#475569" }, " "),
+            e(ProgressBar, { progress: projectCompletion / 100, width: 6, color: getPercentColor(projectCompletion) }),
+            e(Text, { color: getPercentColor(projectCompletion) }, ` ${projectCompletion}%`)
           )
         );
       })

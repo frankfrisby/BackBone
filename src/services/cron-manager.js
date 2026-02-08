@@ -10,7 +10,8 @@ import fs from "fs";
 import path from "path";
 import { EventEmitter } from "events";
 
-const DATA_DIR = path.join(process.cwd(), "data");
+import { getDataDir } from "./paths.js";
+const DATA_DIR = getDataDir();
 const CRON_STATE_PATH = path.join(DATA_DIR, "cron-jobs.json");
 
 /**
@@ -205,6 +206,36 @@ const DEFAULT_JOBS = [
     time: "03:00",
     enabled: true,
     handler: "runDataCleanup"
+  },
+  {
+    id: "prediction-research",
+    name: "Prediction Research",
+    shortName: "Predict",
+    description: "Research half the ticker universe for prediction scores (Group A/B alternating)",
+    frequency: JOB_FREQUENCY.DAILY,
+    time: "20:00",
+    enabled: true,
+    handler: "runPredictionResearch"
+  },
+  {
+    id: "prediction-research-fallback",
+    name: "Prediction Research Fallback",
+    shortName: "Predict FB",
+    description: "Fallback research run if 8 PM job missed",
+    frequency: JOB_FREQUENCY.DAILY,
+    time: "04:00",
+    enabled: true,
+    handler: "runPredictionResearchFallback"
+  },
+  {
+    id: "overnight-research",
+    name: "Overnight Research",
+    shortName: "Overnight",
+    description: "Continuous overnight research (8 PM - 6 AM) for tickers and macro themes",
+    frequency: JOB_FREQUENCY.DAILY,
+    time: "20:05",
+    enabled: true,
+    handler: "runOvernightResearch"
   }
 ];
 

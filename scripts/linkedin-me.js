@@ -3,9 +3,10 @@ import path from "node:path";
 import fetch from "node-fetch";
 import { chromium } from "playwright";
 import * as cheerio from "cheerio";
+import { getDataDir, dataFile } from "../src/services/paths.js";
 
-const OUTPUT_DIR = path.join(process.cwd(), "data");
-const OUTPUT_PATH = path.join(OUTPUT_DIR, "linkedin-me.json");
+const OUTPUT_DIR = getDataDir();
+const OUTPUT_PATH = dataFile("linkedin-me.json");
 
 const ensureOutputDir = () => {
   if (!fs.existsSync(OUTPUT_DIR)) {

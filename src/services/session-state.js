@@ -13,7 +13,8 @@
 import fs from "fs";
 import path from "path";
 
-const DATA_DIR = path.join(process.cwd(), "data");
+import { getDataDir } from "./paths.js";
+const DATA_DIR = getDataDir();
 const STATE_PATH = path.join(DATA_DIR, "session-state.json");
 const MAX_ACTIONS = 50;
 

@@ -7,9 +7,10 @@
 import fs from "fs";
 import path from "path";
 
-const BASE_DIR = process.cwd();
+import { getBackboneHome, getDataDir } from "./paths.js";
+const BASE_DIR = getBackboneHome();
 const PROFILES_DIR = path.join(BASE_DIR, "_profiles");
-const DATA_DIR = path.join(BASE_DIR, "data");
+const DATA_DIR = getDataDir();
 
 // Directories to archive per-user
 const USER_DIRS = ["data", "memory", "projects", "screenshots"];

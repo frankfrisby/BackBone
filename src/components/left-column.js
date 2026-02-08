@@ -17,8 +17,8 @@ import { TickerScoresPanel } from "./ticker-scores-panel.js";
 import { ProjectsPanel } from "./projects-panel.js";
 
 // Import services for direct subscriptions
-import { getLifeScores } from "../services/life-scores.js";
-import { getGoalTracker } from "../services/goal-tracker.js";
+import { getLifeScores } from "../services/health/life-scores.js";
+import { getGoalTracker } from "../services/goals/goal-tracker.js";
 
 const e = React.createElement;
 

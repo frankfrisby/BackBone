@@ -2,13 +2,14 @@ import fs from "fs";
 import path from "path";
 import { EventEmitter } from "events";
 
+import { getDataDir } from "./paths.js";
 /**
  * Work Log Service for BACKBONE
  * Tracks all system activity with timestamps
  * Replaces mock life-feed with real activity logging
  */
 
-const DATA_DIR = path.join(process.cwd(), "data");
+const DATA_DIR = getDataDir();
 const WORK_LOG_PATH = path.join(DATA_DIR, "work-log.json");
 
 // Log entry types

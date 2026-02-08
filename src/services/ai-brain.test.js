@@ -9,9 +9,10 @@
  * 5. Thread persistence works
  */
 
-import { getAIBrain } from "./ai-brain.js";
-import { getMultiAIConfig } from "./multi-ai.js";
+import { getAIBrain } from "./ai/ai-brain.js";
+import { getMultiAIConfig } from "./ai/multi-ai.js";
 
+import { dataFile } from "./paths.js";
 // Test results collector
 const results = {
   passed: [],
@@ -190,7 +191,7 @@ export const testAIBrain = async () => {
     // Check file exists
     const fs = await import("fs");
     const path = await import("path");
-    const threadPath = path.join(process.cwd(), "data", "ai_brain_thread.json");
+    const threadPath = dataFile("ai_brain_thread.json");
 
     assert(fs.existsSync(threadPath), "Thread file should exist");
   });

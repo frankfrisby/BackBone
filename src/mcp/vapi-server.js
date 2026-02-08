@@ -76,7 +76,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
   // Dynamic import to avoid circular deps
-  const { getVapiService } = await import("../services/vapi-service.js");
+  const { getVapiService } = await import("../services/messaging/vapi-service.js");
   const vapi = getVapiService();
 
   let result;

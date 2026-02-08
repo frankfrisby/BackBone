@@ -228,7 +228,7 @@ export const buildMockProfile = () => {
   const focusAreas = ["startups", "family", "gradSchool", "finance", "health"];
 
   return {
-    name: "Frank",
+    name: "User",
     role: "Founder \u00B7 Operator",
     focus: "Capital allocation + health rhythms",
     goals: buildGoals(focusAreas),

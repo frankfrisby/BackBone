@@ -5,9 +5,10 @@
 
 import fs from "fs";
 import path from "path";
-import { getCurrentFirebaseUser } from "./firebase-auth.js";
+import { getCurrentFirebaseUser } from "./firebase/firebase-auth.js";
 
-const DATA_DIR = path.join(process.cwd(), "data");
+import { getDataDir } from "./paths.js";
+const DATA_DIR = getDataDir();
 const SETTINGS_PATH = path.join(DATA_DIR, "user-settings.json");
 const SETUP_WIZARD_PATH = path.join(DATA_DIR, "setup-wizard-status.json");
 

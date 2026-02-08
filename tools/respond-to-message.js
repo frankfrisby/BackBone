@@ -3,7 +3,8 @@
  * Respond to a pending Firebase message
  */
 
-import { getRealtimeMessaging, MESSAGE_TYPE, MESSAGE_STATUS } from "../src/services/realtime-messaging.js";
+import { getRealtimeMessaging, MESSAGE_TYPE, MESSAGE_STATUS } from "../src/services/messaging/realtime-messaging.js";
+import { loadFirebaseUser } from "../src/services/firebase/firebase-auth.js";
 
 const MESSAGE_ID = "MpfdNH8Zv1xGPFXs3yqk";
 
@@ -48,7 +49,9 @@ The overnight research runs tonight at 8 PM and will research all tickers. Morni
 
 async function main() {
   const r = getRealtimeMessaging();
-  await r.initialize("OVT9OwtRQocYlhZqpOdIoxjYGy02");
+  const uid = loadFirebaseUser()?.localId;
+  if (!uid) { console.error("No Firebase user found."); process.exit(1); }
+  await r.initialize(uid);
 
   console.log("Sending response...");
 

@@ -14,13 +14,14 @@ import {
   executeSell,
   loadConfig,
   saveConfig,
-} from "../services/auto-trader.js";
+} from "../services/trading/auto-trader.js";
 import {
   analyzePosition,
   getHoldTime,
   explainWhyHeld,
-} from "../services/position-analyzer.js";
-import { getAlpacaConfig } from "../services/alpaca.js";
+} from "../services/trading/position-analyzer.js";
+import { getAlpacaConfig } from "../services/trading/alpaca.js";
+import { addConviction, getConvictions, removeConviction } from "../services/trading/yahoo-client.js";
 
 /**
  * BACKBONE Trading MCP Server
@@ -151,6 +152,39 @@ const TOOLS = [
       type: "object",
       properties: {
         symbol: { type: "string", description: "Stock ticker symbol" },
+      },
+      required: ["symbol"],
+    },
+  },
+  {
+    name: "add_research_conviction",
+    description: "Add a high-conviction ticker based on research. The conviction boosts the ticker's score in the trading algorithm for 2 weeks, then decays back to baseline. Use this after researching a stock and determining it has strong potential.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        symbol: { type: "string", description: "Stock ticker symbol (e.g., NVDA, AAPL)" },
+        conviction: { type: "number", description: "Conviction level from 0.1 (low) to 1.0 (maximum). 1.0 = strongest conviction, adds up to +5 to prediction score." },
+        reason: { type: "string", description: "Research notes explaining why this ticker has high conviction (e.g., 'Strong earnings beat, expanding margins, AI catalyst')" },
+      },
+      required: ["symbol", "conviction", "reason"],
+    },
+  },
+  {
+    name: "get_research_convictions",
+    description: "Get all active research convictions with their effective score boosts. Shows which tickers have conviction boosts and how much time remains before expiry.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      required: [],
+    },
+  },
+  {
+    name: "remove_research_conviction",
+    description: "Remove a research conviction for a ticker, returning its score to baseline.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        symbol: { type: "string", description: "Stock ticker symbol to remove conviction for" },
       },
       required: ["symbol"],
     },
@@ -527,6 +561,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     case "explain_why_position_held":
       result = await explainWhyPositionHeld(args.symbol);
       break;
+
+    case "add_research_conviction":
+      result = await addConviction(args.symbol, args.conviction, args.reason, { source: "ai-research" });
+      break;
+
+    case "get_research_convictions":
+      result = await getConvictions();
+      break;
+
+    case "remove_research_conviction":
+      result = await removeConviction(args.symbol);
+      break;
+
     default:
       throw new Error(`Unknown tool: ${name}`);
   }

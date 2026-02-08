@@ -1,12 +1,13 @@
 import fs from "fs";
 import path from "path";
 
+import { getDataDir } from "./paths.js";
 /**
  * MCP Tools Service for BACKBONE
  * Manages available MCP servers and tools that the system can execute
  */
 
-const DATA_DIR = path.join(process.cwd(), "data");
+const DATA_DIR = getDataDir();
 const MCP_CONFIG_PATH = path.join(DATA_DIR, "mcp-config.json");
 
 /**

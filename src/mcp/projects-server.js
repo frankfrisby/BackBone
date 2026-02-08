@@ -4,7 +4,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema
 } from "@modelcontextprotocol/sdk/types.js";
-import { createProject, listProjects, createProjectAction } from "../services/projects.js";
+import { createProject, listProjects, createProjectAction } from "../services/projects/projects.js";
 
 const TOOLS = [
   {

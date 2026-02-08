@@ -1,6 +1,7 @@
 import React, { memo } from "react";
 import { Box, Text } from "ink";
-import { SCORE_THRESHOLDS, getSignalFromScore } from "../services/score-engine.js";
+import { SCORE_THRESHOLDS, getSignalFromScore } from "../services/trading/score-engine.js";
+import { getRecessionScore, getRecessionColor } from "../services/trading/recession-score.js";
 
 const e = React.createElement;
 
@@ -813,23 +814,39 @@ const StatusDot = ({ status, label, blinking = false }) => {
 
 /**
  * Ticker Summary Line with status indicators
+ * Format: "TOP  SMCI 10.0  PLTR 10.0  DELL 9.9 | SPY↓ -1.3% | Reces: 3.4"
+ *
  * @param {Array} tickers - All tickers
  * @param {boolean|null} spyPositive - SPY direction for dynamic threshold
+ * @param {number|null} spyChange - SPY % change
  * @param {Object} scanStatus - Status of 800 ticker scan { done: bool, count: num, working: bool }
  * @param {Object} refreshStatus - Status of refresh { done: bool, working: bool, lastRefresh: Date }
  */
 const TickerSummaryLineBase = ({
   tickers = [],
   spyPositive = null,
+  spyChange = null,
   scanStatus = null,
   refreshStatus = null,
   showStatusDots = true
 }) => {
   const threshold = getDynamicThreshold(spyPositive);
+
+  // Get recession score
+  let recessionData = { score: 5.0 };
+  try {
+    recessionData = getRecessionScore();
+  } catch { /* use default */ }
+  const recessionScore = recessionData.score;
+  const recessionColor = getRecessionColor(recessionScore);
+
+  // Determine how many tickers to show (3 if tight on space, otherwise 4)
+  const maxTickers = spyChange !== null ? 3 : 4;
+
   const sorted = [...tickers]
     .filter(t => t && t.symbol && typeof t.score === "number")
     .sort((a, b) => (b.score || 0) - (a.score || 0))
-    .slice(0, 4);  // Show 4 tickers in mini view
+    .slice(0, maxTickers);
 
   // Calculate scan status
   const scanStatusValue = scanStatus?.working ? "working" :
@@ -848,9 +865,19 @@ const TickerSummaryLineBase = ({
       Box,
       { flexDirection: "row", gap: 2 },
       e(Text, { color: "#475569" }, "No ticker data"),
+      // SPY indicator
+      spyChange !== null && e(Text, { color: "#334155" }, "|"),
+      spyChange !== null && e(Text, {
+        color: spyPositive ? "#22c55e" : "#ef4444",
+        bold: true
+      }, `SPY${spyPositive ? "▲" : "▼"} ${spyChange >= 0 ? "+" : ""}${(spyChange || 0).toFixed(1)}%`),
+      // Recession indicator
+      e(Text, { color: "#334155" }, "|"),
+      e(Text, { color: recessionColor, bold: recessionScore >= 6 },
+        `Reces: ${recessionScore.toFixed(1)}`),
       showStatusDots && e(
         Box,
-        { flexDirection: "row", gap: 1 },
+        { flexDirection: "row", gap: 1, marginLeft: 1 },
         e(StatusDot, { status: scanStatusValue, label: scanLabel, blinking: scanStatusValue === "working" }),
         e(StatusDot, { status: refreshStatusValue, label: "Refresh", blinking: refreshStatusValue === "working" })
       )
@@ -859,8 +886,10 @@ const TickerSummaryLineBase = ({
 
   return e(
     Box,
-    { flexDirection: "row", gap: 2 },
-    // Show 4 tickers
+    { flexDirection: "row", gap: 1 },
+    // TOP label
+    e(Text, { color: "#64748b" }, "TOP"),
+    // Show top tickers (3 or 4 depending on space)
     ...sorted.map((ticker, i) => {
       const color = getSignalColor(ticker.score);
       const isQualified = ticker.score >= threshold;
@@ -869,21 +898,33 @@ const TickerSummaryLineBase = ({
         {
           key: ticker.symbol,
           flexDirection: "row",
-          gap: 1,
+          gap: 0,
           backgroundColor: isQualified ? "#166534" : undefined,
-          paddingX: isQualified ? 1 : 0
+          paddingX: isQualified ? 1 : 0,
+          marginLeft: i > 0 ? 1 : 0
         },
-        e(Text, { color: isQualified ? "#f59e0b" : "#475569" }, `${i + 1}.`),
-        e(Text, { color: isQualified ? "#f8fafc" : color, bold: isQualified }, ticker.symbol),
+        e(Text, { color: isQualified ? "#f8fafc" : color, bold: isQualified },
+          `${ticker.symbol} `),
         e(Text, { color }, (ticker.score ?? 0).toFixed(1))
       );
     }),
-    // Status dots section (to right of tickers)
+    // Separator
+    e(Text, { color: "#334155", marginLeft: 1 }, "|"),
+    // SPY indicator with arrow
+    spyChange !== null && e(Text, {
+      color: spyPositive ? "#22c55e" : "#ef4444",
+      bold: true
+    }, `SPY${spyPositive ? "▲" : "▼"} ${spyChange >= 0 ? "+" : ""}${(spyChange || 0).toFixed(1)}%`),
+    // Separator
+    e(Text, { color: "#334155" }, "|"),
+    // Recession score with color
+    e(Text, { color: recessionColor, bold: recessionScore >= 6 },
+      `Reces: ${recessionScore.toFixed(1)}`),
+    // Status dots section (to right)
     showStatusDots && e(
       Box,
       { flexDirection: "row", gap: 1, marginLeft: 1 },
-      e(StatusDot, { status: scanStatusValue, label: scanLabel, blinking: scanStatusValue === "working" }),
-      e(StatusDot, { status: refreshStatusValue, label: "Refresh", blinking: refreshStatusValue === "working" })
+      e(StatusDot, { status: scanStatusValue, blinking: scanStatusValue === "working" })
     )
   );
 };

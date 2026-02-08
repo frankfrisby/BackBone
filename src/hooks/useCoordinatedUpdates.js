@@ -6,7 +6,7 @@
  */
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import { getUpdateCoordinator } from "../services/update-coordinator.js";
+import { getUpdateCoordinator } from "../services/ui/update-coordinator.js";
 
 /**
  * Hook to subscribe to coordinated updates

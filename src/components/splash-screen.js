@@ -8,6 +8,7 @@ import { Box, Text } from "ink";
 import { execSync } from "child_process";
 import fs from "fs";
 import path from "path";
+import { engineFile } from "../services/paths.js";
 
 const e = React.createElement;
 
@@ -24,7 +25,7 @@ const getVersionInfo = () => {
   let commitHash = "dev";
 
   try {
-    const pkgPath = path.join(process.cwd(), "package.json");
+    const pkgPath = engineFile("package.json");
     if (fs.existsSync(pkgPath)) {
       const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
       version = pkg.version || version;

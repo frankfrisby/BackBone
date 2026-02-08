@@ -12,8 +12,8 @@
  *   recession - Show recession score with macro adjustments
  */
 
-import { getOvernightResearch, runResearchCycle, getRecessionAdjustmentFromMacro } from "../src/services/overnight-research.js";
-import { getRecessionScore, getRecessionLabel, getRecessionColor } from "../src/services/recession-score.js";
+import { getOvernightResearch, runResearchCycle, getRecessionAdjustmentFromMacro } from "../src/services/trading/overnight-research.js";
+import { getRecessionScore, getRecessionLabel, getRecessionColor } from "../src/services/trading/recession-score.js";
 
 const command = process.argv[2] || "status";
 

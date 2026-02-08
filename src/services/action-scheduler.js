@@ -17,7 +17,8 @@ import fs from "fs";
 import path from "path";
 import { EventEmitter } from "events";
 
-const DATA_DIR = path.join(process.cwd(), "data");
+import { getDataDir } from "./paths.js";
+const DATA_DIR = getDataDir();
 const SCHEDULER_STATE_PATH = path.join(DATA_DIR, "action-scheduler.json");
 
 /**

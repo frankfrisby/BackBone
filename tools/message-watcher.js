@@ -9,9 +9,11 @@
  */
 
 import { spawn } from "child_process";
-import { getRealtimeMessaging, MESSAGE_TYPE, MESSAGE_STATUS } from "../src/services/realtime-messaging.js";
+import { getRealtimeMessaging, MESSAGE_TYPE, MESSAGE_STATUS } from "../src/services/messaging/realtime-messaging.js";
+import { loadFirebaseUser } from "../src/services/firebase/firebase-auth.js";
 
-const USER_ID = "OVT9OwtRQocYlhZqpOdIoxjYGy02";
+const USER_ID = loadFirebaseUser()?.localId;
+if (!USER_ID) { console.error("No Firebase user found. Run backbone and sign in first."); process.exit(1); }
 
 /**
  * Invoke Claude Code CLI to answer a question

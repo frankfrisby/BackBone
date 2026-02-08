@@ -1,8 +1,9 @@
 import fs from "fs";
 import path from "path";
 import { EventEmitter } from "events";
-import { scrapeLinkedInProfile, loadLinkedInProfile } from "./linkedin-scraper.js";
+import { scrapeLinkedInProfile, loadLinkedInProfile } from "./integrations/linkedin-scraper.js";
 
+import { getDataDir } from "./paths.js";
 /**
  * Data Freshness Checker & Auto-Scheduler Service
  *
@@ -11,7 +12,7 @@ import { scrapeLinkedInProfile, loadLinkedInProfile } from "./linkedin-scraper.j
  * Generates suggested actions based on data analysis.
  */
 
-const DATA_DIR = path.join(process.cwd(), "data");
+const DATA_DIR = getDataDir();
 const FRESHNESS_METADATA_PATH = path.join(DATA_DIR, "freshness-metadata.json");
 const SUGGESTED_ACTIONS_PATH = path.join(DATA_DIR, "suggested-actions.json");
 

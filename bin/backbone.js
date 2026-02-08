@@ -6,17 +6,18 @@ import { exec } from "child_process";
 import fs from "fs";
 import path from "path";
 import App from "../src/app.js";
-import { loadLinkedInProfile } from "../src/services/linkedin-scraper.js";
+import { loadLinkedInProfile } from "../src/services/integrations/linkedin-scraper.js";
 import { Writable } from "stream";
-import { checkForUpdates, consumeUpdateState } from "../src/services/auto-updater.js";
+import { checkForUpdates, consumeUpdateState } from "../src/services/setup/auto-updater.js";
+import { ensureUserDirs, dataFile, memoryFile, getDataDir, getBackboneHome, isLegacyInstall } from "../src/services/paths.js";
 
 // ── Singleton lock — prevent multiple instances ────────────────
-const LOCK_FILE = path.join(process.cwd(), "data", ".backbone.lock");
+const LOCK_FILE = dataFile(".backbone.lock");
 
 const acquireLock = () => {
   try {
     // Ensure data dir exists
-    const dataDir = path.join(process.cwd(), "data");
+    const dataDir = getDataDir();
     if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
 
     // Check if lock file exists and if the process is still alive
@@ -66,27 +67,24 @@ const releaseLock = () => {
 
 // ── First-run scaffolding — create required directories and config ──
 const ensureFirstRun = () => {
-  const cwd = process.cwd();
-  const dirs = [
-    "data", "data/goals", "data/user-skills", "data/spreadsheets",
-    "memory", "projects", "screenshots", "skills"
-  ];
-  for (const d of dirs) {
-    const p = path.join(cwd, d);
-    if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true });
-  }
+  // Create all user-data directories via centralized paths module
+  ensureUserDirs();
+
+  // Also ensure skills/ dir exists alongside the code (not user data)
+  const skillsDir = path.join(process.cwd(), "skills");
+  if (!fs.existsSync(skillsDir)) fs.mkdirSync(skillsDir, { recursive: true });
 
   // Seed essential data files if they don't exist
   const seeds = {
-    "data/goals.json": "[]",
-    "data/core-beliefs.json": JSON.stringify({
+    [dataFile("goals.json")]: "[]",
+    [dataFile("core-beliefs.json")]: JSON.stringify({
       beliefs: [
         { id: "belief_1", name: "Build wealth", description: "Grow financial independence through smart investing and income growth" },
         { id: "belief_2", name: "Be healthy", description: "Optimize physical and mental health through exercise, sleep, and nutrition" },
         { id: "belief_3", name: "Grow continuously", description: "Never stop learning — invest in skills, knowledge, and personal development" }
       ]
     }, null, 2),
-    "data/life-scores.json": JSON.stringify({
+    [dataFile("life-scores.json")]: JSON.stringify({
       overall: 50,
       categories: {
         finance: { score: 50, trend: "stable" },
@@ -97,14 +95,18 @@ const ensureFirstRun = () => {
         education: { score: 50, trend: "stable" }
       }
     }, null, 2),
-    "data/user-settings.json": JSON.stringify({ theme: "dark", quietHoursStart: 22, quietHoursEnd: 7 }, null, 2),
-    "data/backlog.json": JSON.stringify({ items: [], graduatedToGoals: [], dismissed: [], lastUpdated: null, stats: { totalGenerated: 0, totalGraduated: 0, totalDismissed: 0 } }, null, 2),
-    "data/user-skills/index.json": "[]",
-    "memory/BACKBONE.md": "# BACKBONE Engine Memory\\n\\nThis file stores persistent memory across sessions.\\n"
+    [dataFile("user-settings.json")]: JSON.stringify({ theme: "dark", quietHoursStart: 22, quietHoursEnd: 7 }, null, 2),
+    [dataFile("backlog.json")]: JSON.stringify({ items: [], graduatedToGoals: [], dismissed: [], lastUpdated: null, stats: { totalGenerated: 0, totalGraduated: 0, totalDismissed: 0 } }, null, 2),
+    [dataFile("user-skills/index.json")]: "[]",
   };
 
-  for (const [relPath, content] of Object.entries(seeds)) {
-    const fullPath = path.join(cwd, relPath);
+  // Seed memory file
+  const backboneMdPath = memoryFile("BACKBONE.md");
+  if (!fs.existsSync(backboneMdPath)) {
+    fs.writeFileSync(backboneMdPath, "# BACKBONE Engine Memory\\n\\nThis file stores persistent memory across sessions.\\n");
+  }
+
+  for (const [fullPath, content] of Object.entries(seeds)) {
     if (!fs.existsSync(fullPath)) {
       fs.writeFileSync(fullPath, content);
     }
@@ -365,7 +367,7 @@ const getUserName = () => {
 // Get app name from settings (sync)
 const getAppNameSync = () => {
   try {
-    const settingsPath = path.join(process.cwd(), "data", "user-settings.json");
+    const settingsPath = dataFile("user-settings.json");
     if (fs.existsSync(settingsPath)) {
       const settings = JSON.parse(fs.readFileSync(settingsPath, "utf-8"));
       return settings.appName || "Backbone";

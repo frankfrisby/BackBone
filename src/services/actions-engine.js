@@ -1,12 +1,13 @@
 import fs from "fs";
 import path from "path";
 
+import { getDataDir } from "./paths.js";
 /**
  * Actions Engine for BACKBONE
  * Manages the queue of actions the system will take
  */
 
-const DATA_DIR = path.join(process.cwd(), "data");
+const DATA_DIR = getDataDir();
 const ACTIONS_PATH = path.join(DATA_DIR, "actions-queue.json");
 
 // Action statuses

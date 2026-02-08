@@ -33,7 +33,7 @@ import {
   getOrders,
   cancelOrder,
   closePosition
-} from "./services/alpaca.js";
+} from "./services/trading/alpaca.js";
 import {
   loadAlpacaConfig,
   saveAlpacaConfig,
@@ -47,8 +47,8 @@ import {
   openKeysFileInEditor,
   readKeysFile,
   SETUP_STEPS
-} from "./services/alpaca-setup.js";
-import { getClaudeConfig, sendMessage, streamMessage } from "./services/claude.js";
+} from "./services/setup/alpaca-setup.js";
+import { getClaudeConfig, sendMessage, streamMessage } from "./services/ai/claude.js";
 import {
   buildGoals,
   buildMockProfile,
@@ -64,33 +64,33 @@ import {
   fetchLinkedInMessages,
   getLinkedInMeta,
   updateLinkedInMeta
-} from "./services/linkedin.js";
-import { getOuraConfig, buildOuraHealthSummary } from "./services/oura.js";
+} from "./services/integrations/linkedin.js";
+import { getOuraConfig, buildOuraHealthSummary } from "./services/health/oura.js";
 import { getSocialConfig, buildSocialConnectionsSummary, getConnectionPrompts } from "./services/social.js";
-import { getCloudSyncConfig, syncBackboneState, checkPhoneInput } from "./services/cloud-sync.js";
-import { saveAllMemory } from "./services/memory.js";
-import { getEmailConfig, buildEmailSummary } from "./services/email.js";
+import { getCloudSyncConfig, syncBackboneState, checkPhoneInput } from "./services/firebase/cloud-sync.js";
+import { saveAllMemory } from "./services/memory/memory.js";
+import { getEmailConfig, buildEmailSummary } from "./services/integrations/email.js";
 import { getWealthConfig, buildWealthSummary } from "./services/wealth.js";
-import { fetchTickers as fetchYahooTickers, startServer as startYahooServer, restartServer as restartYahooServer, isServerRunning, triggerFullScan, refreshTickers } from "./services/yahoo-client.js";
-import { extractLinkedInProfile, scrapeLinkedInProfile, saveLinkedInProfile, loadLinkedInProfile, isProfileIncomplete, refreshAndGenerateLinkedInMarkdown, generateLinkedInMarkdown, scrapeLinkedInPosts, updateLinkedInViaBrowserAgent } from "./services/linkedin-scraper.js";
+import { fetchTickers as fetchYahooTickers, startServer as startYahooServer, restartServer as restartYahooServer, isServerRunning, triggerFullScan, refreshTickers } from "./services/trading/yahoo-client.js";
+import { extractLinkedInProfile, scrapeLinkedInProfile, saveLinkedInProfile, loadLinkedInProfile, isProfileIncomplete, refreshAndGenerateLinkedInMarkdown, generateLinkedInMarkdown, scrapeLinkedInPosts, updateLinkedInViaBrowserAgent } from "./services/integrations/linkedin-scraper.js";
 import { getDataFreshnessChecker } from "./services/data-freshness-checker.js";
 import { getCronManager, JOB_FREQUENCY } from "./services/cron-manager.js";
-import { captureSnapshot as captureLinkedInSnapshot, getHistory as getLinkedInHistory, getPostsHistory as getLinkedInPostsHistory, trackPosts as trackLinkedInPosts } from "./services/linkedin-tracker.js";
-import { loadTradingStatus, saveTradingStatus, buildTradingStatusDisplay, recordTradeAttempt, resetTradingStatus } from "./services/trading-status.js";
+import { captureSnapshot as captureLinkedInSnapshot, getHistory as getLinkedInHistory, getPostsHistory as getLinkedInPostsHistory, trackPosts as trackLinkedInPosts } from "./services/integrations/linkedin-tracker.js";
+import { loadTradingStatus, saveTradingStatus, buildTradingStatusDisplay, recordTradeAttempt, resetTradingStatus } from "./services/trading/trading-status.js";
 import { deleteAllData, getResetSummary, RESET_STEPS } from "./services/reset.js";
-import { sendMessage as sendMultiAI, getAIStatus, getMultiAIConfig, getCurrentModel, MODELS, TASK_TYPES, isAgenticTask, executeAgenticTask } from "./services/multi-ai.js";
+import { sendMessage as sendMultiAI, getAIStatus, getMultiAIConfig, getCurrentModel, MODELS, TASK_TYPES, isAgenticTask, executeAgenticTask } from "./services/ai/multi-ai.js";
 import { formatToolsList, getToolsSummary, enableServer, disableServer } from "./services/mcp-tools.js";
 import { loadActionsQueue, getActionsDisplay, queueAction, startNextAction, completeAction, initializeDefaultActions, ACTION_TYPES } from "./services/actions-engine.js";
-import { getSkillsCatalog, getUserSkillContent } from "./services/skills-loader.js";
-import { getSkillsLoader } from "./services/skills-loader.js";
+import { getSkillsCatalog, getUserSkillContent } from "./services/projects/skills-loader.js";
+import { getSkillsLoader } from "./services/projects/skills-loader.js";
 import { listSpreadsheets, readSpreadsheet, createSpreadsheet } from "./services/excel-manager.js";
-import { backupToFirebase, restoreFromFirebase, getBackupStatus } from "./services/firebase-storage.js";
-import { forceUpdate, checkVersion, consumeUpdateState } from "./services/auto-updater.js";
+import { backupToFirebase, restoreFromFirebase, getBackupStatus } from "./services/firebase/firebase-storage.js";
+import { forceUpdate, checkVersion, consumeUpdateState } from "./services/setup/auto-updater.js";
 import { startApiServer } from "./services/api-server-client.js";
 import { loadProfileSections, updateFromLinkedIn, updateFromHealth, updateFromPortfolio, getProfileSectionDisplay, getProfileOverview, PROFILE_SECTIONS } from "./services/profile-sections.js";
-import { getGitHubConfig, getGitHubStatus } from "./services/github.js";
+import { getGitHubConfig, getGitHubStatus } from "./services/integrations/github.js";
 import { openUrl } from "./services/open-url.js";
-import { trackUserQuery, QUERY_SOURCE, getQueryTracker } from "./services/query-tracker.js";
+import { trackUserQuery, QUERY_SOURCE, getQueryTracker } from "./services/memory/query-tracker.js";
 import { SetupStatus } from "./components/setup-wizard.js";
 import { LifeFeed, LifeChanges } from "./components/life-feed.js";
 import { ProfilePanel } from "./components/profile-panel.js";
@@ -103,17 +103,17 @@ import { Header } from "./components/header.js";
 import { ConversationPanel } from "./components/conversation-panel.js";
 import { ActionsPanel } from "./components/actions-panel.js";
 import { SetupOverlay, getAlpacaSetupTabs, getLinkedInSetupTabs, getOuraSetupTabs, getLLMSetupTabs, getModelsSetupTabs, getEmailSetupTabs, getCalendarSetupTabs, getProjectSetupTabs } from "./components/setup-overlay.js";
-import { openAlpacaKeys, openOuraKeys, openLLMKeys, readAlpacaKeysFile, watchKeysFile, saveToEnv, SETUP_TYPES } from "./services/setup-manager.js";
+import { openAlpacaKeys, openOuraKeys, openLLMKeys, readAlpacaKeysFile, watchKeysFile, saveToEnv, SETUP_TYPES } from "./services/setup/setup-manager.js";
 import { buildLifeEvent, buildLifeFeed, buildLifeChanges } from "./data/life-engine.js";
 import { DiagnosticsPanel, STATUS_TYPES } from "./components/diagnostics-panel.js";
-import { createProject, createProjectAction, listProjects, createProjectsFromGoals, appendProjectResearch } from "./services/projects.js";
-import { getAIBrain } from "./services/ai-brain.js";
+import { createProject, createProjectAction, listProjects, createProjectsFromGoals, appendProjectResearch } from "./services/projects/projects.js";
+import { getAIBrain } from "./services/ai/ai-brain.js";
 import { getAPIQuotaMonitor, BILLING_URLS } from "./services/api-quota-monitor.js";
 import { QuotaExceededAlert, QuotaWarningBadge } from "./components/quota-exceeded-alert.js";
-import { calculateComprehensiveScore, getSignal, WEIGHT_PROFILES, THRESHOLDS } from "./services/scoring-criteria.js";
-import { calculateMACDScore } from "./services/score-engine.js";
+import { calculateComprehensiveScore, getSignal, WEIGHT_PROFILES, THRESHOLDS } from "./services/trading/scoring-criteria.js";
+import { calculateMACDScore } from "./services/trading/score-engine.js";
 import { updateChat } from "./services/app-store.js";
-import { getRiskyTickers, fetchAllRiskyK8Filings, getSignificantK8Tickers } from "./services/edgar-k8.js";
+import { getRiskyTickers, fetchAllRiskyK8Filings, getSignificantK8Tickers } from "./services/integrations/edgar-k8.js";
 import {
   PROVIDERS,
   PROVIDER_LIST,
@@ -129,8 +129,8 @@ import {
   getModelsStatusDisplay,
   testConnection,
   testAllConnections
-} from "./services/models-setup.js";
-import { getTradingHistory, getNextTradingTime, formatTimeAgo } from "./services/trading-history.js";
+} from "./services/setup/models-setup.js";
+import { getTradingHistory, getNextTradingTime, formatTimeAgo } from "./services/trading/trading-history.js";
 import { TradingHistoryPanel } from "./components/trading-history-panel.js";
 import { TestRunnerPanel } from "./components/test-runner-panel.js";
 import { SettingsPanel } from "./components/settings-panel.js";
@@ -138,31 +138,31 @@ import { LinkedInDataViewer } from "./components/linkedin-data-viewer.js";
 import { DisasterOverlay } from "./components/disaster-overlay.js";
 import { loadUserSettings, saveUserSettings, updateSettings as updateUserSettings, updateSetting, getModelConfig, isProviderConfigured, getAppName, DEFAULT_SETTINGS } from "./services/user-settings.js";
 import { archiveCurrentProfile, restoreProfile, hasArchivedProfile, listProfiles as listArchivedProfiles } from "./services/profile-manager.js";
-import { hasValidCredentials as hasCodexCredentials } from "./services/codex-oauth.js";
-import { loadFineTuningConfig, saveFineTuningConfig, runFineTuningPipeline, queryFineTunedModel } from "./services/fine-tuning.js";
-import { monitorAndTrade, loadConfig as loadTradingConfig, setTradingEnabled, sendTradeNotification } from "./services/auto-trader.js";
-import { shouldUpdateStops, applyStopsToAllPositions } from "./services/trailing-stop-manager.js";
+import { hasValidCredentials as hasCodexCredentials } from "./services/ai/codex-oauth.js";
+import { loadFineTuningConfig, saveFineTuningConfig, runFineTuningPipeline, queryFineTunedModel } from "./services/ai/fine-tuning.js";
+import { monitorAndTrade, loadConfig as loadTradingConfig, setTradingEnabled, sendTradeNotification } from "./services/trading/auto-trader.js";
+import { shouldUpdateStops, applyStopsToAllPositions } from "./services/trading/trailing-stop-manager.js";
 import { recordMomentumSnapshot } from "./services/momentum-drift.js";
-import { isMarketOpen } from "./services/trading-status.js";
-import { analyzeAllPositions, getPositionContext, explainWhyHeld } from "./services/position-analyzer.js";
+import { isMarketOpen } from "./services/trading/trading-status.js";
+import { analyzeAllPositions, getPositionContext, explainWhyHeld } from "./services/trading/position-analyzer.js";
 
 // New autonomous system imports
-import { getAutonomousEngine, AI_ACTION_STATUS, AI_ACTION_TYPES, EXECUTION_TOOLS } from "./services/autonomous-engine.js";
-import { getEngineSupervisor } from "./services/engine-supervisor.js";
-import { getGoalManager, WORK_PHASES, GOAL_PRIORITY } from "./services/goal-manager.js";
+import { getAutonomousEngine, AI_ACTION_STATUS, AI_ACTION_TYPES, EXECUTION_TOOLS } from "./services/engine/autonomous-engine.js";
+import { getEngineSupervisor } from "./services/engine/engine-supervisor.js";
+import { getGoalManager, WORK_PHASES, GOAL_PRIORITY } from "./services/goals/goal-manager.js";
 import { getToolExecutor, TOOL_TYPES, EXECUTION_STATUS } from "./services/tool-executor.js";
-import { getClaudeOrchestrator, EVALUATION_DECISION, ORCHESTRATION_STATE } from "./services/claude-orchestrator.js";
-import { getClaudeCodeBackend } from "./services/claude-code-backend.js";
-import { initializeClaudeCodeEngine, EXECUTION_MODE, getClaudeCodeExecutor } from "./services/claude-code-executor.js";
-import { getClaudeCodeStatus, isClaudeCodeLoggedIn } from "./services/claude-code-cli.js";
+import { getClaudeOrchestrator, EVALUATION_DECISION, ORCHESTRATION_STATE } from "./services/ai/claude-orchestrator.js";
+import { getClaudeCodeBackend } from "./services/ai/claude-code-backend.js";
+import { initializeClaudeCodeEngine, EXECUTION_MODE, getClaudeCodeExecutor } from "./services/ai/claude-code-executor.js";
+import { getClaudeCodeStatus, isClaudeCodeLoggedIn } from "./services/ai/claude-code-cli.js";
 import { getWorkLog, LOG_SOURCE, LOG_STATUS } from "./services/work-log.js";
-import { getGoalTracker, GOAL_CATEGORY } from "./services/goal-tracker.js";
-import { getLifeScores } from "./services/life-scores.js";
-import { getProgressResearch } from "./services/progress-research.js";
-import { getTargetPerson, findBestMatch } from "./services/person-matcher.js";
-import { getLifeEngine } from "./services/life-engine.js";
+import { getGoalTracker, GOAL_CATEGORY } from "./services/goals/goal-tracker.js";
+import { getLifeScores } from "./services/health/life-scores.js";
+import { getProgressResearch } from "./services/research/progress-research.js";
+import { getTargetPerson, findBestMatch } from "./services/research/person-matcher.js";
+import { getLifeEngine } from "./services/health/life-engine.js";
 import { getMobileService } from "./services/mobile.js";
-import { sendWhatsAppMessage, isPhoneVerified } from "./services/phone-auth.js";
+import { sendWhatsAppMessage, isPhoneVerified } from "./services/firebase/phone-auth.js";
 import { getChatActionsManager, RISK_LEVEL, ACTION_CATEGORY, CONFIRMATION_STATUS } from "./services/chat-actions.js";
 import { getSessionState, startFreshSession, recordAction, getResumeSummary } from "./services/session-state.js";
 import { WorkLogPanel } from "./components/work-log-panel.js";
@@ -178,37 +178,37 @@ import OuraHealthPanel from "./components/oura-health-panel.js";
 import { OnboardingPanel } from "./components/onboarding-panel.js";
 import { SplashScreen } from "./components/splash-screen.js";
 // ToolActionsPanel removed - merged into AgentActivityPanel
-import { resizeForOnboarding, resizeForMainApp, TERMINAL_SIZES, setBaseTitle, showActivityTitle, showNotificationTitle, restoreBaseTitle } from "./services/terminal-resize.js";
-import { processAndSaveContext, buildContextForAI } from "./services/conversation-context.js";
+import { resizeForOnboarding, resizeForMainApp, TERMINAL_SIZES, setBaseTitle, showActivityTitle, showNotificationTitle, restoreBaseTitle } from "./services/ui/terminal-resize.js";
+import { processAndSaveContext, buildContextForAI } from "./services/memory/conversation-context.js";
 import { MENTORS, MENTOR_CATEGORIES, getMentorsByCategory, getDailyWisdom, formatMentorDisplay, getAllMentorsDisplay, getMentorAdvice } from "./services/mentors.js";
-import { generateDailyInsights, generateWeeklyReport, formatInsightsDisplay, formatWeeklyReportDisplay, getQuickStatus } from "./services/insights-engine.js";
-import { processMessageForGoals, getGoalSummary, formatGoalsDisplay, loadGoals } from "./services/goal-extractor.js";
-import { generateGoalsFromData, generateGoalsFromInput, generateDiscoveryQuestions, processDiscoveryAnswers, saveGeneratedGoals, quickGenerateGoals } from "./services/goal-generator.js";
+import { generateDailyInsights, generateWeeklyReport, formatInsightsDisplay, formatWeeklyReportDisplay, getQuickStatus } from "./services/research/insights-engine.js";
+import { processMessageForGoals, getGoalSummary, formatGoalsDisplay, loadGoals } from "./services/goals/goal-extractor.js";
+import { generateGoalsFromData, generateGoalsFromInput, generateDiscoveryQuestions, processDiscoveryAnswers, saveGeneratedGoals, quickGenerateGoals } from "./services/goals/goal-generator.js";
 import { loadUserContextFiles } from "./services/service-utils.js";
 import { getFreshnessReport, getSuggestedActions, runFullDataCheck } from "./services/data-freshness-checker.js";
-import { getTodayHabits, getHabitsSummary, formatHabitsDisplay, addHabit, completeHabit, RECOMMENDED_HABITS } from "./services/habits.js";
-import { sendDailyDigest, sendWeeklyReport, getNotificationStatus, NOTIFICATION_TYPES } from "./services/notifications.js";
-import { generateRecommendations, getTopRecommendations, actOnRecommendation, dismissRecommendation, formatRecommendationsDisplay, getDailyFocus } from "./services/recommendations-engine.js";
-import { isReviewDue, startReview, saveReview, getReviewHistory, getReviewStats, formatReviewDisplay } from "./services/weekly-review.js";
-import { getLifeDashboard, formatDashboardDisplay, getQuickDashboard } from "./services/life-dashboard.js";
+import { getTodayHabits, getHabitsSummary, formatHabitsDisplay, addHabit, completeHabit, RECOMMENDED_HABITS } from "./services/health/habits.js";
+import { sendDailyDigest, sendWeeklyReport, getNotificationStatus, NOTIFICATION_TYPES } from "./services/messaging/notifications.js";
+import { generateRecommendations, getTopRecommendations, actOnRecommendation, dismissRecommendation, formatRecommendationsDisplay, getDailyFocus } from "./services/research/recommendations-engine.js";
+import { isReviewDue, startReview, saveReview, getReviewHistory, getReviewStats, formatReviewDisplay } from "./services/briefs/weekly-review.js";
+import { getLifeDashboard, formatDashboardDisplay, getQuickDashboard } from "./services/health/life-dashboard.js";
 import { getAccountabilityStatus, formatAccountabilityDisplay, recordCheckIn, addCommitment, completeCommitment, getActiveCommitments, getMorningBriefing, addPartner } from "./services/accountability.js";
-import { startSession, endSession, pauseSession, resumeSession, getSessionStatus, formatFocusDisplay, getTodayStats as getFocusTodayStats } from "./services/focus-timer.js";
-import { addLearningItem, startLearning, updateProgress, completeLearning, addNote, getInProgress, getReadingList, formatLearningDisplay, getCurrentlyReading } from "./services/learning-tracker.js";
-import { getCurrentFirebaseUser, signOutFirebase } from "./services/firebase-auth.js";
-import { initializeRemoteConfig } from "./services/firebase-config.js";
-import { isOuraConfigured, syncOuraData, getNextSyncTime, getHealthSummary, loadOuraData } from "./services/oura-service.js";
-import { fetchAndAnalyzeNews, shouldFetchNews } from "./services/news-service.js";
-import { isEmailConfigured, syncEmailCalendar, getEmailSummary, getUpcomingEvents, startTokenAutoRefresh, startOAuthFlow as startEmailOAuth } from "./services/email-calendar-service.js";
-import { getPersonalCapitalService } from "./services/personal-capital.js";
-import { getPlaidService, isPlaidConfigured, syncPlaidData } from "./services/plaid-service.js";
-import { getThinkingEngine, calculateDataCompleteness } from "./services/thinking-engine.js";
-import { getIdleProcessor } from "./services/idle-processor.js";
-import { getClaudeCodeMonitor } from "./services/claude-code-monitor.js";
-import { getStartupEngine } from "./services/startup-engine.js";
-import { getClaudeEngine } from "./services/claude-engine.js";
-import { startRealtimeSync, stopRealtimeSync, isAuthenticated as isFirestoreAuthenticated, pushTickers } from "./services/firestore-sync.js";
-import { getDashboardSync } from "./services/firebase-dashboard-sync.js";
-import { generateDailyBrief, generateAndDeliverBrief, pushBriefToFirestore } from "./services/daily-brief-generator.js";
+import { startSession, endSession, pauseSession, resumeSession, getSessionStatus, formatFocusDisplay, getTodayStats as getFocusTodayStats } from "./services/health/focus-timer.js";
+import { addLearningItem, startLearning, updateProgress, completeLearning, addNote, getInProgress, getReadingList, formatLearningDisplay, getCurrentlyReading } from "./services/ui/learning-tracker.js";
+import { getCurrentFirebaseUser, signOutFirebase } from "./services/firebase/firebase-auth.js";
+import { initializeRemoteConfig } from "./services/firebase/firebase-config.js";
+import { isOuraConfigured, syncOuraData, getNextSyncTime, getHealthSummary, loadOuraData } from "./services/health/oura-service.js";
+import { fetchAndAnalyzeNews, shouldFetchNews } from "./services/research/news-service.js";
+import { isEmailConfigured, syncEmailCalendar, getEmailSummary, getUpcomingEvents, startTokenAutoRefresh, startOAuthFlow as startEmailOAuth } from "./services/integrations/email-calendar-service.js";
+import { getPersonalCapitalService } from "./services/integrations/personal-capital.js";
+import { getPlaidService, isPlaidConfigured, syncPlaidData } from "./services/integrations/plaid-service.js";
+import { getThinkingEngine, calculateDataCompleteness } from "./services/engine/thinking-engine.js";
+import { getIdleProcessor } from "./services/engine/idle-processor.js";
+import { getClaudeCodeMonitor } from "./services/ai/claude-code-monitor.js";
+import { getStartupEngine } from "./services/engine/startup-engine.js";
+import { getClaudeEngine } from "./services/ai/claude-engine.js";
+import { startRealtimeSync, stopRealtimeSync, isAuthenticated as isFirestoreAuthenticated, pushTickers } from "./services/firebase/firestore-sync.js";
+import { getDashboardSync } from "./services/firebase/firebase-dashboard-sync.js";
+import { generateDailyBrief, generateAndDeliverBrief, pushBriefToFirestore } from "./services/briefs/daily-brief-generator.js";
 // Initialize Claude Code connection monitor
 console.log("[App] Initializing Claude Code monitor...");
 const _claudeCodeMonitor = getClaudeCodeMonitor();
@@ -226,29 +226,29 @@ const _claudeEngine = getClaudeEngine();
 }
 
 // Life Management Engine imports
-import { getLifeManagementEngine, LIFE_AREAS } from "./services/life-management-engine.js";
-import { getDisasterMonitor } from "./services/disaster-monitor.js";
-import { getPolymarketService } from "./services/polymarket-service.js";
-import { getConversationTracker } from "./services/conversation-tracker.js";
-import { getProactiveEngine } from "./services/proactive-engine.js";
-import { getFirebaseMessaging } from "./services/firebase-messaging.js";
-import { getRealtimeMessaging } from "./services/realtime-messaging.js";
-import { getUnifiedMessageLog, MESSAGE_CHANNEL } from "./services/unified-message-log.js";
-import { getWhatsAppNotifications } from "./services/whatsapp-notifications.js";
+import { getLifeManagementEngine, LIFE_AREAS } from "./services/health/life-management-engine.js";
+import { getDisasterMonitor } from "./services/research/disaster-monitor.js";
+import { getPolymarketService } from "./services/integrations/polymarket-service.js";
+import { getConversationTracker } from "./services/memory/conversation-tracker.js";
+import { getProactiveEngine } from "./services/engine/proactive-engine.js";
+import { getFirebaseMessaging } from "./services/firebase/firebase-messaging.js";
+import { getRealtimeMessaging } from "./services/messaging/realtime-messaging.js";
+import { getUnifiedMessageLog, MESSAGE_CHANNEL } from "./services/messaging/unified-message-log.js";
+import { getWhatsAppNotifications } from "./services/messaging/whatsapp-notifications.js";
 import { classifyMessage } from "./services/message-classifier.js";
 import { selectChannel, routeResponse, CHANNEL } from "./services/response-router.js";
 import { tryDirectCommand, buildContextualSystemPrompt } from "./services/app-command-handler.js";
 
 // Engine state and new panels
-import { getEngineStateManager, ENGINE_STATUS } from "./services/engine-state.js";
+import { getEngineStateManager, ENGINE_STATUS } from "./services/engine/engine-state.js";
 // EngineStatusPanel removed - merged into AgentActivityPanel
 import { EngineStatusLine } from "./components/engine-status-panel.js";
 import { TickerScoresPanel, TickerSummaryLine } from "./components/ticker-scores-panel.js";
-import { getOverlayRenderer } from "./services/overlay-renderer.js";
-import { getActivityNarrator, AGENT_STATES } from "./services/activity-narrator.js";
+import { getOverlayRenderer } from "./services/ui/overlay-renderer.js";
+import { getActivityNarrator, AGENT_STATES } from "./services/ui/activity-narrator.js";
 
 // Activity tracker for agent status display
-import { getActivityTracker, ACTIVITY_STATUS } from "./services/activity-tracker.js";
+import { getActivityTracker, ACTIVITY_STATUS } from "./services/ui/activity-tracker.js";
 import { AgentActivityPanel, AgentStatusDot } from "./components/agent-activity-panel.js";
 import { useStoreSync, STATE_SLICES } from "./hooks/useStoreSync.js";
 
@@ -854,7 +854,7 @@ const App = ({ updateConsoleTitle, updateState }) => {
       // Prediction research - 8 PM primary run
       cronManager.on("run:runPredictionResearch", async () => {
         try {
-          const { runDailyPredictionResearch } = await import("./services/ticker-prediction-research.js");
+          const { runDailyPredictionResearch } = await import("./services/trading/ticker-prediction-research.js");
           const result = await runDailyPredictionResearch();
           if (result.success) {
             console.log(`[Cron] Prediction research: ${result.success}/${result.total} tickers researched`);
@@ -867,7 +867,7 @@ const App = ({ updateConsoleTitle, updateState }) => {
       // Prediction research fallback - 4 AM if primary missed
       cronManager.on("run:runPredictionResearchFallback", async () => {
         try {
-          const { getTickerPredictionResearch } = await import("./services/ticker-prediction-research.js");
+          const { getTickerPredictionResearch } = await import("./services/trading/ticker-prediction-research.js");
           const predictionService = getTickerPredictionResearch();
 
           // Only run if primary didn't run yesterday/today
@@ -888,7 +888,7 @@ const App = ({ updateConsoleTitle, updateState }) => {
       // Overnight research - continuous 8 PM to 6 AM
       cronManager.on("run:runOvernightResearch", async () => {
         try {
-          const { getOvernightResearch } = await import("./services/overnight-research.js");
+          const { getOvernightResearch } = await import("./services/trading/overnight-research.js");
           const overnightService = getOvernightResearch();
 
           // Check if already running
@@ -1529,7 +1529,7 @@ const App = ({ updateConsoleTitle, updateState }) => {
     // 2. Send to WhatsApp (truncate long responses for SMS readability)
     try {
       if (whatsappNotifications?.enabled && whatsappNotifications?.phoneNumber) {
-        const { getTwilioWhatsApp } = await import("./services/twilio-whatsapp.js");
+        const { getTwilioWhatsApp } = await import("./services/messaging/twilio-whatsapp.js");
         const whatsapp = getTwilioWhatsApp();
         if (whatsapp.initialized || await whatsapp.initialize?.()) {
           // Truncate to 1500 chars for WhatsApp readability
@@ -5941,7 +5941,7 @@ Execute this task and provide concrete results.`);
         // Lazy load personal capital service
         if (!personalCapitalRef.current) {
           try {
-            const { getPersonalCapitalService } = await import("./services/personal-capital.js");
+            const { getPersonalCapitalService } = await import("./services/integrations/personal-capital.js");
             personalCapitalRef.current = getPersonalCapitalService();
           } catch (error) {
             setMessages((prev) => [
@@ -5991,7 +5991,7 @@ Execute this task and provide concrete results.`);
         // Lazy load if not already loaded
         if (!personalCapitalRef.current) {
           try {
-            const { getPersonalCapitalService } = await import("./services/personal-capital.js");
+            const { getPersonalCapitalService } = await import("./services/integrations/personal-capital.js");
             personalCapitalRef.current = getPersonalCapitalService();
           } catch (error) {
             setMessages((prev) => [...prev, { role: "assistant", content: `Error: ${error.message}`, timestamp: new Date() }]);
@@ -6070,7 +6070,7 @@ Execute this task and provide concrete results.`);
         // Lazy load if not already loaded
         if (!personalCapitalRef.current) {
           try {
-            const { getPersonalCapitalService } = await import("./services/personal-capital.js");
+            const { getPersonalCapitalService } = await import("./services/integrations/personal-capital.js");
             personalCapitalRef.current = getPersonalCapitalService();
           } catch (error) {
             setMessages((prev) => [...prev, { role: "assistant", content: `Error: ${error.message}`, timestamp: new Date() }]);
@@ -6124,7 +6124,7 @@ Execute this task and provide concrete results.`);
         // Lazy load if not already loaded
         if (!personalCapitalRef.current) {
           try {
-            const { getPersonalCapitalService } = await import("./services/personal-capital.js");
+            const { getPersonalCapitalService } = await import("./services/integrations/personal-capital.js");
             personalCapitalRef.current = getPersonalCapitalService();
           } catch (error) {
             setMessages((prev) => [...prev, { role: "assistant", content: `Error: ${error.message}`, timestamp: new Date() }]);
@@ -6182,7 +6182,7 @@ Execute this task and provide concrete results.`);
         // Lazy load if not already loaded
         if (!personalCapitalRef.current) {
           try {
-            const { getPersonalCapitalService } = await import("./services/personal-capital.js");
+            const { getPersonalCapitalService } = await import("./services/integrations/personal-capital.js");
             personalCapitalRef.current = getPersonalCapitalService();
           } catch (error) {
             setMessages((prev) => [...prev, { role: "assistant", content: `Error: ${error.message}`, timestamp: new Date() }]);
@@ -6725,7 +6725,7 @@ Folder: ${result.action.id}`,
 
         if (subCommand === "status") {
           try {
-            const { getVapiService } = await import("./services/vapi-service.js");
+            const { getVapiService } = await import("./services/messaging/vapi-service.js");
             const vapi = getVapiService();
             const status = vapi.getCallStatus();
             if (!status.active) {
@@ -6761,7 +6761,7 @@ Folder: ${result.action.id}`,
 
         if (subCommand === "end") {
           try {
-            const { getVapiService } = await import("./services/vapi-service.js");
+            const { getVapiService } = await import("./services/messaging/vapi-service.js");
             const vapi = getVapiService();
             await vapi.endCall();
             setMessages((prev) => [
@@ -6785,7 +6785,7 @@ Folder: ${result.action.id}`,
         ]);
 
         try {
-          const { getVapiService } = await import("./services/vapi-service.js");
+          const { getVapiService } = await import("./services/messaging/vapi-service.js");
           const vapi = getVapiService();
 
           vapi.removeAllListeners();
@@ -7422,7 +7422,7 @@ Folder: ${result.action.id}`,
         try {
           const goalManager = getGoalManager();
           const tracker = getGoalTracker();
-          const { generateGoalsFromContext } = await import("./services/goal-generator.js");
+          const { generateGoalsFromContext } = await import("./services/goals/goal-generator.js");
 
           // Delete all current goals (not just archive)
           const allGoals = tracker.getAll();
@@ -7487,7 +7487,7 @@ Folder: ${result.action.id}`,
           const goalManager = getGoalManager();
           const tracker = getGoalTracker();
           const aiBrain = getAIBrain();
-          const { generateGoalsFromInput } = await import("./services/goal-generator.js");
+          const { generateGoalsFromInput } = await import("./services/goals/goal-generator.js");
 
           // Get recent conversation context
           const recentMessages = messages.slice(-10);
@@ -9091,7 +9091,7 @@ Folder: ${result.action.id}`,
               const richBrief = generateDailyBrief();
               if (richBrief) {
                 await pushBriefToFirestore(richBrief);
-                const { sendBriefToWhatsApp, sendBriefPushNotification } = await import("./services/daily-brief-generator.js");
+                const { sendBriefToWhatsApp, sendBriefPushNotification } = await import("./services/briefs/daily-brief-generator.js");
                 const [waResult, pushResult] = await Promise.allSettled([
                   sendBriefToWhatsApp(richBrief),
                   sendBriefPushNotification(richBrief)

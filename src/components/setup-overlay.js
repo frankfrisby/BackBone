@@ -556,7 +556,7 @@ export const getOuraSetupTabs = (currentConfig = {}, handlers = {}) => [
 
 /**
  * AI Models Setup Configuration
- * Supports: Claude Opus 4.5, GPT-5.2, Gemini 3
+ * Supports: Claude Opus (latest), OpenAI GPT (latest), Gemini (latest)
  * Priority: Pro account (browser) -> API key fallback
  */
 export const getLLMSetupTabs = (currentConfig = {}, handlers = {}) => [
@@ -567,19 +567,19 @@ export const getLLMSetupTabs = (currentConfig = {}, handlers = {}) => [
     options: [
       {
         value: "gpt-5.2",
-        label: "◇ OpenAI GPT-5.2",
+        label: "◇ OpenAI GPT (latest)",
         recommended: true,
-        description: "#1 Recommended - versatile & powerful"
+        description: "#1 Recommended - auto-updating OpenAI model"
       },
       {
         value: "claude-opus-4.5",
-        label: "◈ Anthropic Claude Opus 4.5",
-        description: "#2 Recommended - deep reasoning & analysis"
+        label: "◈ Anthropic Claude Opus (latest)",
+        description: "#2 Recommended - auto-updating Claude model"
       },
       {
         value: "gemini-3",
-        label: "◆ Google Gemini 3",
-        description: "#3 Recommended - multimodal AI"
+        label: "◆ Google Gemini (latest)",
+        description: "#3 Recommended - auto-updating Gemini model"
       }
     ],
     onSelect: handlers.onModelSelect
@@ -643,23 +643,23 @@ export const getModelsSetupTabs = (currentConfig = {}, handlers = {}) => {
       label: "Model",
       description: "Select your AI model:",
       options: [
-        {
-          value: "gpt-5.2",
-          label: "◇ OpenAI GPT-5.2",
-          recommended: true,
-          description: "#1 Recommended - versatile & powerful"
-        },
-        {
-          value: "claude-opus-4.5",
-          label: "◈ Anthropic Claude Opus 4.5",
-          description: "#2 Recommended - deep reasoning & analysis"
-        },
-        {
-          value: "gemini-3",
-          label: "◆ Google Gemini 3",
-          description: "#3 Recommended - multimodal AI"
-        }
-      ],
+      {
+        value: "gpt-5.2",
+        label: "◇ OpenAI GPT (latest)",
+        recommended: true,
+        description: "#1 Recommended - auto-updating OpenAI model"
+      },
+      {
+        value: "claude-opus-4.5",
+        label: "◈ Anthropic Claude Opus (latest)",
+        description: "#2 Recommended - auto-updating Claude model"
+      },
+      {
+        value: "gemini-3",
+        label: "◆ Google Gemini (latest)",
+        description: "#3 Recommended - auto-updating Gemini model"
+      }
+    ],
       onSelect: handlers.onModelSelect
     },
     {

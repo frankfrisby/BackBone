@@ -22,7 +22,7 @@ vi.mock('fs', () => ({
 }));
 
 // Mock goal-tracker
-vi.mock('../services/goal-tracker.js', () => ({
+vi.mock('../services/goals/goal-tracker.js', () => ({
   getGoalTracker: vi.fn(() => ({
     getActive: vi.fn(() => []),
     getAll: vi.fn(() => []),
@@ -44,14 +44,14 @@ vi.mock('../services/goal-tracker.js', () => ({
 }));
 
 // Mock goal-extractor
-vi.mock('../services/goal-extractor.js', () => ({
+vi.mock('../services/goals/goal-extractor.js', () => ({
   loadGoals: vi.fn(() => []),
   extractGoalsFromMessage: vi.fn(() => []),
   processMessageForGoals: vi.fn()
 }));
 
 // Mock multi-ai
-vi.mock('../services/multi-ai.js', () => ({
+vi.mock('../services/ai/multi-ai.js', () => ({
   sendMessage: vi.fn(() => Promise.resolve(null)),
   getMultiAIConfig: vi.fn(() => ({
     gptThinking: { ready: false },
@@ -72,7 +72,7 @@ import {
   HOLD_REASON,
   WORK_PHASES,
   GOAL_PRIORITY
-} from '../services/goal-manager.js';
+} from '../services/goals/goal-manager.js';
 
 describe('Goal Manager - Constants', () => {
   it('should export GOAL_STATE with correct values', () => {

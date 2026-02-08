@@ -14,7 +14,7 @@ import {
   listResearch,
   getResearch,
   getYouTubeStatus,
-} from "../services/youtube-service.js";
+} from "../services/integrations/youtube-service.js";
 
 /**
  * BACKBONE YouTube MCP Server

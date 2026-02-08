@@ -1,14 +1,14 @@
 import React, { memo, useMemo, useState, useEffect } from "react";
 import { Box, Text } from "ink";
-import { getActivityNarrator, AGENT_STATES, ACTION_COLORS, STATE_COLORS } from "../services/activity-narrator.js";
-import { getAutonomousEngine } from "../services/autonomous-engine.js";
+import { getActivityNarrator, AGENT_STATES, ACTION_COLORS, STATE_COLORS } from "../services/ui/activity-narrator.js";
+import { getAutonomousEngine } from "../services/engine/autonomous-engine.js";
 import { useCoordinatedUpdates } from "../hooks/useCoordinatedUpdates.js";
-import { getAIStatus, getMultiAIConfig, getCurrentModel } from "../services/multi-ai.js";
+import { getAIStatus, getMultiAIConfig, getCurrentModel } from "../services/ai/multi-ai.js";
 import { BILLING_URLS } from "../services/api-quota-monitor.js";
-import { isClaudeCodeLoggedIn, getCurrentModelInUse } from "../services/claude-code-cli.js";
-import { getGoalManager } from "../services/goal-manager.js";
-import { getBackgroundProjectsManager, BACKGROUND_PROJECT_TYPE } from "../services/background-projects.js";
-import { getClaudeEngine } from "../services/claude-engine.js";
+import { isClaudeCodeLoggedIn, getCurrentModelInUse } from "../services/ai/claude-code-cli.js";
+import { getGoalManager } from "../services/goals/goal-manager.js";
+import { getBackgroundProjectsManager, BACKGROUND_PROJECT_TYPE } from "../services/engine/background-projects.js";
+import { getClaudeEngine } from "../services/ai/claude-engine.js";
 
 const e = React.createElement;
 

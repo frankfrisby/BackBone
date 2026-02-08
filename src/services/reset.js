@@ -1,8 +1,9 @@
 import fs from "fs";
 import path from "path";
 
-const DATA_DIR = path.join(process.cwd(), "data");
-const MEMORY_DIR = path.join(process.cwd(), "memory");
+import { getDataDir, getMemoryDir, getScreenshotsDir } from "./paths.js";
+const DATA_DIR = getDataDir();
+const MEMORY_DIR = getMemoryDir();
 
 /**
  * List of all persistent data files to reset
@@ -91,7 +92,7 @@ export const deleteAllData = () => {
   });
 
   // Also delete screenshots folder contents
-  const screenshotsDir = path.join(process.cwd(), "screenshots");
+  const screenshotsDir = getScreenshotsDir();
   if (fs.existsSync(screenshotsDir)) {
     try {
       const screenshots = fs.readdirSync(screenshotsDir);

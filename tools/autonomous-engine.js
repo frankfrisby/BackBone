@@ -12,8 +12,8 @@
  *   node tools/autonomous-engine.js resume   # Resume the engine
  */
 
-import { getAutonomousLoop } from "../src/services/autonomous-loop.js";
-import { getTaskQueue, saveTaskQueue, Task, PRIORITY } from "../src/services/task-queue.js";
+import { getAutonomousLoop } from "../src/services/engine/autonomous-loop.js";
+import { getTaskQueue, saveTaskQueue, Task, PRIORITY } from "../src/services/engine/task-queue.js";
 
 const args = process.argv.slice(2);
 const command = args[0] || "status";

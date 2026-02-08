@@ -6,13 +6,14 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import fs from "fs";
 import path from "path";
+import { getDataDir } from "../services/paths.js";
 
 /**
  * BACKBONE Contacts Directory MCP Server
  * Manages contacts across categories: linkedin, family, friends, coworkers, startup
  */
 
-const DATA_DIR = path.join(process.cwd(), "data");
+const DATA_DIR = getDataDir();
 const CONTACTS_DIR = path.join(DATA_DIR, "contacts");
 const CATEGORIES = ["linkedin", "family", "friends", "coworkers", "startup"];
 

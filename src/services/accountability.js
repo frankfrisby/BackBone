@@ -7,11 +7,12 @@
 
 import fs from "fs";
 import path from "path";
-import { getHabitsSummary, getTodayHabits } from "./habits.js";
-import { getGoalSummary, loadGoals } from "./goal-extractor.js";
-import { isReviewDue } from "./weekly-review.js";
+import { getHabitsSummary, getTodayHabits } from "./health/habits.js";
+import { getGoalSummary, loadGoals } from "./goals/goal-extractor.js";
+import { isReviewDue } from "./briefs/weekly-review.js";
 
-const DATA_DIR = path.join(process.cwd(), "data");
+import { getDataDir } from "./paths.js";
+const DATA_DIR = getDataDir();
 const ACCOUNTABILITY_PATH = path.join(DATA_DIR, "accountability.json");
 
 // Default check-in times (24h format)

@@ -216,7 +216,9 @@ const ChatPanelBase = ({ commands, onSubmit, onTypingChange, modelInfo, compact 
     return e(
       Box,
       {
-        flexDirection: "column"
+        flexDirection: "column",
+        width: "100%",
+        flexGrow: 1
       },
       // Command palette - renders ABOVE input in compact mode
       showPalette && e(CommandPalette, {
@@ -242,7 +244,7 @@ const ChatPanelBase = ({ commands, onSubmit, onTypingChange, modelInfo, compact 
         e(Text, { color: promptColor, bold: true }, isCommand ? "⟩ " : "› "),
         e(
           Box,
-          { flexGrow: 1 },
+          { flexGrow: 1, width: "100%" },
           isEmpty
             ? e(Text, { color: "#64748b" }, 'Ask anything, / for commands, /talk to chat')
             : e(Text, { color: "#f8fafc", wrap: "wrap" }, displayValue)

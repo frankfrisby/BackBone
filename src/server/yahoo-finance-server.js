@@ -3,7 +3,10 @@ import fetch from "node-fetch";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import { calculateEffectiveScore } from "../services/score-engine.js";
+import { calculateEffectiveScore } from "../services/trading/score-engine.js";
+import { getConvictionBoost, getConvictionBoostMap, getResearchConvictions, addResearchConviction } from "../services/trading/research-convictions.js";
+import { getPredictionScore, getTickerPredictionResearch } from "../services/trading/ticker-prediction-research.js";
+import { getPredictionBoostFromMacro } from "../services/trading/overnight-research.js";
 
 /**
  * Yahoo Finance Background Server
@@ -12,7 +15,7 @@ import { calculateEffectiveScore } from "../services/score-engine.js";
  */
 
 const app = express();
-const PORT = process.env.YAHOO_SERVER_PORT || 3001;
+const PORT = process.env.YAHOO_SERVER_PORT || 3002;
 let httpServer = null;
 
 // Data cache
@@ -29,7 +32,7 @@ let tickerCache = {
 // Flag to signal a running full scan to abort (used by force-restart)
 let scanAbortFlag = false;
 
-const BLACKLIST_PATH = path.join(process.cwd(), "data", "ticker-blacklist.json");
+const BLACKLIST_PATH = dataFile("ticker-blacklist.json");
 let tickerBlacklist = new Set();
 // Track consecutive failures per ticker (requires 3 failures to blacklist)
 const failureCounts = new Map();
@@ -57,7 +60,7 @@ const loadBlacklist = () => {
 
 const saveBlacklist = () => {
   try {
-    const dataDir = path.join(process.cwd(), "data");
+    const dataDir = getDataDir();
     if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
     fs.writeFileSync(BLACKLIST_PATH, JSON.stringify(Array.from(tickerBlacklist), null, 2));
   } catch {
@@ -127,6 +130,7 @@ const isTickerToday = (timestamp) => {
 // CORE_TICKERS (150) = regular refresh, TICKER_UNIVERSE (800+) = full scan
 import { CORE_TICKERS, TICKER_UNIVERSE } from "../data/tickers.js";
 
+import { dataFile, getDataDir } from "../services/paths.js";
 /**
  * Fetch quote for a single ticker
  */
@@ -178,7 +182,7 @@ let alpacaConfig = null;
 const loadAlpacaConfig = () => {
   if (alpacaConfig !== null) return alpacaConfig;
   try {
-    const configPath = path.join(process.cwd(), "data", "alpaca-config.json");
+    const configPath = dataFile("alpaca-config.json");
     if (fs.existsSync(configPath)) {
       const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
       const key = config.apiKey && !config.apiKey.includes("PASTE") ? config.apiKey : null;
@@ -906,9 +910,28 @@ const buildTickerAnalysis = async (symbol, quote) => {
   const intraday = await fetchIntradayBars(symbol);
   const intradayMetrics = calculateIntradayVolumeMultiplier(intraday);
 
+  // Get prediction score from research system (0-10, default 5.0)
+  // The research system evaluates each ticker every 2 days
+  const researchPrediction = getPredictionScore(symbol);
+
+  // Legacy: conviction boost from manual research entries (still supported)
+  // This adds on top of the research-based prediction
+  const convictionBoost = getConvictionBoost(symbol) || 0;
+
+  // Macro boost from overnight research (based on sector correlations)
+  // e.g., if consumer spending is weak, retail stocks get penalized
+  let macroBoost = 0;
+  try {
+    macroBoost = getPredictionBoostFromMacro(symbol) || 0;
+  } catch { /* ignore if overnight research not available */ }
+
+  // Combine: research prediction (already 0-10) + conviction boost (0-5) + macro boost (-1 to +1)
+  // Clamp to reasonable range
+  const adjustedPredictionScore = Math.max(0, Math.min(10, researchPrediction + convictionBoost + macroBoost));
+
   const breakdown = calculateEffectiveScore({
     technicalScore,
-    predictionScore: 0.5,
+    predictionScore: adjustedPredictionScore,
     percentChange: quote.regularMarketChangePercent || 0,
     avgDirectional: 0,
     avgPositive: 0,
@@ -968,6 +991,12 @@ const buildTickerAnalysis = async (symbol, quote) => {
     macdAdjustment: breakdown.macdAdjustment,
     intradayVolumeMultiplier: intradayMetrics.intradayVolumeMultiplier || 0,
     recentPriceChange30min: intradayMetrics.recentPriceChange30min,
+    predictionScore: researchPrediction,
+    convictionBoost: convictionBoost > 0 ? convictionBoost : undefined,
+    macroBoost: macroBoost !== 0 ? Math.round(macroBoost * 100) / 100 : undefined,
+    hasConviction: convictionBoost > 0,
+    hasMacroBoost: macroBoost !== 0,
+    hasPrediction: researchPrediction !== 5.0, // Not default = has research data
     scoredAt: new Date().toISOString(),
     historyDays: closes.length
   };
@@ -1031,7 +1060,7 @@ const updateTickers = async () => {
     console.log(`[${new Date().toISOString()}] Refreshed ${quotes.length} core tickers (${sorted.length} total in cache). Top: ${sorted[0]?.symbol} (${sorted[0]?.score})`);
 
     // Save to file for persistence
-    const dataDir = path.join(process.cwd(), "data");
+    const dataDir = getDataDir();
     if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
     fs.writeFileSync(
       path.join(dataDir, "tickers-cache.json"),
@@ -1147,6 +1176,81 @@ app.post("/api/clear-blacklist", (req, res) => {
   res.json({ success: true, cleared, activeUniverse: getActiveUniverse().length });
 });
 
+// ── Research Convictions API ───────────────────────────────────────────
+
+// Get all active convictions
+app.get("/api/convictions", (req, res) => {
+  const convictions = getResearchConvictions();
+  res.json({
+    success: true,
+    convictions: convictions.getActiveConvictions(),
+    stats: convictions.getStats(),
+    boostMap: convictions.getBoostMap()
+  });
+});
+
+// Add or update a conviction
+app.post("/api/convictions", (req, res) => {
+  const { symbol, conviction, reason, source, expiryDays, research } = req.body || {};
+
+  if (!symbol) {
+    return res.status(400).json({ success: false, error: "symbol is required" });
+  }
+  if (conviction === undefined || conviction === null) {
+    return res.status(400).json({ success: false, error: "conviction level (0-1) is required" });
+  }
+
+  const result = addResearchConviction(symbol, conviction, reason || "API added", {
+    source: source || "api",
+    expiryDays,
+    research
+  });
+
+  res.json(result);
+});
+
+// Bulk add convictions
+app.post("/api/convictions/bulk", (req, res) => {
+  const { tickers, source } = req.body || {};
+
+  if (!Array.isArray(tickers)) {
+    return res.status(400).json({ success: false, error: "tickers array is required" });
+  }
+
+  const convictions = getResearchConvictions();
+  const result = convictions.bulkAdd(tickers, source || "bulk-api");
+  res.json(result);
+});
+
+// Remove a conviction
+app.delete("/api/convictions/:symbol", (req, res) => {
+  const convictions = getResearchConvictions();
+  const result = convictions.removeConviction(req.params.symbol);
+  res.json(result);
+});
+
+// Get conviction for a specific symbol
+app.get("/api/convictions/:symbol", (req, res) => {
+  const convictions = getResearchConvictions();
+  const conviction = convictions.getConviction(req.params.symbol);
+  const boost = convictions.getEffectiveBoost(req.params.symbol);
+
+  if (conviction) {
+    res.json({ success: true, conviction, effectiveBoost: boost });
+  } else {
+    res.json({ success: false, error: "No conviction found for symbol" });
+  }
+});
+
+// Clear all convictions
+app.post("/api/convictions/clear", (req, res) => {
+  const convictions = getResearchConvictions();
+  const result = convictions.clearAll();
+  res.json(result);
+});
+
+// ────────────────────────────────────────────────────────────────────────
+
 // Shutdown endpoint (used to restart server on CLI startup)
 app.post("/api/shutdown", (req, res) => {
   res.json({ success: true, message: "Shutting down" });
@@ -1163,7 +1267,7 @@ app.post("/api/shutdown", (req, res) => {
 // Load cached data on startup
 const loadCache = () => {
   try {
-    const cachePath = path.join(process.cwd(), "data", "tickers-cache.json");
+    const cachePath = dataFile("tickers-cache.json");
     if (fs.existsSync(cachePath)) {
       const data = JSON.parse(fs.readFileSync(cachePath, "utf-8"));
       // Restore data but reset runtime flags (may be stale from killed process)
@@ -1321,7 +1425,7 @@ const runFullScan = async () => {
     }
 
     // Persist
-    const dataDir = path.join(process.cwd(), "data");
+    const dataDir = getDataDir();
     if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
     fs.writeFileSync(
       path.join(dataDir, "tickers-cache.json"),
@@ -1380,7 +1484,7 @@ const reset4amSweep = () => {
   }
 
   // Persist the reset state
-  const dataDir = path.join(process.cwd(), "data");
+  const dataDir = getDataDir();
   if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
   fs.writeFileSync(
     path.join(dataDir, "tickers-cache.json"),
@@ -1407,6 +1511,8 @@ const startServer = () => {
     console.log(`  GET  /api/ticker/:symbol - Get single ticker`);
     console.log(`  POST /api/refresh - Force refresh (top ${CORE_TICKERS.length})`);
     console.log(`  POST /api/full-scan - Full scan all ${getActiveUniverse().length} tickers`);
+    console.log(`  GET  /api/convictions - Get research convictions`);
+    console.log(`  POST /api/convictions - Add conviction { symbol, conviction, reason }`);
     console.log(`  GET  /health - Health check`);
   });
 

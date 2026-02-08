@@ -7,13 +7,14 @@ import {
 import fetch from "node-fetch";
 import fs from "fs";
 import path from "path";
+import { getDataDir } from "../services/paths.js";
 
 /**
  * BACKBONE Email MCP Server
  * Provides tools for email integration (Gmail/Outlook)
  */
 
-const DATA_DIR = path.join(process.cwd(), "data");
+const DATA_DIR = getDataDir();
 const EMAIL_CACHE = path.join(DATA_DIR, "email-cache.json");
 const GOOGLE_TOKEN_FILE = path.join(DATA_DIR, "google-email-tokens.json");
 

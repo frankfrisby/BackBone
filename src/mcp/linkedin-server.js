@@ -6,15 +6,16 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import fs from "fs";
 import path from "path";
+import { getDataDir, getScreenshotsDir } from "../services/paths.js";
 
 /**
  * BACKBONE LinkedIn MCP Server
  * Provides tools for LinkedIn profile, posts, skills, education, and connections
  */
 
-const DATA_DIR = path.join(process.cwd(), "data");
+const DATA_DIR = getDataDir();
 const LINKEDIN_DATA = path.join(DATA_DIR, "linkedin-profile.json");
-const SCREENSHOTS_DIR = path.join(process.cwd(), "screenshots");
+const SCREENSHOTS_DIR = getScreenshotsDir();
 
 // Valid profile sections for incremental updates
 const VALID_SECTIONS = [

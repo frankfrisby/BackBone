@@ -7,13 +7,14 @@ import {
 import fetch from "node-fetch";
 import fs from "fs";
 import path from "path";
+import { getDataDir } from "../services/paths.js";
 
 /**
  * BACKBONE Health MCP Server
  * Provides tools for health data from Oura Ring
  */
 
-const DATA_DIR = path.join(process.cwd(), "data");
+const DATA_DIR = getDataDir();
 const OURA_CACHE = path.join(DATA_DIR, "oura-cache.json");
 const OURA_TOKEN_FILE = path.join(DATA_DIR, "oura-token.json");
 

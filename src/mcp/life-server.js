@@ -6,15 +6,16 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import fs from "fs";
 import path from "path";
+import { getBackboneHome, getDataDir, getMemoryDir, getProjectsDir } from "../services/paths.js";
 
 /**
  * BACKBONE Life Management MCP Server
  * Manages goals, beliefs, backlog, life scores, and thinking engine cycles
  */
 
-const DATA_DIR = path.join(process.cwd(), "data");
-const MEMORY_DIR = path.join(process.cwd(), "memory");
-const PROJECTS_DIR = path.join(process.cwd(), "projects");
+const DATA_DIR = getDataDir();
+const MEMORY_DIR = getMemoryDir();
+const PROJECTS_DIR = getProjectsDir();
 const GOALS_PATH = path.join(DATA_DIR, "goals.json");
 const BELIEFS_PATH = path.join(DATA_DIR, "core-beliefs.json");
 const BACKLOG_PATH = path.join(DATA_DIR, "backlog.json");
@@ -390,7 +391,7 @@ function getThesis() {
 
 async function triggerThinkingCycle() {
   try {
-    const thinkingEngine = await import("../services/thinking-engine.js");
+    const thinkingEngine = await import("../services/engine/thinking-engine.js");
     const engine = thinkingEngine.getThinkingEngine();
 
     if (!engine.isRunning) {
@@ -433,7 +434,7 @@ async function planGoal(goalId) {
       };
     }
 
-    const planner = await import("../services/goal-planner.js");
+    const planner = await import("../services/goals/goal-planner.js");
     const result = await planner.developPlan(goal);
 
     if (result.success) {
@@ -469,13 +470,13 @@ async function reviewGoalPlan(goalId) {
       return { success: false, error: `Goal not found: ${goalId}` };
     }
 
-    const planner = await import("../services/goal-planner.js");
+    const planner = await import("../services/goals/goal-planner.js");
     const evaluation = await planner.evaluatePlan(goal);
 
     // If plan needs update, include the current plan content
     let planContent = null;
     if (goal.plan?.planFile) {
-      planContent = readFile(path.join(process.cwd(), goal.plan.planFile));
+      planContent = readFile(path.join(getBackboneHome(), goal.plan.planFile));
     }
 
     return {

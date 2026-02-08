@@ -22,7 +22,7 @@ vi.mock('fs', () => ({
 }));
 
 // Import after mocks
-import { PlaywrightService, getPlaywrightService } from '../services/playwright-service.js';
+import { PlaywrightService, getPlaywrightService } from '../services/integrations/playwright-service.js';
 
 describe('Playwright Service - Initialization', () => {
   let service;

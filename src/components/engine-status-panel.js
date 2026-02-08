@@ -308,13 +308,30 @@ const EngineStatusPanelBase = ({
  * Compact status line for header/footer use
  * Colors: WHITE = observation, GRAY = working, GREEN = done, RED = error
  */
-const EngineStatusLineBase = ({ status = {}, showSpinner = true }) => {
+const EngineStatusLineBase = ({ status = {}, showSpinner = true, heartbeat = null }) => {
   const statusId = status?.id || "idle";
   const statusDetail = status?.detail || null;
   const statusColor = STATUS_COLORS[statusId] || TASK_STATE.DONE;
   const statusIcon = STATUS_ICONS[statusId] || "●";
   const statusLabel = STATUS_LABELS[statusId] || "Ready";
   const isActive = statusId !== "idle" && statusId !== "waiting";
+
+  // Heartbeat info: show how long ago last work happened
+  let heartbeatText = null;
+  if (heartbeat) {
+    const sinceWork = heartbeat.sinceLastWorkMin;
+    const hbStatus = heartbeat.status;
+    if (hbStatus === "stalled") {
+      heartbeatText = { text: "STALLED", color: "#ef4444" };
+    } else if (sinceWork >= 0 && sinceWork <= 1) {
+      heartbeatText = { text: "work: just now", color: "#22c55e" };
+    } else if (sinceWork > 1 && sinceWork < 60) {
+      heartbeatText = { text: `work: ${sinceWork}m ago`, color: sinceWork > 30 ? "#f59e0b" : "#22c55e" };
+    } else if (sinceWork >= 60) {
+      const hrs = (sinceWork / 60).toFixed(1);
+      heartbeatText = { text: `work: ${hrs}h ago`, color: "#ef4444" };
+    }
+  }
 
   return e(
     Box,
@@ -323,7 +340,8 @@ const EngineStatusLineBase = ({ status = {}, showSpinner = true }) => {
       ? e(Text, { color: TASK_STATE.OBSERVATION }, "...")
       : e(Text, { color: statusColor }, statusIcon),
     e(Text, { color: statusColor, bold: isActive }, statusLabel),
-    statusDetail && e(Text, { color: "#64748b" }, `· ${statusDetail.slice(0, 25)}`)
+    statusDetail && e(Text, { color: "#64748b" }, `· ${statusDetail.slice(0, 25)}`),
+    heartbeatText && e(Text, { color: heartbeatText.color }, ` · ${heartbeatText.text}`)
   );
 };
 

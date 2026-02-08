@@ -1,13 +1,14 @@
 import fs from "fs";
 import path from "path";
 
+import { getDataDir, getMemoryDir } from "./paths.js";
 /**
  * Profile Sections Service for BACKBONE
  * Manages detailed profile information across multiple domains
  */
 
-const DATA_DIR = path.join(process.cwd(), "data");
-const MEMORY_DIR = path.join(process.cwd(), "memory");
+const DATA_DIR = getDataDir();
+const MEMORY_DIR = getMemoryDir();
 const PROFILE_SECTIONS_PATH = path.join(DATA_DIR, "profile-sections.json");
 
 // Profile section types

@@ -8,7 +8,8 @@ import ExcelJS from "exceljs";
 import fs from "fs";
 import path from "path";
 
-const DATA_DIR = path.join(process.cwd(), "data");
+import { getDataDir } from "./paths.js";
+const DATA_DIR = getDataDir();
 const SPREADSHEETS_DIR = path.join(DATA_DIR, "spreadsheets");
 
 const ensureDir = (dir) => {

@@ -20,9 +20,10 @@ import fs from "fs";
 import path from "path";
 import crypto from "crypto";
 import { EventEmitter } from "events";
-import { getTwilioWhatsApp } from "./twilio-whatsapp.js";
+import { getTwilioWhatsApp } from "./messaging/twilio-whatsapp.js";
 
-const DATA_DIR = path.join(process.cwd(), "data");
+import { getDataDir } from "./paths.js";
+const DATA_DIR = getDataDir();
 const VERIFICATION_PATH = path.join(DATA_DIR, "phone-verifications.json");
 
 /**

@@ -1,3 +1,4 @@
+import { dataFile } from "../services/paths.js";
 /**
  * Ticker Data and Technical Analysis for BACKBONE
  * Based on BackBoneApp production system
@@ -21,7 +22,7 @@
 //   scoreRSI,
 //   scoreVolume,
 //   scoreMomentum
-// } from "../services/trading-algorithms.js";
+// } from "../services/trading/trading-algorithms.js";
 
 // Core tickers (high-priority, always tracked) - ~160 most important tickers
 // Well-known large-caps + popular momentum plays + key ETFs
@@ -712,9 +713,9 @@ export const buildInitialTickers = () =>
 export const validateTickerUniverse = async (alpacaConfig) => {
   const fs = await import("node:fs");
   const path = await import("node:path");
-  const { validateTickers } = await import("../services/alpaca.js");
+  const { validateTickers } = await import("../services/trading/alpaca.js");
 
-  const cachePath = path.join(process.cwd(), "data", "validated-tickers.json");
+  const cachePath = dataFile("validated-tickers.json");
 
   // Check cache — only re-validate once per day
   try {

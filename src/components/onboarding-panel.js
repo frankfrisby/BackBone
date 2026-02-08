@@ -7,7 +7,7 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from "react"
 import { execSync } from "child_process";
 import { Box, Text, useInput, useApp } from "ink";
 import TextInput from "ink-text-input";
-import { signInWithGoogle, signOutFirebase, getCurrentFirebaseUser, isSignedIn } from "../services/firebase-auth.js";
+import { signInWithGoogle, signOutFirebase, getCurrentFirebaseUser, isSignedIn } from "../services/firebase/firebase-auth.js";
 import {
   PROVIDERS,
   createApiKeyFile,
@@ -19,7 +19,7 @@ import {
   saveApiKeyToEnv,
   cleanupApiKeyFile,
   isProviderConfigured
-} from "../services/model-key-setup.js";
+} from "../services/setup/model-key-setup.js";
 import {
   loadAlpacaConfig,
   openKeysFileInEditor as openAlpacaKeysFile,
@@ -27,7 +27,7 @@ import {
   testAlpacaConnection,
   saveKeysToEnv as saveAlpacaKeysToEnv,
   readKeysFile as readAlpacaKeysFile
-} from "../services/alpaca-setup.js";
+} from "../services/setup/alpaca-setup.js";
 import {
   isOuraConfigured,
   openOuraTokenPage,
@@ -39,7 +39,7 @@ import {
   validateOuraToken,
   saveOuraToken,
   syncOuraData
-} from "../services/oura-service.js";
+} from "../services/health/oura-service.js";
 import {
   isGoogleEmailConfigured,
   isMicrosoftConfigured,
@@ -47,21 +47,21 @@ import {
   getConfiguredProviders,
   startOAuthFlow,
   syncEmailCalendar
-} from "../services/email-calendar-service.js";
-import { getPersonalCapitalService } from "../services/personal-capital.js";
+} from "../services/integrations/email-calendar-service.js";
+import { getPersonalCapitalService } from "../services/integrations/personal-capital.js";
 import {
   getPlaidService,
   isPlaidConfigured,
   hasPlaidCredentials,
   syncPlaidData
-} from "../services/plaid-service.js";
+} from "../services/integrations/plaid-service.js";
 import { loadUserSettings, updateSetting, updateSettings } from "../services/user-settings.js";
 import { openUrl } from "../services/open-url.js";
-import { requestPhoneCode, verifyPhoneCode, getPhoneRecord, sendWhatsAppMessage, syncPhoneFromFirestore } from "../services/phone-auth.js";
-import { fetchTwilioConfig } from "../services/firebase-config.js";
+import { requestPhoneCode, verifyPhoneCode, getPhoneRecord, getAnyVerifiedPhoneRecord, sendWhatsAppMessage, syncPhoneFromFirestore } from "../services/firebase/phone-auth.js";
+import { fetchTwilioConfig } from "../services/firebase/firebase-config.js";
 import { getMobileService } from "../services/mobile.js";
-import { startOAuthFlow as startClaudeOAuth, hasValidCredentials as hasClaudeCredentials } from "../services/claude-oauth.js";
-import { startOAuthFlow as startCodexOAuth, hasValidCredentials as hasCodexCredentials } from "../services/codex-oauth.js";
+import { startOAuthFlow as startClaudeOAuth, hasValidCredentials as hasClaudeCredentials } from "../services/ai/claude-oauth.js";
+import { startOAuthFlow as startCodexOAuth, hasValidCredentials as hasCodexCredentials } from "../services/ai/codex-oauth.js";
 import {
   isClaudeCodeInstalled,
   isClaudeCodeInstalledAsync,
@@ -69,9 +69,9 @@ import {
   getClaudeCodeStatus,
   spawnClaudeCodeLogin,
   getInstallInstructions as getClaudeCodeInstallInstructions
-} from "../services/claude-code-cli.js";
-import { startSetupWizard, stopSetupWizard, getSetupWizard } from "../services/setup-wizard.js";
-import { scrapeLinkedInProfile } from "../services/linkedin-scraper.js";
+} from "../services/ai/claude-code-cli.js";
+import { startSetupWizard, stopSetupWizard, getSetupWizard } from "../services/setup/setup-wizard.js";
+import { scrapeLinkedInProfile } from "../services/integrations/linkedin-scraper.js";
 import { hasArchivedProfile, restoreProfile } from "../services/profile-manager.js";
 
 const e = React.createElement;
@@ -196,12 +196,12 @@ const BRAND_COLOR = "#f97316";
 
 // Model provider options
 // Model options in priority order for fallback chain
-// OpenAI Codex (Pro/Max) is the recommended option - uses GPT-5.2 Codex model
+// OpenAI Codex (Pro/Max) is the recommended option - uses the latest Codex model
 const MODEL_OPTIONS = [
-  { id: "openai-codex", label: "OpenAI Codex (Pro/Max)", description: "Login with OpenAI Pro/Max - GPT-5.2 Codex", oauth: true, priority: 0, recommended: true },
+  { id: "openai-codex", label: "OpenAI Codex (Pro/Max)", description: "Login with OpenAI Pro/Max - Codex (latest)", oauth: true, priority: 0, recommended: true },
   { id: "claude-code", label: "Claude Code CLI", description: "CLI with Pro/Max subscription", cli: true, priority: 1 },
   { id: "claude-oauth", label: "Claude Pro/Max (Browser)", description: "OAuth login via browser", oauth: true, priority: 2 },
-  { id: "openai", label: "OpenAI API Key", description: "GPT-5.2 via API key", priority: 3 },
+  { id: "openai", label: "OpenAI API Key", description: "OpenAI GPT (latest) via API key", priority: 3 },
   { id: "anthropic", label: "Claude API Key", description: "Anthropic API key", priority: 4 },
   { id: "google", label: "Gemini (Google)", description: "Google AI - Optional", priority: 5, optional: true }
 ];
@@ -1293,7 +1293,7 @@ const ModelSelectionStep = ({ onComplete, onError, onNavigationLockChange, initi
       });
 
       if (result.success) {
-        setMessage("OpenAI Codex (Pro/Max) connected! GPT-5.2 Codex ready.");
+        setMessage("OpenAI Codex (Pro/Max) connected! Codex (latest) ready.");
         setTimeout(() => onComplete({ provider: "openai-codex", method: result.method }), 1500);
       } else {
         setMessage(`Codex login: ${result.error}`);
@@ -1711,57 +1711,34 @@ const MobileAppStep = ({ onComplete, onSkip, onError }) => {
  */
 const CoreGoalsStep = ({ onComplete, onError }) => {
   const [text, setText] = useState("");
-  const [originalText, setOriginalText] = useState(""); // Track original for edit mode
-  const [isEditing, setIsEditing] = useState(false); // true if editing existing goals
-  const [saveStatus, setSaveStatus] = useState(""); // "saving", "saved", ""
   const [submitted, setSubmitted] = useState(false);
+  const [saveStatus, setSaveStatus] = useState(""); // "", "saving", "saved"
+  const loadedRef = useRef(false);
+  const onCompleteRef = useRef(onComplete);
   const saveTimeoutRef = useRef(null);
+  const lastSavedRef = useRef("");
 
-  // Load existing core goals if any
+  // Keep onComplete ref updated
+  onCompleteRef.current = onComplete;
+
+  // Load existing core goals ONCE on mount only
   useEffect(() => {
+    if (loadedRef.current) return;
+    loadedRef.current = true;
+
     const settings = loadUserSettings();
     if (settings.coreGoals) {
       setText(settings.coreGoals);
-      setOriginalText(settings.coreGoals);
-      setIsEditing(true);
+      lastSavedRef.current = settings.coreGoals;
       // Auto-complete if already has 40+ words
       const existingWordCount = settings.coreGoals.trim().split(/\s+/).filter(w => w.length > 0).length;
       if (existingWordCount >= 40) {
-        setTimeout(() => onComplete({ coreGoals: settings.coreGoals, existing: true }), 800);
+        setTimeout(() => onCompleteRef.current({ coreGoals: settings.coreGoals, existing: true }), 800);
       }
     }
-  }, [onComplete]);
+  }, []);
 
-  const wordCount = text.trim().split(/\s+/).filter(w => w.length > 0).length;
-  const wordsNeeded = Math.max(0, 40 - wordCount);
-  const isValid = wordCount >= 40;
-  const hasChanges = text !== originalText;
-
-  // Auto-save with debounce (only for new entries, not editing)
-  const handleTextChange = useCallback((newText) => {
-    setText(newText);
-
-    // Clear any pending save
-    if (saveTimeoutRef.current) {
-      clearTimeout(saveTimeoutRef.current);
-    }
-
-    // Auto-save for new entries (not editing existing)
-    if (!isEditing) {
-      const newWordCount = newText.trim().split(/\s+/).filter(w => w.length > 0).length;
-      if (newWordCount > 0) {
-        setSaveStatus("saving");
-        saveTimeoutRef.current = setTimeout(() => {
-          updateSetting("coreGoals", newText.trim());
-          setSaveStatus("saved");
-          // Clear "saved" status after 2 seconds
-          setTimeout(() => setSaveStatus(""), 2000);
-        }, 500); // Save 500ms after user stops typing
-      }
-    }
-  }, [isEditing]);
-
-  // Cleanup timeout on unmount
+  // Cleanup save timeout on unmount
   useEffect(() => {
     return () => {
       if (saveTimeoutRef.current) {
@@ -1770,34 +1747,49 @@ const CoreGoalsStep = ({ onComplete, onError }) => {
     };
   }, []);
 
+  const wordCount = text.trim().split(/\s+/).filter(w => w.length > 0).length;
+  const wordsNeeded = Math.max(0, 40 - wordCount);
+  const isValid = wordCount >= 40;
+
+  // Debounced auto-save (1000ms after typing stops)
+  const debouncedSave = useCallback((newText) => {
+    // Clear any pending save
+    if (saveTimeoutRef.current) {
+      clearTimeout(saveTimeoutRef.current);
+    }
+
+    // Only save if text actually changed
+    if (newText === lastSavedRef.current) return;
+
+    saveTimeoutRef.current = setTimeout(() => {
+      if (newText && newText !== lastSavedRef.current) {
+        setSaveStatus("saving");
+        updateSetting("coreGoals", newText);
+        lastSavedRef.current = newText;
+        setSaveStatus("saved");
+        // Clear "saved" status after 2 seconds
+        setTimeout(() => setSaveStatus(""), 2000);
+      }
+    }, 1000);
+  }, []);
+
+  // Text change handler - update state and trigger debounced save
+  const handleTextChange = useCallback((newText) => {
+    setText(newText);
+    debouncedSave(newText);
+  }, [debouncedSave]);
+
+  // Handle submit via TextInput's onSubmit
   const handleSubmit = useCallback(() => {
     if (!isValid) return;
+    // Clear any pending debounced save
+    if (saveTimeoutRef.current) {
+      clearTimeout(saveTimeoutRef.current);
+    }
     setSubmitted(true);
-    updateSetting("coreGoals", text.trim());
-    setOriginalText(text.trim());
-    setTimeout(() => onComplete({ coreGoals: text.trim() }), 500);
-  }, [isValid, text, onComplete]);
-
-  const handleCancel = useCallback(() => {
-    setText(originalText);
-    setSaveStatus("");
-  }, [originalText]);
-
-  useInput((input, key) => {
-    if (submitted) return;
-
-    // Enter to save/continue
-    if (key.return && isValid) {
-      handleSubmit();
-      return;
-    }
-
-    // Escape to cancel edits (only in edit mode)
-    if (key.escape && isEditing && hasChanges) {
-      handleCancel();
-      return;
-    }
-  });
+    updateSetting("coreGoals", text);
+    setTimeout(() => onCompleteRef.current({ coreGoals: text }), 500);
+  }, [isValid, text]);
 
   if (submitted) {
     return e(
@@ -1830,6 +1822,7 @@ const CoreGoalsStep = ({ onComplete, onError }) => {
       e(TextInput, {
         value: text,
         onChange: handleTextChange,
+        onSubmit: handleSubmit,
         placeholder: "Type what matters to you..."
       })
     ),
@@ -1839,25 +1832,13 @@ const CoreGoalsStep = ({ onComplete, onError }) => {
       ),
       !isValid && e(Text, { color: "#f59e0b" }, `(${wordsNeeded} more needed)`),
       isValid && e(Text, { color: "#22c55e" }, "Ready!"),
-      // Save status indicator
-      saveStatus === "saving" && e(Text, { color: "#f59e0b" }, " Saving..."),
-      saveStatus === "saved" && e(Text, { color: "#22c55e" }, " Saved!")
+      saveStatus === "saving" && e(Text, { color: "#f59e0b", dimColor: true }, " Saving..."),
+      saveStatus === "saved" && e(Text, { color: "#22c55e", dimColor: true }, " Saved")
     ),
-    // Different instructions for new vs editing
-    isEditing
-      ? e(Box, { flexDirection: "column" },
-          hasChanges
-            ? e(Text, { color: "#f59e0b" }, "Press Enter to save changes, Esc to cancel")
-            : e(Text, { color: isValid ? "#22c55e" : "#64748b" },
-                isValid ? "Press Enter to continue" : "Write at least 40 words to continue"
-              )
-        )
-      : e(Box, { flexDirection: "column" },
-          e(Text, { color: "#94a3b8", dimColor: true }, "Auto-saving as you type..."),
-          e(Text, { color: isValid ? "#22c55e" : "#64748b", dimColor: !isValid },
-            isValid ? "Press Enter to continue" : "Write at least 40 words to continue"
-          )
-        )
+    // Instructions
+    e(Text, { color: isValid ? "#22c55e" : "#64748b" },
+      isValid ? "Press Enter to continue" : "Write at least 40 words to continue"
+    )
   );
 };
 
@@ -1875,8 +1856,8 @@ const LinkedInStep = ({ onComplete, onSkip, onError }) => {
     const loadExisting = async () => {
       try {
         const fs = await import("fs");
-        const path = await import("path");
-        const profilePath = path.default.join(process.cwd(), "data", "linkedin-profile.json");
+        const { dataFile } = await import("../services/paths.js");
+        const profilePath = dataFile("linkedin-profile.json");
         if (fs.default.existsSync(profilePath)) {
           const profileData = JSON.parse(fs.default.readFileSync(profilePath, "utf-8"));
           if (profileData.success && profileData.profileUrl) {
@@ -2914,8 +2895,12 @@ export const OnboardingPanel = ({ onComplete, onProfileRestored, userDisplay = "
         statuses.prerequisites = "complete";
       }
 
-      // Check existing configurations
-      if (isSignedIn()) {
+      // Load settings early for fallback checks
+      const settings = loadUserSettings();
+
+      // Check existing configurations - use both direct checks AND settings fallback
+      // This handles cases where firebase-user.json is missing but connection was made
+      if (isSignedIn() || settings?.connections?.google) {
         statuses.google = "complete";
       }
 
@@ -2939,20 +2924,47 @@ export const OnboardingPanel = ({ onComplete, onProfileRestored, userDisplay = "
       if (isEmailConfigured()) {
         statuses.email = "complete";
       }
+
+      // Check phone verification - try multiple sources
+      // 1. Firebase user + phone record (ideal path)
+      // 2. Any verified phone record (when firebase-user.json missing)
+      // 3. Settings fallback (for legacy/manual verification)
       const firebaseUser = getCurrentFirebaseUser();
+      let phoneVerified = false;
       if (firebaseUser) {
         const phoneRecord = getPhoneRecord(firebaseUser.id);
         if (phoneRecord?.verification?.verifiedAt) {
-          statuses.phone = "complete";
+          phoneVerified = true;
         }
       }
+      if (!phoneVerified) {
+        // Fallback: check if ANY phone record is verified
+        const anyVerified = getAnyVerifiedPhoneRecord();
+        if (anyVerified) {
+          phoneVerified = true;
+          // Sync settings to match reality
+          if (!settings?.connections?.phone || !settings?.phoneNumber) {
+            updateSettings({
+              connections: { ...settings?.connections, phone: true },
+              phoneNumber: anyVerified.phoneNumber
+            });
+          }
+        }
+      }
+      if (!phoneVerified && (settings?.connections?.phone || settings?.phoneNumber)) {
+        // Legacy fallback: settings say phone is connected
+        phoneVerified = true;
+      }
+      if (phoneVerified) {
+        statuses.phone = "complete";
+      }
+
       // Check Plaid configuration
       if (isPlaidConfigured()) {
         statuses.plaid = "complete";
       }
 
       // Check Core Goals (required - must have 40+ words)
-      const settings = loadUserSettings();
 
       // Check Mobile App (optional) - check if user has PWA/push configured
       if (settings.mobileAppInstalled) {
@@ -2968,8 +2980,8 @@ export const OnboardingPanel = ({ onComplete, onProfileRestored, userDisplay = "
       if (statuses.coreGoals !== "complete") {
         try {
           const fs = await import("fs");
-          const path = await import("path");
-          const beliefsPath = path.default.join(process.cwd(), "data", "core-beliefs.json");
+          const { dataFile } = await import("../services/paths.js");
+          const beliefsPath = dataFile("core-beliefs.json");
           if (fs.default.existsSync(beliefsPath)) {
             const beliefsData = JSON.parse(fs.default.readFileSync(beliefsPath, "utf-8"));
             if (beliefsData.beliefs && beliefsData.beliefs.length >= 1) {
@@ -2986,8 +2998,8 @@ export const OnboardingPanel = ({ onComplete, onProfileRestored, userDisplay = "
         // Also check if linkedin-profile.json exists with valid data
         try {
           const fs = await import("fs");
-          const path = await import("path");
-          const profilePath = path.default.join(process.cwd(), "data", "linkedin-profile.json");
+          const { dataFile } = await import("../services/paths.js");
+          const profilePath = dataFile("linkedin-profile.json");
           if (fs.default.existsSync(profilePath)) {
             const profileData = JSON.parse(fs.default.readFileSync(profilePath, "utf-8"));
             if (profileData.success && profileData.profileUrl) {

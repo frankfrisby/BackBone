@@ -5,6 +5,8 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { execSync } from 'child_process';
+import path from 'path';
+import os from 'os';
 
 describe('Claude Code CLI - Installation Check', () => {
   it('should detect Claude Code installation', () => {
@@ -110,7 +112,7 @@ describe('Claude Code CLI - Status Check', () => {
       user: null,
       model: "claude-sonnet-4-20250514",
       method: "claude-code-cli",
-      configDir: "C:\\Users\\frank\\.claude",
+      configDir: path.join(os.homedir(), ".claude"),
       ready: true
     };
 

@@ -1,7 +1,7 @@
 import React, { useMemo } from "react";
 import { Box, Text } from "ink";
-import { getProgressResearch } from "../services/progress-research.js";
-import { getROIDisplayData } from "../services/roi-calculator.js";
+import { getProgressResearch } from "../services/research/progress-research.js";
+import { getROIDisplayData } from "../services/trading/roi-calculator.js";
 
 const e = React.createElement;
 
@@ -52,7 +52,7 @@ const ScoreBar = ({ score = 0, width = 10, color = "#22c55e" }) => {
  *
  * New layout:
  * ┌──────────────────────────────────────┐
- * │ Frank              Warren Buffett    │
+ * │ User               Warren Buffett    │
  * │ 72                              98   │
  * │ ████████░░░░       ██████████████░░  │
  * └──────────────────────────────────────┘

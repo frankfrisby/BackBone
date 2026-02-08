@@ -14,12 +14,12 @@
  */
 
 import { EventEmitter } from "events";
-import { getGoalManager, GOAL_PRIORITY, GOAL_STATE } from "./goal-manager.js";
-import { getGoalTracker, GOAL_CATEGORY } from "./goal-tracker.js";
+import { getGoalManager, GOAL_PRIORITY, GOAL_STATE } from "./goals/goal-manager.js";
+import { getGoalTracker, GOAL_CATEGORY } from "./goals/goal-tracker.js";
 import { getToolExecutor, TOOL_TYPES } from "./tool-executor.js";
-import { sendMessage, getMultiAIConfig, TASK_TYPES } from "./multi-ai.js";
-import { sendWhatsAppMessage, isPhoneVerified } from "./phone-auth.js";
-import { getCurrentFirebaseUser } from "./firebase-auth.js";
+import { sendMessage, getMultiAIConfig, TASK_TYPES } from "./ai/multi-ai.js";
+import { sendWhatsAppMessage, isPhoneVerified } from "./firebase/phone-auth.js";
+import { getCurrentFirebaseUser } from "./firebase/firebase-auth.js";
 
 /**
  * Action risk levels - determines if confirmation is needed

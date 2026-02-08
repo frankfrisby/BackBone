@@ -3,6 +3,7 @@ import http from "http";
 import fs from "fs";
 import path from "path";
 import fetch from "node-fetch";
+import { getDataDir } from "./services/paths.js";
 import {
   createLinkedInAuthRequest,
   exchangeLinkedInCode,
@@ -12,7 +13,7 @@ import {
   buildLinkedInSyncPayload,
   saveLinkedInSync,
   loadLinkedInSync
-} from "./services/linkedin.js";
+} from "./services/integrations/linkedin.js";
 
 const app = express();
 const server = http.createServer(app);
@@ -289,7 +290,7 @@ app.post("/api/trade", async (req, res) => {
     if (!["buy", "sell"].includes(action)) {
       return res.status(400).json({ error: "Action must be 'buy' or 'sell'" });
     }
-    const { getAlpacaConfig } = await import("./services/alpaca.js");
+    const { getAlpacaConfig } = await import("./services/trading/alpaca.js");
     const config = getAlpacaConfig();
     if (!config.ready) {
       return res.status(503).json({ error: "Trading not configured" });
@@ -375,7 +376,7 @@ app.post("/api/engine/start", async (req, res) => {
       res.json({ ok: false, message: "Engine already running" });
       return;
     }
-    const { getAutonomousLoop } = await import("./services/autonomous-loop.js");
+    const { getAutonomousLoop } = await import("./services/engine/autonomous-loop.js");
     autonomousLoop = await getAutonomousLoop();
     autonomousLoop.start(); // Don't await - runs in background
     res.json({ ok: true, message: "Engine started" });
@@ -426,7 +427,7 @@ app.post("/api/engine/resume", async (req, res) => {
 // Engine supervisor — continuity tracking
 app.get("/api/engine/supervisor", async (req, res) => {
   try {
-    const { getEngineSupervisor } = await import("./services/engine-supervisor.js");
+    const { getEngineSupervisor } = await import("./services/engine/engine-supervisor.js");
     const supervisor = getEngineSupervisor();
     res.json(supervisor.getFullStatus());
   } catch (err) {
@@ -436,7 +437,7 @@ app.get("/api/engine/supervisor", async (req, res) => {
 
 app.get("/api/engine/continuity", async (req, res) => {
   try {
-    const { getEngineSupervisor } = await import("./services/engine-supervisor.js");
+    const { getEngineSupervisor } = await import("./services/engine/engine-supervisor.js");
     const supervisor = getEngineSupervisor();
     res.json(supervisor.getContinuityProof());
   } catch (err) {
@@ -477,7 +478,7 @@ async function handleChat(message) {
   if (!message) return { role: "assistant", content: "No message provided.", timestamp: Date.now() };
 
   try {
-    const { sendMessage: sendAI } = await import("./services/multi-ai.js");
+    const { sendMessage: sendAI } = await import("./services/ai/multi-ai.js");
 
     // Build context from available data
     const context = {
@@ -504,7 +505,7 @@ async function handleChat(message) {
 async function handlePortfolio() {
   // Try live Alpaca data first
   try {
-    const { getAlpacaConfig, fetchAccount } = await import("./services/alpaca.js");
+    const { getAlpacaConfig, fetchAccount } = await import("./services/trading/alpaca.js");
     const config = getAlpacaConfig();
     if (config.ready) {
       const account = await fetchAccount(config);
@@ -559,7 +560,7 @@ async function handlePortfolio() {
 async function handlePositions() {
   // Try live Alpaca positions first
   try {
-    const { getAlpacaConfig, fetchPositions } = await import("./services/alpaca.js");
+    const { getAlpacaConfig, fetchPositions } = await import("./services/trading/alpaca.js");
     const config = getAlpacaConfig();
     if (config.ready) {
       const positions = await fetchPositions(config);
@@ -744,7 +745,7 @@ async function handleGoals() {
     }
 
     // Load projects and group by goal
-    const { getProjectManager } = await import("./services/project-manager.js");
+    const { getProjectManager } = await import("./services/projects/project-manager.js");
     const pm = getProjectManager();
     const projectsByGoal = pm.getProjectsByGoal();
 
@@ -780,7 +781,7 @@ async function handleGoals() {
 
 async function handleCalendar() {
   try {
-    const { getEmailCalendarService } = await import("./services/email-calendar-service.js");
+    const { getEmailCalendarService } = await import("./services/integrations/email-calendar-service.js");
     const service = getEmailCalendarService();
     const events = await service.getUpcomingEvents(7);
     return events || [];
@@ -804,7 +805,7 @@ async function handleNews() {
 
   // If no cache, try fetching fresh news
   try {
-    const { fetchAndAnalyzeNews } = await import("./services/news-service.js");
+    const { fetchAndAnalyzeNews } = await import("./services/research/news-service.js");
     const result = await fetchAndAnalyzeNews();
     return { articles: result?.articles || result?.news || [] };
   } catch {
@@ -814,7 +815,7 @@ async function handleNews() {
 
 async function handleVideos(query) {
   try {
-    const { searchYouTube } = await import("./services/youtube-service.js");
+    const { searchYouTube } = await import("./services/integrations/youtube-service.js");
     // Default search based on user interests if no query
     const searchQuery = query || "AI technology investing 2026";
     const videos = await searchYouTube(searchQuery, 10);
@@ -895,7 +896,7 @@ app.get("/linkedin/profile", (req, res) => {
 
 app.post("/api/vapi/call", async (req, res) => {
   try {
-    const { getVapiService } = await import("./services/vapi-service.js");
+    const { getVapiService } = await import("./services/messaging/vapi-service.js");
     const vapiService = getVapiService();
     await vapiService.initialize();
     const { customPrompt } = req.body || {};
@@ -909,7 +910,7 @@ app.post("/api/vapi/call", async (req, res) => {
 
 app.post("/api/vapi/end", async (req, res) => {
   try {
-    const { getVapiService } = await import("./services/vapi-service.js");
+    const { getVapiService } = await import("./services/messaging/vapi-service.js");
     const vapiService = getVapiService();
     const { callId } = req.body || {};
     await vapiService.endCall(callId || undefined);
@@ -922,7 +923,7 @@ app.post("/api/vapi/end", async (req, res) => {
 
 app.post("/api/vapi/webhook", async (req, res) => {
   try {
-    const { getVapiService } = await import("./services/vapi-service.js");
+    const { getVapiService } = await import("./services/messaging/vapi-service.js");
     const vapiService = getVapiService();
     const message = req.body;
     const messageType = message?.message?.type || message?.type;
@@ -962,7 +963,7 @@ app.post("/api/vapi/webhook", async (req, res) => {
 
 app.get("/api/vapi/status", async (req, res) => {
   try {
-    const { getVapiService } = await import("./services/vapi-service.js");
+    const { getVapiService } = await import("./services/messaging/vapi-service.js");
     const vapiService = getVapiService();
     res.json(vapiService.getCallStatus());
   } catch (err) {
@@ -973,7 +974,7 @@ app.get("/api/vapi/status", async (req, res) => {
 // ── WhatsApp Webhook (Twilio) ─────────────────────────────────
 app.post("/api/whatsapp/webhook", async (req, res) => {
   try {
-    const { getTwilioWhatsApp } = await import("./services/twilio-whatsapp.js");
+    const { getTwilioWhatsApp } = await import("./services/messaging/twilio-whatsapp.js");
     const whatsapp = getTwilioWhatsApp();
 
     // Initialize if needed
@@ -1005,7 +1006,7 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
     // Process the request with full context
     try {
       // Load user context
-      const dataDir = path.join(process.cwd(), "data");
+      const dataDir = getDataDir();
       let context = {};
 
       // Portfolio
@@ -1049,7 +1050,7 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
       } catch {}
 
       // Build prompt for Claude
-      const { sendMessage } = await import("./services/claude.js");
+      const { sendMessage } = await import("./services/ai/claude.js");
       const prompt = `You are BACKBONE, a personal AI assistant for an executive. The user sent this via WhatsApp:
 
 "${userMessage}"

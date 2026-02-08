@@ -1,6 +1,6 @@
 import React from "react";
 import { Box, Text, useInput } from "ink";
-import { AI_ACTION_TYPES } from "../services/autonomous-engine.js";
+import { AI_ACTION_TYPES } from "../services/engine/autonomous-engine.js";
 
 const e = React.createElement;
 

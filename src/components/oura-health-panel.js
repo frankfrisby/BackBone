@@ -1,6 +1,6 @@
 import React, { useMemo } from "react";
 import { Box, Text } from "ink";
-import { getAIStatus, getMultiAIConfig } from "../services/multi-ai.js";
+import { getAIStatus, getMultiAIConfig } from "../services/ai/multi-ai.js";
 
 const e = React.createElement;
 

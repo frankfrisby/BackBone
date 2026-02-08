@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { getClaudeCodeBackend, TASK_STATUS, STREAM_MESSAGE_TYPE } from "../services/claude-code-backend.js";
+import { getClaudeCodeBackend, TASK_STATUS, STREAM_MESSAGE_TYPE } from "../services/ai/claude-code-backend.js";
 
 /**
  * React Hook for Claude Code integration in Ink components

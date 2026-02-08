@@ -24,7 +24,7 @@ vi.mock('fs', () => ({
 }));
 
 // Mock firebase-config
-vi.mock('../services/firebase-config.js', () => ({
+vi.mock('../services/firebase/firebase-config.js', () => ({
   fetchPlaidConfig: vi.fn(() => Promise.resolve(null))
 }));
 
@@ -34,7 +34,7 @@ vi.mock('../services/open-url.js', () => ({
 }));
 
 // Import after mocks
-import { PlaidService, getPlaidService, isPlaidConfigured, hasPlaidCredentials } from '../services/plaid-service.js';
+import { PlaidService, getPlaidService, isPlaidConfigured, hasPlaidCredentials } from '../services/integrations/plaid-service.js';
 
 describe('Plaid Service - Configuration', () => {
   let service;

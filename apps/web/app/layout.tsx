@@ -33,7 +33,9 @@ export default function RootLayout({
     <html lang="en" className="dark">
       <head>
         <meta name="apple-mobile-web-app-capable" content="yes" />
-        <link rel="apple-touch-icon" href="/icons/icon-192.png" />
+        <link rel="icon" type="image/png" href="/app/favicon.png" />
+        <link rel="shortcut icon" type="image/png" href="/app/favicon.png" />
+        <link rel="apple-touch-icon" href="/app/icons/icon-192.png" />
       </head>
       <body className={inter.className}>
         <Providers>{children}</Providers>

@@ -6,26 +6,46 @@ title BACKBONE ENGINE
 reg add HKCU\Console /v VirtualTerminalLevel /t REG_DWORD /d 1 /f >nul 2>&1
 cd /d "%~dp0"
 
-if exist "data\.backbone.lock" (
-  for /f "usebackq tokens=*" %%L in ("data\.backbone.lock") do set "LOCKLINE=%%L"
-  for /f "tokens=2 delims=:," %%a in ("!LOCKLINE!") do (
-    set "LOCK_PID=%%~a"
-    goto :checkpid
-  )
-)
-goto :startbb
+REM Prevent server from also launching a browser (we handle it here)
+set BACKBONE_NO_BROWSER=1
 
-:checkpid
-set "LOCK_PID=!LOCK_PID: =!"
-set "LOCK_PID=!LOCK_PID:"=!"
-tasklist /NH 2>nul | findstr /R "^node\.exe.*!LOCK_PID!" >nul 2>&1
+REM Check if server is already running
+curl -s --connect-timeout 2 http://localhost:3000/health >nul 2>&1
 if not errorlevel 1 (
-  echo [BACKBONE] Already running, PID !LOCK_PID!
-  timeout /t 2 /nobreak >nul
-  exit /b 0
+  echo [BACKBONE] Server already running on port 3000
+  goto launchpwa
 )
-del "data\.backbone.lock" >nul 2>&1
 
+REM Start server silently in a hidden window
+echo [BACKBONE] Starting server...
+start "BACKBONE Server" /MIN node src/server.js
+
+REM Wait for server to be ready (up to 15 seconds)
+set /a tries=0
+:waitserver
+set /a tries+=1
+if %tries% gtr 15 (
+  echo [BACKBONE] Server took too long, continuing anyway...
+  goto launchpwa
+)
+timeout /t 1 /nobreak >nul
+curl -s --connect-timeout 1 http://localhost:3000/health >nul 2>&1
+if errorlevel 1 goto waitserver
+echo [BACKBONE] Server ready
+
+:launchpwa
+REM Launch PWA — visible to user (server is the hidden background job)
+if exist "%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe" (
+  start "" "%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe" --app="http://localhost:3000/app"
+) else if exist "C:\Program Files\Google\Chrome\Application\chrome.exe" (
+  start "" "C:\Program Files\Google\Chrome\Application\chrome.exe" --app="http://localhost:3000/app"
+) else if exist "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" (
+  start "" "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" --app="http://localhost:3000/app"
+) else (
+  start "" "http://localhost:3000/app"
+)
+
+REM Start the CLI (foreground — this is the main terminal UI)
 :startbb
 node bin/backbone.js %*
 

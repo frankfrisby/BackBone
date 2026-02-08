@@ -153,6 +153,51 @@
         { "action": "get", "symbol": "AAPL" }
       ]
     }
+    ,{
+      "id": "md-to-latex",
+      "name": "Markdown to LaTeX/PDF",
+      "description": "Convert markdown files to LaTeX (.tex), then compile to PDF. Supports headings, lists, tables, code blocks, checkboxes, links.",
+      "category": "documents",
+      "file": "md-to-latex.js",
+      "inputs": {
+        "action": { "type": "string", "default": "full", "description": "Action: convert (MD→LaTeX), compile (LaTeX→PDF), full (MD→LaTeX→PDF), check (verify toolchain)" },
+        "input": { "type": "string", "required": true, "description": "Path to .md or .tex file (relative to projects/ or absolute)" },
+        "output": { "type": "string", "description": "Output path for .tex file (optional, defaults to same dir)" },
+        "title": { "type": "string", "description": "Document title (auto-detected from first H1 if omitted)" },
+        "author": { "type": "string", "description": "Document author" }
+      },
+      "examples": [
+        { "action": "full", "input": "space-ai-product/DISCOVERY.md", "title": "Space AI Discovery Report" },
+        { "action": "convert", "input": "space-ai-product/PROJECT.md" },
+        { "action": "compile", "input": "space-ai-product/DISCOVERY.tex" },
+        { "action": "check" }
+      ]
+    },
+    {
+      "id": "produce-deliverables",
+      "name": "Produce Deliverables",
+      "description": "Generate tangible deliverables (Excel, PDF, PowerPoint, Word) for all projects. Reads real project data and produces professional documents.",
+      "category": "documents",
+      "file": "produce-deliverables.js",
+      "inputs": {
+        "project": { "type": "string", "description": "Specific project to produce for (optional, defaults to all)" }
+      },
+      "examples": [
+        {},
+        { "project": "financial-growth" },
+        { "project": "disaster-planning" }
+      ]
+    },
+    {
+      "id": "list-deliverables",
+      "name": "List Deliverables",
+      "description": "Show all project deliverables status — what's produced, what's pending, with file paths.",
+      "category": "documents",
+      "file": "list-deliverables.js",
+      "inputs": {
+        "project": { "type": "string", "description": "Filter by project (optional)" }
+      }
+    }
   ],
   "categories": {
     "trading": "Stock trading, portfolio, and market analysis tools",
@@ -161,6 +206,7 @@
     "goals": "Goal tracking and life management tools",
     "daily": "Daily briefing and routine tools",
     "world": "World awareness - markets, news, and global events monitoring",
-    "messaging": "Proactive messaging and alerts to the user"
+    "messaging": "Proactive messaging and alerts to the user",
+    "documents": "Document generation — LaTeX, PDF, Word, Excel"
   }
 }

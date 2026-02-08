@@ -83,6 +83,7 @@ import { formatToolsList, getToolsSummary, enableServer, disableServer } from ".
 import { loadActionsQueue, getActionsDisplay, queueAction, startNextAction, completeAction, initializeDefaultActions, ACTION_TYPES } from "./services/actions-engine.js";
 import { getSkillsCatalog, getUserSkillContent } from "./services/projects/skills-loader.js";
 import { getSkillsLoader } from "./services/projects/skills-loader.js";
+import { getSkillGapDetector } from "./services/projects/skill-gap-detector.js";
 import { listSpreadsheets, readSpreadsheet, createSpreadsheet } from "./services/excel-manager.js";
 import { backupToFirebase, restoreFromFirebase, getBackupStatus } from "./services/firebase/firebase-storage.js";
 import { forceUpdate, checkVersion, consumeUpdateState } from "./services/setup/auto-updater.js";
@@ -9369,6 +9370,86 @@ Folder: ${result.action.id}`,
           `and update skills/index.json.`
         );
         setLastAction("Learning skills...");
+        return;
+      }
+
+      if (resolved.startsWith("/skill pull ")) {
+        const query = resolved.replace("/skill pull ", "").trim();
+        if (!query) {
+          setMessages((prev) => [...prev, { role: "assistant", content: "Usage: `/skill pull <query>` — searches Anthropic repos for matching skills", timestamp: new Date() }]);
+          return;
+        }
+        setMessages((prev) => [...prev, { role: "assistant", content: `Searching Anthropic repos for "${query}"...`, timestamp: new Date() }]);
+        (async () => {
+          try {
+            const loader = getSkillsLoader();
+            const results = await loader.searchOnlineSkills(query, 10);
+            if (results.length === 0) {
+              setMessages((prev) => [...prev, { role: "assistant", content: `No matches found for "${query}" in Anthropic repos. Try a broader query or use \`/skill repos\` to browse.`, timestamp: new Date() }]);
+              return;
+            }
+            let display = `## Search Results for "${query}"\n\n`;
+            display += `Found ${results.length} matches from Anthropic repos:\n\n`;
+            results.forEach((r, i) => {
+              display += `**${i + 1}.** \`${r.name}\` — ${r.repo} (${r.type})\n`;
+            });
+            display += `\nTo install, tell me which one to download (e.g., "install #1").\n`;
+            display += `Or use \`/skill pull <more-specific-query>\` to refine.\n`;
+            // Store results for follow-up
+            setMessages((prev) => [...prev, { role: "assistant", content: display, timestamp: new Date(), meta: { skillSearchResults: results } }]);
+          } catch (error) {
+            setMessages((prev) => [...prev, { role: "assistant", content: `Search error: ${error.message}`, timestamp: new Date() }]);
+          }
+        })();
+        setLastAction("Searching Anthropic skills...");
+        return;
+      }
+
+      if (resolved === "/skill gaps") {
+        setMessages((prev) => [...prev, { role: "assistant", content: "Analyzing goals and projects for skill gaps...", timestamp: new Date() }]);
+        (async () => {
+          try {
+            const detector = getSkillGapDetector();
+            const result = await detector.processGaps();
+            let display = "## Skill Gap Analysis\n\n";
+            if (result.gaps === 0) {
+              display += "No skill gaps detected. All active goals are covered by existing capabilities.";
+            } else {
+              display += `Found **${result.gaps}** gaps. Created **${result.skillsCreated}** skills, **${result.serversCreated}** MCP servers.\n\n`;
+              const log = detector.getDisplayData();
+              if (log.recentGaps.length > 0) {
+                display += "### Detected Gaps\n";
+                log.recentGaps.forEach(g => {
+                  display += `- **${g.skillName}** (${g.priority || "medium"}) — ${g.description}\n`;
+                });
+              }
+              if (log.recentSkills.length > 0) {
+                display += "\n### Skills Created\n";
+                log.recentSkills.forEach(s => {
+                  display += `- **${s.name}** — created ${new Date(s.createdAt).toLocaleDateString()}\n`;
+                });
+              }
+            }
+            setMessages((prev) => [...prev, { role: "assistant", content: display, timestamp: new Date() }]);
+          } catch (error) {
+            setMessages((prev) => [...prev, { role: "assistant", content: `Gap analysis error: ${error.message}`, timestamp: new Date() }]);
+          }
+        })();
+        setLastAction("Detecting skill gaps...");
+        return;
+      }
+
+      if (resolved === "/skill repos") {
+        const loader = getSkillsLoader();
+        const repos = loader.getAvailableRepos();
+        let display = "## Anthropic Skill Repos\n\n";
+        display += "Skills can only be pulled from official Anthropic repositories:\n\n";
+        repos.forEach(r => {
+          display += `- **${r.name}** — ${r.description}\n  ${r.url.replace("api.github.com/repos/", "github.com/").replace("/contents", "")}\n`;
+        });
+        display += "\nUse `/skill pull <query>` to search these repos.";
+        setMessages((prev) => [...prev, { role: "assistant", content: display, timestamp: new Date() }]);
+        setLastAction("Skill repos");
         return;
       }
 

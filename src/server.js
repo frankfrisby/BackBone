@@ -1,9 +1,10 @@
 import express from "express";
 import http from "http";
+import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 import fetch from "node-fetch";
-import { getDataDir } from "./services/paths.js";
+import { getDataDir, getActiveUser } from "./services/paths.js";
 import {
   createLinkedInAuthRequest,
   exchangeLinkedInCode,
@@ -39,6 +40,279 @@ app.use((req, res, next) => {
 app.get("/health", (req, res) => {
   res.json({ ok: true, status: "healthy", version: "1.0.0" });
 });
+
+// ── User Profile ─────────────────────────────────────────────
+
+app.get("/api/user/profile", async (req, res) => {
+  const user = getActiveUser();
+  let photoURL = user.photoURL || null;
+
+  // Fallback: check firebase-user.json for photo if active-user doesn't have one
+  if (!photoURL) {
+    try {
+      const fbUserPath = path.join(getDataDir(), "firebase-user.json");
+      if (fs.existsSync(fbUserPath)) {
+        const fbUser = JSON.parse(fs.readFileSync(fbUserPath, "utf-8"));
+        photoURL = fbUser.picture || fbUser.photoURL || null;
+        if (!user.displayName || user.displayName === "User") {
+          user.displayName = fbUser.name || fbUser.displayName || user.displayName;
+        }
+        if (!user.email) {
+          user.email = fbUser.email || user.email;
+        }
+      }
+    } catch {}
+  }
+
+  res.json({
+    uid: user.uid || "local",
+    displayName: user.displayName || "User",
+    email: user.email || null,
+    photoURL,
+  });
+});
+
+// ── Dashboard Cache (fast startup) ──────────────────────────
+
+const dashboardCacheFile = path.join(getDataDir(), "dashboard-cache.json");
+let dashboardCache = null;
+let dashboardCacheAge = 0;
+
+function readJsonSafe(filePath) {
+  try {
+    if (fs.existsSync(filePath)) return JSON.parse(fs.readFileSync(filePath, "utf-8"));
+  } catch {}
+  return null;
+}
+
+function buildDashboardCache() {
+  const dataDir = getDataDir();
+  const now = Date.now();
+
+  // Only rebuild if cache is older than 10 seconds
+  if (dashboardCache && (now - dashboardCacheAge) < 10000) return dashboardCache;
+
+  const alpacaCache = readJsonSafe(path.join(dataDir, "alpaca-cache.json"));
+  const tickersCache = readJsonSafe(path.join(dataDir, "tickers-cache.json"));
+  const ouraData = readJsonSafe(path.join(dataDir, "oura-data.json"));
+  const goals = readJsonSafe(path.join(dataDir, "goals.json"));
+  const lifeScores = readJsonSafe(path.join(dataDir, "life-scores.json"));
+  const tradesLog = readJsonSafe(path.join(dataDir, "trades-log.json"));
+  const predictionCache = readJsonSafe(path.join(dataDir, "prediction-cache.json"));
+  const user = getActiveUser();
+  let photoURL = user.photoURL || null;
+  let displayName = user.displayName || "User";
+  let email = user.email || null;
+
+  // Fallback to firebase-user.json for photo
+  if (!photoURL) {
+    try {
+      const fbUserPath = path.join(dataDir, "firebase-user.json");
+      if (fs.existsSync(fbUserPath)) {
+        const fbUser = JSON.parse(fs.readFileSync(fbUserPath, "utf-8"));
+        photoURL = fbUser.picture || fbUser.photoURL || null;
+        if (displayName === "User") displayName = fbUser.name || fbUser.displayName || displayName;
+        if (!email) email = fbUser.email || email;
+      }
+    } catch {}
+  }
+
+  dashboardCache = {
+    user: {
+      uid: user.uid || "local",
+      displayName,
+      email,
+      photoURL,
+    },
+    portfolio: alpacaCache?.portfolio || null,
+    positions: alpacaCache?.positions || [],
+    tickers: tickersCache?.tickers?.slice(0, 20) || [],
+    health: {
+      sleep: ouraData?.latest?.sleep?.at(-1) || null,
+      readiness: ouraData?.latest?.readiness?.at(-1) || null,
+      activity: ouraData?.latest?.activity?.at(-1) || null,
+    },
+    goals: (goals || []).filter(g => g.status === "active").slice(0, 10),
+    lifeScores: lifeScores || null,
+    recentTrades: Array.isArray(tradesLog) ? tradesLog.slice(-5) : [],
+    predictions: predictionCache ? { totalTickers: Object.keys(predictionCache).length } : null,
+    cachedAt: new Date().toISOString(),
+  };
+
+  dashboardCacheAge = now;
+
+  // Also persist to disk for even faster cold starts
+  try { fs.writeFileSync(dashboardCacheFile, JSON.stringify(dashboardCache)); } catch {}
+
+  return dashboardCache;
+}
+
+app.get("/api/dashboard-cache", (req, res) => {
+  const cache = buildDashboardCache();
+  res.json(cache);
+});
+
+// ── SSE Real-Time Event Stream ───────────────────────────────
+
+const sseClients = new Set();
+const lastEventByType = new Map();
+const SSE_THROTTLE_MS = 1000; // Max 1 event per type per second
+
+/**
+ * Broadcast an event to all connected SSE clients.
+ * Called by any handler/service to push real-time updates.
+ */
+export function broadcastEvent(type, data = {}) {
+  const now = Date.now();
+  const lastTime = lastEventByType.get(type) || 0;
+  if (now - lastTime < SSE_THROTTLE_MS) return; // Throttle
+  lastEventByType.set(type, now);
+
+  const event = { type, data, timestamp: new Date().toISOString() };
+  const payload = `data: ${JSON.stringify(event)}\n\n`;
+
+  for (const client of sseClients) {
+    try {
+      client.write(payload);
+    } catch {
+      sseClients.delete(client);
+    }
+  }
+}
+
+app.get("/api/stream", (req, res) => {
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    Connection: "keep-alive",
+    "Access-Control-Allow-Origin": "*",
+  });
+
+  // Send initial connection event
+  res.write(`data: ${JSON.stringify({ type: "connected", timestamp: new Date().toISOString() })}\n\n`);
+
+  sseClients.add(res);
+
+  // Heartbeat every 30s to keep connection alive
+  const heartbeat = setInterval(() => {
+    try {
+      res.write(`: heartbeat\n\n`);
+    } catch {
+      clearInterval(heartbeat);
+      sseClients.delete(res);
+    }
+  }, 30000);
+
+  req.on("close", () => {
+    clearInterval(heartbeat);
+    sseClients.delete(res);
+  });
+});
+
+// ── File Watcher for Real-Time Data Updates ──────────────────
+
+const dataDir = getDataDir();
+const WATCHED_FILES = {
+  "alpaca-cache.json": "portfolio_update",
+  "tickers-cache.json": "ticker_update",
+  "oura-data.json": "health_update",
+  "goals.json": "goals_update",
+  "trades-log.json": "trade_update",
+  "life-scores.json": "life_scores_update",
+  "prediction-cache.json": "prediction_update",
+  "engine-supervisor.json": "engine_update",
+};
+
+const fileWatchDebounce = new Map();
+
+function startFileWatchers() {
+  for (const [filename, eventType] of Object.entries(WATCHED_FILES)) {
+    const filePath = path.join(dataDir, filename);
+    try {
+      if (!fs.existsSync(filePath)) continue;
+      fs.watch(filePath, { persistent: false }, (changeType) => {
+        if (changeType !== "change") return;
+        // Debounce: ignore changes within 500ms of each other
+        const now = Date.now();
+        const lastChange = fileWatchDebounce.get(filename) || 0;
+        if (now - lastChange < 500) return;
+        fileWatchDebounce.set(filename, now);
+
+        // Invalidate dashboard cache on any data file change
+        dashboardCacheAge = 0;
+
+        // Read the file and broadcast
+        try {
+          const content = JSON.parse(fs.readFileSync(filePath, "utf8"));
+          broadcastEvent(eventType, summarizeFileData(eventType, content));
+        } catch {
+          broadcastEvent(eventType, { updated: true });
+        }
+      });
+    } catch {
+      // File doesn't exist yet, skip
+    }
+  }
+}
+
+function summarizeFileData(eventType, data) {
+  switch (eventType) {
+    case "portfolio_update": {
+      const acct = data.account;
+      if (!acct) return { updated: true };
+      return {
+        equity: parseFloat(acct.equity) || 0,
+        buyingPower: parseFloat(acct.buying_power) || 0,
+        cash: parseFloat(acct.cash) || 0,
+        dayPL: parseFloat(acct.equity) - parseFloat(acct.last_equity || acct.equity),
+        positionCount: Array.isArray(data.positions) ? data.positions.length : 0,
+        positions: (data.positions || []).slice(0, 10).map(p => ({
+          symbol: p.symbol,
+          qty: parseFloat(p.qty),
+          pl: parseFloat(p.unrealized_pl) || 0,
+          price: parseFloat(p.current_price) || 0,
+          change: parseFloat(p.change_today) * 100 || 0,
+        })),
+      };
+    }
+    case "ticker_update": {
+      const tickers = Array.isArray(data.tickers) ? data.tickers : [];
+      return {
+        count: tickers.length,
+        top5: tickers
+          .filter(t => t.score != null)
+          .sort((a, b) => (b.score || 0) - (a.score || 0))
+          .slice(0, 5)
+          .map(t => ({ symbol: t.symbol, score: t.score, price: t.price, change: t.changePercent })),
+      };
+    }
+    case "health_update": {
+      const latest = data.latest || {};
+      const sleep = Array.isArray(latest.sleep) ? latest.sleep[latest.sleep.length - 1] : null;
+      const readiness = Array.isArray(latest.readiness) ? latest.readiness[latest.readiness.length - 1] : null;
+      return {
+        sleepScore: sleep?.score || null,
+        readinessScore: readiness?.score || null,
+      };
+    }
+    case "trade_update": {
+      const trades = Array.isArray(data) ? data : [];
+      const latest = trades[trades.length - 1];
+      return { totalTrades: trades.length, latest: latest || null };
+    }
+    case "engine_update":
+      return {
+        shouldBeRunning: data.shouldBeRunning,
+        state: data.state,
+        currentTask: data.currentTask,
+      };
+    default:
+      return { updated: true };
+  }
+}
+
+// Start file watchers after a short delay to let the server boot
+setTimeout(startFileWatchers, 2000);
 
 // ── WebSocket Server ─────────────────────────────────────────
 let WebSocketServer;
@@ -454,7 +728,7 @@ app.post("/api/register-push", async (req, res) => {
       return;
     }
     // Store token in data directory
-    const tokensPath = path.resolve("data/fcm-tokens.json");
+    const tokensPath = path.join(dataDir, "fcm-tokens.json");
     let tokens = [];
     try {
       if (fs.existsSync(tokensPath)) {
@@ -516,7 +790,7 @@ async function handlePortfolio() {
         const dayPLPercent = lastEquity > 0 ? (dayPL / lastEquity) * 100 : 0;
         // Cache for brief generator
         try {
-          const cachePath = path.resolve("data/alpaca-cache.json");
+          const cachePath = path.join(dataDir, "alpaca-cache.json");
           const cache = fs.existsSync(cachePath) ? JSON.parse(fs.readFileSync(cachePath, "utf8")) : {};
           cache.account = account;
           cache.updatedAt = new Date().toISOString();
@@ -540,7 +814,7 @@ async function handlePortfolio() {
   }
 
   // Fallback to cached data
-  const dataPath = path.resolve("data/trades-log.json");
+  const dataPath = path.join(dataDir, "trades-log.json");
   try {
     if (fs.existsSync(dataPath)) {
       const data = JSON.parse(fs.readFileSync(dataPath, "utf8"));
@@ -567,7 +841,7 @@ async function handlePositions() {
       if (Array.isArray(positions)) {
         // Cache for brief generator
         try {
-          const cachePath = path.resolve("data/alpaca-cache.json");
+          const cachePath = path.join(dataDir, "alpaca-cache.json");
           const cache = fs.existsSync(cachePath) ? JSON.parse(fs.readFileSync(cachePath, "utf8")) : {};
           cache.positions = positions;
           cache.positionsUpdatedAt = new Date().toISOString();
@@ -592,7 +866,7 @@ async function handlePositions() {
   }
 
   // Fallback to cached data
-  const dataPath = path.resolve("data/trades-log.json");
+  const dataPath = path.join(dataDir, "trades-log.json");
   try {
     if (fs.existsSync(dataPath)) {
       const data = JSON.parse(fs.readFileSync(dataPath, "utf8"));
@@ -603,7 +877,7 @@ async function handlePositions() {
 }
 
 async function handleSignals() {
-  const dataPath = path.resolve("data/tickers-cache.json");
+  const dataPath = path.join(dataDir, "tickers-cache.json");
   try {
     if (fs.existsSync(dataPath)) {
       const data = JSON.parse(fs.readFileSync(dataPath, "utf8"));
@@ -641,7 +915,7 @@ async function handleSignals() {
 }
 
 async function handleHealth() {
-  const dataPath = path.resolve("data/oura-data.json");
+  const dataPath = path.join(dataDir, "oura-data.json");
   try {
     if (fs.existsSync(dataPath)) {
       const raw = JSON.parse(fs.readFileSync(dataPath, "utf8"));
@@ -691,7 +965,7 @@ async function handleHealth() {
 }
 
 async function handleTickers() {
-  const dataPath = path.resolve("data/tickers-cache.json");
+  const dataPath = path.join(dataDir, "tickers-cache.json");
   try {
     if (fs.existsSync(dataPath)) {
       const data = JSON.parse(fs.readFileSync(dataPath, "utf8"));
@@ -716,7 +990,7 @@ async function handleTickers() {
 }
 
 async function handleLifeScores() {
-  const dataPath = path.resolve("data/life-scores.json");
+  const dataPath = path.join(dataDir, "life-scores.json");
   try {
     if (fs.existsSync(dataPath)) {
       return JSON.parse(fs.readFileSync(dataPath, "utf8"));
@@ -726,8 +1000,8 @@ async function handleLifeScores() {
 }
 
 async function handleGoals() {
-  const dataPath = path.resolve("data/goals.json");
-  const parsedGoalsPath = path.resolve("data/parsed-goals.json");
+  const dataPath = path.join(dataDir, "goals.json");
+  const parsedGoalsPath = path.join(dataDir, "parsed-goals.json");
 
   try {
     // Load goals
@@ -749,11 +1023,30 @@ async function handleGoals() {
     const pm = getProjectManager();
     const projectsByGoal = pm.getProjectsByGoal();
 
-    // Attach projects to goals
-    const goalsWithProjects = goals.map(goal => ({
-      ...goal,
-      projects: projectsByGoal[goal.id] || projectsByGoal[goal.title] || []
-    }));
+    // Compute progress % from currentValue/startValue/targetValue and attach projects
+    const goalsWithProjects = goals.map(goal => {
+      let progress = goal.progress;
+      if (progress == null && goal.targetValue != null && goal.startValue != null) {
+        const range = goal.targetValue - goal.startValue;
+        if (range > 0) {
+          progress = Math.min(100, Math.max(0, Math.round(((goal.currentValue || goal.startValue) - goal.startValue) / range * 100)));
+        } else {
+          progress = goal.status === "completed" ? 100 : 0;
+        }
+      }
+      // Fallback: check milestones
+      if (progress == null && Array.isArray(goal.milestones) && goal.milestones.length > 0) {
+        const achieved = goal.milestones.filter(m => m.achieved).length;
+        progress = Math.round((achieved / goal.milestones.length) * 100);
+      }
+      if (progress == null) progress = goal.status === "completed" ? 100 : 0;
+
+      return {
+        ...goal,
+        progress,
+        projects: projectsByGoal[goal.id] || projectsByGoal[goal.title] || []
+      };
+    });
 
     // Attach projects to core goals and calculate overall completion
     const coreGoalsWithProjects = coreGoals.map(goal => {
@@ -792,7 +1085,7 @@ async function handleCalendar() {
 
 async function handleNews() {
   // Try to read cached news first
-  const cachePath = path.resolve("data/news-cache.json");
+  const cachePath = path.join(dataDir, "news-cache.json");
   try {
     if (fs.existsSync(cachePath)) {
       const cached = JSON.parse(fs.readFileSync(cachePath, "utf8"));
@@ -890,6 +1183,39 @@ app.get("/linkedin/profile", (req, res) => {
     return;
   }
   res.json(sync);
+});
+
+// ── LinkedIn Agent Routes ────────────────────────────────────
+
+app.get("/api/linkedin/agent/status", async (req, res) => {
+  try {
+    const { getLinkedInAgent } = await import("./services/integrations/linkedin-agent.js");
+    const agent = getLinkedInAgent();
+    res.json(agent.getStatus());
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/linkedin/agent/run", async (req, res) => {
+  try {
+    const { getLinkedInAgent } = await import("./services/integrations/linkedin-agent.js");
+    const agent = getLinkedInAgent();
+    const result = await agent.run();
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/linkedin/agent/reset", async (req, res) => {
+  try {
+    const { getLinkedInAgent } = await import("./services/integrations/linkedin-agent.js");
+    const agent = getLinkedInAgent();
+    res.json(agent.resetCooldowns());
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ── Vapi Voice AI Routes ─────────────────────────────────────
@@ -1089,12 +1415,138 @@ server.on("error", (err) => {
   console.error("[Server] Startup error:", err.message);
 });
 
+// ── Activity Log (broadcast engine/system activity) ──────────
+
+const MAX_ACTIVITY_LOG = 200;
+const activityLog = [];
+
+export function logActivity(category, message, data = null) {
+  const entry = {
+    id: crypto.randomUUID(),
+    category, // trade, research, engine, health, goal, system
+    message,
+    data,
+    timestamp: new Date().toISOString(),
+  };
+  activityLog.push(entry);
+  if (activityLog.length > MAX_ACTIVITY_LOG) activityLog.shift();
+  broadcastEvent("activity", entry);
+}
+
+app.get("/api/activity", (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit) || 50, MAX_ACTIVITY_LOG);
+  res.json(activityLog.slice(-limit));
+});
+
+// Send a desktop notification via the SSE-connected PWA clients
+app.post("/api/notify", (req, res) => {
+  const { title, body, type } = req.body || {};
+  if (!body) return res.status(400).json({ error: "Missing body" });
+  broadcastEvent("notification", { title: title || "BACKBONE", body, type: type || "system" });
+  logActivity(type || "system", body);
+  res.json({ ok: true, sent: sseClients.size });
+});
+
+// ── Serve Static Web App (PWA) ──────────────────────────────
+
+import { fileURLToPath } from "url";
+const __dirname_server = import.meta.dirname || path.dirname(fileURLToPath(import.meta.url));
+const webAppOutDir = path.resolve(__dirname_server, "../apps/web/out");
+if (fs.existsSync(webAppOutDir)) {
+  app.use("/app", express.static(webAppOutDir));
+  // SPA fallback
+  app.get("/app/*", (req, res) => {
+    res.sendFile(path.join(webAppOutDir, "index.html"));
+  });
+}
+
+// ── Start Server ─────────────────────────────────────────────
+
 server.listen(PORT, () => {
   console.log(`BACKBONE backend listening on ${PORT}`);
   if (WebSocketServer) {
     console.log(`WebSocket available at ws://localhost:${PORT}/ws`);
   }
+  console.log(`SSE stream at http://localhost:${PORT}/api/stream`);
+  console.log(`Activity log at http://localhost:${PORT}/api/activity`);
+
+  // Auto-launch desktop PWA
+  if (process.env.BACKBONE_NO_BROWSER !== "1") {
+    launchDesktopPWA();
+  }
 });
+
+async function launchDesktopPWA() {
+  // Small delay to ensure server is ready
+  await new Promise(r => setTimeout(r, 1500));
+  const url = `http://localhost:${PORT}/app`;
+  try {
+    const { spawn } = await import("child_process");
+    const platform = process.platform;
+    let launched = false;
+
+    // Use spawn with detached + windowsHide to avoid flashing console windows
+    const launchQuiet = (exe, args) => {
+      const child = spawn(exe, args, {
+        detached: true,
+        stdio: "ignore",
+        windowsHide: true,
+      });
+      child.unref();
+    };
+
+    if (platform === "win32") {
+      const chromePaths = [
+        (process.env.LOCALAPPDATA || "") + "\\Google\\Chrome\\Application\\chrome.exe",
+        "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+        "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+      ];
+      for (const chromePath of chromePaths) {
+        try {
+          if (fs.existsSync(chromePath)) {
+            launchQuiet(chromePath, [`--app=${url}`]);
+            launched = true;
+            break;
+          }
+        } catch {}
+      }
+
+      if (!launched) {
+        const edgePath = "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe";
+        try {
+          if (fs.existsSync(edgePath)) {
+            launchQuiet(edgePath, [`--app=${url}`]);
+            launched = true;
+          }
+        } catch {}
+      }
+
+      // Final fallback: use cmd /c start (hidden)
+      if (!launched) {
+        launchQuiet("cmd.exe", ["/c", "start", "", url]);
+        launched = true;
+      }
+    } else if (platform === "darwin") {
+      try {
+        launchQuiet("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", [`--app=${url}`]);
+      } catch {
+        launchQuiet("open", [url]);
+      }
+      launched = true;
+    } else {
+      // Linux: Try chromium/chrome, fallback to xdg-open
+      exec(`google-chrome --app="${url}" --new-window 2>/dev/null || chromium-browser --app="${url}" --new-window 2>/dev/null || xdg-open "${url}"`, () => {});
+      launched = true;
+    }
+
+    if (launched) {
+      console.log(`[PWA] Desktop app launched at ${url}`);
+      logActivity("system", "Desktop PWA launched", { url, mode: "standalone" });
+    }
+  } catch (err) {
+    console.log("[PWA] Auto-launch skipped:", err.message);
+  }
+}
 
 // Graceful shutdown
 const shutdown = (signal) => {

@@ -1,0 +1,20 @@
+{
+  "entrypoint": "src/services/integrations/linkedin-agent.js",
+  "type": "engine",
+  "schedule": "cron",
+  "cron": "0 8 * * *",
+  "permissions": {
+    "skills": ["web-scraping", "social-media"],
+    "mcp": ["backbone-linkedin", "backbone-contacts"],
+    "tools": [],
+    "filesystem": {
+      "read": ["data/linkedin-profile.json", "data/linkedin-history/", "data/contacts/", "memory/"],
+      "write": ["data/linkedin-profile.json", "data/linkedin-history/", "data/linkedin-agent-state.json", "data/contacts/"]
+    }
+  },
+  "browser": {
+    "required": true,
+    "provider": "claude-in-chrome",
+    "domains": ["linkedin.com", "www.linkedin.com"]
+  }
+}

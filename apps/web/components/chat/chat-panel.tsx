@@ -34,7 +34,7 @@ export function ChatPanel() {
             <div className="text-center">
               <div className="h-10 w-10 rounded-full bg-[#111] border border-[#1f1f1f] flex items-center justify-center mx-auto mb-3">
                 <img
-                  src="/logo-dark.png"
+                  src="/app/logo-dark.png"
                   alt="B"
                   className="h-5 w-5 rounded"
                 />
@@ -69,7 +69,7 @@ export function ChatPanel() {
               <div className="flex items-center gap-2.5 py-2 px-1">
                 <div className="h-7 w-7 rounded-full overflow-hidden flex-shrink-0">
                   <img
-                    src="/logo-dark.png"
+                    src="/app/logo-dark.png"
                     alt="B"
                     className="h-full w-full object-cover"
                   />

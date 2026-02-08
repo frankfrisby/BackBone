@@ -30,7 +30,7 @@ export default function LoginPage() {
         <div className="flex flex-col items-center mb-12">
           <div className="relative mb-6">
             <img
-              src="/logo-dark.png"
+              src="/app/logo-dark.png"
               alt="BACKBONE"
               className="h-[80px] w-[80px] rounded-[22px]"
             />

@@ -19,10 +19,32 @@ interface PendingRequest {
 }
 
 const LOCALHOST_PORT = 3000;
-const WS_URL = `ws://localhost:${LOCALHOST_PORT}/ws`;
-const HTTP_URL = `http://localhost:${LOCALHOST_PORT}`;
 const REQUEST_TIMEOUT = 30000;
 const TUNNEL_CONFIG_KEY = "backbone_tunnel_url";
+
+// When served from Express (/app), use same origin; otherwise use localhost:3000
+function getBaseUrl(): string {
+  if (typeof window === "undefined") return `http://localhost:${LOCALHOST_PORT}`;
+  // If we're on the same port as the backend, use relative URLs
+  const port = parseInt(window.location.port, 10);
+  if (port === LOCALHOST_PORT || window.location.pathname.startsWith("/app")) {
+    return window.location.origin;
+  }
+  return `http://localhost:${LOCALHOST_PORT}`;
+}
+
+function getWsUrl(): string {
+  if (typeof window === "undefined") return `ws://localhost:${LOCALHOST_PORT}/ws`;
+  const port = parseInt(window.location.port, 10);
+  if (port === LOCALHOST_PORT || window.location.pathname.startsWith("/app")) {
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    return `${protocol}//${window.location.host}/ws`;
+  }
+  return `ws://localhost:${LOCALHOST_PORT}/ws`;
+}
+
+const WS_URL = typeof window !== "undefined" ? getWsUrl() : `ws://localhost:${LOCALHOST_PORT}/ws`;
+const HTTP_URL = typeof window !== "undefined" ? getBaseUrl() : `http://localhost:${LOCALHOST_PORT}`;
 
 export class BackboneConnection {
   private ws: WebSocket | null = null;

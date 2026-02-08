@@ -139,7 +139,7 @@ export function VapiCallView() {
         {/* Avatar / Visual */}
         <div className="relative mb-8">
           <img
-            src="/logo-dark.png"
+            src="/app/logo-dark.png"
             alt="B"
             className={`h-20 w-20 rounded-2xl ${
               callState === "connecting" ? "animate-pulse" : ""

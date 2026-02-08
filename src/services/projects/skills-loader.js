@@ -12,9 +12,11 @@ const SKILLS_INDEX_PATH = path.join(DATA_DIR, "skills-index.json");
 const USER_SKILLS_DIR = getUserSkillsDir();
 const USER_SKILLS_INDEX_PATH = path.join(USER_SKILLS_DIR, "index.json");
 
+// IMPORTANT: Anthropic-only repos. Do NOT add non-Anthropic sources.
 const SKILL_REPOS = [
-  { name: "anthropics/courses", url: "https://api.github.com/repos/anthropics/courses/contents" },
-  { name: "anthropics/anthropic-cookbook", url: "https://api.github.com/repos/anthropics/anthropic-cookbook/contents" }
+  { name: "anthropics/courses", url: "https://api.github.com/repos/anthropics/courses/contents", description: "Anthropic official courses and tutorials" },
+  { name: "anthropics/anthropic-cookbook", url: "https://api.github.com/repos/anthropics/anthropic-cookbook/contents", description: "Anthropic cookbook — patterns, examples, best practices" },
+  { name: "anthropics/anthropic-quickstarts", url: "https://api.github.com/repos/anthropics/anthropic-quickstarts/contents", description: "Anthropic quickstart templates and guides" },
 ];
 
 // Default skills that come bundled with the app
@@ -103,31 +105,102 @@ class SkillsLoader extends EventEmitter {
     } catch (e) { /* ignore */ }
   }
 
-  async searchOnlineSkills(query) {
+  /**
+   * Search Anthropic repos for skills matching a query.
+   * Searches top-level items by name.
+   */
+  async searchOnlineSkills(query, maxResults = 20) {
     const results = [];
+    const lowerQuery = query.toLowerCase();
     for (const repo of SKILL_REPOS) {
       try {
         const response = await fetch(repo.url, { headers: { "User-Agent": "backbone-app" } });
         if (response.ok) {
           const items = await response.json();
-          items.filter(i => i.name.toLowerCase().includes(query.toLowerCase()) || i.type === "dir")
-            .forEach(i => results.push({ name: i.name, repo: repo.name, url: i.html_url, downloadUrl: i.download_url, type: i.type }));
+          for (const item of items) {
+            if (item.name.toLowerCase().includes(lowerQuery) || item.type === "dir") {
+              results.push({
+                name: item.name,
+                repo: repo.name,
+                repoDescription: repo.description,
+                url: item.html_url,
+                downloadUrl: item.download_url,
+                type: item.type,
+                size: item.size,
+              });
+            }
+            if (results.length >= maxResults) break;
+          }
         }
       } catch (e) { /* ignore */ }
     }
     return results;
   }
 
+  /**
+   * Deep search into a specific Anthropic repo directory.
+   * Recursively lists contents to find .md, .py, .ipynb files.
+   */
+  async deepSearchRepo(repoName, dirPath = "", maxDepth = 2) {
+    const repo = SKILL_REPOS.find(r => r.name === repoName);
+    if (!repo) return [];
+
+    const url = dirPath ? `${repo.url}/${dirPath}` : repo.url;
+    const results = [];
+
+    try {
+      const response = await fetch(url, { headers: { "User-Agent": "backbone-app" } });
+      if (!response.ok) return results;
+      const items = await response.json();
+
+      for (const item of items) {
+        const fullPath = dirPath ? `${dirPath}/${item.name}` : item.name;
+        if (item.type === "file" && /\.(md|py|ipynb|txt)$/i.test(item.name)) {
+          results.push({
+            name: item.name,
+            path: fullPath,
+            repo: repoName,
+            url: item.html_url,
+            downloadUrl: item.download_url,
+            size: item.size,
+          });
+        } else if (item.type === "dir" && maxDepth > 0 && !item.name.startsWith(".")) {
+          const subResults = await this.deepSearchRepo(repoName, fullPath, maxDepth - 1);
+          results.push(...subResults);
+        }
+      }
+    } catch (e) { /* ignore */ }
+
+    return results;
+  }
+
+  /**
+   * Download a skill file from an Anthropic repo and install it locally.
+   */
   async downloadSkill(skillUrl, skillName) {
+    // Verify URL is from an Anthropic repo
+    if (!skillUrl.includes("anthropics/") && !skillUrl.includes("raw.githubusercontent.com/anthropics/")) {
+      this.emit("skill:error", { skillName, error: "Only Anthropic repos are allowed" });
+      return null;
+    }
+
     try {
       const response = await fetch(skillUrl);
-      if (!response.ok) throw new Error("Failed to fetch");
+      if (!response.ok) throw new Error(`Failed to fetch: ${response.status}`);
       const content = await response.text();
-      const filename = `${skillName.replace(/[^a-z0-9]/gi, "-").toLowerCase()}.md`;
+      const slug = skillName.replace(/[^a-z0-9]/gi, "-").toLowerCase();
+      const filename = `${slug}.md`;
       const filepath = path.join(SKILLS_DIR, filename);
       fs.writeFileSync(filepath, content);
-      const skill = { id: skillName, name: skillName, filepath, downloadedAt: new Date().toISOString(), source: skillUrl };
-      this.skills.set(skillName, skill);
+      const skill = {
+        id: slug,
+        name: skillName,
+        filepath,
+        downloadedAt: new Date().toISOString(),
+        source: skillUrl,
+        sourceType: "anthropic-repo",
+      };
+      this.skills.set(slug, skill);
       this._saveIndex();
       this.emit("skill:downloaded", { skill });
       return skill;
@@ -135,6 +208,50 @@ class SkillsLoader extends EventEmitter {
       this.emit("skill:error", { skillName, error: e.message });
       return null;
     }
+  }
+
+  /**
+   * Search and install: find a skill online, download the best match.
+   * Convenience method combining search + download.
+   */
+  async searchAndInstall(query) {
+    const results = await this.searchOnlineSkills(query, 5);
+    const downloadable = results.filter(r => r.downloadUrl && r.type === "file");
+
+    if (downloadable.length === 0) {
+      // Try deep search in each repo
+      for (const repo of SKILL_REPOS) {
+        const deepResults = await this.deepSearchRepo(repo.name, "", 2);
+        const matches = deepResults.filter(r =>
+          r.name.toLowerCase().includes(query.toLowerCase()) ||
+          r.path.toLowerCase().includes(query.toLowerCase())
+        );
+        if (matches.length > 0) {
+          downloadable.push(...matches);
+          break;
+        }
+      }
+    }
+
+    if (downloadable.length === 0) {
+      return { installed: false, message: `No matching skills found in Anthropic repos for "${query}"`, searched: SKILL_REPOS.map(r => r.name) };
+    }
+
+    const best = downloadable[0];
+    const skillName = best.name.replace(/\.(md|py|ipynb|txt)$/i, "");
+    const skill = await this.downloadSkill(best.downloadUrl || best.url, skillName);
+
+    if (skill) {
+      return { installed: true, skill, source: best.repo, message: `Installed "${skillName}" from ${best.repo}` };
+    }
+    return { installed: false, message: "Download failed" };
+  }
+
+  /**
+   * List all available Anthropic repos for browsing.
+   */
+  getAvailableRepos() {
+    return SKILL_REPOS.map(r => ({ name: r.name, url: r.url, description: r.description }));
   }
 
   loadSkill(skillId) {

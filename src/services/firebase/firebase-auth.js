@@ -581,7 +581,7 @@ export const saveFirebaseUser = (userData) => {
       claimDefaultProfile(uid);
 
       // Switch active user so all paths resolve to this user's directory
-      setActiveUser(uid, userData.email, userData.displayName);
+      setActiveUser(uid, userData.email, userData.displayName, userData.picture || userData.photoURL);
       ensureUserDirs(uid);
     }
 

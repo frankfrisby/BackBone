@@ -3,58 +3,51 @@
   "short_name": "BACKBONE",
   "description": "Life optimization engine powered by AI",
   "display": "standalone",
-  "start_url": "/",
-  "scope": "/",
+  "start_url": "/app/",
+  "scope": "/app/",
   "theme_color": "#000000",
   "background_color": "#000000",
-  "orientation": "portrait-primary",
+  "orientation": "any",
   "categories": ["productivity", "lifestyle", "finance", "health"],
+  "prefer_related_applications": false,
   "icons": [
     {
-      "src": "/icons/icon-72.png",
-      "sizes": "72x72",
-      "type": "image/png"
-    },
-    {
-      "src": "/icons/icon-96.png",
-      "sizes": "96x96",
-      "type": "image/png"
-    },
-    {
-      "src": "/icons/icon-128.png",
-      "sizes": "128x128",
-      "type": "image/png"
-    },
-    {
-      "src": "/icons/icon-144.png",
-      "sizes": "144x144",
-      "type": "image/png"
-    },
-    {
-      "src": "/icons/icon-152.png",
-      "sizes": "152x152",
-      "type": "image/png"
-    },
-    {
-      "src": "/icons/icon-192.png",
+      "src": "/app/favicon.png",
       "sizes": "192x192",
       "type": "image/png"
     },
     {
-      "src": "/icons/icon-384.png",
-      "sizes": "384x384",
+      "src": "/app/icons/icon-192.png",
+      "sizes": "192x192",
       "type": "image/png"
     },
     {
-      "src": "/icons/icon-512.png",
+      "src": "/app/icons/icon-512.png",
       "sizes": "512x512",
       "type": "image/png"
     },
     {
-      "src": "/icons/icon-512.png",
+      "src": "/app/icons/icon-512.png",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Portfolio",
+      "url": "/app/?view=portfolio",
+      "description": "View your portfolio"
+    },
+    {
+      "name": "Health",
+      "url": "/app/?view=health",
+      "description": "View health data"
+    },
+    {
+      "name": "Goals",
+      "url": "/app/?view=goals",
+      "description": "View goals progress"
     }
   ]
 }

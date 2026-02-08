@@ -191,7 +191,7 @@ export function AppShell({ user }: AppShellProps) {
         <div className="flex-1 flex flex-col items-center justify-center px-6">
           <div className="relative mb-8">
             <img
-              src="/logo-dark.png"
+              src="/app/logo-dark.png"
               alt="BACKBONE"
               className="h-[72px] w-[72px] rounded-[20px]"
             />
@@ -260,7 +260,7 @@ export function AppShell({ user }: AppShellProps) {
 
           <div className="flex items-center gap-2">
             <img
-              src="/logo-dark.png"
+              src="/app/logo-dark.png"
               alt="BACKBONE"
               className="h-6 w-6 rounded-md"
             />
@@ -337,7 +337,7 @@ export function AppShell({ user }: AppShellProps) {
       <div className="h-11 flex items-center justify-between px-5 border-b border-[#141414]">
         <div className="flex items-center gap-3">
           <img
-            src="/logo-dark.png"
+            src="/app/logo-dark.png"
             alt="BACKBONE"
             className="h-6 w-6 rounded-md"
           />

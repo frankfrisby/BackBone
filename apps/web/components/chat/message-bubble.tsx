@@ -30,7 +30,7 @@ export function MessageBubble({
         <div className="flex-shrink-0 mt-1">
           <div className="h-7 w-7 rounded-full overflow-hidden">
             <img
-              src="/logo-dark.png"
+              src="/app/logo-dark.png"
               alt="B"
               className="h-full w-full object-cover"
             />

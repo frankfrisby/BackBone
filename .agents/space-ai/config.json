@@ -1,0 +1,36 @@
+{
+  "entrypoint": "src/services/products/space-ai-agent.js",
+  "type": "engine",
+  "schedule": "continuous",
+  "maxSessionMs": 1800000,
+  "restBetweenCyclesMs": 3600000,
+  "permissions": {
+    "skills": ["space-ai-product", "market-research", "web-scraping", "data-analysis", "api-integration", "academic-research"],
+    "mcp": ["backbone-life", "backbone-news", "backbone-projects", "backbone-youtube"],
+    "tools": ["research-stock", "goal-progress"],
+    "filesystem": {
+      "read": ["data/", "memory/", "projects/space-ai-product/", "skills/"],
+      "write": [
+        "projects/space-ai-product/",
+        "data/space-ai-state.json",
+        "memory/space-ai-journal.md"
+      ]
+    }
+  },
+  "phases": {
+    "discovery": { "order": 1, "description": "Research market, find gaps, score opportunities" },
+    "validation": { "order": 2, "description": "Validate demand, size market, define value prop" },
+    "design": { "order": 3, "description": "Define MVP, architecture, tech stack, criteria" },
+    "build": { "order": 4, "description": "Build the product iteratively" },
+    "launch": { "order": 5, "description": "Deploy, get users, collect feedback" },
+    "mature": { "order": 6, "description": "Iterate, grow, optimize for revenue" }
+  },
+  "graduation": {
+    "discovery_to_validation": "Top opportunity scored and selected with rationale",
+    "validation_to_design": "Market size > $10M, demand signals confirmed, value prop defined",
+    "design_to_build": "MVP scope locked, CRITERIA.md written, architecture documented",
+    "build_to_launch": "All must-have criteria met, deployed to staging, tested",
+    "launch_to_mature": "First paying users or clear path to monetization",
+    "mature_done": "Product generates revenue independently with minimal intervention"
+  }
+}

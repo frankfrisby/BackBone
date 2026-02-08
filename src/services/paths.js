@@ -114,11 +114,25 @@ export function getUserHome(uid) {
  * Set the active user. Call this on sign-in.
  * Writes active-user.json and resets cached resolution.
  */
-export function setActiveUser(uid, email, displayName) {
+export function setActiveUser(uid, email, displayName, photoURL) {
   const root = resolveBackboneRoot();
   const activeUserPath = path.join(root, "active-user.json");
-  fs.writeFileSync(activeUserPath, JSON.stringify({ uid, email, displayName, switchedAt: new Date().toISOString() }, null, 2));
+  fs.writeFileSync(activeUserPath, JSON.stringify({ uid, email, displayName, photoURL: photoURL || null, switchedAt: new Date().toISOString() }, null, 2));
   _activeUserId = uid;
+}
+
+/**
+ * Get the full active user object { uid, email, displayName, photoURL }.
+ */
+export function getActiveUser() {
+  const root = resolveBackboneRoot();
+  const activeUserPath = path.join(root, "active-user.json");
+  try {
+    if (fs.existsSync(activeUserPath)) {
+      return JSON.parse(fs.readFileSync(activeUserPath, "utf-8"));
+    }
+  } catch {}
+  return { uid: "default", email: null, displayName: "User", photoURL: null };
 }
 
 /**

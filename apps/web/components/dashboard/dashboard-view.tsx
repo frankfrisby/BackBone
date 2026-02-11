@@ -142,8 +142,8 @@ const CATEGORY_COLORS: Record<string, string> = {
 function LiveGoalsCard() {
   const { data } = useLocalData<any>("/api/goals", 60000);
 
-  const goals = data?.goals || [];
-  const active = goals.filter((g: any) => g.status === "active" || g.status === "planning");
+  const goals = Array.isArray(data) ? data : Array.isArray(data?.goals) ? data.goals : [];
+  const active = goals.filter((g: any) => g?.status === "active" || g?.status === "planning");
 
   return (
     <motion.div
@@ -154,33 +154,48 @@ function LiveGoalsCard() {
     >
       <div className="flex items-center gap-2 mb-3">
         <Target className="h-4 w-4 text-blue-400" />
-        <span className="text-[11px] font-semibold text-neutral-400 uppercase tracking-wider">Goals</span>
-        <span className="text-[10px] text-neutral-600 ml-auto">{active.length} active</span>
+        <span className="text-[11px] font-semibold text-neutral-400 uppercase tracking-wider">
+          Goals
+        </span>
+        <span className="text-[10px] text-neutral-600 ml-auto">
+          {active.length} active
+        </span>
       </div>
+
       <div className="space-y-2">
-        {active.slice(0, 5).map((g: any) => (
-          <div key={g.id || g.title} className="flex items-center gap-2">
-            <div className={`h-1.5 w-1.5 rounded-full flex-shrink-0 ${CATEGORY_COLORS[g.category] || "bg-neutral-500"}`} />
-            <div className="flex-1 min-w-0">
-              <p className="text-[11px] text-neutral-300 truncate">{g.title}</p>
-            </div>
-            {g.status === "planning" ? (
-              <span className="text-[9px] px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400 flex-shrink-0">PLAN</span>
-            ) : (
-              <>
-                <div className="w-16 h-1.5 rounded-full bg-[#1a1a1a] overflow-hidden flex-shrink-0">
-                  <div
-                    className={`h-full rounded-full ${CATEGORY_COLORS[g.category]?.replace("bg-", "bg-") || "bg-blue-500"}`}
-                    style={{ width: `${Math.max(g.progress || 0, 2)}%` }}
-                  />
-                </div>
-                <span className="text-[9px] text-neutral-600 tabular-nums w-6 text-right flex-shrink-0">
-                  {g.progress || 0}%
+        {active.slice(0, 5).map((g: any, idx: number) => {
+          const progress = typeof g?.progress === "number" ? g.progress : 0;
+          return (
+            <div key={g?.id || g?.title || idx} className="flex items-center gap-2">
+              <div
+                className={`h-1.5 w-1.5 rounded-full flex-shrink-0 ${
+                  CATEGORY_COLORS[g?.category] || "bg-neutral-500"
+                }`}
+              />
+              <div className="flex-1 min-w-0">
+                <p className="text-[11px] text-neutral-300 truncate">{g?.title || "Untitled"}</p>
+              </div>
+              {g?.status === "planning" ? (
+                <span className="text-[9px] px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400 flex-shrink-0">
+                  PLAN
                 </span>
-              </>
-            )}
-          </div>
-        ))}
+              ) : (
+                <>
+                  <div className="w-16 h-1.5 rounded-full bg-[#1a1a1a] overflow-hidden flex-shrink-0">
+                    <div
+                      className="h-full rounded-full bg-blue-500"
+                      style={{ width: `${Math.max(progress, 2)}%` }}
+                    />
+                  </div>
+                  <span className="text-[9px] text-neutral-600 tabular-nums w-6 text-right flex-shrink-0">
+                    {progress}%
+                  </span>
+                </>
+              )}
+            </div>
+          );
+        })}
+
         {active.length === 0 && (
           <p className="text-[11px] text-neutral-700">No active goals</p>
         )}
@@ -188,6 +203,7 @@ function LiveGoalsCard() {
     </motion.div>
   );
 }
+
 
 function LiveSignalsCard() {
   const { data } = useLocalData<any[]>("/api/signals", 30000);
@@ -370,9 +386,11 @@ export function DashboardView() {
             {/* Existing widgets below */}
             {config && (
               <div className="grid grid-cols-2 gap-3">
-                {(config.widgets || [])
-                  .filter((w) => w.enabled)
-                  .map((widget) => {
+                {(() => {
+                  const widgets = Array.isArray(config.widgets) ? config.widgets : [];
+                  return widgets
+                    .filter((w) => w.enabled)
+                    .map((widget) => {
                     const Component = WIDGET_MAP[widget.sourceId];
                     if (!Component) return null;
                     return (
@@ -383,7 +401,8 @@ export function DashboardView() {
                         <Component />
                       </div>
                     );
-                  })}
+                  });
+                })()}
               </div>
             )}
           </div>
@@ -411,7 +430,9 @@ export function DashboardView() {
     );
   }
 
-  const enabledWidgets = (config?.widgets || []).filter((w) => w.enabled);
+  const enabledWidgets = (Array.isArray(config?.widgets) ? config.widgets : []).filter(
+    (w) => w.enabled
+  );
 
   if (enabledWidgets.length === 0) {
     return (

@@ -10,11 +10,16 @@
 node_modules/
 
 # ----- User Data (engine creates these at ~/.backbone, NOT here) -----
-data/
-memory/
-projects/
-screenshots/
-_profiles/
+# These dirs may appear in the repo root during dev but are NOT code.
+# Leading / anchors to repo root so src/data/, src/services/memory/ etc. are NOT caught.
+/data/
+/memory/
+/projects/
+/screenshots/
+/_profiles/
+
+# Generated artifacts accidentally written into source tree
+src/data/*.json
 
 # ----- Environment & Secrets -----
 .env
@@ -25,6 +30,16 @@ _profiles/
 *.crt
 credentials.json
 tokens.json
+*-token.json
+*-config.json
+!.env.example
+!apps/web/.env.example
+
+# ----- Claude Code / AI session state -----
+# User-specific permissions and AI memory (not portable across machines)
+.claude/settings.local.json
+.claude/projects/*/memory/
+.backbone-codex-last-message.txt
 
 # ----- Build Outputs -----
 dist/
@@ -38,9 +53,11 @@ apps/web/.next/
 
 # ----- Firebase -----
 .firebase/
+dev/firebase/functions/node_modules/
 
 # ----- IDE -----
 .idea/
+.vscode/
 *.swp
 *.swo
 *~

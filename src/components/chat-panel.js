@@ -79,15 +79,11 @@ const ChatPanelBase = ({ commands, onSubmit, onTypingChange, modelInfo, compact 
 
   const showPalette = isCommandInput && matches.length > 0;
 
-  const updateScheduledRef = useRef(false);
+  // Sync ref → state immediately. No setImmediate — the deferred update
+  // created a visible gap where re-renders from other components would
+  // show the OLD display value, making typed text flicker/overlap.
   const syncDisplay = useCallback(() => {
-    if (updateScheduledRef.current) return;
-    updateScheduledRef.current = true;
-    // Use setImmediate pattern for minimal latency while preventing render spam
-    setImmediate(() => {
-      updateScheduledRef.current = false;
-      setDisplayValue(inputRef.current);
-    });
+    setDisplayValue(inputRef.current);
   }, []);
 
   // Signal typing started

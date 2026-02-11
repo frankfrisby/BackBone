@@ -34,8 +34,9 @@ const debugLog = (msg) => {
 import { sendMessage, getMultiAIConfig, TASK_TYPES } from "./multi-ai.js";
 import { getActivityNarrator, ACTION_STATUS } from "../ui/activity-narrator.js";
 import { getGoalManager, TASK_STATE } from "../goals/goal-manager.js";
+import { isClaudeAgentSdkInstalled, runClaudeAgentSdkTask } from "./claude-agent-sdk.js";
 
-import { dataFile } from "../paths.js";
+import { dataFile, getBackboneRoot } from "../paths.js";
 /**
  * Orchestration states
  */
@@ -100,6 +101,16 @@ export class ClaudeOrchestrator extends EventEmitter {
     this.narrator = getActivityNarrator();
   }
 
+  async _shouldUseAgentSdk() {
+    // Default ON: once installed, prefer SDK over spawning a separate CLI process.
+    if (String(process.env.BACKBONE_CLAUDE_AGENT_SDK || "1") === "0") return false;
+    try {
+      return await isClaudeAgentSdkInstalled();
+    } catch {
+      return false;
+    }
+  }
+
   /**
    * Start orchestrated execution of a goal
    *
@@ -145,11 +156,18 @@ export class ClaudeOrchestrator extends EventEmitter {
     const prompt = this.buildClaudePrompt(goal);
 
     try {
-      // Start Claude Code process
-      const result = await this.runClaudeWithSupervision(prompt, {
-        workDir: options.workDir || this.workDir,
-        timeout: options.timeout || this.timeout
-      });
+      const useAgentSdk = await this._shouldUseAgentSdk();
+
+      const result = useAgentSdk
+        ? await this.runClaudeWithAgentSdk(prompt, {
+            workDir: options.workDir || this.workDir,
+            timeout: options.timeout || this.timeout,
+            model: options.model || null,
+          })
+        : await this.runClaudeWithSupervision(prompt, {
+            workDir: options.workDir || this.workDir,
+            timeout: options.timeout || this.timeout
+          });
 
       return result;
     } catch (error) {
@@ -365,6 +383,7 @@ ${sourcesList}
         "--output-format", "stream-json",
         "--verbose",
         "--dangerously-skip-permissions",
+        ...(fs.existsSync(getBackboneRoot()) ? ["--add-dir", getBackboneRoot()] : []),
         "--max-turns", String(this.maxTurns)
       ];
 
@@ -377,7 +396,9 @@ ${sourcesList}
       const claudeCliPath = path.join(process.env.APPDATA || "", "npm", "node_modules", "@anthropic-ai", "claude-code", "cli.js");
       const useDirectNode = fs.existsSync(claudeCliPath);
 
-      const spawnCmd = useDirectNode ? process.execPath : "claude";
+      const spawnCmd = useDirectNode
+        ? process.execPath
+        : (process.platform === "win32" ? "claude.cmd" : "claude");
       const spawnArgs = useDirectNode ? [claudeCliPath, ...args] : args;
       const spawnOpts = {
         stdio: ["pipe", "pipe", "pipe"],
@@ -967,6 +988,105 @@ ${taskStatus || "No tasks defined"}`;
     }
 
     return this.runClaudeWithSupervision(prompt, options);
+  }
+
+  /**
+   * Agent SDK execution path.
+   *
+   * Uses the SDK's built-in agent loop instead of spawning `claude` and
+   * supervising with GPT-5.2. Keeps the SAME event interface so the UI
+   * doesn't need to change.
+   */
+  async runClaudeWithAgentSdk(prompt, options = {}) {
+    this.state = ORCHESTRATION_STATE.RUNNING;
+    this.outputBuffer = "";
+    this.toolCalls = [];
+    this.decisions = [];
+
+    const workDir = options.workDir || this.workDir || process.cwd();
+    const timeoutMs = Number.isFinite(options.timeout) ? options.timeout : this.timeout;
+
+    // Stream SDK output into the same events used by the UI.
+    const result = await runClaudeAgentSdkTask(
+      prompt,
+      workDir,
+      (event) => {
+        if (!event || typeof event !== "object") return;
+
+        if (event.type === "assistant_text") {
+          const text = String(event.text || "");
+          if (!text) return;
+
+          // Mirror the CLI path: clean assistant text in `claude-text`, raw-ish data in `output`.
+          this.emit("claude-text", { text });
+          this.emit("output", { chunk: text + "\n", type: "stdout" });
+          this.outputBuffer += text + "\n";
+
+          // Completion signals (best-effort)
+          const lower = text.toLowerCase();
+          if (lower.includes("goal complete") ||
+              lower.includes("task complete") ||
+              lower.includes("successfully completed")) {
+            this.emit("completion-signal", { text });
+          }
+
+          return;
+        }
+
+        if (event.type === "tool_call") {
+          const tool = String(event.tool || "unknown");
+          const input = event.input || {};
+          this.toolCalls.push({ tool, input });
+
+          // Narrator tracking (matches CLI path).
+          try {
+            this.narrator.recordClaudeCodeTool(tool, input);
+            this.narrator.setClaudeCodeActive(true, "running");
+          } catch {}
+
+          this.emit("tool-use", { tool, input });
+          return;
+        }
+
+        if (event.type === "tool_result") {
+          // Not currently forwarded to the UI, but keep stderr/out buffer intact if needed.
+          return;
+        }
+
+        if (event.type === "stderr") {
+          const chunk = String(event.text || "");
+          if (!chunk) return;
+          this.emit("output", { chunk, type: "stderr" });
+          this.outputBuffer += chunk + "\n";
+          return;
+        }
+
+        if (event.type === "error") {
+          const msg = String(event.error || "unknown error");
+          this.emit("error", { error: msg });
+          return;
+        }
+      },
+      {
+        timeoutMs,
+        permissionMode: process.env.BACKBONE_CLAUDE_PERMISSION_MODE || "bypassPermissions",
+        model: options.model || null,
+        settingSources: ["project", "user", "local"],
+      }
+    );
+
+    this.state = result.success ? ORCHESTRATION_STATE.STOPPED : ORCHESTRATION_STATE.ERROR;
+
+    return {
+      success: !!result.success,
+      output: this.outputBuffer || result.output || "",
+      decisions: this.decisions,
+      toolCalls: this.toolCalls,
+      sessionId: null,
+      exitCode: result.exitCode ?? (result.success ? 0 : 1),
+      error: result.error || null,
+      method: "claude-agent-sdk",
+    };
   }
 }
 

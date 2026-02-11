@@ -16,6 +16,7 @@ import path from "path";
 import { EventEmitter } from "events";
 import { spawn, exec } from "child_process";
 import { promisify } from "util";
+import nodeFetch from "node-fetch";
 import { getPlaywrightService } from "./integrations/playwright-service.js";
 import { sendWhatsAppMessage } from "./firebase/phone-auth.js";
 import { loadUserSettings } from "./user-settings.js";
@@ -23,6 +24,46 @@ import { getCurrentFirebaseUser } from "./firebase/firebase-auth.js";
 
 import { dataFile, getDataDir } from "./paths.js";
 const execAsync = promisify(exec);
+const fetchFn = typeof globalThis.fetch === "function" ? globalThis.fetch.bind(globalThis) : nodeFetch;
+
+async function _fetchWithTimeout(url, init = {}, timeoutMs = 30000) {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetchFn(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+function _decodeHtmlEntities(text = "") {
+  return String(text)
+    .replace(/&quot;/g, "\"")
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&nbsp;/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function _stripHtmlTags(text = "") {
+  return String(text).replace(/<[^>]*>/g, " ");
+}
+
+function _decodeDuckDuckGoRedirect(href) {
+  try {
+    const u = new URL(href, "https://duckduckgo.com");
+    if (u.hostname.endsWith("duckduckgo.com") && u.pathname === "/l/") {
+      const uddg = u.searchParams.get("uddg");
+      if (uddg) return decodeURIComponent(uddg);
+    }
+    return u.toString();
+  } catch {
+    return href;
+  }
+}
 
 /**
  * Tool types
@@ -299,27 +340,106 @@ export class ToolExecutor extends EventEmitter {
 
   /**
    * Execute web search
-   * Note: This uses a mock/simple implementation. In production, integrate with actual search API.
+   * Best-effort: scrape DuckDuckGo Lite (no API key) and return a small set of results.
+   * Falls back to returning a search URL if parsing/fetch fails.
    */
   async executeWebSearch(query, params = {}) {
-    // Try to use web search via fetch if available
-    // For now, return a structured result that AI can work with
-    const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(query)}`;
+    const q = String(query || "").trim();
+    if (!q) {
+      throw new Error("WebSearch failed: query is required");
+    }
 
-    return {
-      type: "search_results",
-      query,
-      url: searchUrl,
-      message: `Search initiated for: "${query}"`,
-      results: [
-        {
-          title: `Search results for: ${query}`,
-          url: searchUrl,
-          snippet: `Web search for "${query}" - results available at URL`
+    const maxResultsRaw = Number(params.maxResults ?? params.limit ?? 5);
+    const maxResults = Number.isFinite(maxResultsRaw)
+      ? Math.max(1, Math.min(10, Math.trunc(maxResultsRaw)))
+      : 5;
+
+    const ddgUrl = `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(q)}`;
+    const fallbackUrl = `https://www.google.com/search?q=${encodeURIComponent(q)}`;
+
+    try {
+      const timeoutMs = Number(params.timeoutMs ?? params.timeout ?? 12000);
+      const response = await _fetchWithTimeout(ddgUrl, {
+        method: "GET",
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          "Accept": "text/html,*/*;q=0.8",
+          "Accept-Language": "en-US,en;q=0.9"
         }
-      ],
-      note: "Use Fetch tool to retrieve actual search results from the URL"
-    };
+      }, Number.isFinite(timeoutMs) ? Math.max(1000, timeoutMs) : 12000);
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+
+      const html = await response.text();
+      const results = [];
+
+      // DuckDuckGo Lite uses "result-link" anchors for organic results.
+      const linkRe = /<a[^>]*class=\"result-link\"[^>]*href=\"([^\"]+)\"[^>]*>([\s\S]*?)<\/a>/gi;
+      let match;
+      while ((match = linkRe.exec(html)) && results.length < maxResults) {
+        const href = _decodeDuckDuckGoRedirect(match[1]);
+        const title = _decodeHtmlEntities(_stripHtmlTags(match[2]));
+        if (!href || !title) continue;
+        // Filter out obvious non-web links.
+        if (!/^https?:\/\//i.test(href)) continue;
+        results.push({ title, url: href, snippet: "" });
+      }
+
+      // Fallback: some variants may not include class attr; try rel="nofollow".
+      if (results.length === 0) {
+        const altRe = /<a[^>]*rel=\"nofollow\"[^>]*href=\"([^\"]+)\"[^>]*>([\s\S]*?)<\/a>/gi;
+        while ((match = altRe.exec(html)) && results.length < maxResults) {
+          const href = _decodeDuckDuckGoRedirect(match[1]);
+          const title = _decodeHtmlEntities(_stripHtmlTags(match[2]));
+          if (!href || !title) continue;
+          if (!/^https?:\/\//i.test(href)) continue;
+          results.push({ title, url: href, snippet: "" });
+        }
+      }
+
+      if (results.length === 0) {
+        // If we can't parse results, still return something actionable.
+        return {
+          type: "search_results",
+          query: q,
+          engine: "duckduckgo-lite",
+          url: ddgUrl,
+          results: [
+            {
+              title: `Search: ${q}`,
+              url: fallbackUrl,
+              snippet: ""
+            }
+          ],
+          note: "Search page returned but results could not be parsed; use Fetch on the URL."
+        };
+      }
+
+      return {
+        type: "search_results",
+        query: q,
+        engine: "duckduckgo-lite",
+        url: ddgUrl,
+        results
+      };
+
+    } catch (error) {
+      return {
+        type: "search_results",
+        query: q,
+        url: fallbackUrl,
+        results: [
+          {
+            title: `Search: ${q}`,
+            url: fallbackUrl,
+            snippet: ""
+          }
+        ],
+        note: `WebSearch fallback (DuckDuckGo failed): ${error.message}. Use Fetch on the URL.`
+      };
+    }
   }
 
   /**
@@ -332,14 +452,14 @@ export class ToolExecutor extends EventEmitter {
         throw new Error("Invalid URL: must start with http:// or https://");
       }
 
-      const response = await fetch(url, {
+      const timeoutMs = Number(params.timeoutMs ?? params.timeout ?? 30000);
+      const response = await _fetchWithTimeout(url, {
         method: "GET",
         headers: {
           "User-Agent": "BACKBONE/1.0 (Autonomous Life OS)",
           ...params.headers
-        },
-        timeout: params.timeout || 30000
-      });
+        }
+      }, Number.isFinite(timeoutMs) ? Math.max(1000, timeoutMs) : 30000);
 
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);

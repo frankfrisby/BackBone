@@ -1,5 +1,7 @@
+﻿import { createId } from "./id";
+
 /**
- * BackboneConnection — Hybrid localhost + Cloudflare Tunnel + Firebase relay
+ * BackboneConnection â€” Hybrid localhost + Cloudflare Tunnel + Firebase relay
  *
  * Priority:
  * 1. Direct localhost WebSocket (same machine, zero latency)
@@ -265,7 +267,7 @@ export class BackboneConnection {
         return this.sendViaHTTP(command, payload).then(resolve).catch(reject);
       }
 
-      const requestId = crypto.randomUUID();
+      const requestId = createId();
       const timeout = setTimeout(() => {
         this.pendingRequests.delete(requestId);
         reject(new Error("Request timeout"));

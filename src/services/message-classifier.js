@@ -45,11 +45,32 @@ const COMPLEX_PATTERNS = [
   /\b(thesis|backlog|thinking)\b/i
 ];
 
+// Pivot patterns — user wants to change direction
+const PIVOT_PATTERNS = [
+  /\b(pivot|switch)\s+(to|focus|direction)\b/i,
+  /\blet'?s\s+(do|work\s+on|focus\s+on|switch\s+to)\b/i,
+  /\b(stop|pause|drop)\s+(what|everything|current|this)\b/i,
+  /\b(instead|change\s+(of|course|direction|plan))\b/i,
+  /\b(forget|abandon|shelve)\s+(that|this|current)\b/i,
+  /\bnew\s+priority\b/i,
+  /\bmore\s+important\b/i,
+];
+
+/**
+ * Check if a message is a pivot request (user wants to change direction).
+ * @param {string} text
+ * @returns {boolean}
+ */
+export function isPivotRequest(text) {
+  if (!text) return false;
+  return PIVOT_PATTERNS.some(p => p.test(text));
+}
+
 /**
  * Classify a message as quick or complex
  *
  * @param {string} text - The message text
- * @returns {{ type: "quick"|"complex", confidence: number, reason: string }}
+ * @returns {{ type: "quick"|"complex"|"pivot", confidence: number, reason: string }}
  */
 export function classifyMessage(text) {
   if (!text || typeof text !== "string") {
@@ -58,6 +79,11 @@ export function classifyMessage(text) {
 
   const trimmed = text.trim();
   const lower = trimmed.toLowerCase();
+
+  // Check for pivot requests (user wants to change direction)
+  if (isPivotRequest(trimmed)) {
+    return { type: "pivot", confidence: 0.9, reason: "pivot/direction change detected" };
+  }
 
   // Very short messages (under 20 chars) that don't match complex patterns → quick
   if (trimmed.length < 20) {

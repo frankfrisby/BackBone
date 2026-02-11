@@ -26,6 +26,7 @@ const categoryColors: Record<string, string> = {
 
 export function GoalsWidget() {
   const { data, updatedAt, loading } = useDashboardData<GoalsData>("goals");
+  const goals = Array.isArray(data?.goals) ? data.goals : [];
 
   if (loading) {
     return (
@@ -37,7 +38,7 @@ export function GoalsWidget() {
     );
   }
 
-  if (!data || !data.goals || data.goals.length === 0) {
+  if (!data || goals.length === 0) {
     return (
       <div className="card-elevated rounded-2xl p-5 flex flex-col items-center justify-center h-full min-h-[140px]">
         <Target className="h-6 w-6 text-neutral-700 mb-2" />
@@ -48,7 +49,7 @@ export function GoalsWidget() {
   }
 
   const avgProgress = Math.round(
-    data.goals.reduce((sum, g) => sum + (g.progress || 0), 0) / data.goals.length
+    goals.reduce((sum, g) => sum + (g.progress || 0), 0) / goals.length
   );
 
   return (
@@ -56,7 +57,9 @@ export function GoalsWidget() {
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2">
           <span className="text-[10px] text-neutral-500 uppercase tracking-widest font-medium">Goals</span>
-          <span className="text-[10px] text-neutral-600 tabular-nums">{data.totalActive} active</span>
+          <span className="text-[10px] text-neutral-600 tabular-nums">
+            {typeof data.totalActive === "number" ? data.totalActive : goals.length} active
+          </span>
         </div>
         <span className="text-[9px] text-neutral-600">{formatFreshness(updatedAt)}</span>
       </div>
@@ -77,7 +80,7 @@ export function GoalsWidget() {
 
       {/* Goal list */}
       <div className="space-y-2">
-        {data.goals.slice(0, 5).map((goal) => (
+        {goals.slice(0, 5).map((goal) => (
           <div key={goal.id} className="flex items-center gap-2.5">
             <div className={`h-1.5 w-1.5 rounded-full flex-shrink-0 ${categoryColors[goal.category] || "bg-neutral-500"}`} />
             <div className="flex-1 min-w-0">

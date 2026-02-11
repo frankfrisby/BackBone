@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   useDashboardConfig,
   useConnectedSources,
@@ -25,9 +25,13 @@ interface DashboardSettingsProps {
 export function DashboardSettings({ onClose }: DashboardSettingsProps) {
   const { config, updateConfig } = useDashboardConfig();
   const { sources } = useConnectedSources();
-  const [widgets, setWidgets] = useState<WidgetConfig[]>(
-    config?.widgets || []
+  const [widgets, setWidgets] = useState<WidgetConfig[]>(() =>
+    Array.isArray(config?.widgets) ? config.widgets : []
   );
+
+  useEffect(() => {
+    setWidgets(Array.isArray(config?.widgets) ? config.widgets : []);
+  }, [config?.widgets]);
 
   const handleToggle = (sourceId: string) => {
     setWidgets((prev) =>

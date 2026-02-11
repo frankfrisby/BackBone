@@ -18,6 +18,25 @@ const app = express();
 const PORT = process.env.YAHOO_SERVER_PORT || 3002;
 let httpServer = null;
 
+// When this server is spawned by the BACKBONE CLI, we want it to stop if the parent dies
+// (e.g., terminal window closed, process killed). This prevents orphaned servers holding ports.
+const parentPid = Number(process.env.BACKBONE_PARENT_PID || "");
+if (Number.isFinite(parentPid) && parentPid > 0) {
+  const interval = setInterval(() => {
+    try {
+      // Signal 0 checks for existence without sending a real signal.
+      process.kill(parentPid, 0);
+    } catch (err) {
+      if (err && err.code === "ESRCH") {
+        console.log(`[Parent] Parent PID ${parentPid} not found - shutting down Yahoo server`);
+        process.exit(0);
+      }
+      // EPERM and other errors mean "could not signal", not necessarily "missing".
+    }
+  }, 2000);
+  interval.unref();
+}
+
 // Data cache
 let tickerCache = {
   tickers: [],
@@ -1081,11 +1100,7 @@ app.use(express.json());
 app.get("/api/tickers", (req, res) => {
   const activeUniverse = getActiveUniverse();
   const evaluatedToday = tickerCache.tickers.filter(t => isTickerToday(t.lastEvaluated)).length;
-  let universeSize = activeUniverse.length;
-  // Always reflect the actual completed count when we have any evaluated today
-  if (evaluatedToday > 0) {
-    universeSize = evaluatedToday;
-  }
+  const universeSize = activeUniverse.length;
   res.json({
     success: true,
     tickers: tickerCache.tickers,
@@ -1274,8 +1289,10 @@ const loadCache = () => {
       const rawTickers = data.tickers || [];
       // Purge orphan tickers, non-major exchanges, delisted, penny stocks
       const universeSet = new Set(getActiveUniverse());
+      const coreSet = new Set(CORE_TICKERS);
       tickerCache.tickers = rawTickers.filter(t => {
         if (!universeSet.has(t.symbol)) return false;
+        if (coreSet.has(t.symbol)) return true;
         const check = isActiveTicker(t);
         if (!check.valid) {
           console.log(`[Cache purge] ${t.symbol} — ${check.reason}`);
@@ -1304,6 +1321,10 @@ const runFullScan = async () => {
     console.log("Full scan already running, skipping");
     return;
   }
+
+  // Core tickers should never disappear from the cache/universe due to transient fetch failures.
+  // Keep them present and mark them evaluated for the day if we can't fetch a fresh quote.
+  const coreSet = new Set(CORE_TICKERS);
 
   const activeUniverse = getActiveUniverse();
   tickerCache.fullScanRunning = true;
@@ -1360,10 +1381,43 @@ const runFullScan = async () => {
         if (!quote) {
           blacklistTicker(symbol, "no_quote_full_scan");
           missingQuotes.push(symbol);
-          if (tickerCache.scanTotal > 0) {
-            tickerCache.scanTotal = Math.max(0, tickerCache.scanTotal - 1);
+
+          // If this symbol was blacklisted (after multiple failures), drop it from cache.
+          // Otherwise keep any existing cached ticker so we don't thrash the sweep forever.
+          const isBlacklisted = tickerBlacklist.has(symbol);
+          if (isBlacklisted) {
+            existingMap.delete(symbol);
+          } else if (coreSet.has(symbol)) {
+            const existing = existingMap.get(symbol);
+            if (existing) {
+              existing.lastEvaluated = nowISO;
+              existing.quoteFetchFailedAt = nowISO;
+              existing.quoteFetchFailureReason = "no_quote_full_scan";
+              existingMap.set(symbol, existing);
+            } else {
+              // Minimal placeholder so core tickers count toward evaluatedToday/universeSize.
+              existingMap.set(symbol, {
+                symbol,
+                shortName: symbol,
+                longName: symbol,
+                exchange: null,
+                currency: "USD",
+                instrumentType: "EQUITY",
+                price: null,
+                change: null,
+                changePercent: null,
+                volume: null,
+                avgVolume: null,
+                marketCap: null,
+                score: 0,
+                scoredAt: nowISO,
+                lastEvaluated: nowISO,
+                quoteFetchFailedAt: nowISO,
+                quoteFetchFailureReason: "no_quote_full_scan",
+              });
+            }
           }
-          existingMap.delete(symbol);
+
           evaluated++;
           tickerCache.scanProgress = evaluated;
           continue;
@@ -1374,9 +1428,6 @@ const runFullScan = async () => {
           if (!check.valid) {
             console.log(`[Skip] ${analysis.symbol} — ${check.reason}`);
             blacklistTicker(analysis.symbol, check.reason);
-            if (tickerCache.scanTotal > 0) {
-              tickerCache.scanTotal = Math.max(0, tickerCache.scanTotal - 1);
-            }
             existingMap.delete(analysis.symbol);
             evaluated++;
             tickerCache.scanProgress = evaluated;
@@ -1503,6 +1554,8 @@ const startServer = () => {
   loadBlacklist();
   loadCache();
 
+  const autoFullScanEnabled = process.env.YAHOO_SERVER_AUTO_FULL_SCAN !== "0";
+
   httpServer = app.listen(PORT, () => {
     console.log(`Yahoo Finance Server running on http://localhost:${PORT}`);
     console.log(`Ticker universe: ${getActiveUniverse().length} real symbols`);
@@ -1520,10 +1573,14 @@ const startServer = () => {
   scheduleAt(4, 0, reset4amSweep, "4AM ticker sweep reset");
 
   // Schedule 5:30am full ticker sweep
-  scheduleAt(5, 30, () => {
-    console.log(`[${new Date().toISOString()}] 5:30AM scheduled full sweep starting...`);
-    runFullScan();
-  }, "5:30AM full ticker sweep");
+  if (autoFullScanEnabled) {
+    scheduleAt(5, 30, () => {
+      console.log(`[${new Date().toISOString()}] 5:30AM scheduled full sweep starting...`);
+      runFullScan();
+    }, "5:30AM full ticker sweep");
+  } else {
+    console.log("[Scheduler] Auto full scan disabled (YAHOO_SERVER_AUTO_FULL_SCAN=0) - skipping 5:30AM sweep schedule");
+  }
 
   // Check if full scan was done in current ticker day (4 AM to 4 AM)
   const lastScanToday = tickerCache.lastFullScan && isTickerToday(tickerCache.lastFullScan);
@@ -1532,8 +1589,13 @@ const startServer = () => {
     console.log(`Full scan already done today (${tickerCache.lastFullScan}) — running core refresh only`);
     updateTickers();
   } else {
-    console.log("Full scan NOT done today — starting full scan automatically");
-    runFullScan();
+    if (autoFullScanEnabled) {
+      console.log("Full scan NOT done today — starting full scan automatically");
+      runFullScan();
+    } else {
+      console.log("Auto full scan disabled — running core refresh only");
+      updateTickers();
+    }
   }
 
   // Schedule core ticker refresh every 3 minutes (top 150, fast)

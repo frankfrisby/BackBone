@@ -98,44 +98,86 @@ Commands: `/idle` (status) · `/idle on` · `/idle off` · `/idle work` (force w
 ## Your Role
 When the user sends a message, determine what they need and take action. You have access to the filesystem, web search, and all Claude Code tools. Use them to read data, create files, search the web, and execute tasks.
 
+## Data Location — IMPORTANT
+
+User data lives OUTSIDE the codebase at `~/.backbone/users/<uid>/` (resolved by `src/services/paths.js`).
+
+```
+~/.backbone/                          ← BACKBONE_HOME (per OS user)
+  active-user.json                    ← which Google account is active
+  users/
+    <firebase-uid>/                   ← isolated per Google account
+      data/                           ← user data, settings, goals
+      memory/                         ← AI memory files (markdown)
+      projects/                       ← user's active projects
+      screenshots/                    ← visual captures
+      skills/                         ← custom user-defined skills
+```
+
+**For code:** Use `paths.js` helpers — `getDataDir()`, `dataFile("goals.json")`, `getMemoryDir()`, `memoryFile("thesis.md")`, `getProjectsDir()`, `projectDir("name")`.
+
+**For MCP tools:** MCP servers already resolve paths correctly via `paths.js`. Use MCP tools (backbone-life, backbone-trading, etc.) to read/write user data whenever possible.
+
+**For direct file access:** When you need to read user data files directly, resolve the path first:
+- `data/goals.json` means `~/.backbone/users/<uid>/data/goals.json`
+- `memory/portfolio.md` means `~/.backbone/users/<uid>/memory/portfolio.md`
+- `memory/portfolio-notes.md` means `~/.backbone/users/<uid>/memory/portfolio-notes.md` (safe to edit; long-form analysis)
+- `memory/health-notes.md` means `~/.backbone/users/<uid>/memory/health-notes.md` (safe to edit; long-form analysis)
+- `projects/<name>/` means `~/.backbone/users/<uid>/projects/<name>/`
+
+**NEVER write user data to the repo directory.** The repo contains only code: `src/`, `apps/`, `tools/`, `skills/`, `dev/`.
+
 ## Query Classification
-When the user asks something, determine the type and act accordingly:
+When the user asks something, determine the type and act accordingly.
 
-1. **GOAL_CREATE** — User wants to create a new goal (e.g., "I want to learn Spanish", "set a goal to run a marathon")
-   → Create a goal file in `data/goals/` following the goal format below
-   → Also update `data/goals.json` to add the goal entry
+All `data/`, `memory/`, `projects/` paths below refer to `~/.backbone/users/<uid>/` (see Data Location above).
 
-2. **GOAL_CHECK** — User asks about their goals (e.g., "what are my goals?", "how am I doing?")
-   → Read `data/goals.json` for structured goal data
-   → Read `data/goals/` directory for detailed goal markdown files
-   → Read `memory/goals.md` and `memory/user-goals.md` for goal context
+1. **GOAL_CREATE** — User wants to create a new goal
+   → Use MCP backbone-life `add_goal` tool, or write to `data/goals.json`
+
+2. **GOAL_CHECK** — User asks about their goals
+   → Use MCP backbone-life `get_goals` tool
+   → Read `data/goals.json`, `memory/goals.md`, `memory/user-goals.md`
 
 3. **INFO_RETRIEVE** — User wants information about themselves or their data
-   → Read from `data/`, `memory/`, or `projects/` directories as appropriate
+   → Read from `data/`, `memory/`, or `projects/` as appropriate
 
-4. **PORTFOLIO** — Finance or portfolio question (e.g., "how are my stocks?", "portfolio update")
-   → Read `data/trades-log.json`, `data/trading-history.json`, `data/tickers-cache.json`
-   → Read `memory/portfolio.md` and `memory/tickers.md` for summaries
+4. **PORTFOLIO** — Finance or portfolio question
+   → Use MCP backbone-trading tools (`get_portfolio`, `get_positions`, `get_trading_signals`)
+   → Read `memory/portfolio.md` (snapshot), `memory/portfolio-notes.md` (analysis), and `memory/tickers.md` (signals)
 
-5. **HEALTH** — Health question (e.g., "how did I sleep?", "health update")
-   → Read `data/oura-data.json` for Oura ring data
-   → Read `memory/health.md` for health summary
+5. **HEALTH** — Health question
+   → Use MCP backbone-health tools (`get_health_summary`, `get_sleep_data`)
+   → Read `memory/health.md` (snapshot) and `memory/health-notes.md` (analysis)
 
 6. **PROJECT_WORK** — User wants to work on a project
-   → Look in `projects/` directory for the relevant project
-   → Each project has its own directory with a PROJECT.md file
+   → Use MCP backbone-projects `list_projects` tool
+   → Read `projects/<name>/PROJECT.md`
 
 7. **WEB_RESEARCH** — User wants information from the web
-   → Use WebSearch and Fetch tools to find and retrieve information
+   → Use WebSearch and WebFetch tools
 
 8. **SKILL_TASK** — Task matches a known skill (see Skills Catalog below)
-   → Read the relevant skill file from `skills/` for detailed instructions
-   → Follow the patterns and tools described in that skill file
+   → Read the relevant skill file from `skills/` (in the repo) for detailed instructions
 
 9. **CONVERSATION** — General chat, opinions, advice
    → Respond naturally using context from `memory/` files
 
 ## Directory Map
+
+### Codebase (repo root — tracked in git)
+```
+src/                   — Engine source code
+apps/web/              — PWA dashboard (Next.js)
+tools/                 — Executable tools for AI assistants (run via tool-loader.js)
+  index.json           — Registry of available tools
+  tool-loader.js       — Tool discovery and execution
+  cli.js               — Command-line interface for running tools
+skills/                — System skill reference files (read these for task capabilities)
+dev/                   — Firebase functions, scripts, tests
+```
+
+### User Data (~/.backbone/users/<uid>/ — NOT in repo)
 ```
 data/                  — User data, settings, activity logs, goal definitions
   core-beliefs.json    — Core beliefs/epics (ongoing forever)
@@ -164,11 +206,6 @@ memory/                — AI memory files (markdown summaries of user context)
   integrations.md      — Connected services
 projects/              — User's active projects (each has its own directory)
   <name>/PROJECT.md    — Project overview, goals, progress log
-skills/                — Skill reference files (read these for task capabilities)
-tools/                 — Executable tools for AI assistants (run via tool-loader.js)
-  index.json           — Registry of available tools
-  tool-loader.js       — Tool discovery and execution
-  cli.js               — Command-line interface for running tools
 screenshots/           — Visual captures for analysis
 ```
 
@@ -251,6 +288,7 @@ These are detailed instruction files in `skills/`. Read the relevant file when h
 - **file-management**: File Management — organize, move, rename, backup files
 - **geopolitical-analysis**: Geopolitical Analysis — international relations, risk assessment
 - **image-processing**: Image Processing — edit, convert, analyze images
+- **linkedin-enrichment**: LinkedIn Profile Enrichment — auto-populate user profile from public web sources when completeness < 70%. Uses enrich-linkedin-profile tool (plan → search → enrich)
 - **market-research**: Market Research — competitive analysis, market sizing, trends
 - **openai-platform**: OpenAI Platform — GPT API usage, fine-tuning, embeddings
 - **pdf-document**: PDF Document Creation — generate and manipulate PDF files
@@ -266,7 +304,7 @@ These are detailed instruction files in `skills/`. Read the relevant file when h
 - **word-document**: Word Document Creation — create and format Word files
 
 ## Excel Data Persistence
-When working on projects, research, or tracking rolling data, prefer saving to Excel spreadsheets in `data/spreadsheets/`. This ensures data survives across sessions — the AI can read the spreadsheet and continue where it left off.
+When working on projects, research, or tracking rolling data, prefer saving to Excel spreadsheets in the user's `data/spreadsheets/` directory (at `~/.backbone/users/<uid>/data/spreadsheets/`). This ensures data survives across sessions — the AI can read the spreadsheet and continue where it left off.
 
 ### When to Use Excel
 - Project cost breakdowns with formulas (e.g., 156 parts × unit costs)

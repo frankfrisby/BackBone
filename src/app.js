@@ -3,6 +3,7 @@ import { Box, Text, useStdout, Static, useInput } from "ink";
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
+
 import { COMMANDS, COMMAND_DESCRIPTIONS } from "./commands.js";
 import { DEFAULTS } from "./config/defaults.js";
 import { buildStatusMessage } from "./data/status.js";
@@ -73,6 +74,7 @@ import { getEmailConfig, buildEmailSummary } from "./services/integrations/email
 import { getWealthConfig, buildWealthSummary } from "./services/wealth.js";
 import { fetchTickers as fetchYahooTickers, startServer as startYahooServer, restartServer as restartYahooServer, isServerRunning, triggerFullScan, refreshTickers } from "./services/trading/yahoo-client.js";
 import { extractLinkedInProfile, scrapeLinkedInProfile, saveLinkedInProfile, loadLinkedInProfile, isProfileIncomplete, refreshAndGenerateLinkedInMarkdown, generateLinkedInMarkdown, scrapeLinkedInPosts, updateLinkedInViaBrowserAgent } from "./services/integrations/linkedin-scraper.js";
+import { clearLinkedInCurlCommand, getStoredLinkedInCurlCommand } from "./services/integrations/linkedin-curl-scraper.js";
 import { getDataFreshnessChecker } from "./services/data-freshness-checker.js";
 import { getCronManager, JOB_FREQUENCY } from "./services/cron-manager.js";
 import { captureSnapshot as captureLinkedInSnapshot, getHistory as getLinkedInHistory, getPostsHistory as getLinkedInPostsHistory, trackPosts as trackLinkedInPosts } from "./services/integrations/linkedin-tracker.js";
@@ -90,7 +92,7 @@ import { forceUpdate, checkVersion, consumeUpdateState } from "./services/setup/
 import { startApiServer } from "./services/api-server-client.js";
 import { loadProfileSections, updateFromLinkedIn, updateFromHealth, updateFromPortfolio, getProfileSectionDisplay, getProfileOverview, PROFILE_SECTIONS } from "./services/profile-sections.js";
 import { getGitHubConfig, getGitHubStatus } from "./services/integrations/github.js";
-import { openUrl } from "./services/open-url.js";
+import { openUrl, openUrlPreferChrome } from "./services/open-url.js";
 import { trackUserQuery, QUERY_SOURCE, getQueryTracker } from "./services/memory/query-tracker.js";
 import { SetupStatus } from "./components/setup-wizard.js";
 import { LifeFeed, LifeChanges } from "./components/life-feed.js";
@@ -141,7 +143,15 @@ import { loadUserSettings, saveUserSettings, updateSettings as updateUserSetting
 import { archiveCurrentProfile, restoreProfile, hasArchivedProfile, listProfiles as listArchivedProfiles } from "./services/profile-manager.js";
 import { hasValidCredentials as hasCodexCredentials } from "./services/ai/codex-oauth.js";
 import { loadFineTuningConfig, saveFineTuningConfig, runFineTuningPipeline, queryFineTunedModel } from "./services/ai/fine-tuning.js";
-import { monitorAndTrade, loadConfig as loadTradingConfig, setTradingEnabled, sendTradeNotification } from "./services/trading/auto-trader.js";
+import {
+  monitorAndTrade,
+  loadConfig as loadTradingConfig,
+  setTradingEnabled,
+  sendTradeNotification,
+  getTradingStatus as getAutoTradingStatus,
+  getPendingBuys,
+  cancelPendingBuy,
+} from "./services/trading/auto-trader.js";
 import { shouldUpdateStops, applyStopsToAllPositions } from "./services/trading/trailing-stop-manager.js";
 import { recordMomentumSnapshot } from "./services/momentum-drift.js";
 import { isMarketOpen } from "./services/trading/trading-status.js";
@@ -179,7 +189,7 @@ import OuraHealthPanel from "./components/oura-health-panel.js";
 import { OnboardingPanel } from "./components/onboarding-panel.js";
 import { SplashScreen } from "./components/splash-screen.js";
 // ToolActionsPanel removed - merged into AgentActivityPanel
-import { resizeForOnboarding, resizeForMainApp, TERMINAL_SIZES, setBaseTitle, showActivityTitle, showNotificationTitle, restoreBaseTitle } from "./services/ui/terminal-resize.js";
+import { resizeForOnboarding, resizeForMainApp, TERMINAL_SIZES, setBaseTitle, setWorkContext, clearWorkContext, showActivityTitle, showNotificationTitle, restoreBaseTitle } from "./services/ui/terminal-resize.js";
 import { processAndSaveContext, buildContextForAI } from "./services/memory/conversation-context.js";
 import { MENTORS, MENTOR_CATEGORIES, getMentorsByCategory, getDailyWisdom, formatMentorDisplay, getAllMentorsDisplay, getMentorAdvice } from "./services/mentors.js";
 import { generateDailyInsights, generateWeeklyReport, formatInsightsDisplay, formatWeeklyReportDisplay, getQuickStatus } from "./services/research/insights-engine.js";
@@ -531,21 +541,31 @@ function _isClaudeRateLimited(text) {
     lower.includes("overloaded") ||
     lower.includes("capacity") ||
     lower.includes("too many requests") ||
-    lower.includes("quota exceeded");
+    lower.includes("quota exceeded") ||
+    lower.includes("usage limit") ||
+    lower.includes("hit your limit") ||
+    lower.includes("you've hit your limit") ||
+    lower.includes("you have hit your limit") ||
+    (lower.includes("resets") && lower.includes("limit"));
 }
 
 const App = ({ updateConsoleTitle, updateState }) => {
   // Pre-render phase: render main view first (invisible) to set terminal rows, then show splash
   const [preRenderPhase, setPreRenderPhase] = useState(true);
   const [isInitializing, setIsInitializing] = useState(true);
+  const [splashStatus, setSplashStatus] = useState("Starting up");
+  const initDoneRef = useRef(false);  // Signals initAutonomousSystem finished
+  const splashMinTimeRef = useRef(false); // Signals minimum splash time elapsed
   // Track how many outcomes to show (4 during loading, then dynamic 2-5 based on height)
   const [maxOutcomesToShow, setMaxOutcomesToShow] = useState(4);
   const [lifeEngineCoverage, setLifeEngineCoverage] = useState(0);
   const [lifeEngineReady, setLifeEngineReady] = useState(false);
   // Pulsing dot for connection status (toggles every 500ms)
+  // Paused while typing to prevent re-renders that cause input flicker
   const [pulsingDotVisible, setPulsingDotVisible] = useState(true);
   useEffect(() => {
     const interval = setInterval(() => {
+      if (isTypingRef.current) return;
       setPulsingDotVisible(prev => !prev);
     }, 500);
     return () => clearInterval(interval);
@@ -1002,25 +1022,44 @@ const App = ({ updateConsoleTitle, updateState }) => {
       setTimeout(() => {
         process.stdout.write("\x1b[2J\x1b[1;1H"); // Clear pre-render
         setPreRenderPhase(false);
-        // Phase 2: Show splash screen for 1 second
-        setTimeout(() => {
-          // Clear screen before transitioning from splash to main view
+
+        // Phase 2: Show splash with spinning B until init completes
+        // Minimum 1.5s so splash is visible, but wait for initAutonomousSystem to finish
+        const finishSplash = () => {
           process.stdout.write("\x1b[2J\x1b[1;1H");
           setIsInitializing(false);
-          // Set outcomes count based on terminal height (default 2, expand to 5 for tall terminals)
-          // Each outcome row takes ~1 line; base threshold 40 rows for 2, +1 outcome per 8 extra rows
           const rows = process.stdout.rows || 40;
           const heightBasedOutcomes = Math.min(5, Math.max(2, 2 + Math.floor((rows - 40) / 8)));
           setMaxOutcomesToShow(heightBasedOutcomes);
-          // Restore terminal title after splash (ensure "Backbone · [User]" shows)
           restoreBaseTitle();
-          // Emit resize event to ensure layout calculates correctly
           setTimeout(() => {
-            if (process.stdout.emit) {
-              process.stdout.emit("resize");
-            }
+            if (process.stdout.emit) process.stdout.emit("resize");
           }, 50);
-        }, 1000);
+        };
+
+        // Set minimum splash time
+        setTimeout(() => {
+          splashMinTimeRef.current = true;
+          // If init already done, finish immediately
+          if (initDoneRef.current) finishSplash();
+        }, 1500);
+
+        // Poll for init completion (check every 250ms after min time)
+        const checkInterval = setInterval(() => {
+          if (splashMinTimeRef.current && initDoneRef.current) {
+            clearInterval(checkInterval);
+            finishSplash();
+          }
+        }, 250);
+
+        // Safety: don't stay on splash forever (max 30s)
+        setTimeout(() => {
+          clearInterval(checkInterval);
+          if (!initDoneRef.current) {
+            initDoneRef.current = true;
+            finishSplash();
+          }
+        }, 30000);
       }, 150);
     };
     init();
@@ -1378,6 +1417,10 @@ const App = ({ updateConsoleTitle, updateState }) => {
     scanDone: false,
     lastFullScan: null,      // Last full scan timestamp
     fullScanRunning: false,  // Whether full scan is currently running
+    scanProgress: 0,
+    scanTotal: 0,
+    evaluatedToday: 0,
+    universeSize: TICKER_UNIVERSE.length || 0,
     updateHistory: [],       // Array of update timestamps for today (for 2hr gap check)
   });
   const [portfolio, setPortfolio] = useState(() => {
@@ -1424,6 +1467,7 @@ const App = ({ updateConsoleTitle, updateState }) => {
   // New integration states
   const [linkedInProfile, setLinkedInProfile] = useState(null);
   const [linkedInMessages, setLinkedInMessages] = useState([]);
+  const [awaitingLinkedInCurl, setAwaitingLinkedInCurl] = useState(false);
   const [ouraHealth, setOuraHealth] = useState(null);
   const [plaidData, setPlaidData] = useState(null);
   const [ouraHistory, setOuraHistory] = useState(() => {
@@ -1527,21 +1571,41 @@ const App = ({ updateConsoleTitle, updateState }) => {
       console.error("[Broadcast] Firebase save failed:", err.message);
     }
 
-    // 2. Send to WhatsApp (truncate long responses for SMS readability)
+    // 2. Send to WhatsApp via Twilio (direct path — same as MCP server)
+    // Resolves phone from user-settings.json, initializes Twilio from Firebase credentials
     try {
-      if (whatsappNotifications?.enabled && whatsappNotifications?.phoneNumber) {
-        const { getTwilioWhatsApp } = await import("./services/messaging/twilio-whatsapp.js");
-        const whatsapp = getTwilioWhatsApp();
-        if (whatsapp.initialized || await whatsapp.initialize?.()) {
-          // Truncate to 1500 chars for WhatsApp readability
-          const truncated = responseText.length > 1500
-            ? responseText.slice(0, 1500) + "..."
-            : responseText;
-          await whatsapp.sendMessage(whatsappNotifications.phoneNumber, truncated);
+      const { getTwilioWhatsApp } = await import("./services/messaging/twilio-whatsapp.js");
+      const whatsapp = getTwilioWhatsApp();
+
+      // Initialize Twilio if needed (fetches creds from Firebase)
+      if (!whatsapp.initialized) {
+        const initResult = await whatsapp.initialize();
+        if (!initResult?.success) throw new Error("Twilio not configured");
+      }
+
+      // Resolve phone from user settings (same as MCP whatsapp-server)
+      let phone = whatsappNotifications?.phoneNumber;
+      if (!phone) {
+        const settings = loadUserSettings();
+        phone = settings?.phoneNumber || settings?.phone;
+      }
+
+      if (phone) {
+        // Format for beautiful WhatsApp rendering
+        const { formatAIResponse, chunkMessage } = await import("./services/messaging/whatsapp-formatter.js");
+        const formatted = formatAIResponse(responseText, { source });
+        const chunks = chunkMessage(formatted, 1500);
+
+        // Send each chunk (most responses fit in 1 message)
+        for (const chunk of chunks) {
+          await whatsapp.sendMessage(phone, chunk);
         }
       }
     } catch (err) {
-      console.error("[Broadcast] WhatsApp send failed:", err.message);
+      // Non-fatal — WhatsApp delivery is best-effort
+      if (err.message !== "Twilio not configured") {
+        console.error("[Broadcast] WhatsApp send failed:", err.message);
+      }
     }
   }, [realtimeMessaging, whatsappNotifications]);
 
@@ -1625,8 +1689,9 @@ const App = ({ updateConsoleTitle, updateState }) => {
     // Start supervisor (tracks sessions, gaps, auto-restart)
     supervisor.start(autonomousEngine);
 
-    // Poll status every 5 seconds for header display
+    // Poll status every 5 seconds for header display (skip while typing)
     const updateStatus = () => {
+      if (isTypingRef.current) return;
       try {
         const status = supervisor.getHeaderStatus();
         setEngineHeaderStatus(status);
@@ -1687,6 +1752,10 @@ const App = ({ updateConsoleTitle, updateState }) => {
           try {
             let responseContent;
 
+            // Show query in title while processing
+            const queryPreview = message.content.slice(0, 60).replace(/\n/g, " ");
+            setWorkContext(`Query: ${queryPreview}`);
+
             // ── STEP 1: Try direct command handler (instant, no AI needed) ──
             const commandResult = await tryDirectCommand(message.content);
             if (commandResult.matched) {
@@ -1697,7 +1766,27 @@ const App = ({ updateConsoleTitle, updateState }) => {
               const classification = classifyMessage(message.content);
               console.log(`[App] ${msgChannel} message classified: ${classification.type} (${classification.confidence}) — ${classification.reason}`);
 
-              if (classification.type === "quick") {
+              if (classification.type === "pivot") {
+                // ── PIVOT PATH: confirm direction change with user ──
+                const currentGoal = getGoalTracker().getAll().find(g => g.status === "active");
+                const currentWork = currentGoal ? currentGoal.title : "current tasks";
+
+                // Use AI to acknowledge the pivot and confirm
+                const systemPrompt = buildContextualSystemPrompt(msgChannel);
+                const pivotPrompt = `The user wants to change direction. They said: "${message.content}"
+
+Current work: ${currentWork}
+
+Acknowledge the pivot. Tell them what you'll pause. Ask them to confirm the new direction. Be concise. Use WhatsApp formatting (*bold*, _italic_).
+
+Example: "Got it. I'll put *${currentWork}* on pause. You want me to focus on [what they asked]. Confirm and I'll switch over."`;
+                const response = await aiBrain.chat(pivotPrompt, {
+                  userId: firebaseUser.uid,
+                  channel: msgChannel,
+                  systemPrompt
+                });
+                responseContent = response.content;
+              } else if (classification.type === "quick") {
                 // ── QUICK PATH: aiBrain.chat() with rich context ──
                 const systemPrompt = buildContextualSystemPrompt(msgChannel);
                 const response = await aiBrain.chat(message.content, {
@@ -1746,8 +1835,11 @@ const App = ({ updateConsoleTitle, updateState }) => {
               });
             }
 
+            // Clear query from title — restore base
+            clearWorkContext();
             return { content: responseContent, type: "ai" };
           } catch (err) {
+            clearWorkContext();
             console.error(`[App] ${msgChannel} message handler error:`, err.message);
             return { content: "Sorry, I encountered an error processing your message. Please try again.", type: "system" };
           }
@@ -1841,6 +1933,7 @@ const App = ({ updateConsoleTitle, updateState }) => {
     if (!realtimeMessaging.listening) return;
 
     const updateCountdown = () => {
+      if (isTypingRef.current) return;
       const countdown = realtimeMessaging.getPollCountdown();
       const status = realtimeMessaging.getStatus();
       setWhatsappPollCountdown(countdown);
@@ -1850,7 +1943,7 @@ const App = ({ updateConsoleTitle, updateState }) => {
     // Initial update
     updateCountdown();
 
-    // Update every second
+    // Update every second (skip while typing to prevent input flicker)
     const interval = setInterval(updateCountdown, 1000);
     return () => clearInterval(interval);
   }, [realtimeMessaging.listening]);
@@ -2006,12 +2099,13 @@ const App = ({ updateConsoleTitle, updateState }) => {
     return Math.max(60, Math.min(300, totalSeconds)) * 1000; // Return milliseconds
   }, []);
 
-  // Clean up expired user queries
+  // Clean up expired user queries (skip while typing)
   useEffect(() => {
     const cleanupInterval = setInterval(() => {
+      if (isTypingRef.current) return;
       const now = Date.now();
       setRecentUserQueries((prev) => prev.filter((q) => q.expiresAt > now));
-    }, 5000); // Check every 5 seconds
+    }, 5000);
     return () => clearInterval(cleanupInterval);
   }, []);
 
@@ -2409,7 +2503,9 @@ const App = ({ updateConsoleTitle, updateState }) => {
       workLog.logSystem("BACKBONE Started", "Autonomous system initializing");
 
       // Initialize Claude Code backend and check full status
+      setSplashStatus("Detecting Claude Code CLI");
       const backend = await claudeCodeBackend.initialize();
+      setSplashStatus("Checking authentication");
       const cliStatus = await getClaudeCodeStatus();
       setClaudeCodeStatus({
         initialized: true,
@@ -2438,6 +2534,7 @@ const App = ({ updateConsoleTitle, updateState }) => {
       }
 
       // Register context providers for autonomous engine
+      setSplashStatus("Loading data sources");
       autonomousEngine.registerContextProvider("portfolio", async () => ({
         equity: portfolioRef.current?.equity,
         cash: portfolioRef.current?.cash,
@@ -2771,6 +2868,7 @@ const App = ({ updateConsoleTitle, updateState }) => {
       engineState.on("project-completed", updateEngineStatus);
 
       claudeCodeBackend.on("task-output", handleTaskOutput);
+      setSplashStatus("Starting engine");
 
       // Sync autonomous engine actions with engine state
       autonomousEngine.on("action-started", (action) => {
@@ -2797,10 +2895,27 @@ const App = ({ updateConsoleTitle, updateState }) => {
           return next;
         });
       };
-      goalTracker.on("milestone-achieved", ({ goal, milestone }) => {
+      goalTracker.on("milestone-achieved", async ({ goal, milestone }) => {
         workLog.logMilestone(LOG_SOURCE.GOAL, `Milestone: ${milestone.label}`, goal.title);
         updateGoals();
         if (dashboardSyncInitRef.current) getDashboardSync().triggerImmediateSync("goals");
+
+        // Send WhatsApp notification for milestone
+        try {
+          const { getWhatsAppNotifications } = await import("./services/messaging/whatsapp-notifications.js");
+          const notif = getWhatsAppNotifications();
+          if (notif.enabled) {
+            const isComplete = milestone.target >= 100;
+            const emoji = isComplete ? "🏆" : "🎯";
+            const msg = isComplete
+              ? `*Goal Complete!*\n\n${emoji} *${goal.title}*\n\n_All milestones achieved. Nice work._`
+              : `*Milestone Reached*\n\n${emoji} *${goal.title}*\n_${milestone.label}_ — ${milestone.target}%`;
+            await notif.send(isComplete ? "breakthrough" : "outcome", msg, {
+              identifier: `milestone_${goal.id}_${milestone.target}`,
+              priority: isComplete ? 3 : 2,
+            });
+          }
+        } catch {}
       });
 
       goalTracker.on("progress-updated", () => {
@@ -2974,6 +3089,10 @@ const App = ({ updateConsoleTitle, updateState }) => {
       } catch (error) {
         // Mobile dashboard is optional, don't fail on error
       }
+
+      // Signal initialization complete — splash screen can now dismiss
+      setSplashStatus("Ready");
+      initDoneRef.current = true;
     };
 
     initAutonomousSystem();
@@ -4131,10 +4250,34 @@ Execute this task and provide concrete results.`);
       const claudeConfig = getClaudeConfig();
       const multiAIConfig = getMultiAIConfig();
 
-      // Check if any AI model is available
-      if (!claudeConfig.ready && !multiAIConfig.ready) {
+      // Check if any AI model is available (Claude Code CLI, API key, or multi-AI)
+      let claudeCodeReady = claudeCodeStatus.available;
+
+      // If cached status says unavailable, do a live check — the CLI may have
+      // been installed/logged-in after BACKBONE started, or detection may have
+      // raced during startup.
+      if (!claudeCodeReady && !claudeConfig.ready && !multiAIConfig.ready) {
+        try {
+          const liveStatus = await getClaudeCodeStatus();
+          if (liveStatus.ready || liveStatus.installed) {
+            claudeCodeReady = true;
+            // Update cached status so we don't re-check every message
+            setClaudeCodeStatus(prev => ({
+              ...prev,
+              available: liveStatus.installed,
+              loggedIn: liveStatus.loggedIn,
+              ready: liveStatus.ready,
+              model: liveStatus.model
+            }));
+          }
+        } catch {
+          // Live check failed — proceed with cached status
+        }
+      }
+
+      if (!claudeConfig.ready && !multiAIConfig.ready && !claudeCodeReady) {
         unifiedMessageLog.addAssistantMessage(
-          "No AI model configured. Add ANTHROPIC_API_KEY or OPENAI_API_KEY to your .env file.",
+          "No AI model configured. Install Claude Code CLI ('npm i -g @anthropic-ai/claude-code && claude login') or add ANTHROPIC_API_KEY / OPENAI_API_KEY to your .env file.",
           MESSAGE_CHANNEL.CHAT,
           { source: "system" }
         );
@@ -4142,7 +4285,7 @@ Execute this task and provide concrete results.`);
           ...prev,
           {
             role: "assistant",
-            content: "No AI model configured. Add ANTHROPIC_API_KEY or OPENAI_API_KEY to your .env file.",
+            content: "No AI model configured. Install Claude Code CLI ('npm i -g @anthropic-ai/claude-code && claude login') or add ANTHROPIC_API_KEY / OPENAI_API_KEY to your .env file.",
             timestamp: new Date()
           }
         ]);
@@ -4201,8 +4344,6 @@ Execute this task and provide concrete results.`);
 
       // Claude Code CLI is the default for ALL queries
       // Only fall back to API if CLI not available
-      const claudeCodeReady = claudeCodeStatus.available;
-
       if (claudeCodeReady) {
         // Use Claude Code CLI as the default handler for all queries
         setIsProcessing(true);
@@ -4263,6 +4404,20 @@ Execute this task and provide concrete results.`);
           agenticPrompt,
           process.cwd(),
           (event) => {
+            if (event.type === "tool") {
+              if (event.tool === "codex") {
+                engineState.setStatus("executing", "Codex CLI");
+                const detail = event.model ? ` (${event.model})` : "";
+                setActionStreamingTitle(`Codex CLI${detail}`);
+              } else if (event.tool === "claude-agent-sdk") {
+                engineState.setStatus("executing", "Claude Agent SDK");
+                setActionStreamingTitle("Claude Agent SDK");
+              } else if (event.tool === "claude") {
+                engineState.setStatus("executing", "Claude Code CLI");
+                setActionStreamingTitle("Claude Code CLI");
+              }
+              return;
+            }
             if (event.type === "stdout") {
               extractToolEvents(event.text, "claude-code");
               const displayText = (event.output || "").slice(-500);
@@ -4306,8 +4461,9 @@ Execute this task and provide concrete results.`);
         // Check if we got a meaningful response
         if (result.success && outputText && !_isClaudeRateLimited(outputText)) {
           const resultMessage = outputText.slice(-2000);
+          const toolSource = result.tool === "codex" ? "codex" : "claude-code";
           unifiedMessageLog.addAssistantMessage(resultMessage, MESSAGE_CHANNEL.CHAT, {
-            source: "claude-code"
+            source: toolSource
           });
           setMessages((prev) => [
             ...prev,
@@ -4316,7 +4472,7 @@ Execute this task and provide concrete results.`);
               content: resultMessage,
               timestamp: new Date(),
               isAgentic: true,
-              tool: "claude-code"
+              tool: toolSource
             }
           ]);
 
@@ -4326,7 +4482,7 @@ Execute this task and provide concrete results.`);
           });
 
           // Broadcast to WhatsApp + Firebase
-          broadcastResponse(resultMessage, "claude-code");
+          broadcastResponse(resultMessage, toolSource);
 
           // Keep last streaming output visible - don't clear actionStreamingText
           setActionStreamingTitle("Completed");
@@ -5058,9 +5214,9 @@ Execute this task and provide concrete results.`);
               nowISO
             ].slice(-50); // Keep last 50 updates max
 
-            const universeSize = (result.evaluatedToday ?? 0) > 0
-              ? result.evaluatedToday
-              : (result.universeSize || result.tickers.length || TICKER_UNIVERSE.length);
+            const universeSize = (Number.isFinite(result.universeSize) && result.universeSize > 0)
+              ? result.universeSize
+              : (prev.universeSize || TICKER_UNIVERSE.length);
 
             return {
               refreshing: false,
@@ -5149,14 +5305,14 @@ Execute this task and provide concrete results.`);
         if (!result.success) return;
 
         const todayCount = result.evaluatedToday ?? result.tickers.filter(t => isTickerToday(t.lastEvaluated)).length;
-        const totalCount = todayCount > 0
-          ? todayCount
-          : (result.universeSize || result.tickers.length || TICKER_UNIVERSE.length);
 
         setTickerStatus(prev => {
           const scanRunning = result.fullScanRunning || false;
           const progress = result.scanProgress || 0;
           const total = result.scanTotal || 0;
+          const universeSize = (Number.isFinite(result.universeSize) && result.universeSize > 0)
+            ? result.universeSize
+            : (prev.universeSize || TICKER_UNIVERSE.length);
 
           // Check if anything changed
           if (prev.fullScanRunning === scanRunning &&
@@ -5173,7 +5329,7 @@ Execute this task and provide concrete results.`);
             scanTotal: total,
             lastFullScan: result.lastFullScan || prev.lastFullScan,
             evaluatedToday: todayCount,
-            universeSize: totalCount,
+            universeSize,
           };
 
           // If scan just finished, pull in updated tickers + scores
@@ -5246,6 +5402,99 @@ Execute this task and provide concrete results.`);
     // Record user activity for idle processor
     if (idleProcessorRef.current) {
       idleProcessorRef.current.recordUserActivity();
+    }
+
+    // Special case: LinkedIn "Copy as cURL" paste contains cookies. Do not persist it in chat/memory logs.
+    const isLinkedInCurlPaste = awaitingLinkedInCurl && /^curl\b/i.test(trimmed);
+    if (isLinkedInCurlPaste) {
+      setAwaitingLinkedInCurl(false);
+
+      recordAction({
+        type: "command",
+        description: "/linkedin curl (redacted)",
+        metadata: { timestamp: new Date().toISOString() }
+      });
+
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          content: "LinkedIn cURL received (redacted). Fetching https://www.linkedin.com/me via curl and following redirects...",
+          timestamp: new Date()
+        }
+      ]);
+      setLastAction("Fetching LinkedIn (curl)...");
+
+      try {
+        const result = await extractLinkedInProfile({ method: "curl", curlCommand: trimmed, persistCurl: true });
+
+        if (result.success) {
+          const linkedInData = {
+            ...(result.profile || {}),
+            profileUrl: result.profileUrl,
+            connected: true,
+            verified: true
+          };
+          setLinkedInProfile(linkedInData);
+          updateFromLinkedIn(linkedInData);
+
+          const mdResult = await generateLinkedInMarkdown(result);
+          const mdStatus = mdResult.success ? "linkedin.md generated" : "markdown generation failed";
+
+          const p = result.profile || {};
+          const profileSummary = [
+            `URL: ${result.profileUrl}`,
+            p.name && `Name: ${p.name}`,
+            p.headline && `Headline: ${p.headline}`,
+            result.httpCode && `HTTP: ${result.httpCode}`,
+            result.htmlPath && `HTML: ${result.htmlPath}`,
+            result.textPath && `Text: ${result.textPath}`
+          ].filter(Boolean).join("\n");
+
+          const snapResult = captureLinkedInSnapshot();
+          const snapMsg = snapResult.success
+            ? snapResult.isFirst
+              ? "First snapshot saved to history."
+              : snapResult.changes.length > 0
+                ? `Snapshot saved. ${snapResult.changes.length} change(s) detected.`
+                : "Snapshot saved. No changes from last capture."
+            : "";
+
+          const warning = result.warning ? `\n\nWarning: ${result.warning}` : "";
+
+          setMessages((prev) => [
+            ...prev,
+            {
+              role: "assistant",
+              content: `LinkedIn profile captured via curl!\n\n${profileSummary}\n\n${mdStatus}${snapMsg ? `\n${snapMsg}` : ""}${warning}\n\nData saved. View with /linkedin data or /profile general`,
+              timestamp: new Date()
+            }
+          ]);
+          setLastAction("LinkedIn captured (curl)");
+        } else {
+          setMessages((prev) => [
+            ...prev,
+            {
+              role: "assistant",
+              content: `LinkedIn curl capture failed: ${result.error}`,
+              timestamp: new Date()
+            }
+          ]);
+          setLastAction("LinkedIn curl failed");
+        }
+      } catch (error) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "assistant",
+            content: `LinkedIn curl error: ${error.message}`,
+            timestamp: new Date()
+          }
+        ]);
+        setLastAction("LinkedIn curl error");
+      }
+
+      return;
     }
 
     // Record action in session state for persistence
@@ -5577,53 +5826,110 @@ Execute this task and provide concrete results.`);
         return;
       }
 
-      // Single LinkedIn command - opens browser, captures profile URL and data
-      if (resolved === "/linkedin") {
+      // /linkedin curl - Force re-capture of browser headers (DevTools "Copy as cURL")
+      if (resolved === "/linkedin curl") {
+        openUrlPreferChrome("https://www.linkedin.com/me");
+        setAwaitingLinkedInCurl(true);
         setMessages((prev) => [
           ...prev,
           {
             role: "assistant",
-            content: "Opening LinkedIn...\nIf not logged in, please log in when the browser opens.\nYour profile will be captured automatically.",
+            content: [
+              "Opening LinkedIn in your browser...",
+              "",
+              "Copy DevTools -> Network -> 'Copy as cURL (bash)' for the /me request, then paste it here.",
+              "This will update the stored headers used for automated /linkedin refresh."
+            ].join("\n"),
             timestamp: new Date()
           }
         ]);
-        setLastAction("Opening LinkedIn...");
+        setLastAction("Waiting for LinkedIn cURL...");
+        return;
+      }
+
+      // /linkedin curl clear - Remove stored browser headers
+      if (resolved === "/linkedin curl clear") {
+        const cleared = clearLinkedInCurlCommand();
+        const msg = cleared.success
+          ? "Cleared stored LinkedIn browser headers."
+          : `Failed to clear stored headers: ${cleared.error}`;
+        setMessages((prev) => [
+          ...prev,
+          { role: "assistant", content: msg, timestamp: new Date() }
+        ]);
+        setLastAction("LinkedIn curl cleared");
+        return;
+      }
+
+      // Single LinkedIn command - capture via curl using the user's browser session headers
+      if (resolved === "/linkedin") {
+        const storedCurl = getStoredLinkedInCurlCommand();
+
+        // First-time (or expired) flow: open browser and ask for a DevTools "Copy as cURL" paste.
+        if (!storedCurl) {
+          openUrlPreferChrome("https://www.linkedin.com/me");
+          setAwaitingLinkedInCurl(true);
+          setMessages((prev) => [
+            ...prev,
+            {
+              role: "assistant",
+              content: [
+                "Opening LinkedIn in your browser...",
+                "",
+                "To capture your real profile URL + full HTML via curl:",
+                "1. Make sure you're logged in (you should land on your profile from /me).",
+                "2. Open DevTools -> Network, then reload the page.",
+                "3. Click the document request for https://www.linkedin.com/me (or your /in/<username>/ page).",
+                "4. Copy -> Copy as cURL (bash).",
+                "5. Paste the cURL command here.",
+                "",
+                "Note: this contains cookies. BACKBONE will store it locally so /linkedin refresh can run automatically."
+              ].join("\n"),
+              timestamp: new Date()
+            }
+          ]);
+          setLastAction("Waiting for LinkedIn cURL...");
+          return;
+        }
+
+        // Stored headers exist: run the curl scrape immediately.
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "assistant",
+            content: "Fetching LinkedIn via stored browser headers (curl)...",
+            timestamp: new Date()
+          }
+        ]);
+        setLastAction("Fetching LinkedIn (curl)...");
 
         try {
-          const result = await extractLinkedInProfile();
+          const result = await extractLinkedInProfile({ method: "curl" });
 
           if (result.success) {
-            // Update state with captured profile
             const linkedInData = {
-              ...result.profile,
+              ...(result.profile || {}),
               profileUrl: result.profileUrl,
               connected: true,
               verified: true
             };
             setLinkedInProfile(linkedInData);
-
-            // Update profile sections with LinkedIn data
             updateFromLinkedIn(linkedInData);
 
-            // Generate linkedin.md file using LLM
             const mdResult = await generateLinkedInMarkdown(result);
             const mdStatus = mdResult.success ? "linkedin.md generated" : "markdown generation failed";
 
-            // Build readable profile summary
             const p = result.profile || {};
             const profileSummary = [
               `URL: ${result.profileUrl}`,
               p.name && `Name: ${p.name}`,
               p.headline && `Headline: ${p.headline}`,
-              p.location && `Location: ${p.location}`,
-              p.currentRole && `Role: ${p.currentRole}`,
-              p.currentCompany && `Company: ${p.currentCompany}`,
-              p.isStudent !== undefined && `Student: ${p.isStudent ? "Yes" : "No"}`,
-              p.connections && `Connections: ${p.connections}`,
+              result.httpCode && `HTTP: ${result.httpCode}`,
+              result.htmlPath && `HTML: ${result.htmlPath}`,
+              result.textPath && `Text: ${result.textPath}`,
               result.screenshotPath && `Screenshot: ${result.screenshotPath}`
             ].filter(Boolean).join("\n");
 
-            // Capture historical snapshot
             const snapResult = captureLinkedInSnapshot();
             const snapMsg = snapResult.success
               ? snapResult.isFirst
@@ -5637,33 +5943,37 @@ Execute this task and provide concrete results.`);
               ...prev,
               {
                 role: "assistant",
-                content: `LinkedIn profile captured!\n\n${profileSummary}\n\n${mdStatus}${snapMsg ? `\n${snapMsg}` : ""}\n\nData saved. View with /profile or /profile general`,
+                content: `LinkedIn profile captured!\n\n${profileSummary}\n\n${mdStatus}${snapMsg ? `\n${snapMsg}` : ""}\n\nData saved. View with /linkedin data or /profile general`,
                 timestamp: new Date()
               }
             ]);
             setLastAction("LinkedIn captured");
           } else {
+            // Stored headers likely expired; prompt for a fresh cURL.
+            openUrlPreferChrome("https://www.linkedin.com/me");
+            setAwaitingLinkedInCurl(true);
             setMessages((prev) => [
               ...prev,
               {
                 role: "assistant",
-                content: `LinkedIn capture failed: ${result.error}`,
+                content: `Stored LinkedIn headers no longer work: ${result.error}\n\nA browser window was opened. Copy a fresh DevTools "Copy as cURL (bash)" request and paste it here to update.`,
                 timestamp: new Date()
               }
             ]);
-            setLastAction("LinkedIn failed");
+            setLastAction("Waiting for LinkedIn cURL...");
           }
         } catch (error) {
           setMessages((prev) => [
             ...prev,
             {
               role: "assistant",
-              content: `Error: ${error.message}`,
+              content: `LinkedIn error: ${error.message}`,
               timestamp: new Date()
             }
           ]);
           setLastAction("LinkedIn error");
         }
+
         return;
       }
 
@@ -6202,6 +6512,194 @@ Execute this task and provide concrete results.`);
           }
         ]);
         setLastAction("Finances reset");
+        return;
+      }
+
+      // Trading commands (auto-trader)
+      if (resolved === "/trading" || resolved === "/trading status") {
+        setLastAction("Trading status");
+        try {
+          const status = getAutoTradingStatus();
+          const alpacaConfig = getAlpacaConfig();
+          const yahooOnline = await isServerRunning();
+          const pending = getPendingBuys();
+
+          const lines = [];
+          lines.push("TRADING STATUS", "");
+          lines.push(`Auto-trading: ${status.enabled ? "ON" : "OFF"}`);
+          lines.push(`Market: ${status.marketOpen ? "OPEN" : "CLOSED"} (${status.marketStatus || "unknown"})`);
+          if (status.nextEvaluation) lines.push(`Next eval: ${status.nextEvaluation}`);
+          if (!status.marketOpen && status.nextMarketOpen?.date) {
+            lines.push(`Next open: ${status.nextMarketOpen.date} ${status.nextMarketOpen.time}`);
+          }
+
+          lines.push("");
+          lines.push(`Alpaca: ${alpacaConfig.ready ? "CONNECTED" : "NOT CONFIGURED"} (${alpacaConfig.mode || "paper"})`);
+          lines.push(`Yahoo tickers: ${yahooOnline ? "ONLINE" : "OFFLINE"} (${tickerStatus?.scanCount || tickers?.length || 0} loaded)`);
+          lines.push(`Portfolio: ${portfolio?.positions?.length || 0} position(s)`);
+
+          if (pending && pending.length > 0) {
+            lines.push("", `Pending buys: ${pending.length}`);
+            for (const p of pending.slice(0, 8)) {
+              const remaining = Number.isFinite(p.remainingSeconds) ? `${p.remainingSeconds}s` : "soon";
+              lines.push(`- BUY ${p.symbol} @ $${Number(p.price).toFixed(2)} in ${remaining}`);
+            }
+            if (pending.length > 8) lines.push(`- (+${pending.length - 8} more)`);
+          }
+
+          lines.push("");
+          lines.push("Commands:");
+          lines.push("  /trading on | /trading off");
+          lines.push("  /trading run        (force an evaluation now)");
+          lines.push("  /trading pending    (show queued buys)");
+          lines.push("  /trading cancel <SYM>");
+
+          setMessages((prev) => [
+            ...prev,
+            { role: "user", content: resolved, timestamp: new Date() },
+            { role: "assistant", content: lines.join("\n"), timestamp: new Date() }
+          ]);
+        } catch (error) {
+          setMessages((prev) => [
+            ...prev,
+            { role: "user", content: resolved, timestamp: new Date() },
+            { role: "assistant", content: `Trading status error: ${error.message}`, timestamp: new Date() }
+          ]);
+        }
+        return;
+      }
+
+      if (resolved === "/trading on" || resolved === "/trading enable") {
+        setTradingEnabled(true);
+        setTradingStatus(buildTradingStatusDisplay(loadTradingStatus()));
+        setMessages((prev) => [
+          ...prev,
+          { role: "user", content: resolved, timestamp: new Date() },
+          { role: "assistant", content: "Auto-trading enabled.\n\nUse /trading run to evaluate immediately.", timestamp: new Date() }
+        ]);
+        setLastAction("Trading enabled");
+        return;
+      }
+
+      if (resolved === "/trading off" || resolved === "/trading disable") {
+        setTradingEnabled(false);
+        setTradingStatus(buildTradingStatusDisplay(loadTradingStatus()));
+        setMessages((prev) => [
+          ...prev,
+          { role: "user", content: resolved, timestamp: new Date() },
+          { role: "assistant", content: "Auto-trading disabled (paused).", timestamp: new Date() }
+        ]);
+        setLastAction("Trading disabled");
+        return;
+      }
+
+      if (resolved === "/trading pending") {
+        const pending = getPendingBuys();
+        if (!pending || pending.length === 0) {
+          setMessages((prev) => [
+            ...prev,
+            { role: "user", content: resolved, timestamp: new Date() },
+            { role: "assistant", content: "No pending buys.", timestamp: new Date() }
+          ]);
+          setLastAction("No pending buys");
+          return;
+        }
+
+        const lines = ["PENDING BUYS", ""];
+        for (const p of pending) {
+          const remaining = Number.isFinite(p.remainingSeconds) ? `${p.remainingSeconds}s` : "soon";
+          lines.push(`- BUY ${p.symbol} @ $${Number(p.price).toFixed(2)} in ${remaining}`);
+          if (p.reason) lines.push(`  Reason: ${String(p.reason).slice(0, 140)}`);
+        }
+
+        setMessages((prev) => [
+          ...prev,
+          { role: "user", content: resolved, timestamp: new Date() },
+          { role: "assistant", content: lines.join("\n"), timestamp: new Date() }
+        ]);
+        setLastAction(`Pending buys: ${pending.length}`);
+        return;
+      }
+
+      if (resolved.startsWith("/trading cancel ")) {
+        const symbol = resolved.slice("/trading cancel ".length).trim().toUpperCase();
+        if (!symbol) {
+          setLastAction("Usage: /trading cancel <SYM>");
+          return;
+        }
+        const cancelled = cancelPendingBuy(symbol);
+        setMessages((prev) => [
+          ...prev,
+          { role: "user", content: resolved, timestamp: new Date() },
+          { role: "assistant", content: cancelled ? `Cancelled pending buy: ${symbol}` : `No pending buy found for: ${symbol}`, timestamp: new Date() }
+        ]);
+        setLastAction(cancelled ? `Cancelled ${symbol}` : "Cancel failed");
+        return;
+      }
+
+      if (resolved === "/trading run") {
+        setLastAction("Auto-trader evaluation...");
+
+        if (!tickers || tickers.length === 0) {
+          setMessages((prev) => [
+            ...prev,
+            { role: "user", content: resolved, timestamp: new Date() },
+            { role: "assistant", content: "No ticker data available.\n\nRun /run stock sweep first.", timestamp: new Date() }
+          ]);
+          setLastAction("No tickers");
+          return;
+        }
+
+        if (!portfolio || !Array.isArray(portfolio.positions)) {
+          setMessages((prev) => [
+            ...prev,
+            { role: "user", content: resolved, timestamp: new Date() },
+            { role: "assistant", content: "Portfolio not ready yet.\n\nRun /alpaca status to confirm connection.", timestamp: new Date() }
+          ]);
+          setLastAction("Portfolio not ready");
+          return;
+        }
+
+        try {
+          const result = await monitorAndTrade(tickers, portfolio.positions);
+
+          const lines = ["AUTO-TRADER RUN", ""];
+          if (result.executed && result.executed.length > 0) {
+            lines.push(`Executed: ${result.executed.map(t => `${t.side.toUpperCase()} ${t.symbol}`).join(", ")}`);
+          } else if (result.monitored === false) {
+            lines.push(`No evaluation: ${result.reason || "unknown"}`);
+          } else {
+            lines.push("No trades executed this run.");
+          }
+
+          const pending = getPendingBuys();
+          if (pending && pending.length > 0) {
+            lines.push("", `Pending buys: ${pending.length} (use /trading pending)`);
+          }
+
+          if (Array.isArray(result.reasoning) && result.reasoning.length > 0) {
+            lines.push("", "Reasoning:");
+            for (const r of result.reasoning.slice(0, 40)) {
+              lines.push(`- ${r}`);
+            }
+            if (result.reasoning.length > 40) lines.push(`- (+${result.reasoning.length - 40} more)`);
+          }
+
+          setMessages((prev) => [
+            ...prev,
+            { role: "user", content: resolved, timestamp: new Date() },
+            { role: "assistant", content: lines.join("\n"), timestamp: new Date() }
+          ]);
+          setLastAction("Auto-trader evaluated");
+        } catch (error) {
+          setMessages((prev) => [
+            ...prev,
+            { role: "user", content: resolved, timestamp: new Date() },
+            { role: "assistant", content: `Auto-trader error: ${error.message}`, timestamp: new Date() }
+          ]);
+          setLastAction("Auto-trader error");
+        }
+
         return;
       }
 
@@ -8165,24 +8663,39 @@ Folder: ${result.action.id}`,
 
       // /linkedin refresh - Force a fresh scrape with improved scraper
       if (resolved === "/linkedin refresh") {
+        const storedCurl = getStoredLinkedInCurlCommand();
+        if (!storedCurl) {
+          openUrlPreferChrome("https://www.linkedin.com/me");
+          setAwaitingLinkedInCurl(true);
+          setMessages((prev) => [
+            ...prev,
+            {
+              role: "assistant",
+              content: [
+                "LinkedIn refresh needs your browser headers (cURL).",
+                "A browser window was opened to https://www.linkedin.com/me.",
+                "",
+                "Copy DevTools -> Network -> 'Copy as cURL (bash)' for the /me request, then paste it here."
+              ].join("\n"),
+              timestamp: new Date()
+            }
+          ]);
+          setLastAction("Waiting for LinkedIn cURL...");
+          return;
+        }
+
         setMessages((prev) => [
           ...prev,
-          {
-            role: "assistant",
-            content: "Refreshing LinkedIn profile...\nOpening browser to capture fresh data with full-page screenshot.\nThis will scroll through your entire profile to capture all sections.",
-            timestamp: new Date()
-          }
+          { role: "assistant", content: "Refreshing LinkedIn via stored browser headers (curl)...", timestamp: new Date() }
         ]);
-        setLastAction("Refreshing LinkedIn...");
+        setLastAction("Refreshing LinkedIn (curl)...");
 
         try {
-          // Force a fresh scrape (not headless so user can verify login)
-          const result = await extractLinkedInProfile({ headless: false });
+          const result = await extractLinkedInProfile({ method: "curl" });
 
           if (result.success) {
-            // Update state
             const linkedInData = {
-              ...result.profile,
+              ...(result.profile || {}),
               profileUrl: result.profileUrl,
               connected: true,
               verified: true
@@ -8190,29 +8703,17 @@ Folder: ${result.action.id}`,
             setLinkedInProfile(linkedInData);
             updateFromLinkedIn(linkedInData);
 
-            // Generate updated linkedin.md
             await generateLinkedInMarkdown(result);
-
-            // Capture snapshot
             const snapResult = captureLinkedInSnapshot();
 
-            // Build summary showing what was captured
             const p = result.profile || {};
-            const gpt = result.gpt4oAnalysis || {};
-            const exp = gpt.experience || [];
-            const edu = gpt.education || [];
-            const skills = gpt.skills || p.skills || [];
-
-            let summary = `LinkedIn profile refreshed!\n\n`;
+            let summary = `LinkedIn profile refreshed (curl)!\n\n`;
             summary += `URL: ${result.profileUrl}\n`;
-            summary += `Name: ${p.name || gpt.name || "—"}\n`;
-            summary += `Headline: ${p.headline || gpt.headline || "—"}\n`;
-            summary += `Location: ${p.location || gpt.location || "—"}\n`;
-            summary += `About: ${(p.about || gpt.about || "—").substring(0, 100)}${(p.about || gpt.about || "").length > 100 ? "..." : ""}\n`;
-            summary += `\nExperience: ${exp.length} position(s) captured\n`;
-            summary += `Education: ${edu.length} school(s) captured\n`;
-            summary += `Skills: ${skills.length} skill(s) captured\n`;
-            summary += `\nScreenshot: ${result.screenshotPath}\n`;
+            summary += `Name: ${p.name || "—"}\n`;
+            summary += `Headline: ${p.headline || "—"}\n`;
+            summary += result.httpCode ? `HTTP: ${result.httpCode}\n` : "";
+            summary += result.htmlPath ? `HTML: ${result.htmlPath}\n` : "";
+            summary += result.textPath ? `Text: ${result.textPath}\n` : "";
             summary += snapResult.success ? `\n${snapResult.changes?.length || 0} change(s) detected since last capture.` : "";
             summary += `\n\nView full data with /linkedin data`;
 
@@ -8220,20 +8721,27 @@ Folder: ${result.action.id}`,
               ...prev,
               { role: "assistant", content: summary, timestamp: new Date() }
             ]);
-            setLastAction("LinkedIn refreshed");
+            setLastAction("LinkedIn refreshed (curl)");
           } else {
+            // Stored headers likely expired; prompt for a fresh cURL.
+            openUrlPreferChrome("https://www.linkedin.com/me");
+            setAwaitingLinkedInCurl(true);
             setMessages((prev) => [
               ...prev,
-              { role: "assistant", content: `LinkedIn refresh failed: ${result.error}`, timestamp: new Date() }
+              {
+                role: "assistant",
+                content: `LinkedIn refresh failed: ${result.error}\n\nA browser window was opened. Copy a fresh DevTools 'Copy as cURL (bash)' request and paste it here to update.`,
+                timestamp: new Date()
+              }
             ]);
-            setLastAction("LinkedIn refresh failed");
+            setLastAction("Waiting for LinkedIn cURL...");
           }
         } catch (error) {
           setMessages((prev) => [
             ...prev,
-            { role: "assistant", content: `Error: ${error.message}`, timestamp: new Date() }
+            { role: "assistant", content: `LinkedIn refresh error: ${error.message}`, timestamp: new Date() }
           ]);
-          setLastAction("LinkedIn error");
+          setLastAction("LinkedIn refresh error");
         }
         return;
       }
@@ -10460,7 +10968,7 @@ Folder: ${result.action.id}`,
         marginTop: 4,
         marginBottom: 4
       },
-      e(SplashScreen, { message: "Initializing" })
+      e(SplashScreen, { message: splashStatus || "Initializing" })
     );
   }
 

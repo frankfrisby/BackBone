@@ -2,6 +2,7 @@ import fs from "fs";
 import path from "path";
 
 import { getDataDir } from "../paths.js";
+import { loadConfig as loadAutoTraderConfig } from "./auto-trader.js";
 const DATA_DIR = getDataDir();
 const TRADING_STATUS_PATH = path.join(DATA_DIR, "trading-status.json");
 
@@ -108,16 +109,30 @@ export const formatTimestamp = (date) => {
  * Load trading status from disk
  */
 export const loadTradingStatus = () => {
+  // Enabled/disabled is controlled by the auto-trader config (data/trading-config.json).
+  // trading-status.json is used only for lightweight UI history.
+  const syncEnabled = (status) => {
+    try {
+      const cfg = loadAutoTraderConfig();
+      if (cfg && typeof cfg.enabled === "boolean") {
+        status.enabled = cfg.enabled;
+      }
+    } catch {
+      // ignore
+    }
+    return status;
+  };
+
   try {
     ensureDataDir();
     if (fs.existsSync(TRADING_STATUS_PATH)) {
       const data = JSON.parse(fs.readFileSync(TRADING_STATUS_PATH, "utf-8"));
-      return data;
+      return syncEnabled(data);
     }
   } catch (error) {
     console.error("Failed to load trading status:", error.message);
   }
-  return getDefaultTradingStatus();
+  return syncEnabled(getDefaultTradingStatus());
 };
 
 /**

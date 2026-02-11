@@ -9,10 +9,11 @@ import { getClaudeCodeStatus, getCurrentModelInUse } from "../ai/claude-code-cli
 import { getActionScheduler, ACTION_PRIORITY, ACTION_STATUS } from "../action-scheduler.js";
 import { getProjectManager } from "../projects/project-manager.js";
 import { getWorkerCoordination, WORKER_MODE } from "./worker-coordination.js";
-import { showActivityTitle, showNotificationTitle, restoreBaseTitle } from "../ui/terminal-resize.js";
+import { showActivityTitle, showNotificationTitle, restoreBaseTitle, setWorkContext, clearWorkContext } from "../ui/terminal-resize.js";
 import { getActionApproval, APPROVAL_REQUIRED_ACTIONS, APPROVAL_STATUS } from "../action-approval.js";
 import { getEngineHeartbeat } from "./engine-heartbeat.js";
 import { calculateDataCompleteness } from "./thinking-engine.js";
+import { getSkillDiscovery } from "./skill-discovery.js";
 
 import { getDataDir } from "../paths.js";
 /**
@@ -497,11 +498,11 @@ export class AutonomousEngine extends EventEmitter {
     // Switch to project for this goal
     if (goal) {
       await this.switchToProjectForGoal(goal);
-      // Update terminal title to show active goal (30 seconds)
-      showActivityTitle(`Working on: ${goal.title.slice(0, 40)}`, 30000);
+      // Set persistent work context in title (stays until goal changes)
+      setWorkContext(`Working: ${goal.title.slice(0, 50)}`);
     } else {
-      // Restore base title when no goal is active
-      restoreBaseTitle();
+      // Clear work context when no goal is active
+      clearWorkContext();
     }
 
     this.emit("goal-set", goal);
@@ -743,6 +744,19 @@ export class AutonomousEngine extends EventEmitter {
 
       saveEngineState(this.state);
       this.emit("action-completed", action);
+
+      // Record action for skill discovery
+      try {
+        const discovery = getSkillDiscovery();
+        const newSkill = discovery.recordAction(
+          action.type || action.label || "unknown",
+          action.description || action.label || "Engine action completed",
+          { goalId: this.state.currentGoal?.id, project: this.state.currentProject }
+        );
+        if (newSkill) {
+          discovery.notifyNewSkill(newSkill);
+        }
+      } catch {}
 
       return action;
     } catch (error) {

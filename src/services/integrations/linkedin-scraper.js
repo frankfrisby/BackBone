@@ -3,6 +3,7 @@ import fs from "fs";
 import path from "path";
 import Anthropic from "@anthropic-ai/sdk";
 import { runBrowserTask } from "./browser-agent.js";
+import { getStoredLinkedInCurlCommand, scrapeLinkedInProfileViaCurl } from "./linkedin-curl-scraper.js";
 import os from "os";
 import fetch from "node-fetch";
 
@@ -10,7 +11,7 @@ import { dataFile, getDataDir, getScreenshotsDir } from "../paths.js";
 /**
  * LinkedIn Profile Scraper using Playwright
  * - Opens browser headful
- * - Navigates to /in/me
+ * - Navigates to /me
  * - Captures real URL after redirect
  * - Takes screenshot
  * - Extracts profile data
@@ -198,6 +199,19 @@ const findChromeChannel = () => {
 export const scrapeLinkedInProfile = async (options = {}) => {
   ensureDirs();
 
+  // Optional: use curl + user headers instead of Playwright.
+  // This is the most reliable way to follow /me redirects for a logged-in user.
+  const method = String(options.method || process.env.LINKEDIN_SCRAPE_METHOD || "").trim().toLowerCase();
+  const storedCurl = getStoredLinkedInCurlCommand();
+  if (method === "curl" || (!method && storedCurl)) {
+    return await scrapeLinkedInProfileViaCurl({
+      curlCommand: options.curlCommand || storedCurl,
+      persistCurl: Boolean(options.persistCurl),
+      startUrl: options.startUrl,
+      fallbackUrl: options.fallbackUrl,
+    });
+  }
+
   const { headless = false, timeout = 180000 } = options;
   let browser = null;
 
@@ -259,8 +273,8 @@ export const scrapeLinkedInProfile = async (options = {}) => {
 
     console.log("Logged in. Navigating to profile...");
 
-    // Navigate to /in/me - this redirects to user's actual profile
-    await page.goto("https://www.linkedin.com/in/me", { waitUntil: "domcontentloaded", timeout: 30000 });
+    // Navigate to /me - this redirects to user's actual profile
+    await page.goto("https://www.linkedin.com/me", { waitUntil: "domcontentloaded", timeout: 30000 });
 
     // Wait for redirect to complete
     await page.waitForTimeout(3000);
@@ -653,7 +667,7 @@ If a section is not visible, use null. Return ONLY JSON.`;
 export const updateLinkedInViaBrowserAgent = async (options = {}) => {
   const task = "Open my LinkedIn profile, scroll through all sections (About, Experience, Education, Skills), and stop once the full profile has been viewed.";
   const result = await runBrowserTask(task, {
-    startUrl: "https://www.linkedin.com/in/me",
+    startUrl: "https://www.linkedin.com/me",
     maxIterations: options.maxIterations || 14,
     model: options.model || "claude-sonnet-4-20250514",
     onEvent: options.onEvent
@@ -671,7 +685,7 @@ export const updateLinkedInViaBrowserAgent = async (options = {}) => {
 
   const payload = {
     profile: analysis.profile,
-    profileUrl: "https://www.linkedin.com/in/me",
+    profileUrl: "https://www.linkedin.com/me",
     connected: true,
     verified: true,
     source: "browser-agent",

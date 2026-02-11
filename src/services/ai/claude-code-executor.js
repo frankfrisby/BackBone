@@ -15,6 +15,9 @@ import path from "path";
 import os from "os";
 import { getClaudeCodeBackend, TASK_STATUS } from "./claude-code-backend.js";
 import { isClaudeCodeInstalled, isClaudeCodeLoggedIn, getClaudeCodeStatus } from "./claude-code-cli.js";
+import { getBackboneRoot } from "../paths.js";
+
+const CLAUDE_CMD = process.platform === "win32" ? "claude.cmd" : "claude";
 
 // MCP server tool prefixes — allows all tools from BACKBONE MCP servers
 const MCP_TOOLS = [
@@ -171,6 +174,7 @@ export class ClaudeCodeExecutor extends EventEmitter {
         "--verbose",
         "--output-format", "stream-json",
         "--dangerously-skip-permissions",
+        ...(fs.existsSync(getBackboneRoot()) ? ["--add-dir", getBackboneRoot()] : []),
         "--allowedTools", this.getAllowedTools().join(",")
       ];
 
@@ -191,7 +195,7 @@ export class ClaudeCodeExecutor extends EventEmitter {
       const cleanEnv = { ...process.env, FORCE_COLOR: "0" };
       delete cleanEnv.ANTHROPIC_API_KEY;
 
-      const proc = spawn("claude", args, {
+      const proc = spawn(CLAUDE_CMD, args, {
         shell: true,
         cwd: options.workDir || this.workDir,
         env: cleanEnv

@@ -14,10 +14,14 @@ function useServiceWorker() {
     const isLocal = port === 3000 || window.location.pathname.startsWith("/app");
 
     if (isLocal) {
+      // Bump this to force SW updates when users have stale/corrupted caches.
+      const SW_VERSION = "5";
       navigator.serviceWorker
-        .register("/app/sw.js", { scope: "/app/" })
+        .register(`/app/sw.js?v=${SW_VERSION}`, { scope: "/app/" })
         .then((reg) => {
           console.log("[PWA] Service worker registered:", reg.scope);
+          // Best-effort: ask the browser to check for updates immediately.
+          reg.update().catch(() => {});
         })
         .catch((err) => {
           console.log("[PWA] Service worker registration failed:", err.message);

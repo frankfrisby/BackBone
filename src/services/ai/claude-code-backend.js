@@ -3,6 +3,29 @@ import { EventEmitter } from "events";
 import path from "path";
 import fs from "fs";
 import os from "os";
+import { getBackboneRoot } from "../paths.js";
+
+/**
+ * Build a process env with npm global bin on PATH (Windows fix).
+ * Claude Code is installed via npm — on Windows the global bin dir
+ * may not be on PATH when BACKBONE is launched from backbone.bat.
+ */
+const getProcessEnvWithNpm = () => {
+  const env = { ...process.env };
+  if (process.platform === "win32") {
+    const npmBin = path.join(process.env.APPDATA || "", "npm");
+    if (npmBin) {
+      const pathValue = env.PATH || env.Path || "";
+      if (!pathValue.toLowerCase().includes(npmBin.toLowerCase())) {
+        // Set both casings to be safe on Windows
+        const newPath = `${npmBin}${path.delimiter}${pathValue}`;
+        env.PATH = newPath;
+        env.Path = newPath;
+      }
+    }
+  }
+  return env;
+};
 
 /**
  * Claude Code Backend for BACKBONE
@@ -46,19 +69,22 @@ export const STREAM_MESSAGE_TYPE = {
   RESULT: "result"            // Final result with session_id
 };
 
+// On Windows, use "claude.cmd" — bare "claude" can timeout due to slow shell resolution
+const CLAUDE_CMD = process.platform === "win32" ? "claude.cmd" : "claude";
+
 /**
  * Check if Claude Code CLI is installed
  */
 export const detectClaudeCode = async () => {
   // Try claude CLI first
   try {
-    const result = await runCommand("claude", ["--version"]);
+    const result = await runCommand(CLAUDE_CMD, ["--version"], { timeout: 15000 });
     if (result.success) {
       return {
         type: BACKEND_TYPE.CLAUDE_CODE,
         installed: true,
         version: result.output.trim(),
-        command: "claude"
+        command: CLAUDE_CMD
       };
     }
   } catch (e) {
@@ -97,11 +123,12 @@ const runCommand = (command, args, options = {}) => {
     const proc = spawn(command, args, {
       shell: true,
       cwd: options.cwd || process.cwd(),
-      env: { ...process.env, ...options.env }
+      env: { ...getProcessEnvWithNpm(), ...options.env }
     });
 
     let output = "";
     let error = "";
+    let settled = false;
 
     proc.stdout.on("data", (data) => {
       output += data.toString();
@@ -112,6 +139,8 @@ const runCommand = (command, args, options = {}) => {
     });
 
     proc.on("close", (code) => {
+      if (settled) return;
+      settled = true;
       resolve({
         success: code === 0,
         output,
@@ -121,6 +150,8 @@ const runCommand = (command, args, options = {}) => {
     });
 
     proc.on("error", (err) => {
+      if (settled) return;
+      settled = true;
       resolve({
         success: false,
         output: "",
@@ -128,6 +159,16 @@ const runCommand = (command, args, options = {}) => {
         exitCode: -1
       });
     });
+
+    // Timeout support
+    if (options.timeout) {
+      setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        proc.kill();
+        resolve({ success: false, output: "", error: "Timeout", exitCode: -1 });
+      }, options.timeout);
+    }
   });
 };
 
@@ -259,7 +300,8 @@ export class ClaudeCodeBackend extends EventEmitter {
       const args = [
         "--output-format", "stream-json",  // Real-time streaming JSON
         "--verbose",
-        "--dangerously-skip-permissions"
+        "--dangerously-skip-permissions",
+        ...(fs.existsSync(getBackboneRoot()) ? ["--add-dir", getBackboneRoot()] : [])
       ];
 
       // Session management

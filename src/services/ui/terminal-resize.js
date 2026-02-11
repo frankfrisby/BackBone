@@ -320,7 +320,8 @@ export const supportsResize = () => {
 };
 
 // Store the base title to restore after temporary titles
-let baseTitle = "Backbone";
+let baseTitle = "BACKBONE";
+let currentWork = null; // Persistent work context (goal, project, query)
 let tempTitleTimeout = null;
 
 /**
@@ -342,8 +343,13 @@ export const setTerminalTitle = (title) => {
  * @param {string} userName - User's name to include in title
  */
 export const setBaseTitle = (userName) => {
-  baseTitle = userName ? `Backbone · ${userName}` : "Backbone";
-  setTerminalTitle(baseTitle);
+  baseTitle = userName ? `BACKBONE · ${userName}` : "BACKBONE";
+  // If there's active work, show that instead
+  if (currentWork) {
+    setTerminalTitle(`${baseTitle} · ${currentWork}`);
+  } else {
+    setTerminalTitle(baseTitle);
+  }
 };
 
 /**
@@ -373,13 +379,45 @@ export const showTemporaryTitle = (title, duration = 30000) => {
 };
 
 /**
- * Show activity in title (e.g., "Backbone · User · Working on: Find jobs")
- * @param {string} activity - Activity description
- * @param {number} duration - Duration in milliseconds
+ * Set persistent work context in title (stays until cleared).
+ * Use for goals, projects, queries being actively worked on.
+ * @param {string} work - Work description (e.g., "Goal: Run 5K", "Query: portfolio update")
  */
-export const showActivityTitle = (activity, duration = 30000) => {
+export const setWorkContext = (work) => {
+  currentWork = work || null;
+  if (currentWork) {
+    setTerminalTitle(`${baseTitle} · ${currentWork}`);
+  } else {
+    setTerminalTitle(baseTitle);
+  }
+};
+
+/**
+ * Clear work context and restore base title
+ */
+export const clearWorkContext = () => {
+  currentWork = null;
+  setTerminalTitle(baseTitle);
+};
+
+/**
+ * Show activity in title (e.g., "BACKBONE · Frank · Working on: Find jobs")
+ * @param {string} activity - Activity description
+ * @param {number} duration - Duration in milliseconds (0 = persistent until cleared)
+ */
+export const showActivityTitle = (activity, duration = 0) => {
+  currentWork = activity;
   const title = `${baseTitle} · ${activity}`;
-  showTemporaryTitle(title, duration);
+  if (duration > 0) {
+    showTemporaryTitle(title, duration);
+  } else {
+    // Persistent — stays until next setWorkContext/clearWorkContext
+    if (tempTitleTimeout) {
+      clearTimeout(tempTitleTimeout);
+      tempTitleTimeout = null;
+    }
+    setTerminalTitle(title);
+  }
 };
 
 /**
@@ -422,6 +460,8 @@ export default {
   setTerminalTitle,
   setBaseTitle,
   getBaseTitle,
+  setWorkContext,
+  clearWorkContext,
   showTemporaryTitle,
   showActivityTitle,
   showNotificationTitle,

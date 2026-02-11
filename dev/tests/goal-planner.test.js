@@ -13,12 +13,13 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fs from "fs";
 import path from "path";
+import { getDataDir, getProjectsDir } from "../../src/services/paths.js";
 
 // === HELPERS ===
 
-const DATA_DIR = path.join(process.cwd(), "data");
+const DATA_DIR = getDataDir();
 const GOALS_PATH = path.join(DATA_DIR, "goals.json");
-const PROJECTS_DIR = path.join(process.cwd(), "projects");
+const PROJECTS_DIR = getProjectsDir();
 
 function readJson(filePath) {
   try {

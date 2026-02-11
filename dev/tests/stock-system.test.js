@@ -8,8 +8,9 @@ import assert from "assert";
 import fs from "fs";
 import path from "path";
 import http from "http";
+import { getDataDir } from "../../src/services/paths.js";
 
-const DATA_DIR = path.join(process.cwd(), "data");
+const DATA_DIR = getDataDir();
 const results = { passed: 0, failed: 0, skipped: 0, tests: [] };
 
 function test(name, fn) {
@@ -47,7 +48,7 @@ function skip(name, reason) {
 // ===== 1. TICKER DATA - Core Lists =====
 console.log("\n=== Ticker Data: Core Lists ===");
 
-const { CORE_TICKERS, TICKER_UNIVERSE } = await import("../src/data/tickers.js");
+const { CORE_TICKERS, TICKER_UNIVERSE } = await import("../../src/data/tickers.js");
 
 test("CORE_TICKERS is a non-empty array of strings", () => {
   assert(Array.isArray(CORE_TICKERS), "CORE_TICKERS should be array");
@@ -101,8 +102,8 @@ test("SPY is in CORE_TICKERS (needed for auto-trader SPY direction)", () => {
 // ===== 2. TRADING ALGORITHMS - Score Calculations =====
 console.log("\n=== Trading Algorithms: Score Engine ===");
 
-const { TRADING_CONFIG, TRADING_RULES, getActionFromScore } = await import("../src/services/trading-algorithms.js");
-const { SCORE_THRESHOLDS, getSignalFromScore } = await import("../src/services/score-engine.js");
+const { TRADING_CONFIG, TRADING_RULES, getActionFromScore } = await import("../../src/services/trading/trading-algorithms.js");
+const { SCORE_THRESHOLDS, getSignalFromScore } = await import("../../src/services/trading/score-engine.js");
 
 test("SCORE_THRESHOLDS has all required levels", () => {
   assert(SCORE_THRESHOLDS, "Should export SCORE_THRESHOLDS");
@@ -234,7 +235,7 @@ test("Cache tickers include RSI data", () => {
 // ===== 4. YAHOO CLIENT - Server Communication =====
 console.log("\n=== Yahoo Client: Server Communication ===");
 
-const { isServerRunning, fetchTickers, triggerFullScan, refreshTickers, getServerStatus } = await import("../src/services/yahoo-client.js");
+const { isServerRunning, fetchTickers, triggerFullScan, refreshTickers, getServerStatus } = await import("../../src/services/yahoo-client.js");
 
 await asyncTest("isServerRunning returns boolean", async () => {
   const running = await isServerRunning();
@@ -351,7 +352,7 @@ await asyncTest("Server /api/full-scan triggers scan", async () => {
 // ===== 6. AUTO-TRADER INTEGRATION - Full Pipeline =====
 console.log("\n=== Auto-Trader: Full Pipeline with Real Cache ===");
 
-const { evaluateBuySignal, evaluateSellSignal, loadConfig } = await import("../src/services/auto-trader.js");
+const { evaluateBuySignal, evaluateSellSignal, loadConfig } = await import("../../src/services/trading/auto-trader.js");
 
 test("Auto-trader can evaluate real cached tickers", () => {
   const cachePath = path.join(DATA_DIR, "tickers-cache.json");
@@ -422,7 +423,7 @@ test("Score distribution looks reasonable", () => {
 // ===== 7. TRADING HISTORY =====
 console.log("\n=== Trading History ===");
 
-const { getTradingHistory, getNextTradingTime, formatTimeAgo } = await import("../src/services/trading-history.js");
+const { getTradingHistory, getNextTradingTime, formatTimeAgo } = await import("../../src/services/trading/trading-history.js");
 
 test("getTradingHistory returns valid structure", () => {
   const history = getTradingHistory();

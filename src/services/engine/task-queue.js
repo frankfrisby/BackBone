@@ -7,11 +7,9 @@
 
 import fs from "fs";
 import path from "path";
-import { fileURLToPath } from "url";
+import { memoryFile } from "../paths.js";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const MEMORY_DIR = path.join(__dirname, "../../memory");
-const QUEUE_FILE = path.join(MEMORY_DIR, "task-queue.md");
+const QUEUE_FILE = memoryFile("task-queue.md");
 
 /**
  * Task priorities

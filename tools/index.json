@@ -197,6 +197,49 @@
       "inputs": {
         "project": { "type": "string", "description": "Filter by project (optional)" }
       }
+    },
+    {
+      "id": "video-analyzer",
+      "name": "Video Analyzer",
+      "description": "Analyze YouTube videos — extract transcript, key frames, and AI-powered visual analysis. Downloads video, extracts frames at intervals, transcribes audio, and uses Claude/OpenAI vision to describe each frame.",
+      "category": "media",
+      "file": "video-analyzer.js",
+      "inputs": {
+        "url": { "type": "string", "required": true, "description": "YouTube URL or video ID" },
+        "intervalSeconds": { "type": "number", "default": 5, "description": "Extract a frame every N seconds" },
+        "maxFrames": { "type": "number", "default": 30, "description": "Maximum frames to extract" },
+        "keepFiles": { "type": "boolean", "default": false, "description": "Save frames and analysis to data/video-analysis/" },
+        "framesOnly": { "type": "boolean", "default": false, "description": "Skip transcript, only extract and analyze frames" },
+        "transcriptOnly": { "type": "boolean", "default": false, "description": "Skip video download, only fetch transcript and metadata" }
+      },
+      "examples": [
+        { "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ", "intervalSeconds": 10 },
+        { "url": "dQw4w9WgXcQ", "transcriptOnly": true },
+        { "url": "https://youtu.be/dQw4w9WgXcQ", "keepFiles": true, "maxFrames": 20 }
+      ]
+    },
+    {
+      "id": "enrich-linkedin-profile",
+      "name": "Enrich LinkedIn Profile",
+      "description": "Enrich any user's LinkedIn profile from public web sources. Two-phase: plan (get search queries) then enrich (save results).",
+      "category": "profile",
+      "file": "enrich-linkedin-profile.js",
+      "inputs": {
+        "action": { "type": "string", "default": "status", "description": "Action: status, plan, enrich, auto" },
+        "name": { "type": "string", "description": "Full name (for enrich action)" },
+        "headline": { "type": "string", "description": "Headline (for enrich action)" },
+        "about": { "type": "string", "description": "About section (for enrich action)" },
+        "experience": { "type": "array", "description": "Experience array (for enrich action)" },
+        "education": { "type": "array", "description": "Education array (for enrich action)" },
+        "skills": { "type": "array", "description": "Skills array (for enrich action)" },
+        "profileUrl": { "type": "string", "description": "LinkedIn URL (for enrich action)" }
+      },
+      "examples": [
+        { "action": "status" },
+        { "action": "plan" },
+        { "action": "auto" },
+        { "action": "enrich", "name": "Jane Doe", "about": "AI Engineer at...", "skills": [{"name": "Python"}] }
+      ]
     }
   ],
   "categories": {
@@ -207,6 +250,8 @@
     "daily": "Daily briefing and routine tools",
     "world": "World awareness - markets, news, and global events monitoring",
     "messaging": "Proactive messaging and alerts to the user",
-    "documents": "Document generation — LaTeX, PDF, Word, Excel"
+    "documents": "Document generation — LaTeX, PDF, Word, Excel",
+    "media": "Media processing — video analysis, audio transcription, image processing",
+    "profile": "User profile management — LinkedIn enrichment, identity"
   }
 }

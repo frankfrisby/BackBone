@@ -7,12 +7,10 @@
 
 import fs from "fs";
 import path from "path";
-import { fileURLToPath } from "url";
+import { memoryFile } from "../paths.js";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const MEMORY_DIR = path.join(__dirname, "../../memory");
-const ENGINE_STATE_FILE = path.join(MEMORY_DIR, "engine-state.md");
-const THINKING_JOURNAL_FILE = path.join(MEMORY_DIR, "thinking-journal.md");
+const ENGINE_STATE_FILE = memoryFile("engine-state.md");
+const THINKING_JOURNAL_FILE = memoryFile("thinking-journal.md");
 
 /**
  * Engine state object
@@ -346,7 +344,7 @@ export async function archiveOldJournalEntries() {
 
     // Save archive if there are old entries
     if (archiveLines.length > 10) {
-      const archiveFile = path.join(MEMORY_DIR, `thinking-journal-archive-${cutoffStr}.md`);
+      const archiveFile = memoryFile(`thinking-journal-archive-${cutoffStr}.md`);
       await fs.promises.writeFile(archiveFile, archiveLines.join("\n"), "utf-8");
       await fs.promises.writeFile(THINKING_JOURNAL_FILE, keepLines.join("\n"), "utf-8");
       console.log(`[StatePersistence] Archived ${archiveLines.length} journal lines`);

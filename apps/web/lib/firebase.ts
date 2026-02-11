@@ -19,23 +19,32 @@ const firebaseConfig = {
   appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID,
 };
 
-let app: FirebaseApp;
-let auth: Auth;
-let db: Firestore;
+const isFirebaseConfigured = Object.values(firebaseConfig).every(Boolean);
 
-if (typeof window !== "undefined" && !getApps().length) {
-  app = initializeApp(firebaseConfig);
+let app: FirebaseApp | undefined;
+let auth: Auth | undefined;
+let db: Firestore | undefined;
+
+if (typeof window !== "undefined" && isFirebaseConfigured) {
+  if (!getApps().length) {
+    app = initializeApp(firebaseConfig);
+  } else {
+    app = getApp();
+  }
   auth = getAuth(app);
   db = getFirestore(app);
 } else if (typeof window !== "undefined") {
-  app = getApp();
-  auth = getAuth(app);
-  db = getFirestore(app);
+  console.warn(
+    "Firebase is not configured. Set NEXT_PUBLIC_FIREBASE_* env vars to enable auth."
+  );
 }
 
-export { auth, db };
+export { auth, db, isFirebaseConfigured };
 
 export const signInWithGoogle = async () => {
+  if (!auth) {
+    throw new Error("Firebase is not configured. Cannot sign in.");
+  }
   const provider = new GoogleAuthProvider();
   try {
     const result = await signInWithPopup(auth, provider);
@@ -47,6 +56,9 @@ export const signInWithGoogle = async () => {
 };
 
 export const signOut = async () => {
+  if (!auth) {
+    throw new Error("Firebase is not configured. Cannot sign out.");
+  }
   try {
     await firebaseSignOut(auth);
   } catch (error) {
@@ -56,5 +68,9 @@ export const signOut = async () => {
 };
 
 export const onAuthStateChange = (callback: (user: User | null) => void) => {
+  if (!auth) {
+    callback(null);
+    return () => {};
+  }
   return onAuthStateChanged(auth, callback);
 };

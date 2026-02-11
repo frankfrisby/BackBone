@@ -7,9 +7,10 @@
 import assert from "assert";
 import fs from "fs";
 import path from "path";
+import { getDataDir, getMemoryDir } from "../../src/services/paths.js";
 
-const DATA_DIR = path.join(process.cwd(), "data");
-const MEMORY_DIR = path.join(process.cwd(), "memory");
+const DATA_DIR = getDataDir();
+const MEMORY_DIR = getMemoryDir();
 
 const results = { passed: 0, failed: 0, skipped: 0, tests: [] };
 

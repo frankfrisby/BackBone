@@ -222,7 +222,7 @@ class LinkedInAgent extends EventEmitter {
         {
           step: 1,
           action: "navigate",
-          url: "https://www.linkedin.com/in/me",
+          url: "https://www.linkedin.com/me",
           description: "Go to user's LinkedIn profile (redirects to actual URL)",
           waitFor: "profile page load",
         },
@@ -317,7 +317,7 @@ class LinkedInAgent extends EventEmitter {
         {
           step: 1,
           action: "navigate",
-          url: profileUrl ? `${profileUrl}recent-activity/all/` : "https://www.linkedin.com/in/me/recent-activity/all/",
+          url: profileUrl ? `${profileUrl}recent-activity/all/` : "https://www.linkedin.com/me/recent-activity/all/",
           description: "Navigate to user's recent activity/posts page",
         },
         {

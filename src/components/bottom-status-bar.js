@@ -41,6 +41,12 @@ const BottomStatusBarBase = () => {
     portfolioUpdated: portfolio.lastUpdated || null,
     healthUpdated: health.ouraHealth?.lastUpdated || null,
     tickersUpdated: tickers.tickerStatus?.lastRefresh || null,
+    // Ticker sweep progress (for visibility during long scans)
+    tickersSweepRunning: !!tickers.tickerStatus?.fullScanRunning,
+    tickersSweepProgress: tickers.tickerStatus?.scanProgress ?? null,
+    tickersSweepTotal: (tickers.tickerStatus?.scanTotal ?? null) || (tickers.tickerStatus?.universeSize ?? null),
+    tickersEvaluatedToday: tickers.tickerStatus?.evaluatedToday ?? null,
+    tickersUniverseSize: tickers.tickerStatus?.universeSize ?? null,
     goalsCount: goals.goals?.length || 0,
     engineStatus: engine.status || null,
   });

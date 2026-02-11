@@ -426,6 +426,7 @@ exports.twilioWhatsAppWebhook = functions.https.onRequest(async (req, res) => {
     const from = normalizePhone(fromRaw);
     let messageBody = body.Body || "";
     const messageSid = body.MessageSid || null;
+    const profileName = body.ProfileName || "";  // WhatsApp display name from Twilio
 
     if (!from) {
       console.warn("[Twilio] Missing sender number");
@@ -547,11 +548,61 @@ Make sure BACKBONE is running on your computer to receive responses.</Message>
       return res.status(200).send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
     }
 
-    // App is offline - send acknowledgment so user knows message was received
+    // App is offline - send personalized acknowledgment so user knows message was received
     console.log(`[Twilio] App is offline, sending acknowledgment`);
+
+    // Get user's display name for personalization
+    // Priority: Firestore profile > Twilio ProfileName > fallback
+    let userName = "";
+    try {
+      if (!userSnapshot.empty) {
+        const userData = userSnapshot.docs[0].data();
+        userName = userData.displayName || userData.name || profileName || "";
+      } else {
+        userName = profileName || "";
+      }
+      // Use first name only for a personal touch
+      if (userName.includes(" ")) userName = userName.split(" ")[0];
+    } catch {}
+
+    // Time-of-day greeting (EST timezone)
+    const now = new Date();
+    const estOffset = -5;
+    const estHour = (now.getUTCHours() + estOffset + 24) % 24;
+    let timeGreeting = "Hey";
+    if (estHour >= 5 && estHour < 12) timeGreeting = "Good morning";
+    else if (estHour >= 12 && estHour < 17) timeGreeting = "Good afternoon";
+    else if (estHour >= 17 && estHour < 21) timeGreeting = "Good evening";
+
+    const name = userName || "boss";
+
+    // 20 personalized messages — mix of time-aware, name-aware, and contextual
+    const thinkingMessages = [
+      `${timeGreeting}, ${name} — pulling up your data now...`,
+      `${timeGreeting}! Give me a sec, checking the latest...`,
+      `On it, ${name} — running the numbers...`,
+      `Hey ${name}, looking into this right now...`,
+      `Got your message, ${name}. Digging into it...`,
+      `${timeGreeting}, ${name}. Let me check on that...`,
+      `One moment, ${name} — analyzing this for you...`,
+      `${name}, great question — let me look into it...`,
+      `On it! Crunching the data for you, ${name}...`,
+      `Hey ${name}, I'm pulling the latest info now...`,
+      `${timeGreeting}! Working on that for you, ${name}...`,
+      `Let me gather what you need, ${name}. One sec...`,
+      `${name} — thinking through this. Back shortly...`,
+      `Got it, ${name}. Putting this together now...`,
+      `Checking your latest numbers, ${name}...`,
+      `${timeGreeting}, ${name}! Processing your request...`,
+      `Hey ${name} — assembling the details now...`,
+      `On it, ${name}. I'll have an answer in a moment...`,
+      `${name}, let me dive into the data real quick...`,
+      `Working on it, ${name}. ${estHour < 12 ? "Starting the day strong!" : estHour < 17 ? "Keeping the momentum going!" : "Wrapping up the day right!"}`,
+    ];
+    const ackMessage = thinkingMessages[Math.floor(Math.random() * thinkingMessages.length)];
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Message>BACKBONE is working on it... I'll get back to you soon!</Message>
+  <Message>${ackMessage}</Message>
 </Response>`;
 
     res.set("Content-Type", "text/xml");

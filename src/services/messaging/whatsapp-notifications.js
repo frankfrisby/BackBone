@@ -22,6 +22,7 @@ import { getUnifiedMessageLog, MESSAGE_CHANNEL } from "./unified-message-log.js"
 import { getVerifiedPhone } from "../firebase/phone-auth.js";
 import { showNotificationTitle, restoreBaseTitle } from "../ui/terminal-resize.js";
 import { sendPush, sendMorningBriefPush, sendTradeAlertPush, getPushStatus, PUSH_TYPE } from "./push-notifications.js";
+import { formatTradeNotification, formatBriefForWhatsApp } from "./whatsapp-formatter.js";
 
 /**
  * Notification types
@@ -75,13 +76,22 @@ class WhatsAppNotifications extends EventEmitter {
     // First try local phone verification
     let phone = getVerifiedPhone(userId);
 
-    // If no local phone, try to get from Firestore (set by WhatsApp webhook)
+    // Try user-settings.json (most reliable — same path as working MCP server)
+    if (!phone) {
+      try {
+        const { loadUserSettings } = await import("../user-settings.js");
+        const settings = loadUserSettings();
+        phone = settings?.phoneNumber || settings?.phone || null;
+        if (phone) console.log(`[WhatsAppNotifications] Got phone from user-settings`);
+      } catch {}
+    }
+
+    // Try Firestore (set by WhatsApp webhook)
     if (!phone) {
       try {
         const { getRealtimeMessaging } = await import("./realtime-messaging.js");
         const messaging = getRealtimeMessaging();
         if (messaging.userId === userId || !messaging.userId) {
-          // Ensure messaging is initialized for this user
           if (!messaging.userId) await messaging.initialize(userId);
           const userDoc = await messaging.getUserDocument();
           if (userDoc?.whatsappPhone) {
@@ -270,9 +280,6 @@ class WhatsAppNotifications extends EventEmitter {
    * Notify about a trade execution
    */
   async notifyTrade(trade) {
-    const { symbol, action, quantity, price, total } = trade;
-    const actionWord = action === "buy" ? "Bought" : "Sold";
-
     // Also send as push notification
     try {
       await sendTradeAlertPush(trade);
@@ -281,9 +288,9 @@ class WhatsAppNotifications extends EventEmitter {
     }
 
     return this.send(NOTIFICATION_TYPE.TRADE,
-      `${actionWord} ${quantity} ${symbol} @ $${price.toFixed(2)}\nTotal: $${total.toFixed(2)}`,
+      formatTradeNotification(trade),
       {
-        identifier: `${symbol}_${action}_${Date.now()}`,
+        identifier: `${trade.symbol}_${trade.action}_${Date.now()}`,
         priority: NOTIFICATION_PRIORITY.HIGH,
         metadata: trade,
         pushType: PUSH_TYPE.TRADE_ALERT
@@ -356,51 +363,8 @@ class WhatsAppNotifications extends EventEmitter {
       return { success: false, error: "Already sent today", duplicate: true };
     }
 
-    let message;
-
-    if (typeof briefOrText === "string") {
-      // New path: pre-formatted rich text
-      message = briefOrText;
-    } else {
-      // Legacy path: build from object
-      const { greeting, weather, calendar, priorities, portfolio, health } = briefOrText;
-
-      message = greeting || "Good morning!";
-
-      if (health && (health.sleepScore || health.readiness)) {
-        const parts = [];
-        if (health.sleepScore) parts.push(`Sleep ${health.sleepScore}`);
-        if (health.readiness) parts.push(`Readiness ${health.readiness}`);
-        message += `\n\n${parts.join(" · ")}`;
-      }
-
-      if (calendar && calendar.length > 0) {
-        message += "\n\n";
-        calendar.slice(0, 3).forEach(event => {
-          message += `${event.time} ${event.title}\n`;
-        });
-      }
-
-      if (priorities && priorities.length > 0) {
-        message += "\n";
-        priorities.slice(0, 3).forEach((p, i) => {
-          message += `${i + 1}. ${p}\n`;
-        });
-      }
-
-      if (portfolio) {
-        if (portfolio.topMovers && portfolio.topMovers.length > 0) {
-          message += `\n${portfolio.topMovers.join(" | ")}`;
-        } else if (portfolio.changePercent != null) {
-          const sign = portfolio.changePercent >= 0 ? "+" : "";
-          message += `\nPortfolio ${sign}${portfolio.changePercent.toFixed(1)}%`;
-        }
-      }
-
-      if (weather) {
-        message += `\n\n${weather}`;
-      }
-    }
+    // Use the WhatsApp formatter for beautiful output
+    const message = formatBriefForWhatsApp(briefOrText);
 
     // Send with or without media
     let result;

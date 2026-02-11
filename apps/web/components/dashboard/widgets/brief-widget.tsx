@@ -62,9 +62,8 @@ export function BriefWidget() {
         ? "from-amber-500/6"
         : "";
 
-  const urgentCount = data.actionItems?.filter(
-    (a) => a.priority === "urgent"
-  ).length || 0;
+  const actionItems = Array.isArray(data.actionItems) ? data.actionItems : [];
+  const urgentCount = actionItems.filter((a) => a.priority === "urgent").length;
 
   return (
     <div className={`card-elevated rounded-2xl overflow-hidden ${moodGradient}`}>
@@ -98,9 +97,9 @@ export function BriefWidget() {
       </div>
 
       {/* Action items preview */}
-      {data.actionItems && data.actionItems.length > 0 && (
+      {actionItems.length > 0 && (
         <div className="px-4 pb-3 space-y-1">
-          {data.actionItems.slice(0, 2).map((item, i) => (
+          {actionItems.slice(0, 2).map((item, i) => (
             <div key={i} className="flex items-center gap-2">
               {item.priority === "urgent" ? (
                 <Flame className="h-2.5 w-2.5 text-red-400 shrink-0" />
@@ -110,9 +109,9 @@ export function BriefWidget() {
               <p className="text-[10px] text-neutral-400 truncate">{item.text}</p>
             </div>
           ))}
-          {data.actionItems.length > 2 && (
+          {actionItems.length > 2 && (
             <p className="text-[9px] text-neutral-600 pl-4">
-              +{data.actionItems.length - 2} more
+              +{actionItems.length - 2} more
             </p>
           )}
         </div>

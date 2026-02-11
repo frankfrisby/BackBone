@@ -28,6 +28,10 @@ export const LinkedInDataViewer = ({ data, onClose, visible = true }) => {
     if (profileData.profileUrl) {
       lines.push(`URL: ${profileData.profileUrl}`);
     }
+    if (profileData.captureMethod) lines.push(`Capture: ${profileData.captureMethod}`);
+    if (profileData.httpCode) lines.push(`HTTP: ${profileData.httpCode}`);
+    if (profileData.htmlPath) lines.push(`HTML: ${profileData.htmlPath}`);
+    if (profileData.textPath) lines.push(`Text: ${profileData.textPath}`);
 
     lines.push("");
     lines.push("─── Profile ───");

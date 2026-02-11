@@ -21,6 +21,41 @@ const server = http.createServer(app);
 const PORT = Number.parseInt(process.env.PORT || "3000", 10);
 const REDIRECT_URI = process.env.LINKEDIN_REDIRECT_URI || "http://localhost:3000/linkedin/callback";
 
+// If the API server was spawned by the CLI, self-terminate when the parent process disappears.
+// This prevents "Server already running on port 3000" after closing the CLI window on Windows.
+const parentPid = Number.parseInt(process.env.BACKBONE_PARENT_PID || "", 10);
+if (Number.isFinite(parentPid) && parentPid > 0) {
+  let shuttingDown = false;
+  const t = setInterval(() => {
+    if (shuttingDown) return;
+    try {
+      process.kill(parentPid, 0); // check parent existence
+    } catch {
+      shuttingDown = true;
+      try {
+        server.close(() => process.exit(0));
+      } catch {
+        process.exit(0);
+      }
+    }
+  }, 2000);
+  t.unref();
+}
+
+// Write PID file so the CLI can find and kill us reliably
+const DATA_DIR_PID = getDataDir();
+const PID_FILE = path.join(DATA_DIR_PID, "server.pid");
+try {
+  if (!fs.existsSync(DATA_DIR_PID)) fs.mkdirSync(DATA_DIR_PID, { recursive: true });
+  fs.writeFileSync(PID_FILE, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
+} catch {}
+
+// Clean up PID file on exit
+const cleanupPidFile = () => {
+  try { if (fs.existsSync(PID_FILE)) fs.unlinkSync(PID_FILE); } catch {}
+};
+process.on("exit", cleanupPidFile);
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true })); // For Twilio webhooks (form data)
 
@@ -117,6 +152,12 @@ function buildDashboardCache() {
     } catch {}
   }
 
+  const goalsList = Array.isArray(goals)
+    ? goals
+    : Array.isArray(goals?.goals)
+    ? goals.goals
+    : [];
+
   dashboardCache = {
     user: {
       uid: user.uid || "local",
@@ -132,7 +173,7 @@ function buildDashboardCache() {
       readiness: ouraData?.latest?.readiness?.at(-1) || null,
       activity: ouraData?.latest?.activity?.at(-1) || null,
     },
-    goals: (goals || []).filter(g => g.status === "active").slice(0, 10),
+    goals: goalsList.filter(g => g.status === "active").slice(0, 10),
     lifeScores: lifeScores || null,
     recentTrades: Array.isArray(tradesLog) ? tradesLog.slice(-5) : [],
     predictions: predictionCache ? { totalTickers: Object.keys(predictionCache).length } : null,
@@ -540,6 +581,36 @@ app.get("/api/tickers", async (req, res) => {
   }
 });
 
+// Market Indicators — SPY change + recession score for ticker bar
+app.get("/api/market-indicators", async (req, res) => {
+  try {
+    const dataDir = getDataDir();
+
+    // SPY data from tickers cache
+    let spyChange = null;
+    try {
+      const cachePath = path.join(dataDir, "tickers-cache.json");
+      if (fs.existsSync(cachePath)) {
+        const cache = JSON.parse(fs.readFileSync(cachePath, "utf-8"));
+        const tickers = Array.isArray(cache) ? cache : (cache.tickers || []);
+        const spy = tickers.find(t => t.symbol === "SPY");
+        if (spy) spyChange = spy.changePercent || 0;
+      }
+    } catch {}
+
+    // Recession score
+    let recession = { score: 5.0 };
+    try {
+      const { default: getRecessionScore } = await import("./services/trading/recession-score.js");
+      recession = getRecessionScore();
+    } catch {}
+
+    res.json({ spyChange, recessionScore: recession.score });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Life Scores
 app.get("/api/life-scores", async (req, res) => {
   try {
@@ -719,6 +790,170 @@ app.get("/api/engine/continuity", async (req, res) => {
   }
 });
 
+// ── Continuous Improvement Engine ────────────────────────────
+let continuousEngine = null;
+
+async function getOrCreateContinuousEngine() {
+  if (!continuousEngine) {
+    const { getContinuousEngine } = await import("./services/continuous-engine.js");
+    continuousEngine = getContinuousEngine();
+
+    // Wire events to SSE broadcast + activity log
+    continuousEngine.on("started", () => {
+      broadcastEvent("engine", { status: "running", type: "continuous" });
+      logActivity("engine", "Continuous engine started");
+    });
+    continuousEngine.on("stopped", () => {
+      broadcastEvent("engine", { status: "stopped", type: "continuous" });
+      logActivity("engine", "Continuous engine stopped");
+    });
+    continuousEngine.on("paused", () => {
+      broadcastEvent("engine", { status: "paused", type: "continuous" });
+    });
+    continuousEngine.on("resumed", () => {
+      broadcastEvent("engine", { status: "running", type: "continuous" });
+    });
+    continuousEngine.on("resting", ({ durationMs }) => {
+      broadcastEvent("engine", { status: "resting", restMs: durationMs, type: "continuous" });
+    });
+    continuousEngine.on("plan", (action) => {
+      broadcastEvent("engine", { status: "working", action: action.label, strategy: action.strategy, type: "continuous" });
+      logActivity("engine", `Planning: ${action.label} (${action.strategy})`);
+    });
+    continuousEngine.on("cycle-complete", (cycleData) => {
+      const { action, reward, cycleCount, delta, handoff } = cycleData;
+      broadcastEvent("engine", { status: "cycle_done", action: action.label, reward, cycleCount, type: "continuous" });
+      logActivity("engine", `Cycle ${cycleCount}: ${action.label} → reward ${reward.toFixed(3)}`);
+
+      // Send meaningful cycle summaries to WhatsApp (skip low-impact cycles)
+      if (Math.abs(reward) > 0.02) {
+        sendCycleToWhatsApp(cycleData).catch(() => {});
+      }
+    });
+    continuousEngine.on("error", ({ error }) => {
+      logActivity("engine", `Error: ${error}`);
+    });
+  }
+  return continuousEngine;
+}
+
+app.get("/api/engine/continuous", async (req, res) => {
+  try {
+    const engine = await getOrCreateContinuousEngine();
+    res.json(engine.getStatus());
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/engine/continuous/start", async (req, res) => {
+  try {
+    const engine = await getOrCreateContinuousEngine();
+    const result = await engine.start();
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/engine/continuous/stop", async (req, res) => {
+  try {
+    const engine = await getOrCreateContinuousEngine();
+    engine.stop();
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/engine/continuous/pause", async (req, res) => {
+  try {
+    const engine = await getOrCreateContinuousEngine();
+    engine.pause();
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/engine/continuous/resume", async (req, res) => {
+  try {
+    const engine = await getOrCreateContinuousEngine();
+    engine.resume();
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/engine/continuous/nudge", async (req, res) => {
+  try {
+    const { action } = req.body;
+    const engine = await getOrCreateContinuousEngine();
+    engine.nudge(action);
+    res.json({ ok: true, message: `Nudged to: ${action}` });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── WhatsApp Integration Helpers ─────────────────────────────
+
+/**
+ * Send engine cycle summary to WhatsApp (only meaningful cycles)
+ */
+async function sendCycleToWhatsApp(cycleData) {
+  try {
+    const { getWhatsAppNotifications } = await import("./services/messaging/whatsapp-notifications.js");
+    const { formatCycleSummary } = await import("./services/messaging/whatsapp-formatter.js");
+    const notifications = getWhatsAppNotifications();
+    if (!notifications.enabled) {
+      try { await notifications.initialize("default"); } catch {}
+    }
+    if (!notifications.enabled) return;
+
+    const message = formatCycleSummary(cycleData);
+    await notifications.send("system", message, {
+      identifier: `cycle_${cycleData.cycleCount}`,
+      allowDuplicate: false,
+    });
+  } catch (err) {
+    console.log("[Server] WhatsApp cycle notification failed:", err.message);
+  }
+}
+
+/**
+ * Mirror a chat response to WhatsApp (when user types in BACKBONE message box)
+ */
+async function sendChatResponseToWhatsApp(responseContent) {
+  try {
+    const { getWhatsAppNotifications } = await import("./services/messaging/whatsapp-notifications.js");
+    const { formatAIResponse, chunkMessage } = await import("./services/messaging/whatsapp-formatter.js");
+    const { getTwilioWhatsApp } = await import("./services/messaging/twilio-whatsapp.js");
+
+    const notifications = getWhatsAppNotifications();
+    if (!notifications.enabled) {
+      try { await notifications.initialize("default"); } catch {}
+    }
+    if (!notifications.enabled || !notifications.phoneNumber) return;
+
+    const whatsapp = getTwilioWhatsApp();
+    if (!whatsapp.initialized) {
+      const initResult = await whatsapp.initialize();
+      if (!initResult.success) return;
+    }
+
+    const formatted = formatAIResponse(responseContent);
+    const chunks = chunkMessage(formatted);
+
+    for (const chunk of chunks) {
+      await whatsapp.sendMessage(notifications.phoneNumber, chunk);
+    }
+  } catch (err) {
+    console.log("[Server] WhatsApp chat mirror failed:", err.message);
+  }
+}
+
 // Push notification token registration
 app.post("/api/register-push", async (req, res) => {
   try {
@@ -751,29 +986,75 @@ app.post("/api/register-push", async (req, res) => {
 async function handleChat(message) {
   if (!message) return { role: "assistant", content: "No message provided.", timestamp: Date.now() };
 
+  let chatResult = null;
+
+  // Primary path: use Claude Code CLI (leverages Pro/Max subscription, no API key needed)
   try {
-    const { sendMessage: sendAI } = await import("./services/ai/multi-ai.js");
+    const { runClaudeCodePrompt, getClaudeCodeStatus } = await import("./services/ai/claude-code-cli.js");
+    const cliStatus = await getClaudeCodeStatus();
 
-    // Build context from available data
-    const context = {
-      systemPrompt: `You are BACKBONE, a life optimization AI assistant. You help the user manage their portfolio, health, goals, and daily life. Be concise and actionable. If the user asks about their data (portfolio, health, goals, etc.), provide a brief summary and note that the view has been generated for them. Keep responses under 3 sentences for data queries, longer for analysis or advice.`
-    };
+    if (cliStatus.ready) {
+      // Load context files for the prompt
+      let contextSnippet = "";
+      try {
+        const goalsPath = path.join(dataDir, "goals.json");
+        const cachePath = path.join(dataDir, "alpaca-cache.json");
+        if (fs.existsSync(goalsPath)) {
+          const goals = JSON.parse(fs.readFileSync(goalsPath, "utf8"));
+          const active = (Array.isArray(goals) ? goals : goals.goals || []).filter(g => g.status === "active").slice(0, 5);
+          if (active.length) contextSnippet += `\nActive goals: ${active.map(g => g.title).join(", ")}`;
+        }
+        if (fs.existsSync(cachePath)) {
+          const cache = JSON.parse(fs.readFileSync(cachePath, "utf8"));
+          if (cache.account?.equity) contextSnippet += `\nPortfolio equity: $${parseFloat(cache.account.equity).toFixed(2)}`;
+        }
+      } catch { /* context loading is best-effort */ }
 
-    const result = await sendAI(message, context);
-    const content = typeof result === "string"
-      ? result
-      : result?.response || result?.content || "I processed your request.";
+      const prompt = `You are BACKBONE, a life optimization AI assistant. You help the user manage their portfolio, health, goals, and daily life. Be concise and actionable. Keep responses under 3 sentences for data queries, longer for analysis or advice.${contextSnippet}\n\nUser: ${message}`;
 
-    return { role: "assistant", content, timestamp: Date.now() };
-  } catch (err) {
-    console.error("AI chat error:", err.message);
-    // Fallback to basic response if AI service unavailable
-    return {
-      role: "assistant",
-      content: `I received your request. The AI service is not available right now, but I've loaded the relevant view for you.`,
-      timestamp: Date.now(),
-    };
+      const result = await runClaudeCodePrompt(prompt, { timeout: 60000 });
+      if (result.success && result.output) {
+        chatResult = { role: "assistant", content: result.output.trim(), timestamp: Date.now() };
+      } else {
+        // If CLI call failed, fall through to API fallback
+        console.log("[Server] Claude Code CLI chat failed, trying API fallback:", result.error);
+      }
+    }
+  } catch (cliErr) {
+    console.log("[Server] Claude Code CLI unavailable for chat:", cliErr.message);
   }
+
+  // Fallback: use multi-ai (requires ANTHROPIC_API_KEY or OPENAI_API_KEY)
+  if (!chatResult) {
+    try {
+      const { sendMessage: sendAI } = await import("./services/ai/multi-ai.js");
+
+      const context = {
+        systemPrompt: `You are BACKBONE, a life optimization AI assistant. You help the user manage their portfolio, health, goals, and daily life. Be concise and actionable. If the user asks about their data (portfolio, health, goals, etc.), provide a brief summary and note that the view has been generated for them. Keep responses under 3 sentences for data queries, longer for analysis or advice.`
+      };
+
+      const result = await sendAI(message, context);
+      const content = typeof result === "string"
+        ? result
+        : result?.response || result?.content || "I processed your request.";
+
+      chatResult = { role: "assistant", content, timestamp: Date.now() };
+    } catch (err) {
+      console.error("AI chat error:", err.message);
+      chatResult = {
+        role: "assistant",
+        content: `I received your request. The AI service is not available right now, but I've loaded the relevant view for you.`,
+        timestamp: Date.now(),
+      };
+    }
+  }
+
+  // Mirror the response to WhatsApp (async, non-blocking)
+  if (chatResult?.content) {
+    sendChatResponseToWhatsApp(chatResult.content).catch(() => {});
+  }
+
+  return chatResult;
 }
 
 async function handlePortfolio() {
@@ -1297,10 +1578,44 @@ app.get("/api/vapi/status", async (req, res) => {
   }
 });
 
+// ── WhatsApp Poller Status ────────────────────────────────────
+app.get("/api/whatsapp/poller", async (req, res) => {
+  try {
+    const { getWhatsAppPoller } = await import("./services/messaging/whatsapp-poller.js");
+    res.json(getWhatsAppPoller().getStatus());
+  } catch (err) {
+    res.json({ running: false, error: err.message });
+  }
+});
+
+// ── Proactive Scheduler Status & Trigger ──────────────────────
+
+app.get("/api/proactive/status", async (req, res) => {
+  try {
+    const { getProactiveScheduler } = await import("./services/messaging/proactive-scheduler.js");
+    res.json(getProactiveScheduler().getStatus());
+  } catch (err) {
+    res.json({ running: false, error: err.message });
+  }
+});
+
+app.post("/api/proactive/trigger", async (req, res) => {
+  try {
+    const { jobId } = req.body;
+    if (!jobId) return res.status(400).json({ error: "jobId required" });
+    const { getProactiveScheduler } = await import("./services/messaging/proactive-scheduler.js");
+    const result = await getProactiveScheduler().triggerJob(jobId);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── WhatsApp Webhook (Twilio) ─────────────────────────────────
 app.post("/api/whatsapp/webhook", async (req, res) => {
   try {
     const { getTwilioWhatsApp } = await import("./services/messaging/twilio-whatsapp.js");
+    const { formatAIResponse, chunkMessage, formatPortfolioUpdate, formatHealthUpdate, formatGoalsSummary } = await import("./services/messaging/whatsapp-formatter.js");
     const whatsapp = getTwilioWhatsApp();
 
     // Initialize if needed
@@ -1326,77 +1641,159 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
     res.type("text/xml");
     res.send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
 
-    // Send "working on it" update
-    await whatsapp.sendMessage(userPhone, "Got it. Working on that now...");
-
     // Process the request with full context
     try {
-      // Load user context
-      const dataDir = getDataDir();
+      // Load comprehensive user context
+      const whatsAppDataDir = getDataDir();
       let context = {};
 
       // Portfolio
       try {
-        const alpaca = JSON.parse(fs.readFileSync(path.join(dataDir, "alpaca-cache.json"), "utf-8"));
+        const alpaca = JSON.parse(fs.readFileSync(path.join(whatsAppDataDir, "alpaca-cache.json"), "utf-8"));
         context.portfolio = {
           equity: alpaca.account?.equity,
           cash: alpaca.account?.cash,
+          buying_power: alpaca.account?.buying_power,
           positions: alpaca.positions?.filter(p => !p.symbol.includes("CVR")).map(p => ({
             symbol: p.symbol,
             qty: p.qty,
             value: p.market_value,
-            pl: p.unrealized_pl
+            pl: p.unrealized_pl,
+            plPercent: p.unrealized_plpc
           }))
         };
       } catch {}
 
       // Life scores
       try {
-        context.lifeScores = JSON.parse(fs.readFileSync(path.join(dataDir, "life-scores.json"), "utf-8"));
+        context.lifeScores = JSON.parse(fs.readFileSync(path.join(whatsAppDataDir, "life-scores.json"), "utf-8"));
       } catch {}
 
-      // Top tickers
+      // Top/bottom tickers
       try {
-        const tickers = JSON.parse(fs.readFileSync(path.join(dataDir, "tickers-cache.json"), "utf-8"));
-        context.topTickers = (tickers.tickers || tickers).slice(0, 5).map(t => ({
-          symbol: t.symbol,
-          score: t.score,
-          change: t.changePercent
+        const tickers = JSON.parse(fs.readFileSync(path.join(whatsAppDataDir, "tickers-cache.json"), "utf-8"));
+        const arr = tickers.tickers || tickers;
+        context.topTickers = arr.slice(0, 5).map(t => ({
+          symbol: t.symbol, score: t.score?.toFixed(1), change: t.changePercent
+        }));
+        // Also include bottom 3 for sell signals
+        context.bottomTickers = arr.slice(-3).map(t => ({
+          symbol: t.symbol, score: t.score?.toFixed(1), change: t.changePercent
         }));
       } catch {}
 
       // Health
       try {
-        const oura = JSON.parse(fs.readFileSync(path.join(dataDir, "oura-data.json"), "utf-8"));
+        const oura = JSON.parse(fs.readFileSync(path.join(whatsAppDataDir, "oura-data.json"), "utf-8"));
         const latest = oura.latest || oura.history?.[oura.history.length - 1];
         context.health = {
-          sleep: latest?.sleep?.[latest.sleep.length - 1]?.score,
-          readiness: latest?.readiness?.[latest.readiness.length - 1]?.score
+          sleep: latest?.sleep?.at(-1)?.score,
+          readiness: latest?.readiness?.at(-1)?.score,
+          activity: latest?.activity?.at(-1)?.score
         };
       } catch {}
 
-      // Build prompt for Claude
-      const { sendMessage } = await import("./services/ai/claude.js");
-      const prompt = `You are BACKBONE, a personal AI assistant for an executive. The user sent this via WhatsApp:
+      // Active goals
+      try {
+        const goalsRaw = JSON.parse(fs.readFileSync(path.join(whatsAppDataDir, "goals.json"), "utf-8"));
+        const goals = Array.isArray(goalsRaw) ? goalsRaw : goalsRaw.goals || [];
+        context.goals = goals.filter(g => g.status === "active").slice(0, 5).map(g => ({
+          title: g.title, progress: g.progress || 0, category: g.category
+        }));
+      } catch {}
 
-"${userMessage}"
+      // Engine state (handoff from continuous engine)
+      try {
+        const handoffPath = path.join(whatsAppDataDir, "engine-handoff.json");
+        if (fs.existsSync(handoffPath)) {
+          const handoff = JSON.parse(fs.readFileSync(handoffPath, "utf-8"));
+          context.engineLastAction = handoff.fromAction;
+          context.engineNextTask = handoff.nextTask;
+        }
+      } catch {}
 
-USER CONTEXT:
+      // Recent trades
+      try {
+        const trades = JSON.parse(fs.readFileSync(path.join(whatsAppDataDir, "trades-log.json"), "utf-8"));
+        if (Array.isArray(trades)) {
+          context.recentTrades = trades.slice(-3).map(t => ({
+            symbol: t.symbol, action: t.side || t.action, qty: t.qty, price: t.price, time: t.timestamp
+          }));
+        }
+      } catch {}
+
+      // Build the AI prompt — instruct WhatsApp-native formatting
+      const prompt = `You are BACKBONE, an executive AI assistant. The user messaged you on WhatsApp.
+
+*User message:* "${userMessage}"
+
+*FORMATTING RULES (CRITICAL):*
+Use WhatsApp-native formatting in your response:
+- *bold* for emphasis (single asterisks)
+- _italic_ for secondary emphasis (underscores)
+- ~strikethrough~ for corrections
+- \`\`\`code\`\`\` for numbers/data blocks
+- Bullet points with - or •
+- Keep under 1500 characters
+- No markdown headers (##), no [links](url)
+- Use emojis sparingly for visual scanning
+
+*USER CONTEXT:*
 ${JSON.stringify(context, null, 2)}
 
-Respond in a conversational but information-dense way. Use *bold* for emphasis, bullet points where helpful. Max 1500 chars. Be specific with numbers from the context. If they ask about markets, mention top tickers. If about health, mention scores. If about portfolio, mention positions and P&L.`;
+Respond to the user's question with specific data from the context above. Be concise, actionable, and data-rich. If they ask about markets, mention specific tickers and scores. If about health, cite Oura scores. If about portfolio, cite positions and P&L. If they ask what the engine is doing, mention the last action and next planned task.`;
 
-      const aiResponse = await sendMessage(prompt, { format: "text", maxTokens: 1000 });
+      // Use Claude Code CLI (Pro/Max subscription) — no API key needed
+      let responseText = null;
+      try {
+        const { runClaudeCodePrompt } = await import("./services/ai/claude-code-cli.js");
+        const cliResult = await runClaudeCodePrompt(prompt, { timeout: 90000 });
+        if (cliResult.success && cliResult.output) {
+          responseText = cliResult.output.trim();
+        } else {
+          console.log("[WhatsApp Webhook] CLI failed, trying multi-ai fallback:", cliResult.error);
+        }
+      } catch (cliErr) {
+        console.log("[WhatsApp Webhook] CLI unavailable:", cliErr.message);
+      }
 
-      if (aiResponse && typeof aiResponse === "string") {
-        await whatsapp.sendMessage(userPhone, aiResponse.slice(0, 1500));
-        console.log("[WhatsApp Webhook] Sent full response to", userPhone);
+      // Fallback: try multi-ai (requires API key)
+      if (!responseText) {
+        try {
+          const { sendMessage } = await import("./services/ai/multi-ai.js");
+          const aiResponse = await sendMessage(prompt, { format: "text", maxTokens: 1000 });
+          if (typeof aiResponse === "string") {
+            responseText = aiResponse;
+          } else if (aiResponse?.content) {
+            responseText = aiResponse.content;
+          } else if (aiResponse?.message) {
+            responseText = aiResponse.message;
+          } else if (aiResponse?.response) {
+            responseText = aiResponse.response;
+          } else if (aiResponse?.error) {
+            console.error("[WhatsApp Webhook] multi-ai error:", aiResponse.error);
+          }
+        } catch (aiErr) {
+          console.error("[WhatsApp Webhook] multi-ai fallback failed:", aiErr.message);
+        }
+      }
+
+      if (responseText) {
+        // Run through WhatsApp formatter as safety net
+        const formatted = formatAIResponse(responseText);
+        const chunks = chunkMessage(formatted, 1500);
+
+        for (const chunk of chunks) {
+          await whatsapp.sendMessage(userPhone, chunk);
+        }
+        console.log("[WhatsApp Webhook] Sent response to", userPhone, `(${chunks.length} chunks)`);
       } else {
-        await whatsapp.sendMessage(userPhone, "Processed your request but couldn't generate a response. Try again?");
+        console.error("[WhatsApp Webhook] No response text. aiResponse:", JSON.stringify(aiResponse)?.slice(0, 300));
+        await whatsapp.sendMessage(userPhone, "_Something went wrong generating a response. The AI service may be temporarily unavailable._");
       }
     } catch (aiErr) {
       console.error("[WhatsApp Webhook] AI processing failed:", aiErr.message);
-      await whatsapp.sendMessage(userPhone, `Hit a snag: ${aiErr.message.slice(0, 100)}. Try again in a moment.`);
+      await whatsapp.sendMessage(userPhone, `Hit a snag processing that: _${aiErr.message.slice(0, 100)}_\nTry again in a moment.`);
     }
   } catch (err) {
     console.error("[WhatsApp Webhook] Error:", err.message);
@@ -1453,11 +1850,35 @@ import { fileURLToPath } from "url";
 const __dirname_server = import.meta.dirname || path.dirname(fileURLToPath(import.meta.url));
 const webAppOutDir = path.resolve(__dirname_server, "../apps/web/out");
 if (fs.existsSync(webAppOutDir)) {
+  // Ensure correct content-type + no-store for PWA metadata (prevents cached 404s + stale SW).
+  app.get("/app/manifest.json", (req, res) => {
+    res.setHeader("Content-Type", "application/manifest+json");
+    res.setHeader("Cache-Control", "no-store");
+    res.sendFile(path.join(webAppOutDir, "manifest.json"));
+  });
+  // Root-level alias for older builds that referenced /manifest.json
+  app.get("/manifest.json", (req, res) => {
+    res.setHeader("Content-Type", "application/manifest+json");
+    res.setHeader("Cache-Control", "no-store");
+    res.sendFile(path.join(webAppOutDir, "manifest.json"));
+  });
+  app.get("/app/sw.js", (req, res) => {
+    res.setHeader("Content-Type", "application/javascript; charset=utf-8");
+    res.setHeader("Cache-Control", "no-store");
+    res.sendFile(path.join(webAppOutDir, "sw.js"));
+  });
+
   app.use("/app", express.static(webAppOutDir));
+  // Prefer PWA entry when visiting root
+  app.get("/", (req, res) => {
+    res.redirect("/app/");
+  });
   // SPA fallback
   app.get("/app/*", (req, res) => {
     res.sendFile(path.join(webAppOutDir, "index.html"));
   });
+} else {
+  console.log(`[PWA] Missing static export at ${webAppOutDir}. Run 'npm run webapp:build' to enable the PWA at /app/.`);
 }
 
 // ── Start Server ─────────────────────────────────────────────
@@ -1470,78 +1891,163 @@ server.listen(PORT, () => {
   console.log(`SSE stream at http://localhost:${PORT}/api/stream`);
   console.log(`Activity log at http://localhost:${PORT}/api/activity`);
 
-  // Auto-launch desktop PWA
-  if (process.env.BACKBONE_NO_BROWSER !== "1") {
+  // Auto-launch desktop PWA only when explicitly enabled
+  if (process.env.BACKBONE_AUTO_BROWSER === "1") {
     launchDesktopPWA();
   }
+
+  // Start WhatsApp message poller (polls Twilio API for incoming messages)
+  startWhatsAppPoller();
+
+  // Start proactive WhatsApp scheduler (randomized nudges throughout the day)
+  startProactiveScheduler();
 });
+
+/**
+ * Start WhatsApp message poller — polls Twilio for incoming messages.
+ * This replaces the need for a public webhook URL.
+ */
+async function startWhatsAppPoller() {
+  try {
+    const { getWhatsAppPoller } = await import("./services/messaging/whatsapp-poller.js");
+    const poller = getWhatsAppPoller();
+
+    // Set the message handler — uses the same AI processing as the webhook
+    poller.setMessageHandler(async (messageData) => {
+      const { from, content } = messageData;
+      console.log(`[WhatsAppPoller] Processing: "${content?.slice(0, 80)}"`);
+      logActivity("system", `WhatsApp message received: "${content?.slice(0, 60)}"`);
+
+      // Load context and generate AI response (same logic as POST /api/whatsapp/webhook)
+      const context = poller._loadContext();
+
+      const prompt = `You are BACKBONE, an executive AI assistant. The user messaged you on WhatsApp.
+
+*User message:* "${content}"
+
+*FORMATTING RULES (CRITICAL):*
+Use WhatsApp-native formatting in your response:
+- *bold* for emphasis (single asterisks)
+- _italic_ for secondary emphasis (underscores)
+- Bullet points with - or •
+- Keep under 1500 characters
+- No markdown headers (##), no [links](url)
+- Use emojis sparingly for visual scanning
+
+*USER CONTEXT:*
+${JSON.stringify(context, null, 2)}
+
+Respond to the user's question with specific data from the context above. Be concise, actionable, and data-rich.`;
+
+      // Use Claude Code CLI (Pro/Max subscription) — no API key needed
+      let responseText = null;
+      try {
+        const { runClaudeCodePrompt } = await import("./services/ai/claude-code-cli.js");
+        const cliResult = await runClaudeCodePrompt(prompt, { timeout: 90000 });
+        if (cliResult.success && cliResult.output) {
+          responseText = cliResult.output.trim();
+        } else {
+          console.log("[WhatsAppPoller] CLI failed, trying multi-ai fallback:", cliResult.error);
+        }
+      } catch (cliErr) {
+        console.log("[WhatsAppPoller] CLI unavailable:", cliErr.message);
+      }
+
+      // Fallback: try multi-ai
+      if (!responseText) {
+        try {
+          const { sendMessage } = await import("./services/ai/multi-ai.js");
+          const aiResponse = await sendMessage(prompt, { format: "text", maxTokens: 1000 });
+          if (typeof aiResponse === "string") {
+            responseText = aiResponse;
+          } else if (aiResponse?.content) {
+            responseText = aiResponse.content;
+          } else if (aiResponse?.message) {
+            responseText = aiResponse.message;
+          } else if (aiResponse?.response) {
+            responseText = aiResponse.response;
+          } else if (aiResponse?.error) {
+            console.error("[WhatsAppPoller] multi-ai error:", aiResponse.error);
+          }
+        } catch (aiErr) {
+          console.error("[WhatsAppPoller] multi-ai fallback failed:", aiErr.message);
+        }
+      }
+
+      return responseText || "_Something went wrong generating a response. The AI service may be temporarily unavailable._";
+    });
+
+    await poller.start();
+  } catch (err) {
+    console.log("[Server] WhatsApp poller not started:", err.message);
+  }
+}
+
+/**
+ * Start the proactive WhatsApp scheduler — sends personalized nudges
+ * at randomized times throughout the day (briefs, market, goals, projects).
+ */
+async function startProactiveScheduler() {
+  try {
+    const { getProactiveScheduler } = await import("./services/messaging/proactive-scheduler.js");
+    const scheduler = getProactiveScheduler();
+
+    scheduler.on("job-fired", ({ jobId, type, result }) => {
+      logActivity("system", `Proactive ${type}: ${jobId}`, { jobId, type, result });
+      broadcastEvent("proactive-job", { jobId, type, result });
+    });
+
+    scheduler.start();
+    console.log("[Server] Proactive scheduler started");
+  } catch (err) {
+    console.log("[Server] Proactive scheduler not started:", err.message);
+  }
+}
 
 async function launchDesktopPWA() {
   // Small delay to ensure server is ready
-  await new Promise(r => setTimeout(r, 1500));
+  await new Promise(r => setTimeout(r, 5000));
   const url = `http://localhost:${PORT}/app`;
   try {
-    const { spawn } = await import("child_process");
+    const { spawn, exec: execCb } = await import("child_process");
     const platform = process.platform;
     let launched = false;
 
-    // Use spawn with detached + windowsHide to avoid flashing console windows
-    const launchQuiet = (exe, args) => {
-      const child = spawn(exe, args, {
-        detached: true,
-        stdio: "ignore",
-        windowsHide: true,
-      });
-      child.unref();
-    };
-
     if (platform === "win32") {
+      // On Windows, use a VBScript wrapper to launch minimized (window style 7)
       const chromePaths = [
         (process.env.LOCALAPPDATA || "") + "\\Google\\Chrome\\Application\\chrome.exe",
         "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
         "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+        "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
       ];
-      for (const chromePath of chromePaths) {
-        try {
-          if (fs.existsSync(chromePath)) {
-            launchQuiet(chromePath, [`--app=${url}`]);
-            launched = true;
-            break;
-          }
-        } catch {}
+      let browserExe = null;
+      for (const p of chromePaths) {
+        if (fs.existsSync(p)) { browserExe = p; break; }
       }
-
-      if (!launched) {
-        const edgePath = "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe";
-        try {
-          if (fs.existsSync(edgePath)) {
-            launchQuiet(edgePath, [`--app=${url}`]);
-            launched = true;
-          }
-        } catch {}
-      }
-
-      // Final fallback: use cmd /c start (hidden)
-      if (!launched) {
-        launchQuiet("cmd.exe", ["/c", "start", "", url]);
+      if (browserExe) {
+        const vbs = `CreateObject("WScript.Shell").Run """${browserExe}"" --app=""${url}""", 7, False`;
+        const vbsPath = path.join(process.env.TEMP || ".", "bb_pwa_launch.vbs");
+        fs.writeFileSync(vbsPath, vbs);
+        const child = spawn("wscript", [vbsPath], { detached: true, stdio: "ignore", windowsHide: true });
+        child.unref();
+        // Clean up VBS file after a delay
+        setTimeout(() => { try { fs.unlinkSync(vbsPath); } catch {} }, 5000);
         launched = true;
       }
     } else if (platform === "darwin") {
-      try {
-        launchQuiet("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", [`--app=${url}`]);
-      } catch {
-        launchQuiet("open", [url]);
-      }
+      const child = spawn("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        [`--app=${url}`], { detached: true, stdio: "ignore" });
+      child.unref();
       launched = true;
     } else {
-      // Linux: Try chromium/chrome, fallback to xdg-open
-      exec(`google-chrome --app="${url}" --new-window 2>/dev/null || chromium-browser --app="${url}" --new-window 2>/dev/null || xdg-open "${url}"`, () => {});
+      execCb(`google-chrome --app="${url}" 2>/dev/null || chromium-browser --app="${url}" 2>/dev/null || xdg-open "${url}"`, () => {});
       launched = true;
     }
 
     if (launched) {
-      console.log(`[PWA] Desktop app launched at ${url}`);
-      logActivity("system", "Desktop PWA launched", { url, mode: "standalone" });
+      console.log(`[PWA] Desktop app launched minimized at ${url}`);
+      logActivity("system", "Desktop PWA launched (minimized)", { url, mode: "standalone" });
     }
   } catch (err) {
     console.log("[PWA] Auto-launch skipped:", err.message);

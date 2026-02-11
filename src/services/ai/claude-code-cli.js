@@ -10,12 +10,12 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 import { EventEmitter } from "events";
+import { isClaudeAgentSdkInstalled, runClaudeAgentSdkStreaming } from "./claude-agent-sdk.js";
+import { getBackboneRoot } from "../paths.js";
 
-// Use bare "claude" command — it's on PATH via npm global bin.
-// Avoid hardcoding the full Windows path because backslash sequences
-// like \f (form feed) and \n (newline) in paths such as
-// e.g. C:\Users\<user>\AppData\Roaming\npm\claude.cmd get mangled by shell: true.
-const CLAUDE_CMD = "claude";
+// On Windows, use "claude.cmd" explicitly — bare "claude" can timeout due to
+// slow shell command resolution. On macOS/Linux, use bare "claude".
+const CLAUDE_CMD = process.platform === "win32" ? "claude.cmd" : "claude";
 
 const getClaudeProcessEnv = () => {
   const env = { ...process.env };
@@ -25,7 +25,11 @@ const getClaudeProcessEnv = () => {
       const pathValue = env.PATH || env.Path || "";
       const lowerPath = pathValue.toLowerCase();
       if (!lowerPath.includes(npmBin.toLowerCase())) {
-        env.PATH = `${npmBin}${path.delimiter}${pathValue}`;
+        const newPath = `${npmBin}${path.delimiter}${pathValue}`;
+        // Set both casings — Windows env vars are case-insensitive
+        // but Node.js object keys are not, so cmd.exe may read either
+        env.PATH = newPath;
+        env.Path = newPath;
       }
     }
   }
@@ -91,11 +95,11 @@ export const getClaudeCodeConfigDir = () => {
  */
 export const isClaudeCodeInstalled = () => {
   try {
-    // Try running claude --version
-    const result = execSync("claude --version", {
+    // Try running claude --version (15s timeout — Windows can be slow)
+    const result = execSync(`${CLAUDE_CMD} --version`, {
       encoding: "utf-8",
       stdio: ["pipe", "pipe", "pipe"],
-      timeout: 5000,
+      timeout: 15000,
       env: getClaudeProcessEnv(),
     });
     return {
@@ -150,7 +154,7 @@ export const isClaudeCodeInstalledAsync = async () => {
       });
     });
 
-    // Timeout after 5 seconds
+    // Timeout after 15 seconds (Windows is slow with shell resolution)
     setTimeout(() => {
       proc.kill();
       resolve({
@@ -158,7 +162,7 @@ export const isClaudeCodeInstalledAsync = async () => {
         version: null,
         error: "Timeout",
       });
-    }, 5000);
+    }, 15000);
   });
 };
 
@@ -632,6 +636,26 @@ export const runClaudeCodeStreaming = async (prompt, options = {}) => {
   const modelToUse = options.model || getCurrentModelInUse();
   const isUsingFallback = modelToUse === FALLBACK_MODEL;
 
+  // Prefer Claude Agent SDK when available (runs in-process, uses `.mcp.json` automatically).
+  // Can be disabled with BACKBONE_CLAUDE_AGENT_SDK=0.
+  try {
+    const useAgentSdk = String(process.env.BACKBONE_CLAUDE_AGENT_SDK || "1") !== "0";
+    if (useAgentSdk && (await isClaudeAgentSdkInstalled())) {
+      console.log(`[ClaudeCodeCLI] Using Claude Agent SDK (model: ${modelToUse})`);
+      return await runClaudeAgentSdkStreaming(prompt, {
+        cwd: options.cwd || process.cwd(),
+        timeoutMs: options.timeoutMs || options.timeout || 5 * 60 * 1000,
+        permissionMode: options.permissionMode || process.env.BACKBONE_CLAUDE_PERMISSION_MODE || "bypassPermissions",
+        model: modelToUse,
+        resume: options.resume || false,
+        settingSources: options.settingSources || ["project", "user", "local"],
+      });
+    }
+  } catch (err) {
+    // Fall back to spawning `claude` CLI below.
+    console.log(`[ClaudeCodeCLI] Agent SDK unavailable - falling back to CLI (${err?.message || err})`);
+  }
+
   // Build args with model selection, stream-json for structured output, and permissions bypass
   const mcpTools = [
     "mcp__backbone-google", "mcp__backbone-linkedin", "mcp__backbone-contacts",
@@ -646,6 +670,7 @@ export const runClaudeCodeStreaming = async (prompt, options = {}) => {
     "--model", modelToUse, "--print",
     "--verbose", "--output-format", "stream-json",
     "--dangerously-skip-permissions",
+    ...(fs.existsSync(getBackboneRoot()) ? ["--add-dir", getBackboneRoot()] : []),
     "--allowedTools", allowedTools.join(",")
   ];
 

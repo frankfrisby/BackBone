@@ -289,7 +289,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           };
           break;
         }
-        const sendResult = await wa.sendMessage(phone, args.message);
+        // Format for beautiful WhatsApp rendering
+        const { formatAIResponse, chunkMessage } = await import(
+          "../services/messaging/whatsapp-formatter.js"
+        );
+        const formatted = formatAIResponse(args.message);
+        const chunks = chunkMessage(formatted, 1500);
+
+        // Send each chunk
+        let sendResult;
+        for (const chunk of chunks) {
+          sendResult = await wa.sendMessage(phone, chunk);
+        }
         result = sendResult;
       } catch (err) {
         result = { success: false, error: err.message };

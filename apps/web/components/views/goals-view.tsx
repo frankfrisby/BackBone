@@ -8,14 +8,22 @@ interface GoalsViewProps {
 }
 
 async function fetchGoals() {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5000);
   try {
-    const resp = await fetch("http://localhost:3000/api/goals", {
-      signal: AbortSignal.timeout(5000),
-    });
+    // Use same-origin API so the PWA works whether it's served locally (/app) or deployed elsewhere.
+    const resp = await fetch("/api/goals", { signal: controller.signal });
     if (!resp.ok) throw new Error("Failed");
-    return resp.json();
+    const json = await resp.json();
+
+    // Normalize to an array for the UI. The backend may return { goals, coreGoals, ... }.
+    if (Array.isArray(json)) return json;
+    if (Array.isArray((json as any)?.goals)) return (json as any).goals;
+    return [];
   } catch {
     return null;
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
@@ -34,7 +42,13 @@ export function GoalsView({ data }: GoalsViewProps) {
     queryFn: fetchGoals,
   });
 
-  const g = goals || data?.goals || [];
+  const g = Array.isArray(goals)
+    ? goals
+    : Array.isArray((goals as any)?.goals)
+    ? (goals as any).goals
+    : Array.isArray(data?.goals)
+    ? data.goals
+    : [];
 
   if (!goals && !data) {
     return (

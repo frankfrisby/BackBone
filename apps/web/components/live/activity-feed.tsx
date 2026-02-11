@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useEventSource, type SSEEvent } from "@/hooks/use-event-source";
+import { createId } from "@/lib/id";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   TrendingUp,
@@ -93,7 +94,7 @@ export function ActivityFeed({ compact = false }: { compact?: boolean }) {
 
   const handleEvent = useCallback((event: SSEEvent) => {
     const entry: ActivityEntry = {
-      id: event.type === "activity" && event.data?.id ? event.data.id : crypto.randomUUID(),
+      id: event.type === "activity" && event.data?.id ? event.data.id : createId(),
       category: event.type === "activity" ? event.data?.category || "system" : event.type,
       message: describeEvent(event),
       data: event.data,

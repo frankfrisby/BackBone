@@ -1219,6 +1219,10 @@ export const sendTradeNotification = async (trade) => {
   try {
     const { getWhatsAppNotifications } = await import("./whatsapp-notifications.js");
     const whatsappNotifier = getWhatsAppNotifications();
+    // Auto-initialize if not yet enabled
+    if (!whatsappNotifier.enabled) {
+      try { await whatsappNotifier.initialize("default"); } catch {}
+    }
     if (whatsappNotifier.enabled) {
       await whatsappNotifier.notifyTrade({
         symbol: trade.symbol,

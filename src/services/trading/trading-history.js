@@ -7,13 +7,10 @@
 import { getAlpacaConfig } from "./alpaca.js";
 import fs from "fs";
 import path from "path";
-import { fileURLToPath } from "url";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+import { dataFile } from "../paths.js";
 
 const WEEKS_TO_SHOW = 8;
-const DATA_FILE = path.join(__dirname, "../../data/trading-history.json");
+const DATA_FILE = dataFile("trading-history.json");
 
 /**
  * Load stored trading history from disk

@@ -1,12 +1,13 @@
 import fetch from "node-fetch";
 import fs from "fs";
+import os from "os";
 import path from "path";
 import { getAPIQuotaMonitor } from "../api-quota-monitor.js";
 import { hasValidCredentials as hasCodexCredentials } from "./codex-oauth.js";
 import { getClaudeCodeStatus, runClaudeCodeStreaming } from "./claude-code-cli.js";
 import { getLatestOpenAICodexModelId, kickoffModelRefresh } from "./model-registry.js";
 
-import { dataFile } from "../paths.js";
+import { dataFile, getBackboneRoot } from "../paths.js";
 // ═══════════════════════════════════════════════════════════════════════════
 // RATE LIMIT TRACKING - Track "wait until" times for each model
 // ═══════════════════════════════════════════════════════════════════════════
@@ -88,6 +89,16 @@ const parseRateLimitTime = (errorMessage) => {
 
 // Initialize rate limits
 loadRateLimits();
+
+// Claude Code CLI agentic cooldown (when Claude is hard rate-limited and we should use Codex instead).
+let claudeCodeAgenticRateLimitedUntilMs = null;
+try {
+  const persisted = rateLimits["claude-code-cli"]?.waitUntil;
+  if (persisted) {
+    const ms = new Date(persisted).getTime();
+    if (Number.isFinite(ms)) claudeCodeAgenticRateLimitedUntilMs = ms;
+  }
+} catch { /* ignore */ }
 
 /**
  * Parse OpenAI API error response and return a clean message
@@ -918,9 +929,27 @@ export const getAgenticCapabilities = async () => {
     // Claude Code not available
   }
 
+  // Check for Claude Agent SDK (optional). Requires Claude Code to actually run.
+  try {
+    await import("@anthropic-ai/claude-agent-sdk");
+    capabilities.claudeAgentSdk = true;
+  } catch {
+    // Agent SDK not available
+  }
+
   // Check for Codex CLI (OpenAI)
   try {
-    await execAsync("codex --version", { timeout: 5000 });
+    // Ensure Codex can initialize even in sandboxed runtimes where ~/.codex isn't writable.
+    const safeCodexHome =
+      process.env.CODEX_HOME ||
+      process.env.BACKBONE_CODEX_HOME ||
+      dataFile("codex-home");
+    try { fs.mkdirSync(safeCodexHome, { recursive: true }); } catch {}
+
+    await execAsync("codex --version", {
+      timeout: 5000,
+      env: { ...process.env, CODEX_HOME: safeCodexHome }
+    });
     capabilities.codex = true;
     capabilities.available = true;
   } catch {
@@ -932,7 +961,7 @@ export const getAgenticCapabilities = async () => {
 
 /**
  * Execute agentic task with streaming output
- * Uses Claude Code or Codex depending on availability
+ * Prefers Claude Code CLI, falls back to Codex CLI on Claude rate limits.
  */
 export const executeAgenticTask = async (task, workDir, onOutput) => {
   const capabilities = await getAgenticCapabilities();
@@ -947,8 +976,22 @@ export const executeAgenticTask = async (task, workDir, onOutput) => {
 
   const { spawn } = await import("child_process");
 
-  // Prefer Claude Code, fall back to Codex
-  const command = capabilities.claudeCode ? "claude" : "codex";
+  const isRateLimitText = (text) => {
+    const t = (text || "").toLowerCase();
+    return (
+      t.includes("rate limit") ||
+      t.includes("rate_limit") ||
+      t.includes("too many requests") ||
+      t.includes("429") ||
+      t.includes("resource exhausted") ||
+      t.includes("quota exceeded") ||
+      t.includes("usage limit") ||
+      t.includes("hit your limit") ||
+      t.includes("you've hit your limit") ||
+      t.includes("you have hit your limit") ||
+      (t.includes("resets") && t.includes("limit"))
+    );
+  };
 
   // MCP tool prefixes for BACKBONE servers
   const mcpTools = [
@@ -961,144 +1004,485 @@ export const executeAgenticTask = async (task, workDir, onOutput) => {
     "Write", "Edit", "Bash", ...mcpTools
   ];
 
-  // For Claude Code, use -p flag with stream-json and MCP tools
-  // Pass message via stdin to avoid shell escaping issues on Windows
-  const useStdin = capabilities.claudeCode && process.platform === "win32";
-  const args = capabilities.claudeCode
-    ? [
-        "-p",
-        "--verbose",
-        "--output-format", "stream-json",
-        "--dangerously-skip-permissions",
-        "--allowedTools", allowedTools.join(","),
-        ...(useStdin ? [] : [task])
-      ]
-    : ["--task", task];
-
-  return new Promise((resolve) => {
-    const proc = spawn(command, args, {
-      cwd: workDir || process.cwd(),
-      shell: true,
-      stdio: useStdin ? ["pipe", "pipe", "pipe"] : ["ignore", "pipe", "pipe"],
-      env: { ...process.env, FORCE_COLOR: "0" }
+  const runClaudeAgentSdk = async () => {
+    const { runClaudeAgentSdkTask } = await import("./claude-agent-sdk.js");
+    const res = await runClaudeAgentSdkTask(task, workDir || process.cwd(), onOutput, {
+      timeoutMs: 180000,
+      permissionMode: process.env.BACKBONE_CLAUDE_PERMISSION_MODE || "bypassPermissions"
     });
+    return {
+      ...res,
+      rateLimited: isRateLimitText((res?.output || "") + "\n" + (res?.error || ""))
+    };
+  };
 
-    // On Windows, write task to stdin to avoid escaping issues
-    if (useStdin && proc.stdin) {
-      proc.stdin.write(task);
-      proc.stdin.end();
-    }
+  const runClaudeCodeCli = async () => {
+    if (onOutput) onOutput({ type: "tool", tool: "claude" });
+    const useStdin = process.platform === "win32";
+    const claudeCmd = process.platform === "win32" ? "claude.cmd" : "claude";
+    const args = [
+      "-p",
+      "--verbose",
+      "--output-format", "stream-json",
+      "--dangerously-skip-permissions",
+      ...(fs.existsSync(getBackboneRoot()) ? ["--add-dir", getBackboneRoot()] : []),
+      "--allowedTools", allowedTools.join(","),
+      ...(useStdin ? [] : [task])
+    ];
 
-    let output = "";
-    let finalText = "";
-    let error = "";
-    let resolved = false;
-    let lineBuffer = "";
+    return new Promise((resolve) => {
+      const proc = spawn(claudeCmd, args, {
+        cwd: workDir || process.cwd(),
+        shell: true,
+        stdio: useStdin ? ["pipe", "pipe", "pipe"] : ["ignore", "pipe", "pipe"],
+        env: { ...process.env, FORCE_COLOR: "0" }
+      });
 
-    // Parse a stream-json line and emit structured events
-    const processStreamLine = (line) => {
-      if (!line.trim()) return;
-      try {
-        const msg = JSON.parse(line);
-        switch (msg.type) {
-          case "assistant": {
-            const text = msg.message?.content?.[0]?.text || msg.content?.[0]?.text || "";
-            if (text) {
-              finalText = text;
-              output = text;
-              if (onOutput) onOutput({ type: "stdout", text, output: text });
+      if (useStdin && proc.stdin) {
+        proc.stdin.write(task);
+        proc.stdin.end();
+      }
+
+      let output = "";
+      let finalText = "";
+      let error = "";
+      let resolved = false;
+      let lineBuffer = "";
+
+      const processStreamLine = (line) => {
+        if (!line.trim()) return;
+        try {
+          const msg = JSON.parse(line);
+          switch (msg.type) {
+            case "assistant": {
+              const text = msg.message?.content?.[0]?.text || msg.content?.[0]?.text || "";
+              if (text) {
+                finalText = text;
+                output = text;
+                if (onOutput) onOutput({ type: "stdout", text, output: text });
+              }
+              break;
             }
-            break;
-          }
-          case "tool_use": {
-            const tool = msg.tool?.name || msg.name || "unknown";
-            const input = msg.tool?.input || msg.input || {};
-            const toolLine = `[Tool] ${tool}: ${JSON.stringify(input).slice(0, 200)}`;
-            if (onOutput) onOutput({ type: "stdout", text: toolLine, output: toolLine });
-            break;
-          }
-          case "tool_result": {
-            const content = typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content || "").slice(0, 300);
-            if (onOutput) onOutput({ type: "stdout", text: content, output: content });
-            break;
-          }
-          case "result": {
-            const resultText = msg.result || msg.message?.content?.[0]?.text || "";
-            if (resultText) {
-              finalText = resultText;
-              output = resultText;
+            case "tool_use": {
+              const tool = msg.tool?.name || msg.name || "unknown";
+              const input = msg.tool?.input || msg.input || {};
+              const toolLine = `[Tool] ${tool}: ${JSON.stringify(input).slice(0, 200)}`;
+              if (onOutput) onOutput({ type: "stdout", text: toolLine, output: toolLine });
+              break;
             }
-            break;
+            case "tool_result": {
+              const content = typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content || "").slice(0, 300);
+              if (onOutput) onOutput({ type: "stdout", text: content, output: content });
+              break;
+            }
+            case "result": {
+              const resultText = msg.result || msg.message?.content?.[0]?.text || "";
+              if (resultText) {
+                finalText = resultText;
+                output = resultText;
+              }
+              break;
+            }
           }
+        } catch {
+          output += line;
+          if (onOutput) onOutput({ type: "stdout", text: line, output });
         }
+      };
+
+      const timeout = setTimeout(() => {
+        if (!resolved) {
+          resolved = true;
+          proc.kill();
+          if (onOutput) onOutput({ type: "error", error: "Timeout after 3 minutes" });
+          resolve({
+            success: false,
+            error: "Request timed out after 3 minutes",
+            output: finalText || output,
+            exitCode: null,
+            tool: "claude",
+            rateLimited: isRateLimitText((finalText || output || "") + "\n" + (error || ""))
+          });
+        }
+      }, 180000);
+
+      proc.stdout.on("data", (data) => {
+        const chunk = data.toString();
+        lineBuffer += chunk;
+        const lines = lineBuffer.split("\n");
+        lineBuffer = lines.pop() || "";
+        for (const line of lines) processStreamLine(line);
+      });
+
+      proc.stderr.on("data", (data) => {
+        const text = data.toString();
+        error += text;
+        if (onOutput) onOutput({ type: "stderr", text, error });
+      });
+
+      proc.on("close", (code) => {
+        if (lineBuffer.trim()) processStreamLine(lineBuffer);
+        if (!resolved) {
+          resolved = true;
+          clearTimeout(timeout);
+          const finalOutput = finalText || output;
+          if (onOutput) onOutput({ type: "done", code, output: finalOutput, error });
+          resolve({
+            success: code === 0,
+            output: finalOutput,
+            error,
+            exitCode: code,
+            tool: "claude",
+            rateLimited: isRateLimitText((finalOutput || "") + "\n" + (error || ""))
+          });
+        }
+      });
+
+      proc.on("error", (err) => {
+        if (!resolved) {
+          resolved = true;
+          clearTimeout(timeout);
+          if (onOutput) onOutput({ type: "error", error: err.message });
+          resolve({
+            success: false,
+            error: err.message,
+            output: "",
+            exitCode: null,
+            tool: "claude",
+            rateLimited: isRateLimitText(err.message || "")
+          });
+        }
+      });
+    });
+  };
+
+  const extractCodexText = (msg) => {
+    if (!msg || typeof msg !== "object") return "";
+    if (typeof msg.delta === "string") return msg.delta;
+    if (typeof msg.text === "string") return msg.text;
+    if (typeof msg.output_text === "string") return msg.output_text;
+    if (typeof msg.message === "string") return msg.message;
+    const content = msg.message?.content ?? msg.content;
+    if (typeof content === "string") return content;
+    if (Array.isArray(content)) {
+      return content.map((c) => (typeof c === "string" ? c : c?.text || "")).join("");
+    }
+    return "";
+  };
+
+  const runCodexCli = async () => {
+    const cwd = workDir || process.cwd();
+    const model = process.env.CODEX_CLI_MODEL || "gpt-5.3-codex";
+    const reasoning = process.env.CODEX_REASONING_EFFORT || "xhigh";
+    if (onOutput) onOutput({ type: "tool", tool: "codex", model, reasoning });
+
+    // Codex CLI persists sessions/config under CODEX_HOME (defaults to ~/.codex).
+    // Keep CODEX_HOME inside BACKBONE user data by default so it doesn't pollute the repo checkout.
+    let codexHome =
+      process.env.CODEX_HOME ||
+      process.env.BACKBONE_CODEX_HOME ||
+      dataFile("codex-home");
+
+    const ensureDir = (dir) => {
+      try {
+        fs.mkdirSync(dir, { recursive: true });
+        return true;
       } catch {
-        // Not JSON — treat as raw text
-        output += line;
-        if (onOutput) onOutput({ type: "stdout", text: line, output });
+        return false;
       }
     };
 
-    // Timeout after 3 minutes
-    const timeout = setTimeout(() => {
-      if (!resolved) {
-        resolved = true;
-        proc.kill();
-        if (onOutput) onOutput({ type: "error", error: "Timeout after 3 minutes" });
-        resolve({
-          success: false,
-          error: "Request timed out after 3 minutes",
-          output: finalText || output
+    if (!ensureDir(codexHome)) {
+      // Last-resort: use a temp directory (still allows Codex to run, but loses session persistence).
+      codexHome = path.join(os.tmpdir(), `backbone-codex-home-${process.pid}`);
+      ensureDir(codexHome);
+    }
+
+    // Best-effort: copy existing Codex CLI auth into CODEX_HOME so Codex can run when home is redirected.
+    try {
+      const globalAuth = path.join(os.homedir(), ".codex", "auth.json");
+      const localAuth = path.join(codexHome, "auth.json");
+      if (!fs.existsSync(localAuth) && fs.existsSync(globalAuth)) {
+        fs.copyFileSync(globalAuth, localAuth);
+      }
+    } catch { /* ignore */ }
+
+    const lastMsgPath = path.join(cwd, ".backbone-codex-last-message.txt");
+
+    const args = [
+      "exec",
+      "--json",
+      "--full-auto",
+      "--add-dir", codexHome,
+      "--color", "never",
+      "-C", cwd,
+      "-m", model,
+      "-c", `model_reasoning_effort=${reasoning}`,
+      "--output-last-message", lastMsgPath,
+      "-",
+    ];
+
+    return new Promise((resolve) => {
+      const proc = spawn("codex", args, {
+        cwd,
+        shell: true,
+        stdio: ["pipe", "pipe", "pipe"],
+        env: { ...process.env, FORCE_COLOR: "0", CODEX_HOME: codexHome }
+      });
+
+      if (proc.stdin) {
+        proc.stdin.write(task);
+        proc.stdin.end();
+      }
+
+      let output = "";
+      let error = "";
+      let resolved = false;
+      let lineBuffer = "";
+
+      const emitText = (text) => {
+        if (!text) return;
+        output += text;
+        if (onOutput) onOutput({ type: "stdout", text, output });
+      };
+
+      const processJsonLine = (line) => {
+        const trimmed = (line || "").trim();
+        if (!trimmed) return;
+        try {
+          const msg = JSON.parse(trimmed);
+          const text = extractCodexText(msg);
+          if (text) emitText(text);
+        } catch {
+          emitText(line);
+        }
+      };
+
+      const timeout = setTimeout(() => {
+        if (!resolved) {
+          resolved = true;
+          proc.kill();
+          if (onOutput) onOutput({ type: "error", error: "Timeout after 5 minutes" });
+          resolve({
+            success: false,
+            error: "Request timed out after 5 minutes",
+            output,
+            exitCode: null,
+            tool: "codex"
+          });
+        }
+      }, 300000);
+
+      proc.stdout.on("data", (data) => {
+        const chunk = data.toString();
+        lineBuffer += chunk;
+        const lines = lineBuffer.split("\n");
+        lineBuffer = lines.pop() || "";
+        for (const line of lines) processJsonLine(line);
+      });
+
+      proc.stderr.on("data", (data) => {
+        const text = data.toString();
+        error += text;
+        if (onOutput) onOutput({ type: "stderr", text, error });
+      });
+
+      proc.on("close", (code) => {
+        if (lineBuffer.trim()) processJsonLine(lineBuffer);
+
+        if (!resolved) {
+          resolved = true;
+          clearTimeout(timeout);
+
+          let finalText = "";
+          try {
+            if (fs.existsSync(lastMsgPath)) {
+              finalText = fs.readFileSync(lastMsgPath, "utf-8") || "";
+            }
+          } catch { /* ignore */ }
+          try { fs.unlinkSync(lastMsgPath); } catch { /* ignore */ }
+
+          const finalOutput = (finalText || output || "").trim() ? (finalText || output) : output;
+          if (onOutput) onOutput({ type: "done", code, output: finalOutput, error });
+          resolve({
+            success: code === 0,
+            output: finalOutput,
+            error,
+            exitCode: code,
+            tool: "codex"
+          });
+        }
+      });
+
+      proc.on("error", (err) => {
+        if (!resolved) {
+          resolved = true;
+          clearTimeout(timeout);
+          if (onOutput) onOutput({ type: "error", error: err.message });
+          resolve({
+            success: false,
+            error: err.message,
+            output: "",
+            exitCode: null,
+            tool: "codex"
+          });
+        }
+      });
+    });
+  };
+
+  const parseClaudeResetUntilMs = (text) => {
+    const raw = text || "";
+    const m = raw.match(/resets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)/i);
+    if (!m) return null;
+
+    const hour12 = Number.parseInt(m[1], 10);
+    const minute = m[2] ? Number.parseInt(m[2], 10) : 0;
+    const ampm = (m[3] || "").toLowerCase();
+    let hour = hour12 % 12;
+    if (ampm === "pm") hour += 12;
+
+    let timeZone = "America/New_York";
+    const tzMatch = raw.match(/\(([^)]+)\)/);
+    if (tzMatch && tzMatch[1] && tzMatch[1].includes("/")) {
+      timeZone = tzMatch[1].trim();
+    }
+
+    const mkUtcMsForLocal = (baseDate) => {
+      // Base date is interpreted in the target timezone via Intl.
+      const dateStr = new Intl.DateTimeFormat("en-CA", {
+        timeZone,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+      }).format(baseDate);
+      const [y, mo, d] = dateStr.split("-").map((n) => Number.parseInt(n, 10));
+
+      // Guess a UTC time to query the offset; offset is stable for almost all days.
+      const guessUtc = new Date(Date.UTC(y, mo - 1, d, hour, minute, 0));
+      let offsetMinutes = null;
+      try {
+        const fmt = new Intl.DateTimeFormat("en-US", {
+          timeZone,
+          timeZoneName: "shortOffset",
+          hour: "2-digit",
+          minute: "2-digit",
+        });
+        const tzName = fmt.formatToParts(guessUtc).find((p) => p.type === "timeZoneName")?.value || "";
+        const mm = tzName.match(/GMT([+-])(\d{1,2})(?::(\d{2}))?/i);
+        if (mm) {
+          const sign = mm[1] === "-" ? -1 : 1;
+          const hh = Number.parseInt(mm[2], 10);
+          const min = mm[3] ? Number.parseInt(mm[3], 10) : 0;
+          offsetMinutes = sign * (hh * 60 + min);
+        }
+      } catch { /* ignore */ }
+      if (offsetMinutes == null) return null;
+
+      // local = utc + offset => utc = local - offset
+      return Date.UTC(y, mo - 1, d, hour, minute, 0) - (offsetMinutes * 60 * 1000);
+    };
+
+    let untilMs = mkUtcMsForLocal(new Date());
+    if (untilMs == null) return null;
+    if (untilMs <= Date.now()) {
+      untilMs = mkUtcMsForLocal(new Date(Date.now() + 24 * 60 * 60 * 1000)) || untilMs;
+    }
+    return untilMs;
+  };
+
+  if (claudeCodeAgenticRateLimitedUntilMs && Date.now() >= claudeCodeAgenticRateLimitedUntilMs) {
+    claudeCodeAgenticRateLimitedUntilMs = null;
+    clearRateLimit("claude-code-cli");
+  }
+
+  // If Claude is known to be rate-limited right now, skip straight to Codex.
+  if (capabilities.codex && capabilities.claudeCode && claudeCodeAgenticRateLimitedUntilMs) {
+    const untilIso = new Date(claudeCodeAgenticRateLimitedUntilMs).toISOString();
+    if (onOutput) {
+      onOutput({
+        type: "stdout",
+        text: `[BACKBONE] Claude Code rate limited until ${untilIso} - using Codex now.`,
+        output: `[BACKBONE] Claude Code rate limited until ${untilIso} - using Codex now.`,
+      });
+    }
+    return runCodexCli();
+  }
+
+  if (capabilities.claudeCode) {
+    const agentSdkEnabled =
+      capabilities.claudeAgentSdk &&
+      String(process.env.BACKBONE_CLAUDE_AGENT_SDK || "1") !== "0";
+
+    let claudeRes = null;
+
+    if (agentSdkEnabled) {
+      claudeRes = await runClaudeAgentSdk();
+
+      const hasText = !!(claudeRes?.output || "").trim();
+      const claudeFailed = !claudeRes?.success || !hasText;
+
+      if (claudeFailed) {
+        if (onOutput) {
+          onOutput({
+            type: "stdout",
+            text: "[BACKBONE] Claude Agent SDK failed - falling back to Claude Code CLI.",
+            output: "[BACKBONE] Claude Agent SDK failed - falling back to Claude Code CLI.",
+          });
+        }
+        claudeRes = await runClaudeCodeCli();
+      }
+    } else {
+      claudeRes = await runClaudeCodeCli();
+    }
+
+    const hasText = !!(claudeRes?.output || "").trim();
+    const claudeFailed = !claudeRes?.success || !hasText;
+
+    // If Claude is rate limited and Codex is available, switch immediately and persist the cooldown.
+    if (claudeRes?.rateLimited && capabilities.codex) {
+      const untilMs =
+        parseClaudeResetUntilMs(`${claudeRes.output || ""}\n${claudeRes.error || ""}`) ||
+        (Date.now() + 15 * 60 * 1000);
+      claudeCodeAgenticRateLimitedUntilMs = untilMs;
+      setRateLimit("claude-code-cli", new Date(untilMs).toISOString());
+
+      if (onOutput) {
+        onOutput({
+          type: "stdout",
+          text: "[BACKBONE] Claude Code rate limited - switching to Codex.",
+          output: "[BACKBONE] Claude Code rate limited - switching to Codex.",
         });
       }
-    }, 180000);
 
-    proc.stdout.on("data", (data) => {
-      const chunk = data.toString();
-      lineBuffer += chunk;
-      const lines = lineBuffer.split("\n");
-      lineBuffer = lines.pop() || "";
-      for (const line of lines) {
-        processStreamLine(line);
-      }
-    });
+      return runCodexCli();
+    }
 
-    proc.stderr.on("data", (data) => {
-      const text = data.toString();
-      error += text;
-      if (onOutput) onOutput({ type: "stderr", text, error });
-    });
-
-    proc.on("close", (code) => {
-      // Process any remaining buffered line
-      if (lineBuffer.trim()) processStreamLine(lineBuffer);
-      if (!resolved) {
-        resolved = true;
-        clearTimeout(timeout);
-        const finalOutput = finalText || output;
-        if (onOutput) onOutput({ type: "done", code, output: finalOutput, error });
-        resolve({
-          success: code === 0,
-          output: finalOutput,
-          error,
-          exitCode: code,
-          tool: command
+    // If Claude failed to run for any reason and Codex is available, fall back.
+    if (claudeFailed && capabilities.codex) {
+      if (onOutput) {
+        onOutput({
+          type: "stdout",
+          text: "[BACKBONE] Claude Code failed - using Codex.",
+          output: "[BACKBONE] Claude Code failed - using Codex.",
         });
       }
-    });
+      return runCodexCli();
+    }
 
-    proc.on("error", (err) => {
-      if (!resolved) {
-        resolved = true;
-        clearTimeout(timeout);
-        if (onOutput) onOutput({ type: "error", error: err.message });
-        resolve({
-          success: false,
-          error: err.message,
-          output: ""
-        });
-      }
-    });
-  });
+    const { rateLimited: _rl, ...rest } = claudeRes || {};
+    return rest;
+  }
+
+  if (capabilities.codex) {
+    return runCodexCli();
+  }
+
+  return {
+    success: false,
+    error: "Claude Code CLI is unavailable and Codex CLI is not installed.",
+    output: ""
+  };
 };
 
 /**

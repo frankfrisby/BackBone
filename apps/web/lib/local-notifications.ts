@@ -23,9 +23,7 @@ export async function initLocalNotifications(): Promise<boolean> {
 
   try {
     // Register our service worker
-    swRegistration = await navigator.serviceWorker.register("/sw.js", {
-      scope: "/app/",
-    });
+    swRegistration = await navigator.serviceWorker.register("/app/sw.js", { scope: "/app/" });
     console.log("[Notifications] Service worker registered");
 
     // Request permission

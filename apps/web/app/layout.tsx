@@ -1,14 +1,13 @@
 import type { Metadata, Viewport } from "next";
-import { Inter } from "next/font/google";
 import "./globals.css";
 import { Providers } from "./providers";
-
-const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
   title: "BACKBONE - Life Optimization Engine",
   description: "AI-powered life management system",
-  manifest: "/manifest.json",
+  // The app is served from Express at `/app` (Next basePath). Keep the manifest under `/app`
+  // so the browser doesn't request a root-level `/manifest.json` that may be cached as a 404.
+  manifest: "/app/manifest.json",
   appleWebApp: {
     capable: true,
     statusBarStyle: "black-translucent",
@@ -37,7 +36,7 @@ export default function RootLayout({
         <link rel="shortcut icon" type="image/png" href="/app/favicon.png" />
         <link rel="apple-touch-icon" href="/app/icons/icon-192.png" />
       </head>
-      <body className={inter.className}>
+      <body>
         <Providers>{children}</Providers>
       </body>
     </html>

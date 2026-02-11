@@ -14,12 +14,13 @@
 import { describe, it, expect } from "vitest";
 import fs from "fs";
 import path from "path";
+import { getDataDir } from "../../src/services/paths.js";
 
 const SRC_DIR = path.join(process.cwd(), "src");
-const DATA_DIR = path.join(process.cwd(), "data");
+const DATA_DIR = getDataDir();
 
 describe("Auto-Trader - Buy Selection Logic", () => {
-  const content = fs.readFileSync(path.join(SRC_DIR, "services", "auto-trader.js"), "utf-8");
+  const content = fs.readFileSync(path.join(SRC_DIR, "services", "trading", "auto-trader.js"), "utf-8");
 
   it("sorts tickers by score (highest first)", () => {
     expect(content).toContain(".sort((a, b) => (b.score || 0) - (a.score || 0))");

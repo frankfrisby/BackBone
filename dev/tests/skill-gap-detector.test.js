@@ -6,14 +6,15 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fs from "fs";
 import path from "path";
+import { getDataDir } from "../../src/services/paths.js";
 
-const DATA_DIR = path.join(process.cwd(), "data");
+const DATA_DIR = getDataDir();
 const SKILLS_DIR = path.join(DATA_DIR, "user-skills");
 const SKILLS_INDEX = path.join(SKILLS_DIR, "index.json");
 const MCP_DIR = path.join(process.cwd(), "src", "mcp");
 const MCP_CONFIG_PATH = path.join(process.cwd(), ".mcp.json");
 const GAP_LOG_PATH = path.join(DATA_DIR, "skill-gaps.json");
-const SERVICE_PATH = path.join(process.cwd(), "src", "services", "skill-gap-detector.js");
+const SERVICE_PATH = path.join(process.cwd(), "src", "services", "projects", "skill-gap-detector.js");
 
 // === STRUCTURE TESTS (no side effects) ===
 
@@ -216,11 +217,11 @@ describe("Skill Gap Detector - Pipeline", () => {
 // === INTEGRATION WITH THINKING ENGINE ===
 
 describe("Thinking Engine Integration", () => {
-  const thinkingEnginePath = path.join(process.cwd(), "src", "services", "thinking-engine.js");
+  const thinkingEnginePath = path.join(process.cwd(), "src", "services", "engine", "thinking-engine.js");
 
   it("thinking engine imports skill gap detector", () => {
     const content = fs.readFileSync(thinkingEnginePath, "utf-8");
-    expect(content).toContain('import { getSkillGapDetector } from "./skill-gap-detector.js"');
+    expect(content).toContain('import { getSkillGapDetector } from "../projects/skill-gap-detector.js"');
   });
 
   it("thinking engine calls processGaps during cycle", () => {
@@ -238,11 +239,11 @@ describe("Thinking Engine Integration", () => {
 // === INTEGRATION WITH IDLE PROCESSOR ===
 
 describe("Idle Processor Integration", () => {
-  const idleProcessorPath = path.join(process.cwd(), "src", "services", "idle-processor.js");
+  const idleProcessorPath = path.join(process.cwd(), "src", "services", "engine", "idle-processor.js");
 
   it("idle processor imports skill gap detector", () => {
     const content = fs.readFileSync(idleProcessorPath, "utf-8");
-    expect(content).toContain('import { getSkillGapDetector } from "./skill-gap-detector.js"');
+    expect(content).toContain('import { getSkillGapDetector } from "../projects/skill-gap-detector.js"');
   });
 
   it("idle processor has SKILL_GAP work type", () => {

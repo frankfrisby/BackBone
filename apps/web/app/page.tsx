@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { onAuthStateChange } from "@/lib/firebase";
+import { onAuthStateChange, isFirebaseConfigured } from "@/lib/firebase";
 import { AppShell } from "@/components/layout/app-shell";
 import { User } from "firebase/auth";
 
@@ -27,7 +27,7 @@ export default function HomePage() {
 
   useEffect(() => {
     // In local mode, fetch real user profile from server (includes photoURL)
-    if (isLocalMode()) {
+    if (isLocalMode() || !isFirebaseConfigured) {
       fetch("/api/user/profile")
         .then((r) => r.ok ? r.json() : null)
         .then((profile) => {

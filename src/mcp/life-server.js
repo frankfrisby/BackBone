@@ -249,7 +249,7 @@ function getBacklog(minScore, source, limit = 20) {
   };
 }
 
-function getLifeScores() {
+async function getLifeScores() {
   const data = readJson(LIFE_SCORES_PATH) || {};
 
   // Extract scores, excluding metadata
@@ -262,8 +262,35 @@ function getLifeScores() {
     }
   }
 
+  // Include calibrated comparison (User vs Role Model vs Average)
+  let calibrated = null;
+  try {
+    const { getCalibratedScores } = await import("../services/health/calibrated-scores.js");
+
+    const portfolioData = readJson(path.join(DATA_DIR, "alpaca-cache.json"));
+    const ouraData = readJson(path.join(DATA_DIR, "oura-data.json"));
+    const linkedinData = readJson(path.join(DATA_DIR, "linkedin-profile.json"));
+    const goalsData = readJson(path.join(DATA_DIR, "goals.json"));
+    const ouraLatest = ouraData?.latest || {};
+
+    calibrated = getCalibratedScores({
+      portfolio: {
+        equity: portfolioData?.account?.equity,
+        positions: portfolioData?.positions,
+      },
+      oura: {
+        sleep: ouraLatest.sleep?.at?.(-1),
+        readiness: ouraLatest.readiness?.at?.(-1),
+        activity: ouraLatest.activity?.at?.(-1),
+      },
+      linkedin: linkedinData?.profile || linkedinData,
+      goals: Array.isArray(goalsData) ? goalsData : goalsData?.goals || [],
+    });
+  } catch {}
+
   return {
     scores,
+    calibrated,
     lastUpdated: data.lastUpdated || null,
     dimensions: Object.keys(scores).length,
   };
@@ -521,7 +548,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       result = getBacklog(args.minScore, args.source, args.limit);
       break;
     case "get_life_scores":
-      result = getLifeScores();
+      result = await getLifeScores();
       break;
     case "add_goal":
       result = addGoal(args);

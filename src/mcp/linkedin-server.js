@@ -283,7 +283,7 @@ async function scrapeLinkedInProfile(waitForLogin = true) {
           description: "Navigate to the user's LinkedIn profile and verify login",
           tools: ["navigate", "computer(screenshot)", "get_page_text"],
           instructions:
-            "Navigate to 'https://www.linkedin.com/in/me' — this redirects to the user's actual profile URL. " +
+            "Navigate to 'https://www.linkedin.com/me' — this redirects to the user's actual profile URL. " +
             "Take a screenshot to verify the page loaded. If a login page appears and waitForLogin is true, " +
             "inform the user they need to log in and wait. Once on the profile page, capture the final URL from " +
             "the browser (it will be linkedin.com/in/<username>/). This is the profileUrl to use in later steps.",

@@ -47,7 +47,7 @@ const {
   AI_ACTION_STATUS,
   AI_ACTION_TYPES,
   EXECUTION_TOOLS
-} = await import("../src/services/autonomous-engine.js");
+} = await import("../../src/services/engine/autonomous-engine.js");
 
 test("AutonomousEngine: singleton instance", () => {
   const engine1 = getAutonomousEngine();
@@ -90,7 +90,7 @@ test("AutonomousEngine: registerExecutor works", () => {
 // ===== CLAUDE CODE BACKEND TESTS =====
 console.log("\n=== Claude Code Backend Tests ===");
 
-const { getClaudeCodeBackend, BACKEND_TYPE, TASK_STATUS } = await import("../src/services/claude-code-backend.js");
+const { getClaudeCodeBackend, BACKEND_TYPE, TASK_STATUS } = await import("../../src/services/ai/claude-code-backend.js");
 
 test("ClaudeCodeBackend: singleton instance", () => {
   const backend1 = getClaudeCodeBackend();
@@ -122,7 +122,7 @@ test("ClaudeCodeBackend: getInstallInstructions returns valid object", () => {
 // ===== WORK LOG TESTS =====
 console.log("\n=== Work Log Tests ===");
 
-const { getWorkLog, LOG_TYPE, LOG_SOURCE, LOG_STATUS } = await import("../src/services/work-log.js");
+const { getWorkLog, LOG_TYPE, LOG_SOURCE, LOG_STATUS } = await import("../../src/services/work-log.js");
 
 test("WorkLog: singleton instance", () => {
   const log1 = getWorkLog();
@@ -169,7 +169,7 @@ test("WorkLog: logConnection convenience method works", () => {
 // ===== GOAL TRACKER TESTS =====
 console.log("\n=== Goal Tracker Tests ===");
 
-const { getGoalTracker, GOAL_CATEGORY, GOAL_STATUS } = await import("../src/services/goal-tracker.js");
+const { getGoalTracker, GOAL_CATEGORY, GOAL_STATUS } = await import("../../src/services/goals/goal-tracker.js");
 
 test("GoalTracker: singleton instance", () => {
   const tracker1 = getGoalTracker();
@@ -212,7 +212,7 @@ test("GoalTracker: getDisplayData returns formatted data", () => {
 // ===== LIFE SCORES TESTS =====
 console.log("\n=== Life Scores Tests ===");
 
-const { getLifeScores, LIFE_CATEGORIES } = await import("../src/services/life-scores.js");
+const { getLifeScores, LIFE_CATEGORIES } = await import("../../src/services/health/life-scores.js");
 
 test("LifeScores: singleton instance", () => {
   const scores1 = getLifeScores();
@@ -248,7 +248,7 @@ test("LifeScores: updateCategoryScore works", () => {
 // ===== MOBILE SERVICE TESTS =====
 console.log("\n=== Mobile Service Tests ===");
 
-const { getMobileService, MOBILE_TYPE, MESSAGE_TYPE } = await import("../src/services/mobile.js");
+const { getMobileService, MOBILE_TYPE, MESSAGE_TYPE } = await import("../../src/services/mobile.js");
 
 test("MobileService: singleton instance", () => {
   const mobile1 = getMobileService();
@@ -296,7 +296,7 @@ asyncTest("MobileService: startWebDashboard starts server", async () => {
 // ===== GOALS DATA TESTS =====
 console.log("\n=== Goals Data Tests ===");
 
-const goalsData = await import("../src/data/goals.js");
+const goalsData = await import("../../src/data/goals.js");
 
 test("GoalsData: has GOAL_CATEGORIES", () => {
   assert(goalsData.GOAL_CATEGORIES, "Should export GOAL_CATEGORIES");

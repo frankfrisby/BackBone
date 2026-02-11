@@ -34,16 +34,8 @@ if errorlevel 1 goto waitserver
 echo [BACKBONE] Server ready
 
 :launchpwa
-REM Launch PWA — visible to user (server is the hidden background job)
-if exist "%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe" (
-  start "" "%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe" --app="http://localhost:3000/app"
-) else if exist "C:\Program Files\Google\Chrome\Application\chrome.exe" (
-  start "" "C:\Program Files\Google\Chrome\Application\chrome.exe" --app="http://localhost:3000/app"
-) else if exist "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" (
-  start "" "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" --app="http://localhost:3000/app"
-) else (
-  start "" "http://localhost:3000/app"
-)
+REM PWA dormant — server runs but no browser window opened
+REM Access manually at http://localhost:3000/app if needed
 
 REM Start the CLI (foreground — this is the main terminal UI)
 :startbb

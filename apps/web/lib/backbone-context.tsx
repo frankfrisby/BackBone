@@ -9,6 +9,7 @@ import {
   type ReactNode,
 } from "react";
 import { getBackboneConnection } from "./connection";
+import { createId } from "./id";
 
 // ── Types ────────────────────────────────────────────────────
 
@@ -94,7 +95,8 @@ const initialState: AppState = {
   activeTab: null,
   tabs: [],
   currentPanel: "view",
-  hasQueried: false,
+  // Show dashboard by default on load (skip welcome gate).
+  hasQueried: true,
 };
 
 function appReducer(state: AppState, action: Action): AppState {
@@ -136,8 +138,10 @@ function appReducer(state: AppState, action: Action): AppState {
         ...state,
         tabs: action.tabs,
         messages: action.messages,
-        hasQueried: action.messages.length > 0,
-        activeTab: action.tabs[0] || null,
+        // Always show the main UI; cached data should not force the welcome screen.
+        hasQueried: true,
+        // Default to dashboard on load; cached tabs remain accessible from the tabs panel.
+        activeTab: null,
       };
     case "RESET":
       return {
@@ -325,7 +329,7 @@ export function BackboneProvider({ children }: { children: ReactNode }) {
       // Handle pushed messages
       if (data.type === "message" || data.content || data.message) {
         const msg: Message = {
-          id: crypto.randomUUID(),
+          id: createId(),
           role: "assistant",
           content: data.content || data.message || JSON.stringify(data),
           timestamp: Date.now(),
@@ -339,7 +343,7 @@ export function BackboneProvider({ children }: { children: ReactNode }) {
         // If the push includes a view, create a tab
         if (data.viewType) {
           const tab: Tab = {
-            id: crypto.randomUUID(),
+            id: createId(),
             type: data.viewType === "call" ? "call" : "view",
             viewType: data.viewType,
             title: data.title || data.viewType,
@@ -370,7 +374,7 @@ export function BackboneProvider({ children }: { children: ReactNode }) {
   const sendMessage = useCallback(
     async (content: string) => {
       const userMsg: Message = {
-        id: crypto.randomUUID(),
+        id: createId(),
         role: "user",
         content,
         timestamp: Date.now(),
@@ -390,7 +394,7 @@ export function BackboneProvider({ children }: { children: ReactNode }) {
         const response = await connection.send("chat", { message: content });
 
         const assistantMsg: Message = {
-          id: crypto.randomUUID(),
+          id: createId(),
           role: "assistant",
           content:
             response?.content ||
@@ -402,7 +406,7 @@ export function BackboneProvider({ children }: { children: ReactNode }) {
         // If this query should generate a view, create a tab
         if (viewType) {
           const tab: Tab = {
-            id: crypto.randomUUID(),
+            id: createId(),
             type: viewType === "call" ? "call" : "view",
             viewType,
             title,
@@ -424,7 +428,7 @@ export function BackboneProvider({ children }: { children: ReactNode }) {
         // Even if server is unreachable, classify and show the view
         if (viewType) {
           const tab: Tab = {
-            id: crypto.randomUUID(),
+            id: createId(),
             type: viewType === "call" ? "call" : "view",
             viewType,
             title,
@@ -437,7 +441,7 @@ export function BackboneProvider({ children }: { children: ReactNode }) {
         }
 
         const errorMsg: Message = {
-          id: crypto.randomUUID(),
+          id: createId(),
           role: "assistant",
           content:
             viewType

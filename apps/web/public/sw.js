@@ -1,6 +1,6 @@
 /* eslint-env serviceworker */
 
-const CACHE_NAME = "backbone-v1";
+const CACHE_NAME = "backbone-v5";
 const APP_SHELL_URLS = [
   "/app/",
   "/app/index.html",
@@ -46,6 +46,34 @@ self.addEventListener("fetch", (event) => {
     url.pathname.startsWith("/ws") ||
     event.request.headers.get("accept") === "text/event-stream"
   ) {
+    return;
+  }
+
+  // Network-first for navigations and manifest to avoid stale HTML / PWA metadata.
+  const accept = event.request.headers.get("accept") || "";
+  if (
+    event.request.mode === "navigate" ||
+    accept.includes("text/html") ||
+    url.pathname === "/app/manifest.json"
+  ) {
+    event.respondWith(
+      fetch(event.request)
+        .then((response) => {
+          if (response && response.ok) {
+            const responseClone = response.clone();
+            caches.open(CACHE_NAME).then((cache) => {
+              cache.put(event.request, responseClone);
+            });
+          }
+          return response;
+        })
+        .catch(() => caches.match(event.request).then((c) => c || caches.match("/app/index.html")))
+    );
+    return;
+  }
+
+  // Never cache Next.js build assets to avoid stale bundles in dev
+  if (url.pathname.startsWith("/app/_next/")) {
     return;
   }
 

@@ -6,12 +6,12 @@
 
 import { describe, it, expect } from "vitest";
 import fs from "fs";
-import path from "path";
+import { dataFile } from "../../src/services/paths.js";
 
 // Client functions
 import {
   fetchTickers,
-} from "../src/services/trading/yahoo-client.js";
+} from "../../src/services/trading/yahoo-client.js";
 
 // Ticker data lists and scoring
 import {
@@ -19,20 +19,20 @@ import {
   TICKER_UNIVERSE,
   calculateMACD,
   calculateVolumeScore,
-} from "../src/data/tickers.js";
+} from "../../src/data/tickers.js";
 
 // Score engine
 import {
   getSignalFromScore,
   SCORE_THRESHOLDS,
-} from "../src/services/trading/score-engine.js";
+} from "../../src/services/trading/score-engine.js";
 
 // Trading algorithms
 import {
   getActionFromScore,
-} from "../src/services/trading/trading-algorithms.js";
+} from "../../src/services/trading/trading-algorithms.js";
 
-const CACHE_PATH = path.join(process.cwd(), "data", "tickers-cache.json");
+const CACHE_PATH = dataFile("tickers-cache.json");
 
 // ─── Helper ──────────────────────────────────────────────────────
 

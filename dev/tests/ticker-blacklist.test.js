@@ -6,10 +6,11 @@
 import { describe, it, expect } from "vitest";
 import fs from "fs";
 import path from "path";
+import { dataFile } from "../../src/services/paths.js";
 
 const SERVER_PATH = path.join(process.cwd(), "src", "server", "yahoo-finance-server.js");
 const CLIENT_PATH = path.join(process.cwd(), "src", "services", "yahoo-client.js");
-const BLACKLIST_PATH = path.join(process.cwd(), "data", "ticker-blacklist.json");
+const BLACKLIST_PATH = dataFile("ticker-blacklist.json");
 
 describe("Ticker Blacklist - Server Fixes", () => {
   const content = fs.readFileSync(SERVER_PATH, "utf-8");

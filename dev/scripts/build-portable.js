@@ -43,7 +43,8 @@ const log = (msg) => console.log(`${CYAN}[build]${RESET} ${msg}`);
 const ok = (msg) => console.log(`  ${GREEN}✓${RESET} ${msg}`);
 
 // Directories/files to include in the portable build
-const INCLUDE_DIRS = ["bin", "src", "skills", "node_modules"];
+// Include the statically exported PWA (served by src/server.js from /app).
+const INCLUDE_DIRS = ["bin", "src", "skills", "node_modules", "apps/web/out"];
 const INCLUDE_FILES = [
   ".env.example",
   "CLAUDE.md",
@@ -55,6 +56,31 @@ const INCLUDE_FILES = [
 
 // Directories to create (empty) for user data
 const CREATE_DIRS = ["data", "memory", "projects", "screenshots"];
+
+function ensureWebAppExport() {
+  const outIndex = path.join(ROOT, "apps", "web", "out", "index.html");
+  if (fs.existsSync(outIndex)) {
+    ok("PWA export present (apps/web/out/)");
+    return true;
+  }
+
+  log("Building PWA export (apps/web/out)...");
+  try {
+    execSync("npm run webapp:build", { cwd: ROOT, stdio: "inherit" });
+  } catch (err) {
+    console.error(`  ${YELLOW}!${RESET} Failed to build PWA export: ${err.message}`);
+    console.error(`  ${YELLOW}!${RESET} Run 'npm run webapp:build' and re-run this build to include the PWA.`);
+    return false;
+  }
+
+  if (fs.existsSync(outIndex)) {
+    ok("Built PWA export (apps/web/out/)");
+    return true;
+  }
+
+  console.error(`  ${YELLOW}!${RESET} PWA export still missing after build (expected ${outIndex})`);
+  return false;
+}
 
 function cleanDist() {
   log("Cleaning dist/BackBone...");
@@ -340,6 +366,9 @@ async function main() {
   console.log(`\n${BOLD}${CYAN}═══════════════════════════════════════${RESET}`);
   console.log(`${BOLD}${CYAN}  BACKBONE Portable Build${RESET}`);
   console.log(`${BOLD}${CYAN}═══════════════════════════════════════${RESET}\n`);
+
+  // Ensure the web app exists so it gets bundled into dist/BackBone/apps/web/out
+  ensureWebAppExport();
 
   cleanDist();
   copySourceFiles();

@@ -151,8 +151,78 @@ function initSchema(db) {
     }
   }
 
+  // ── Continuous Engine Learning Tables ──────────────────────────
+  db.exec(`
+    -- Engine cycles: each observe→plan→execute→measure loop
+    CREATE TABLE IF NOT EXISTS engine_cycles (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      started_at INTEGER NOT NULL,
+      finished_at INTEGER,
+      action_type TEXT NOT NULL,
+      action_description TEXT,
+      action_target TEXT,
+      -- State snapshot BEFORE action (JSON of dimension scores)
+      state_before TEXT,
+      -- State snapshot AFTER action
+      state_after TEXT,
+      -- Numeric delta per dimension (positive = improvement)
+      delta_json TEXT,
+      -- Overall reward signal (-1.0 to 1.0)
+      reward REAL DEFAULT 0,
+      -- Was this explore (random) or exploit (best-known)?
+      strategy TEXT DEFAULT 'exploit',
+      -- Agent output summary
+      output_summary TEXT,
+      success INTEGER DEFAULT 0,
+      error TEXT,
+      duration_ms INTEGER,
+      model_used TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_cycles_action ON engine_cycles(action_type);
+    CREATE INDEX IF NOT EXISTS idx_cycles_reward ON engine_cycles(reward);
+    CREATE INDEX IF NOT EXISTS idx_cycles_time ON engine_cycles(started_at);
+
+    -- Aggregated action effectiveness (materialized view, updated after each cycle)
+    CREATE TABLE IF NOT EXISTS action_effectiveness (
+      action_type TEXT NOT NULL,
+      action_target TEXT,
+      total_runs INTEGER DEFAULT 0,
+      total_reward REAL DEFAULT 0,
+      avg_reward REAL DEFAULT 0,
+      best_reward REAL DEFAULT 0,
+      worst_reward REAL DEFAULT 0,
+      last_run_at INTEGER,
+      consecutive_failures INTEGER DEFAULT 0,
+      PRIMARY KEY (action_type, action_target)
+    );
+
+    -- Exploration log: tracks epsilon-greedy decisions to avoid local minima
+    CREATE TABLE IF NOT EXISTS exploration_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      timestamp INTEGER NOT NULL,
+      epsilon REAL NOT NULL,
+      was_explore INTEGER NOT NULL,
+      chosen_action TEXT NOT NULL,
+      best_known_action TEXT,
+      reason TEXT
+    );
+
+    -- State snapshots for trend tracking
+    CREATE TABLE IF NOT EXISTS state_snapshots (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      timestamp INTEGER NOT NULL,
+      dimension TEXT NOT NULL,
+      value REAL NOT NULL,
+      source TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_snapshots_dim ON state_snapshots(dimension);
+    CREATE INDEX IF NOT EXISTS idx_snapshots_time ON state_snapshots(timestamp);
+  `);
+
   // Set schema version
-  db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '1')").run();
+  db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '2')").run();
 }
 
 /**

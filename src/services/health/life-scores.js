@@ -3,6 +3,7 @@ import fs from "fs";
 import path from "path";
 
 import { getDataDir } from "../paths.js";
+import { getCalibratedScores, formatCalibratedComparison } from "./calibrated-scores.js";
 /**
  * Life Scores Service for BACKBONE
  * Calculates overall achievement scores for each area of life
@@ -276,54 +277,77 @@ export class LifeScores extends EventEmitter {
   }
 
   /**
-   * Sync all scores from data sources
+   * Sync all scores from data sources.
+   * Now uses CALIBRATED scoring — scores are benchmarked against
+   * the pinnacle of human achievement (100% = best of all famous people).
    */
   syncAllScores(data = {}) {
     const { portfolio, goals, oura, linkedin, family, work, education, growth } = data;
 
-    // Finance
-    if (portfolio) {
-      const financeScore = this.calculateFinanceScore(portfolio, goals);
-      this.updateCategoryScore(LIFE_CATEGORIES.FINANCE, financeScore, {
-        equity: portfolio.equity,
-        dayPL: portfolio.dayPL
+    // Calculate calibrated scores against real benchmarks
+    const calibrated = getCalibratedScores(data);
+    this._lastCalibrated = calibrated;
+
+    // Use calibrated scores for each category
+    if (portfolio || calibrated.user.categories.finance > 0) {
+      this.updateCategoryScore(LIFE_CATEGORIES.FINANCE, calibrated.user.categories.finance, {
+        equity: portfolio?.equity,
+        dayPL: portfolio?.dayPL,
+        calibrated: true,
       });
     }
 
-    // Health
-    if (oura) {
-      const healthScore = this.calculateHealthScore(oura);
-      this.updateCategoryScore(LIFE_CATEGORIES.HEALTH, healthScore, {
-        sleepScore: oura.sleep?.score,
-        readinessScore: oura.readiness?.score
+    if (oura || calibrated.user.categories.health > 0) {
+      this.updateCategoryScore(LIFE_CATEGORIES.HEALTH, calibrated.user.categories.health, {
+        sleepScore: oura?.sleep?.score,
+        readinessScore: oura?.readiness?.score,
+        calibrated: true,
       });
     }
 
-    // Family
-    if (family) {
-      const familyScore = this.calculateFamilyScore(family);
-      this.updateCategoryScore(LIFE_CATEGORIES.FAMILY, familyScore);
-    }
-
-    // Career
-    if (linkedin) {
-      const careerScore = this.calculateCareerScore(linkedin, work);
-      this.updateCategoryScore(LIFE_CATEGORIES.CAREER, careerScore, {
-        connections: linkedin.connections
+    if (family || calibrated.user.categories.family > 0) {
+      this.updateCategoryScore(LIFE_CATEGORIES.FAMILY, calibrated.user.categories.family, {
+        calibrated: true,
       });
     }
 
-    // Education
-    if (education) {
-      this.updateCategoryScore(LIFE_CATEGORIES.EDUCATION, education.score || 50);
+    if (linkedin || calibrated.user.categories.career > 0) {
+      this.updateCategoryScore(LIFE_CATEGORIES.CAREER, calibrated.user.categories.career, {
+        connections: linkedin?.connections,
+        calibrated: true,
+      });
     }
 
-    // Growth
-    if (growth) {
-      this.updateCategoryScore(LIFE_CATEGORIES.GROWTH, growth.score || 50);
+    // Map growth and impact into education/growth categories
+    if (calibrated.user.categories.growth > 0) {
+      this.updateCategoryScore(LIFE_CATEGORIES.GROWTH, calibrated.user.categories.growth, {
+        calibrated: true,
+      });
+    }
+
+    if (education?.score || calibrated.user.categories.impact > 0) {
+      this.updateCategoryScore(LIFE_CATEGORIES.EDUCATION, calibrated.user.categories.impact || education?.score || 0, {
+        calibrated: true,
+      });
     }
 
     return this.getDisplayData();
+  }
+
+  /**
+   * Get calibrated comparison: User vs Role Model vs Average Person.
+   * Returns the full comparison object for display.
+   */
+  getCalibratedComparison(roleModelName = "Ray Dalio") {
+    return this._lastCalibrated || getCalibratedScores({}, roleModelName);
+  }
+
+  /**
+   * Get formatted comparison string for WhatsApp/CLI display.
+   */
+  getFormattedComparison(roleModelName = "Ray Dalio") {
+    const scores = this.getCalibratedComparison(roleModelName);
+    return formatCalibratedComparison(scores);
   }
 
   /**

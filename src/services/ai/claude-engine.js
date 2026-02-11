@@ -18,7 +18,7 @@ import { getClaudeCodeStatus } from "./claude-code-cli.js";
 import { getActivityNarrator } from "../ui/activity-narrator.js";
 import { updateProjects } from "../app-store.js";
 
-import { getDataDir, getMemoryDir, getProjectsDir } from "../paths.js";
+import { getDataDir, getMemoryDir, getProjectsDir, getBackboneRoot } from "../paths.js";
 const DATA_DIR = getDataDir();
 const MEMORY_DIR = getMemoryDir();
 const CURRENT_WORK_FILE = path.join(MEMORY_DIR, "current-work.md");
@@ -488,6 +488,11 @@ Start by reading engine-work-log.md to see recent work, then update the priority
 
     const prompt = this.buildPrompt();
     const cwd = process.cwd();
+    const backboneRoot = getBackboneRoot();
+    const addDirArg =
+      backboneRoot && fs.existsSync(backboneRoot)
+        ? `--add-dir "${backboneRoot}"`
+        : "";
 
     // Write prompt to a temp file to avoid cmd.exe quoting/newline issues
     const promptPath = path.join(os.tmpdir(), `backbone-cli-prompt-${Date.now()}.txt`);
@@ -510,7 +515,7 @@ echo BACKBONE Claude Engine
 echo ========================================
 echo.
 echo Running Claude Code CLI...
-type "${promptPath}" | "${CLAUDE_CMD}" --print --verbose --output-format stream-json --dangerously-skip-permissions --allowedTools "Read,Glob,Grep,WebFetch,WebSearch,Task,Write,Edit,Bash,mcp__backbone-google,mcp__backbone-linkedin,mcp__backbone-contacts,mcp__backbone-news,mcp__backbone-life,mcp__backbone-health,mcp__backbone-trading,mcp__backbone-projects" > "${logPath}" 2>&1
+type "${promptPath}" | "${CLAUDE_CMD}" --print --verbose --output-format stream-json --dangerously-skip-permissions ${addDirArg} --allowedTools "Read,Glob,Grep,WebFetch,WebSearch,Task,Write,Edit,Bash,mcp__backbone-google,mcp__backbone-linkedin,mcp__backbone-contacts,mcp__backbone-news,mcp__backbone-life,mcp__backbone-health,mcp__backbone-trading,mcp__backbone-projects" > "${logPath}" 2>&1
 echo.
 echo ========================================
 echo Work complete. Window closing in 5 seconds...

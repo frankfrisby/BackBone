@@ -62,11 +62,24 @@ const AppFooterBarBase = ({
   portfolioUpdated = null,
   healthUpdated = null,
   tickersUpdated = null,
+  // Ticker sweep progress
+  tickersSweepRunning = false,
+  tickersSweepProgress = null,
+  tickersSweepTotal = null,
+  tickersEvaluatedToday = null,
+  tickersUniverseSize = null,
   goalsCount = null,
   engineStatus = null,
 }) => {
   const spyColor = getSpyScoreColor(spyScore);
   const spyChangeColor = spyChange != null ? (spyChange >= 0 ? "#22c55e" : "#ef4444") : "#64748b";
+
+  const toInt = (value) => (Number.isFinite(value) ? Math.trunc(value) : null);
+  const evaluated = toInt(tickersEvaluatedToday) ?? 0;
+  const universe = toInt(tickersUniverseSize) ?? 0;
+  const progress = toInt(tickersSweepProgress) ?? 0;
+  const total = toInt(tickersSweepTotal) ?? (universe || 0);
+  const sweepAllDone = !tickersSweepRunning && universe > 0 && evaluated >= universe;
 
   return e(
     Box,
@@ -108,6 +121,12 @@ const AppFooterBarBase = ({
       e(Text, { color: "#64748b" }, "Tickers "),
       e(Text, { color: getFreshnessColor(tickersUpdated, 10, 60) },
         formatAge(tickersUpdated)),
+      // Show sweep progress in the footer so the user can see long scans moving.
+      universe > 0 && (
+        tickersSweepRunning
+          ? e(Text, { color: "#9ca3af" }, ` ${progress}/${total || universe}`)
+          : e(Text, { color: sweepAllDone ? "#22c55e" : "#ef4444" }, ` ${evaluated}/${universe}`)
+      ),
       e(Text, { color: "#334155" }, "|"),
       // Cron status
       (() => {

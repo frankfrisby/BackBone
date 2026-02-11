@@ -165,7 +165,7 @@ export const kickoffModelRefresh = ({ openaiKey, anthropicKey } = {}) => {
   }
 };
 
-export const getLatestOpenAICodexModelId = (openaiKey, fallback = "gpt-5.2-codex") => {
+export const getLatestOpenAICodexModelId = (openaiKey, fallback = "gpt-5.3-codex") => {
   const entry = getEntry("openai", "codex");
   const resolved = entry?.modelId || fallback;
   if (!entry || isStale(entry)) {

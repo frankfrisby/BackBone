@@ -316,7 +316,7 @@ export const getMultiAIConfig = () => {
     },
     // Codex: Full spectrum coding (Pro/Max subscription)
     gptCodex: {
-      model: getLatestOpenAICodexModelId(openaiKey),
+      model: process.env.CODEX_CLI_MODEL || getLatestOpenAICodexModelId(openaiKey, "gpt-5.3-codex"),
       modelInfo: MODELS.GPT52_CODEX,
       ready: codexAvailable,
       requiresCodex: true
@@ -1170,10 +1170,33 @@ export const executeAgenticTask = async (task, workDir, onOutput) => {
     return "";
   };
 
+  const resolveCodexModel = () => {
+    const envModel = (process.env.CODEX_CLI_MODEL || "").trim();
+    if (envModel) return envModel;
+    return getLatestOpenAICodexModelId(process.env.OPENAI_API_KEY, "gpt-5.3-codex");
+  };
+
+  const normalizeCodexReasoningEffort = (value) => {
+    const normalized = String(value || "")
+      .trim()
+      .toLowerCase()
+      .replace(/[\s_-]+/g, "");
+    const map = {
+      minimal: "minimal",
+      low: "low",
+      medium: "medium",
+      high: "high",
+      xhigh: "xhigh",
+      ultrahigh: "xhigh",
+      veryhigh: "xhigh"
+    };
+    return map[normalized] || "xhigh";
+  };
+
   const runCodexCli = async () => {
     const cwd = workDir || process.cwd();
-    const model = process.env.CODEX_CLI_MODEL || "gpt-5.3-codex";
-    const reasoning = process.env.CODEX_REASONING_EFFORT || "xhigh";
+    const model = resolveCodexModel();
+    const reasoning = normalizeCodexReasoningEffort(process.env.CODEX_REASONING_EFFORT || "xhigh");
     if (onOutput) onOutput({ type: "tool", tool: "codex", model, reasoning });
 
     // Codex CLI persists sessions/config under CODEX_HOME (defaults to ~/.codex).

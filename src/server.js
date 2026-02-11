@@ -1901,6 +1901,9 @@ server.listen(PORT, () => {
 
   // Start proactive WhatsApp scheduler (randomized nudges throughout the day)
   startProactiveScheduler();
+
+  // Kick off macro economic research (yield curve, VIX, credit, soft indicators)
+  startMacroResearch();
 });
 
 /**
@@ -2001,6 +2004,40 @@ async function startProactiveScheduler() {
     console.log("[Server] Proactive scheduler started");
   } catch (err) {
     console.log("[Server] Proactive scheduler not started:", err.message);
+  }
+}
+
+/**
+ * Start macro economic research — fetches yield curve, VIX, credit spreads,
+ * consumer sentiment, etc. for the recession score engine.
+ * Runs once on boot, then refreshes every 4 hours.
+ */
+async function startMacroResearch() {
+  try {
+    const { runMacroResearch, needsRefresh } = await import("./services/trading/macro-research.js");
+
+    // Initial fetch (only if stale or missing)
+    if (needsRefresh()) {
+      console.log("[Server] Running initial macro research...");
+      await runMacroResearch();
+      console.log("[Server] Macro research complete");
+    } else {
+      console.log("[Server] Macro data is fresh, skipping initial fetch");
+    }
+
+    // Refresh every 4 hours
+    const FOUR_HOURS = 4 * 60 * 60 * 1000;
+    const interval = setInterval(async () => {
+      try {
+        console.log("[Server] Scheduled macro research refresh...");
+        await runMacroResearch({ forceRefresh: true });
+      } catch (err) {
+        console.error("[Server] Macro research refresh failed:", err.message);
+      }
+    }, FOUR_HOURS);
+    interval.unref();
+  } catch (err) {
+    console.log("[Server] Macro research not started:", err.message);
   }
 }
 

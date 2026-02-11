@@ -115,6 +115,7 @@ import { getAPIQuotaMonitor, BILLING_URLS } from "./services/api-quota-monitor.j
 import { QuotaExceededAlert, QuotaWarningBadge } from "./components/quota-exceeded-alert.js";
 import { calculateComprehensiveScore, getSignal, WEIGHT_PROFILES, THRESHOLDS } from "./services/trading/scoring-criteria.js";
 import { calculateMACDScore } from "./services/trading/score-engine.js";
+import { getRecessionScore, getRecessionColor } from "./services/trading/recession-score.js";
 import { updateChat } from "./services/app-store.js";
 import { getRiskyTickers, fetchAllRiskyK8Filings, getSignificantK8Tickers } from "./services/integrations/edgar-k8.js";
 import {
@@ -11519,24 +11520,44 @@ Folder: ${result.action.id}`,
           })
         ),
 
-        // TOP 4 TICKERS - Compact inline display with decimals, green if > 8, plus Tickers/Sweep/Trading status
-        topTickers.length > 0 && e(
-          Box,
-          { flexDirection: "row", gap: 1, marginTop: 1, height: 1 },
-          e(Text, { color: "#64748b" }, "TOP "),
-          ...topTickers.slice(0, 4).map((t, i) => {
-            const score = t.score || 0;
-            const isHigh = score > 8;
-            const isTop3 = i < 3;
-            return e(
-              Box,
-              { key: t.symbol, flexDirection: "row", gap: 0, backgroundColor: isTop3 && isHigh ? "#14532d" : undefined },
-              e(Text, { color: isTop3 && isHigh ? "#22c55e" : "#f59e0b", backgroundColor: isTop3 && isHigh ? "#14532d" : undefined }, ` ${t.symbol} `),
-              e(Text, { color: isHigh ? "#22c55e" : "#94a3b8", backgroundColor: isTop3 && isHigh ? "#14532d" : undefined, bold: isHigh }, score.toFixed(1)),
-              i < 3 && e(Text, { color: "#334155" }, " ")
-            );
-          })
-        ),
+        // TOP 4 TICKERS + SPY + Recession - Compact inline display
+        topTickers.length > 0 && (() => {
+          const spyTicker = tickers.find(t => t.symbol === "SPY");
+          const spyChg = spyTicker?.changePercent ?? spyTicker?.change ?? null;
+          const spyUp = spyChg !== null ? spyChg >= 0 : null;
+          let rScore = 5.0, rColor = "#eab308";
+          try {
+            const rd = getRecessionScore();
+            rScore = rd.score;
+            rColor = getRecessionColor(rScore);
+          } catch {}
+          return e(
+            Box,
+            { flexDirection: "row", gap: 1, marginTop: 1, height: 1 },
+            e(Text, { color: "#64748b" }, "TOP "),
+            ...topTickers.slice(0, 4).map((t, i) => {
+              const score = t.score || 0;
+              const isHigh = score > 8;
+              const isTop3 = i < 3;
+              return e(
+                Box,
+                { key: t.symbol, flexDirection: "row", gap: 0, backgroundColor: isTop3 && isHigh ? "#14532d" : undefined },
+                e(Text, { color: isTop3 && isHigh ? "#22c55e" : "#f59e0b", backgroundColor: isTop3 && isHigh ? "#14532d" : undefined }, ` ${t.symbol} `),
+                e(Text, { color: isHigh ? "#22c55e" : "#94a3b8", backgroundColor: isTop3 && isHigh ? "#14532d" : undefined, bold: isHigh }, score.toFixed(1)),
+                i < 3 && e(Text, { color: "#334155" }, " ")
+              );
+            }),
+            e(Text, { color: "#334155" }, " | "),
+            // SPY indicator
+            spyChg !== null && e(Text, {
+              color: spyUp ? "#22c55e" : "#ef4444",
+              bold: true
+            }, `SPY${spyUp ? "▲" : "▼"} ${spyUp ? "+" : ""}${spyChg.toFixed(1)}%`),
+            spyChg !== null && e(Text, { color: "#334155" }, " | "),
+            // Recession score
+            e(Text, { color: rColor, bold: rScore >= 6 }, `Reces: ${rScore.toFixed(1)}`)
+          );
+        })(),
 
         // NET WORTH SUMMARY - Assets, Liabilities, Total
         plaidData?.connected && e(

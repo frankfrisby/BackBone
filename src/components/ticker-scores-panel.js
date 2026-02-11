@@ -498,25 +498,35 @@ const TickerScoresPanelBase = ({
             }, ` ${tradingStatus.riskLevel || "conservative"}`)
           )
         ),
-        e(
-          Box,
-          { flexDirection: "row", gap: 1, alignItems: "center" },
-          // SPY indicator with arrow (green ▲ / red ▼)
-          spyChange !== null && e(Text, {
-            color: spyPositive ? "#22c55e" : "#ef4444",
-            bold: true
-          }, `SPY ${spyPositive ? "▲" : "▼"} ${spyChange >= 0 ? "+" : ""}${spyChange?.toFixed(1) || 0}%`),
-          spyChange !== null && e(Text, { color: "#334155" }, "│"),
-          e(Text, { color: top3Count > 0 ? "#22c55e" : "#475569" },
-            top3Count > 0 ? `${top3Count} buy` : "0 buy"),
-          e(StatusDot, {
-            status: marketStatus,
-            blinking: marketStatus === "working"
-          }),
-          e(Text, { color: "#334155" }, "│"),
-          e(Text, { color: "#475569", dimColor: true },
-            `last ${formatShortDateTime(tickerStatus?.lastRefresh)}`)
-        )
+        (() => {
+          // Get recession score for mini view
+          let miniRecessionScore = 5.0;
+          try { miniRecessionScore = getRecessionScore().score; } catch {}
+          const miniRecessionColor = getRecessionColor(miniRecessionScore);
+          return e(
+            Box,
+            { flexDirection: "row", gap: 1, alignItems: "center" },
+            // SPY indicator with arrow (green ▲ / red ▼)
+            spyChange !== null && e(Text, {
+              color: spyPositive ? "#22c55e" : "#ef4444",
+              bold: true
+            }, `SPY ${spyPositive ? "▲" : "▼"} ${spyChange >= 0 ? "+" : ""}${spyChange?.toFixed(1) || 0}%`),
+            spyChange !== null && e(Text, { color: "#334155" }, "│"),
+            // Recession score
+            e(Text, { color: miniRecessionColor, bold: miniRecessionScore >= 6 },
+              `Reces: ${miniRecessionScore.toFixed(1)}`),
+            e(Text, { color: "#334155" }, "│"),
+            e(Text, { color: top3Count > 0 ? "#22c55e" : "#475569" },
+              top3Count > 0 ? `${top3Count} buy` : "0 buy"),
+            e(StatusDot, {
+              status: marketStatus,
+              blinking: marketStatus === "working"
+            }),
+            e(Text, { color: "#334155" }, "│"),
+            e(Text, { color: "#475569", dimColor: true },
+              `last ${formatShortDateTime(tickerStatus?.lastRefresh)}`)
+          );
+        })()
       ),
       // Mini view column headers
       e(

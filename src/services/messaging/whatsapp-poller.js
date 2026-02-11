@@ -25,6 +25,7 @@ import path from "path";
 import { getTwilioWhatsApp } from "./twilio-whatsapp.js";
 import { formatAIResponse, chunkMessage } from "./whatsapp-formatter.js";
 import { getDataDir } from "../paths.js";
+import { getUnifiedMessageLog, MESSAGE_CHANNEL } from "./unified-message-log.js";
 
 const DATA_DIR = getDataDir();
 const PROCESSED_SIDS_PATH = path.join(DATA_DIR, "whatsapp-processed-sids.json");
@@ -360,17 +361,32 @@ class WhatsAppPoller {
   }
 
   /**
-   * Process a message using Claude AI with full user context
+   * Process a message using Claude AI with full user context + conversation history
    */
   async _processWithAI(from, content) {
     try {
+      const messageLog = getUnifiedMessageLog();
+
+      // Log incoming message
+      messageLog.addUserMessage(content, MESSAGE_CHANNEL.WHATSAPP, { from });
+
+      // Build conversation history
+      const recentMessages = messageLog.getMessagesForAI(12);
+      const conversationHistory = recentMessages
+        .slice(-10)
+        .map(m => `${m.role === "user" ? "User" : "BACKBONE"}: ${m.content}`)
+        .join("\n");
+
       // Load user context from local data files
       const context = this._loadContext();
 
-      // Build AI prompt
+      // Build AI prompt with conversation history
       const prompt = `You are BACKBONE, an executive AI assistant. The user messaged you on WhatsApp.
 
-*User message:* "${content}"
+*CONVERSATION HISTORY (most recent):*
+${conversationHistory || "(first message — no prior history)"}
+
+*Current message:* "${content}"
 
 *FORMATTING RULES (CRITICAL):*
 Use WhatsApp-native formatting in your response:
@@ -383,10 +399,10 @@ Use WhatsApp-native formatting in your response:
 - No markdown headers (##), no [links](url)
 - Use emojis sparingly for visual scanning
 
-*USER CONTEXT:*
+*USER DATA:*
 ${JSON.stringify(context, null, 2)}
 
-Respond to the user's question with specific data from the context above. Be concise, actionable, and data-rich.`;
+IMPORTANT: You are in a CONVERSATION. Read the history above. If the user is answering a question you asked, or following up on a prior topic, respond in context. Be concise, actionable, and data-rich.`;
 
       // Use Claude Code CLI (Pro/Max subscription) — no API key needed
       let responseText = null;
@@ -423,11 +439,12 @@ Respond to the user's question with specific data from the context above. Be con
         }
       }
 
-      if (responseText) {
-        await this._sendResponse(from, responseText);
-      } else {
-        await this._sendResponse(from, "Hmm, I drew a blank on that one. Could you rephrase?");
-      }
+      const finalResponse = responseText || "Hmm, I drew a blank on that one. Could you rephrase?";
+
+      // Log assistant response
+      messageLog.addAssistantMessage(finalResponse, MESSAGE_CHANNEL.WHATSAPP);
+
+      await this._sendResponse(from, finalResponse);
     } catch (err) {
       console.error("[WhatsAppPoller] AI processing error:", err.message);
       await this._sendResponse(from, `Hit a snag: _${err.message.slice(0, 100)}_`);

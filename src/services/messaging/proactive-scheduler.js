@@ -387,6 +387,42 @@ class ProactiveScheduler extends EventEmitter {
       .slice(0, 5)
       .map(t => ({ symbol: t.symbol, score: (t.effectiveScore || t.score || 0).toFixed(1), price: t.price }));
 
+    // ── Enhanced context: recession, convictions, recent trades ──
+    let recessionInfo = "";
+    try {
+      const { getRecessionScore, getRecessionLabel } = await import("../trading/recession-score.js");
+      const rs = getRecessionScore();
+      recessionInfo = `\nRECESSION SCORE: ${rs.score}/10 (${getRecessionLabel(rs.score)})`;
+      if (rs.components) {
+        const alerts = Object.entries(rs.components)
+          .filter(([, v]) => v.score >= 7)
+          .map(([k, v]) => `${k}: ${v.score.toFixed(1)}/10`);
+        if (alerts.length > 0) recessionInfo += ` — Elevated: ${alerts.join(", ")}`;
+      }
+    } catch {}
+
+    let convictionsInfo = "";
+    try {
+      const convictions = readJsonSafe(path.join(dataDir, "research-convictions.json"));
+      if (convictions && Array.isArray(convictions) && convictions.length > 0) {
+        const active = convictions.filter(c => !c.expired).slice(0, 5);
+        if (active.length > 0) {
+          convictionsInfo = `\nRESEARCH CONVICTIONS: ${active.map(c => `${c.symbol} (${c.conviction})`).join(", ")}`;
+        }
+      }
+    } catch {}
+
+    let recentTradesInfo = "";
+    try {
+      const trades = readJsonSafe(path.join(dataDir, "trades-log.json"));
+      if (Array.isArray(trades) && trades.length > 0) {
+        const recent = trades.slice(-3).map(t =>
+          `${t.side} ${t.qty}x ${t.symbol} @ $${t.price}`
+        );
+        recentTradesInfo = `\nRECENT TRADES: ${recent.join(" | ")}`;
+      }
+    } catch {}
+
     const promptLabel = {
       "market-open": "pre-market opening snapshot",
       "market-midday": "midday market alert (significant move detected)",
@@ -400,11 +436,13 @@ Equity: $${portfolio.equity || "?"} | Cash: $${portfolio.cash || "?"}
 Positions: ${JSON.stringify(positions)}
 
 TOP TICKERS BY SCORE: ${JSON.stringify(topTickers)}
+${recessionInfo}${convictionsInfo}${recentTradesInfo}
 
 RULES:
 - Use WhatsApp formatting: *bold*, _italic_, bullet points with -
 - Keep under 800 characters
 - Include key numbers (P&L, % changes)
+- Mention recession score if >= 5 (caution+), or convictions if noteworthy
 - Be actionable: highlight what needs attention
 - No markdown headers, no [links]
 - If this is a midday alert, emphasize the big mover
@@ -429,38 +467,56 @@ Return ONLY the message text, nothing else.`;
       return { success: false, skipped: true, reason: "No active goals" };
     }
 
-    // Find stalled goals (3+ days no progress update) or near-due goals
     const now = Date.now();
     const THREE_DAYS = 3 * 24 * 60 * 60 * 1000;
 
-    const needsAttention = activeGoals.filter(g => {
+    // Find stalled goals (3+ days no progress update)
+    const stalledGoals = activeGoals.filter(g => {
       const lastUpdate = g.lastUpdated || g.updatedAt || g.createdAt;
       if (!lastUpdate) return true;
-      const age = now - new Date(lastUpdate).getTime();
-      return age > THREE_DAYS;
+      return (now - new Date(lastUpdate).getTime()) > THREE_DAYS;
     });
 
-    if (needsAttention.length === 0) {
-      return { success: false, skipped: true, reason: "All goals progressing" };
+    // Find near-complete goals (>= 75% progress) — worth a push
+    const nearComplete = activeGoals.filter(g => {
+      const progress = g.progress || 0;
+      return progress >= 75 && progress < 100;
+    });
+
+    if (stalledGoals.length === 0 && nearComplete.length === 0) {
+      return { success: false, skipped: true, reason: "All goals progressing, none near finish" };
     }
 
-    const goalsSummary = needsAttention.map(g => ({
+    const stalledSummary = stalledGoals.map(g => ({
       title: g.title,
       category: g.category,
       progress: g.progress || 0,
       daysSinceUpdate: Math.floor((now - new Date(g.lastUpdated || g.updatedAt || g.createdAt).getTime()) / (24 * 60 * 60 * 1000)),
+      type: "stalled",
     }));
+
+    const nearCompleteSummary = nearComplete
+      .filter(g => !stalledGoals.find(s => s.id === g.id)) // avoid duplicates
+      .map(g => ({
+        title: g.title,
+        category: g.category,
+        progress: g.progress || 0,
+        type: "near-complete",
+      }));
+
+    const allGoals = [...stalledSummary, ...nearCompleteSummary];
 
     const prompt = `Generate a motivating WhatsApp goal check-in nudge.
 
-STALLED/OVERDUE GOALS:
-${JSON.stringify(goalsSummary, null, 2)}
+GOALS NEEDING ATTENTION:
+${JSON.stringify(allGoals, null, 2)}
 
 RULES:
 - Use WhatsApp formatting: *bold*, _italic_, bullet points
 - Keep under 600 characters
-- Be encouraging, not naggy
-- Suggest one small next step for the most important stalled goal
+- For "near-complete" goals: celebrate the progress and encourage the final push
+- For "stalled" goals: be encouraging, not naggy, suggest one small next step
+- Prioritize near-complete goals (they're almost wins!)
 - No markdown headers, no [links]
 
 Return ONLY the message text, nothing else.`;

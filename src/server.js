@@ -158,6 +158,17 @@ function buildDashboardCache() {
     ? goals.goals
     : [];
 
+  // Per-source freshness — file mtime tells when data was last written
+  const fileFreshness = (filePath) => {
+    try {
+      if (fs.existsSync(filePath)) {
+        const stat = fs.statSync(filePath);
+        return { updatedAt: stat.mtime.toISOString(), ageSeconds: Math.round((now - stat.mtimeMs) / 1000) };
+      }
+    } catch {}
+    return null;
+  };
+
   dashboardCache = {
     user: {
       uid: user.uid || "local",
@@ -177,6 +188,17 @@ function buildDashboardCache() {
     lifeScores: lifeScores || null,
     recentTrades: Array.isArray(tradesLog) ? tradesLog.slice(-5) : [],
     predictions: predictionCache ? { totalTickers: Object.keys(predictionCache).length } : null,
+    _meta: {
+      cachedAt: new Date().toISOString(),
+      freshness: {
+        portfolio: fileFreshness(path.join(dataDir, "alpaca-cache.json")),
+        tickers: fileFreshness(path.join(dataDir, "tickers-cache.json")),
+        health: fileFreshness(path.join(dataDir, "oura-data.json")),
+        goals: fileFreshness(path.join(dataDir, "goals.json")),
+        lifeScores: fileFreshness(path.join(dataDir, "life-scores.json")),
+        trades: fileFreshness(path.join(dataDir, "trades-log.json")),
+      },
+    },
     cachedAt: new Date().toISOString(),
   };
 
@@ -1913,7 +1935,9 @@ server.listen(PORT, () => {
 async function startWhatsAppPoller() {
   try {
     const { getWhatsAppPoller } = await import("./services/messaging/whatsapp-poller.js");
+    const { getUnifiedMessageLog, MESSAGE_CHANNEL } = await import("./services/messaging/unified-message-log.js");
     const poller = getWhatsAppPoller();
+    const messageLog = getUnifiedMessageLog();
 
     // Set the message handler — uses the same AI processing as the webhook
     poller.setMessageHandler(async (messageData) => {
@@ -1921,12 +1945,25 @@ async function startWhatsAppPoller() {
       console.log(`[WhatsAppPoller] Processing: "${content?.slice(0, 80)}"`);
       logActivity("system", `WhatsApp message received: "${content?.slice(0, 60)}"`);
 
-      // Load context and generate AI response (same logic as POST /api/whatsapp/webhook)
+      // ── Log incoming message to unified history ──────────────
+      messageLog.addUserMessage(content, MESSAGE_CHANNEL.WHATSAPP, { from });
+
+      // ── Build conversation history for context ───────────────
+      const recentMessages = messageLog.getMessagesForAI(12);
+      const conversationHistory = recentMessages
+        .slice(-10) // Last 10 messages (user + assistant)
+        .map(m => `${m.role === "user" ? "User" : "BACKBONE"}: ${m.content}`)
+        .join("\n");
+
+      // Load static data context (portfolio, health, goals)
       const context = poller._loadContext();
 
       const prompt = `You are BACKBONE, an executive AI assistant. The user messaged you on WhatsApp.
 
-*User message:* "${content}"
+*CONVERSATION HISTORY (most recent):*
+${conversationHistory || "(first message — no prior history)"}
+
+*Current message:* "${content}"
 
 *FORMATTING RULES (CRITICAL):*
 Use WhatsApp-native formatting in your response:
@@ -1937,10 +1974,11 @@ Use WhatsApp-native formatting in your response:
 - No markdown headers (##), no [links](url)
 - Use emojis sparingly for visual scanning
 
-*USER CONTEXT:*
+*USER DATA:*
 ${JSON.stringify(context, null, 2)}
 
-Respond to the user's question with specific data from the context above. Be concise, actionable, and data-rich.`;
+IMPORTANT: You are in a CONVERSATION. Read the history above. If the user is answering a question you asked, or following up on a prior topic, respond in context. Do not ask "what are you talking about?" — check the history.
+Be concise, actionable, and data-rich.`;
 
       // Use Claude Code CLI (Pro/Max subscription) — no API key needed
       let responseText = null;
@@ -1977,7 +2015,12 @@ Respond to the user's question with specific data from the context above. Be con
         }
       }
 
-      return responseText || "_Something went wrong generating a response. The AI service may be temporarily unavailable._";
+      const finalResponse = responseText || "_Something went wrong generating a response. The AI service may be temporarily unavailable._";
+
+      // ── Log assistant response to unified history ────────────
+      messageLog.addAssistantMessage(finalResponse, MESSAGE_CHANNEL.WHATSAPP);
+
+      return finalResponse;
     });
 
     await poller.start();

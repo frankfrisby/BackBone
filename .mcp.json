@@ -60,6 +60,12 @@
         "src/mcp/whatsapp-server.js"
       ]
     },
+    "backbone-brokerage": {
+      "command": "node",
+      "args": [
+        "src/mcp/brokerage-server.js"
+      ]
+    },
     "backbone-youtube": {
       "command": "node",
       "args": [

@@ -48,6 +48,9 @@ export function markdownToWhatsApp(md) {
 
   let text = md;
 
+  // ── Convert markdown tables FIRST (before other transforms break pipe chars) ──
+  text = convertMarkdownTables(text);
+
   // ── Strip markdown headers → just bold text ──
   // WhatsApp has NO header syntax — # ## ### are meaningless raw characters
   // # H1 → *TITLE* (bold, uppercased)
@@ -225,6 +228,40 @@ export function formatGoalsSummary(goals) {
 }
 
 /**
+ * Format net worth / brokerage overview for WhatsApp
+ */
+export function formatNetWorth(data) {
+  if (!data) return "💰 _Net worth data unavailable_";
+
+  let msg = `💰 *Net Worth Overview*\n─────────────────\n`;
+
+  if (data.netWorth?.total != null) {
+    msg += `\n🏦 *Total:* ${currency(data.netWorth.total)}\n`;
+    if (data.netWorth.assets) msg += `  📈 Assets: ${currency(data.netWorth.assets)}\n`;
+    if (data.netWorth.liabilities) msg += `  📉 Liabilities: ${currency(data.netWorth.liabilities)}\n`;
+  }
+
+  // Account categories
+  if (data.categories) {
+    for (const [cat, info] of Object.entries(data.categories)) {
+      const emoji = cat === "investments" ? "📊" : cat === "cash" ? "💵" : cat === "creditCards" ? "💳" : cat === "loans" ? "🏠" : "📁";
+      msg += `\n${emoji} *${cat.charAt(0).toUpperCase() + cat.slice(1)}* (${info.count})\n`;
+      for (const acc of (info.accounts || []).slice(0, 5)) {
+        msg += `  • ${acc.name || acc.institution}: ${currency(acc.balance || 0)}\n`;
+      }
+      msg += `  *Subtotal:* ${currency(info.total)}\n`;
+    }
+  }
+
+  if (data.lastUpdated) {
+    const age = Math.round((Date.now() - new Date(data.lastUpdated).getTime()) / 3600000);
+    msg += `\n_Updated ${age}h ago_`;
+  }
+
+  return msg.trim();
+}
+
+/**
  * Format a trade notification for WhatsApp
  */
 export function formatTradeNotification(trade) {
@@ -295,7 +332,9 @@ export function formatCycleSummary(cycle) {
  */
 export function formatBriefForWhatsApp(brief) {
   if (typeof brief === "string") {
-    return formatAIResponse(brief, { includeFooter: true });
+    // Pre-formatted briefs from daily-brief-generator pass through clean.
+    // No extra headers — the brief already has its own structure.
+    return brief;
   }
 
   // Build from structured data
@@ -342,6 +381,75 @@ export function formatBriefForWhatsApp(brief) {
   }
 
   return `🦴 *BACKBONE Daily Brief*\n━━━━━━━━━━━━━━━━━\n\n${parts.join("\n\n")}`;
+}
+
+// ── Table Formatter ──────────────────────────────────────────────
+
+/**
+ * Format a table for WhatsApp using monospace alignment.
+ * WhatsApp doesn't support real tables — we use ``` blocks for alignment.
+ *
+ * @param {string[]} headers - Column headers
+ * @param {string[][]} rows - Array of row arrays
+ * @param {object} options - { title, alignRight: number[] (0-indexed columns to right-align) }
+ */
+export function formatTable(headers, rows, options = {}) {
+  const { title, alignRight = [] } = options;
+
+  if (!rows || rows.length === 0) return title ? `*${title}*\n_No data_` : "_No data_";
+
+  // Calculate column widths
+  const colWidths = headers.map((h, i) => {
+    const dataMax = rows.reduce((max, row) => Math.max(max, String(row[i] || "").length), 0);
+    return Math.max(h.length, dataMax);
+  });
+
+  // Build header row
+  const headerRow = headers.map((h, i) =>
+    alignRight.includes(i) ? h.padStart(colWidths[i]) : h.padEnd(colWidths[i])
+  ).join("  ");
+
+  const separator = colWidths.map(w => "─".repeat(w)).join("──");
+
+  // Build data rows
+  const dataRows = rows.map(row =>
+    row.map((cell, i) => {
+      const s = String(cell || "");
+      return alignRight.includes(i) ? s.padStart(colWidths[i]) : s.padEnd(colWidths[i]);
+    }).join("  ")
+  ).join("\n");
+
+  const table = `${headerRow}\n${separator}\n${dataRows}`;
+
+  if (title) {
+    return `*${title}*\n\`\`\`\n${table}\n\`\`\``;
+  }
+  return `\`\`\`\n${table}\n\`\`\``;
+}
+
+/**
+ * Convert markdown tables (| col | col |) to WhatsApp-friendly format.
+ * Called automatically by markdownToWhatsApp.
+ */
+function convertMarkdownTables(text) {
+  // Match markdown table blocks
+  const tableRegex = /^(\|.+\|)\n(\|[-:\s|]+\|)\n((?:\|.+\|\n?)+)/gm;
+
+  return text.replace(tableRegex, (match, headerLine, sepLine, bodyLines) => {
+    // Parse headers
+    const headers = headerLine.split("|").filter(c => c.trim()).map(c => c.trim());
+
+    // Detect alignment from separator
+    const seps = sepLine.split("|").filter(c => c.trim());
+    const alignRight = seps.map((s, i) => s.trim().endsWith(":") ? i : -1).filter(i => i >= 0);
+
+    // Parse rows
+    const rows = bodyLines.trim().split("\n").map(line =>
+      line.split("|").filter(c => c.trim()).map(c => c.trim())
+    );
+
+    return formatTable(headers, rows, { alignRight });
+  });
 }
 
 // ── Message Chunking ────────────────────────────────────────────

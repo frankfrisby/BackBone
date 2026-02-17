@@ -99,6 +99,15 @@ export class PersonalCapitalService extends EventEmitter {
         fs.mkdirSync(DATA_DIR, { recursive: true });
       }
       fs.writeFileSync(PC_DATA_PATH, JSON.stringify(this.data, null, 2));
+      // Also write empower-data.json as a fallback for brokerage MCP server
+      const empowerDataPath = path.join(DATA_DIR, "empower-data.json");
+      fs.writeFileSync(empowerDataPath, JSON.stringify({
+        netWorth: this.data.netWorth?.total || 0,
+        accounts: this.data.accounts || [],
+        holdings: this.data.holdings || [],
+        categories: this.data.categories || {},
+        lastUpdated: this.data.lastUpdated,
+      }, null, 2));
     } catch (error) {
       console.error("Failed to save Personal Capital data:", error.message);
     }

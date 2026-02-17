@@ -657,12 +657,24 @@ export const runClaudeCodeStreaming = async (prompt, options = {}) => {
   }
 
   // Build args with model selection, stream-json for structured output, and permissions bypass
-  const mcpTools = [
-    "mcp__backbone-google", "mcp__backbone-linkedin", "mcp__backbone-contacts",
-    "mcp__backbone-news", "mcp__backbone-life", "mcp__backbone-health",
-    "mcp__backbone-brokerage", "mcp__backbone-trading", "mcp__backbone-projects",
-    "mcp__backbone-vapi", "mcp__backbone-whatsapp", "mcp__backbone-youtube",
-  ];
+  // Auto-discover MCP tool prefixes from .mcp.json so new servers are never missed
+  let mcpTools = [];
+  try {
+    const mcpJsonPath = path.join(getBackboneRoot(), ".mcp.json");
+    if (fs.existsSync(mcpJsonPath)) {
+      const mcpConfig = JSON.parse(fs.readFileSync(mcpJsonPath, "utf-8"));
+      mcpTools = Object.keys(mcpConfig.mcpServers || {}).map(name => `mcp__${name}`);
+    }
+  } catch {}
+  // Fallback if .mcp.json is unreadable
+  if (mcpTools.length === 0) {
+    mcpTools = [
+      "mcp__backbone-google", "mcp__backbone-linkedin", "mcp__backbone-contacts",
+      "mcp__backbone-news", "mcp__backbone-life", "mcp__backbone-health",
+      "mcp__backbone-brokerage", "mcp__backbone-trading", "mcp__backbone-projects",
+      "mcp__backbone-vapi", "mcp__backbone-whatsapp", "mcp__backbone-youtube",
+    ];
+  }
   const allowedTools = [
     "Read", "Glob", "Grep", "WebFetch", "WebSearch", "Task",
     "Write", "Edit", "Bash", ...mcpTools

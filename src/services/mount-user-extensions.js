@@ -4,7 +4,7 @@
  * On startup, merges user-defined MCP servers, skills, and tools
  * with the engine's built-in ones so they're available at runtime.
  *
- * MCP:    user/mcp/servers.json  + engine base  → .mcp.json (read by Claude Code)
+ * MCP:    auto-discovered from src/mcp/*-server.js + user/mcp/servers.json → .mcp.json
  * Skills: user/skills/           + engine/skills → merged by skills-loader.js
  * Tools:  user/tools/index.json  + engine/tools  → merged by tool-loader.js
  */
@@ -13,81 +13,70 @@ import fs from "fs";
 import path from "path";
 import { getUserMcpDir, getEngineRoot } from "./paths.js";
 
-// ── Base MCP config (engine-provided servers) ───────────────────
+// ── Non-standard name mappings ──────────────────────────────
+// Servers whose MCP name doesn't match `backbone-{filename}`.
+// e.g. google-mail-calendar-server.js → backbone-google (not backbone-google-mail-calendar)
+const NAME_OVERRIDES = {
+  "google-mail-calendar-server.js": "backbone-google",
+};
 
-const BASE_MCP_SERVERS = {
-  "backbone-google": {
-    command: "node",
-    args: ["src/mcp/google-mail-calendar-server.js"]
-  },
-  "backbone-linkedin": {
-    command: "node",
-    args: ["src/mcp/linkedin-server.js"]
-  },
-  "backbone-contacts": {
-    command: "node",
-    args: ["src/mcp/contacts-server.js"]
-  },
-  "backbone-news": {
-    command: "node",
-    args: ["src/mcp/news-server.js"]
-  },
-  "backbone-life": {
-    command: "node",
-    args: ["src/mcp/life-server.js"]
-  },
-  "backbone-health": {
-    command: "node",
-    args: ["src/mcp/health-server.js"]
-  },
-  "backbone-brokerage": {
-    command: "node",
-    args: ["src/mcp/brokerage-server.js"]
-  },
-  "backbone-trading": {
-    command: "node",
-    args: ["src/mcp/trading-server.js"]
-  },
-  "backbone-projects": {
-    command: "node",
-    args: ["src/mcp/projects-server.js"]
-  },
-  "backbone-vapi": {
-    command: "node",
-    args: ["src/mcp/vapi-server.js"]
-  },
-  "backbone-whatsapp": {
-    command: "node",
-    args: ["src/mcp/whatsapp-server.js"]
-  },
-  "backbone-youtube": {
-    command: "node",
-    args: ["src/mcp/youtube-server.js"]
-  },
+// Servers to skip (superseded by other servers)
+const SKIP_FILES = new Set([
+  // calendar-server.js and email-server.js are superseded by google-mail-calendar-server.js
+  "calendar-server.js",
+  "email-server.js",
+]);
+
+/**
+ * Auto-discover all MCP servers in src/mcp/*-server.js
+ * Derives the MCP name from the filename: foo-server.js → backbone-foo
+ * Unless overridden in NAME_OVERRIDES.
+ */
+function discoverMcpServers() {
+  const engineRoot = getEngineRoot();
+  const mcpDir = path.join(engineRoot, "src", "mcp");
+  const servers = {};
+
+  if (!fs.existsSync(mcpDir)) return servers;
+
+  const files = fs.readdirSync(mcpDir).filter(f => f.endsWith("-server.js"));
+
+  for (const file of files) {
+    if (SKIP_FILES.has(file)) continue;
+
+    // Derive name: brokerage-server.js → backbone-brokerage
+    const name = NAME_OVERRIDES[file] || "backbone-" + file.replace("-server.js", "");
+    servers[name] = {
+      command: "node",
+      args: [`src/mcp/${file}`],
+    };
+  }
+
+  return servers;
+}
+
+// ── Extra (non-src/mcp) servers ─────────────────────────────
+const EXTRA_SERVERS = {
   "claude-in-chrome": {
     command: "npx",
-    args: ["-y", "@anthropic-ai/claude-code-mcp-in-chrome"]
-  }
+    args: ["-y", "@anthropic-ai/claude-code-mcp-in-chrome"],
+  },
 };
 
 /**
  * Merge engine MCP servers + user MCP servers → .mcp.json
  *
- * User servers.json format:
- * {
- *   "my-custom-server": {
- *     "command": "node",
- *     "args": ["path/to/server.js"],
- *     "env": { "API_KEY": "..." }
- *   }
- * }
- *
- * User servers override engine servers on name collision.
+ * Engine servers are auto-discovered from src/mcp/*-server.js.
+ * User servers.json overrides engine servers on name collision.
  */
 export function mountMcpServers() {
-  const merged = { ...BASE_MCP_SERVERS };
+  // Auto-discover all engine MCP servers
+  const discovered = discoverMcpServers();
+  const merged = { ...discovered, ...EXTRA_SERVERS };
 
-  // Load user MCP servers
+  const engineCount = Object.keys(merged).length;
+
+  // Load user MCP servers (override on collision)
   const userMcpDir = getUserMcpDir();
   const userServersPath = path.join(userMcpDir, "servers.json");
 
@@ -113,12 +102,14 @@ export function mountMcpServers() {
 
   if (newContent !== currentContent) {
     fs.writeFileSync(mcpJsonPath, newContent);
+    console.log(`[Mount] Updated .mcp.json with ${Object.keys(merged).length} servers (${Object.keys(discovered).length} auto-discovered)`);
   }
 
   return {
-    engineServers: Object.keys(BASE_MCP_SERVERS).length,
-    userServers: Object.keys(merged).length - Object.keys(BASE_MCP_SERVERS).length,
-    totalServers: Object.keys(merged).length
+    engineServers: engineCount,
+    discoveredServers: Object.keys(discovered),
+    userServers: Object.keys(merged).length - engineCount,
+    totalServers: Object.keys(merged).length,
   };
 }
 

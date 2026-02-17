@@ -40,6 +40,10 @@ const BASE_MCP_SERVERS = {
     command: "node",
     args: ["src/mcp/health-server.js"]
   },
+  "backbone-brokerage": {
+    command: "node",
+    args: ["src/mcp/brokerage-server.js"]
+  },
   "backbone-trading": {
     command: "node",
     args: ["src/mcp/trading-server.js"]

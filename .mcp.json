@@ -36,6 +36,12 @@
         "src/mcp/health-server.js"
       ]
     },
+    "backbone-brokerage": {
+      "command": "node",
+      "args": [
+        "src/mcp/brokerage-server.js"
+      ]
+    },
     "backbone-trading": {
       "command": "node",
       "args": [

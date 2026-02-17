@@ -183,19 +183,12 @@ export class MessagingGateway extends EventEmitter {
         };
         this.config.enabledChannels.push(CHANNEL.WHATSAPP);
 
-        // Forward events
+        // Forward WhatsApp events — but DON'T process/respond here.
+        // RealtimeMessaging already handles incoming WhatsApp messages via Firestore.
+        // Responding here would cause DUPLICATE messages.
         this.whatsAppService.on("message-received", async (data) => {
-          const response = await this.handleIncomingMessage({
-            content: data.content,
-            from: data.from,
-            type: MESSAGE_TYPE.USER
-          }, CHANNEL.WHATSAPP);
-
-          // Send response via WhatsApp
-          if (response?.content) {
-            await this.whatsAppService.sendMessage(data.from, response.content);
-          }
-
+          // Only emit the event for other listeners (UI, logging).
+          // Do NOT call handleIncomingMessage or send a response.
           this.emit("message-received", { channel: CHANNEL.WHATSAPP, ...data });
         });
       } else {
@@ -567,120 +560,92 @@ export const getMessagingGateway = () => {
 export const setupMessaging = async (userId, aiBrain) => {
   const gateway = getMessagingGateway();
 
-  // Create sophisticated message handler
+  // Create message handler that routes through Claude Code CLI for full tool access
   const messageHandler = async (message) => {
     try {
       const { loadUserSettings } = await import("./user-settings.js");
       const settings = loadUserSettings();
-      const appName = settings.appName || "Backbone";
 
-      // First, evaluate if we can confidently answer
-      const evaluationPrompt = `Evaluate if you can confidently answer this question based on what you currently know.
-Question: "${message.content}"
+      // ALWAYS route through Claude Code CLI — it has MCP tools, file access,
+      // web search, and CLAUDE.md context. The old "evaluate then research" pattern
+      // used a bare LLM with zero tool access and couldn't do anything useful.
+      const { runClaudeCodeStreaming, getClaudeCodeStatus } = await import("../ai/claude-code-cli.js");
+      const cliStatus = await getClaudeCodeStatus();
 
-Respond with JSON only:
-{
-  "canAnswer": true/false,
-  "confidence": 0-100,
-  "answer": "your answer if confident" or null,
-  "researchNeeded": "what needs to be researched" or null,
-  "category": "question/request/action/info"
-}`;
+      if (cliStatus.ready) {
+        console.log(`[MessagingGateway] Routing to Claude Code CLI: "${message.content.slice(0, 80)}"`);
 
-      const evaluation = await aiBrain.chat(evaluationPrompt, {
-        context: { channel: message.channel, from: message.from, format: "json" }
-      });
+        const cliPrompt = `The user sent this message via WhatsApp. Answer concisely (max 3-4 sentences for simple questions, more for complex ones). Use your MCP tools and file access to get real data — never say "I don't have access".
 
-      let evalResult;
-      try {
-        const jsonMatch = (evaluation.text || evaluation.content || "").match(/\{[\s\S]*\}/);
-        evalResult = jsonMatch ? JSON.parse(jsonMatch[0]) : { canAnswer: false, confidence: 0 };
-      } catch (e) {
-        evalResult = { canAnswer: false, confidence: 0 };
-      }
+User message: "${message.content}"
 
-      // High confidence - respond directly
-      if (evalResult.canAnswer && evalResult.confidence >= 70) {
-        return {
-          content: evalResult.answer || evaluation.text || "I processed your message.",
-          type: MESSAGE_TYPE.AI,
-          metadata: {
-            model: evaluation.model,
-            tokens: evaluation.tokens,
-            confidence: evalResult.confidence
-          }
-        };
-      }
+IMPORTANT: You have full access to MCP tools (backbone-trading, backbone-brokerage, backbone-life, backbone-health, backbone-google, etc.), file system, and web search. Use them to answer with real data. Keep the response WhatsApp-friendly (no markdown tables, use plain text).`;
 
-      // Low confidence - create goal and acknowledge
-      const { getGoalManager, GOAL_PRIORITY } = await import("./goal-manager.js");
-      const goalManager = getGoalManager();
+        // Collect streamed output
+        return await new Promise((resolve, reject) => {
+          let fullOutput = "";
+          const timeout = setTimeout(() => {
+            resolve({
+              content: fullOutput || "I'm working on this but it's taking longer than expected. I'll follow up shortly.",
+              type: MESSAGE_TYPE.AI,
+              metadata: { model: "claude-code-cli", timedOut: true }
+            });
+          }, 3 * 60 * 1000); // 3 minute timeout
 
-      // Create a priority research goal
-      const researchGoal = {
-        title: `Research: ${message.content.slice(0, 50)}${message.content.length > 50 ? "..." : ""}`,
-        description: `User asked via WhatsApp: "${message.content}"\n\nResearch needed: ${evalResult.researchNeeded || "Find accurate information to answer this question"}`,
-        priority: GOAL_PRIORITY.URGENT,
-        category: "research",
-        source: "whatsapp",
-        originalMessage: message.content,
-        userId: userId,
-        notifyOnComplete: true,
-        notifyChannel: message.channel || "whatsapp"
-      };
+          const stream = runClaudeCodeStreaming(cliPrompt, {
+            timeout: 3 * 60 * 1000,
+          });
 
-      await goalManager.addGoal(researchGoal, true); // Set as current goal
-
-      // Send acknowledgment
-      const acknowledgment = evalResult.researchNeeded
-        ? `I don't have all the information on "${message.content.slice(0, 40)}..." yet, but I'm on it now. I'll research this and get back to you with what I find, including any relevant documents, links, or actions I take.`
-        : `Good question! Let me look into that for you. I'll do some research and get back to you shortly with a thorough answer.`;
-
-      // Set up goal completion listener to send follow-up
-      const onGoalComplete = async ({ goal, summary }) => {
-        if (goal.originalMessage === message.content && goal.notifyOnComplete) {
-          try {
-            const { getWhatsAppService } = await import("./whatsapp-service.js");
-            const whatsapp = getWhatsAppService();
-
-            if (whatsapp && whatsapp.initialized && settings.phoneNumber) {
-              // Build detailed follow-up message
-              let followUp = `${appName}: I've completed my research on your question.\n\n`;
-              followUp += summary || `Regarding: "${message.content.slice(0, 50)}..."`;
-
-              // Add any actions taken
-              const actionHistory = goalManager.actionHistory || [];
-              const recentActions = actionHistory.filter(a =>
-                a.timestamp && new Date(a.timestamp) > new Date(goal.createdAt)
-              ).slice(0, 3);
-
-              if (recentActions.length > 0) {
-                followUp += "\n\nActions taken:";
-                for (const action of recentActions) {
-                  followUp += `\n• ${action.action?.action || action.type || "Action"}: ${action.result?.summary || "completed"}`;
-                }
+          // Handle both Promise and EventEmitter returns (Agent SDK vs CLI)
+          const attachListeners = (emitter) => {
+            emitter.on("data", (text) => {
+              // Accumulate only the final assistant text, skip tool output lines
+              if (text && !text.startsWith("[Tool]") && !text.startsWith("Read(") &&
+                  !text.startsWith("Bash(") && !text.startsWith("Glob(") &&
+                  !text.startsWith("Grep(") && !text.startsWith("Edit(") &&
+                  !text.startsWith("Write(") && !text.startsWith("WebSearch(") &&
+                  !text.startsWith("Fetch(")) {
+                fullOutput = text; // Claude Code streams full text, last emission is final
               }
+            });
 
-              await whatsapp.sendTextMessage(settings.phoneNumber, followUp);
-            }
-          } catch (err) {
-            console.error("[MessagingGateway] Failed to send follow-up:", err.message);
+            emitter.on("end", (result) => {
+              clearTimeout(timeout);
+              const finalText = result?.output || result?.text || fullOutput || "Done.";
+              resolve({
+                content: finalText.slice(0, 4000), // WhatsApp message limit
+                type: MESSAGE_TYPE.AI,
+                metadata: { model: "claude-code-cli" }
+              });
+            });
+
+            emitter.on("error", (err) => {
+              clearTimeout(timeout);
+              console.error("[MessagingGateway] CLI error:", err.error || err.message || err);
+              // Fall back to aiBrain if CLI fails
+              resolve(fallbackToAiBrain(message, aiBrain));
+            });
+          };
+
+          // runClaudeCodeStreaming may return a Promise<EventEmitter> or EventEmitter
+          if (stream && typeof stream.then === "function") {
+            stream.then(attachListeners).catch((err) => {
+              clearTimeout(timeout);
+              console.error("[MessagingGateway] CLI spawn error:", err.message);
+              resolve(fallbackToAiBrain(message, aiBrain));
+            });
+          } else if (stream && typeof stream.on === "function") {
+            attachListeners(stream);
+          } else {
+            clearTimeout(timeout);
+            resolve(fallbackToAiBrain(message, aiBrain));
           }
-        }
-      };
+        });
+      }
 
-      goalManager.once("goal-completed", onGoalComplete);
-
-      return {
-        content: acknowledgment,
-        type: MESSAGE_TYPE.AI,
-        metadata: {
-          model: evaluation.model,
-          pendingResearch: true,
-          goalCreated: researchGoal.title,
-          confidence: evalResult.confidence
-        }
-      };
+      // Fallback: Claude Code CLI not available, use aiBrain directly
+      console.log("[MessagingGateway] Claude Code CLI not ready, falling back to aiBrain");
+      return await fallbackToAiBrain(message, aiBrain);
 
     } catch (error) {
       console.error("[MessagingGateway] AI processing error:", error.message);
@@ -691,6 +656,26 @@ Respond with JSON only:
       };
     }
   };
+
+  // Fallback handler when Claude Code CLI is not available
+  async function fallbackToAiBrain(message, brain) {
+    try {
+      const response = await brain.chat(message.content, {
+        context: { channel: message.channel, from: message.from }
+      });
+      return {
+        content: response.text || response.content || "I processed your message.",
+        type: MESSAGE_TYPE.AI,
+        metadata: { model: response.model, fallback: true }
+      };
+    } catch (err) {
+      return {
+        content: "Sorry, I encountered an error processing your message.",
+        type: MESSAGE_TYPE.SYSTEM,
+        error: err.message
+      };
+    }
+  }
 
   await gateway.initialize(userId, messageHandler);
 

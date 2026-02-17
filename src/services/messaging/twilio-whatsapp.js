@@ -33,6 +33,7 @@ import { getBaileysWhatsApp } from "./baileys-whatsapp.js";
 import { ensureRuntimeDependency, isModuleNotFoundError } from "../runtime/dependency-installer.js";
 
 import { getDataDir } from "../paths.js";
+import { isDuplicateSend, logOutgoing, logIncoming } from "./whatsapp-conversation-log.js";
 const DATA_DIR = getDataDir();
 const TWILIO_CONFIG_PATH = path.join(DATA_DIR, "twilio-config.json");
 const formatTwilioError = (error) => ({
@@ -65,6 +66,7 @@ export class TwilioWhatsAppService extends EventEmitter {
     // Forward Baileys inbound events through this legacy facade.
     this.baileysService.on("message-received", (data) => {
       const userId = data?.from ? this.getUserIdForPhone(data.from) : null;
+      logIncoming(data?.content || data?.body || "", { from: data?.from });
       this.emit("message-received", {
         ...data,
         userId
@@ -361,6 +363,15 @@ export class TwilioWhatsAppService extends EventEmitter {
       return { success: false, error: "Invalid phone number" };
     }
 
+    // Dedup guard — block identical messages within 30 seconds
+    if (!options.skipDedup) {
+      const dupCheck = isDuplicateSend(body);
+      if (dupCheck.isDuplicate) {
+        console.log(`[TwilioWhatsApp] DEDUP BLOCKED: ${dupCheck.reason}`);
+        return { success: true, dedupBlocked: true, reason: dupCheck.reason };
+      }
+    }
+
     const forcedProvider = String(options.forceProvider || "").toLowerCase();
     const forceTwilio = forcedProvider === "twilio";
     const forceBaileys = forcedProvider === "baileys";
@@ -379,6 +390,7 @@ export class TwilioWhatsAppService extends EventEmitter {
       if (baileysResult.success) {
         this.initialized = true;
         this.activeProvider = "baileys";
+        logOutgoing(body, { source: options.source || "baileys" });
         this.emit("message-sent", {
           to: phoneNumber,
           messageId: baileysResult.messageId,
@@ -426,6 +438,7 @@ export class TwilioWhatsAppService extends EventEmitter {
         this.activeProvider = "twilio";
       }
 
+      logOutgoing(body, { source: options.source || "twilio" });
       this.emit("message-sent", {
         to: phoneNumber,
         messageId: message.sid,
@@ -458,6 +471,13 @@ export class TwilioWhatsAppService extends EventEmitter {
       return { success: false, error: "Invalid phone number" };
     }
 
+    // Dedup guard — block identical media messages within 30 seconds
+    const dupCheck = isDuplicateSend(body, mediaUrl);
+    if (dupCheck.isDuplicate) {
+      console.log(`[TwilioWhatsApp] DEDUP BLOCKED (media): ${dupCheck.reason}`);
+      return { success: true, dedupBlocked: true, reason: dupCheck.reason };
+    }
+
     const prefer = String(this.activeProvider || this.config.providerPreference || "baileys").toLowerCase();
     const baileysEnabled = this.config.enableBaileys !== false && process.env.WHATSAPP_DISABLE_BAILEYS !== "1";
     const tryBaileysFirst = baileysEnabled && prefer !== "twilio";
@@ -468,6 +488,7 @@ export class TwilioWhatsAppService extends EventEmitter {
       if (baileysResult.success) {
         this.initialized = true;
         this.activeProvider = "baileys";
+        logOutgoing(body, { mediaUrl, type: "media", source: "baileys" });
         return baileysResult;
       }
       baileysError = baileysResult.error || "Baileys media send failed";
@@ -494,6 +515,7 @@ export class TwilioWhatsAppService extends EventEmitter {
       this.initialized = true;
       this.activeProvider = "twilio";
 
+      logOutgoing(body, { mediaUrl, type: "media", source: "twilio" });
       return {
         success: true,
         provider: "twilio",

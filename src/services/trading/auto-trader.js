@@ -31,6 +31,34 @@ const getMomentumDrift = async () => {
 let spyIntradayCache = { bars: null, timestamp: 0 };
 const SPY_CACHE_TTL = 2 * 60 * 1000; // 2 minutes
 
+// Per-ticker price cache (8-second TTL for observation polling)
+const tickerPriceCache = {};
+const TICKER_PRICE_CACHE_TTL = 8 * 1000; // 8 seconds
+
+// --- Market-Open Price Stabilization ---
+// Observation buffer: { SYMBOL: [{ price, time }, ...] }
+const observationBuffer = {};
+// Track which tickers we've already bought via observation (reset daily)
+const observationBuysExecuted = new Set();
+let observationBuysDate = null;
+// Observation sampler interval handle
+let observationSamplerInterval = null;
+// Tickers currently being observed
+let observationTargets = [];
+
+// Observation config
+const OBSERVATION_WINDOW = {
+  startMinutesSinceOpen: 0,   // Start sampling at 9:30 (market open)
+  minMinutesBeforeBuy: 5,     // Earliest buy at 9:35 (5 min of data)
+  endMinutesSinceOpen: 10,    // Stop observation mode at 9:40
+  sampleIntervalMs: 10 * 1000, // Sample every 10 seconds
+  shortMaSamples: 6,          // Last 6 samples (~1 min) for short MA
+  // Buy triggers
+  bounceDropPercent: 1.5,     // Price must drop 1.5% from initial to count as dip
+  bounceRecoverPercent: 0.3,  // Must recover 0.3% from low to trigger bounce buy
+  timeoutNearLowPercent: 0.5, // At timeout, buy if within 0.5% of observation low
+};
+
 // Bad market items - inverse ETFs and defensive positions that DO WELL when market is DOWN
 // These are the ONLY items allowed to be bought when SPY is negative
 const BAD_MARKET_ITEMS = [
@@ -252,6 +280,197 @@ const fetchSpyIntradayBars = async () => {
     console.error("[SPY Intraday] Fetch error:", error.message);
     return null;
   }
+};
+
+/**
+ * Fetch current price for a single ticker from Yahoo Finance.
+ * Per-symbol cache with 8-second TTL (we poll every 10s).
+ */
+const fetchTickerPrice = async (symbol) => {
+  const now = Date.now();
+  const cached = tickerPriceCache[symbol];
+  if (cached && (now - cached.timestamp) < TICKER_PRICE_CACHE_TTL) {
+    return cached.price;
+  }
+
+  try {
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1m&range=1d`;
+    const response = await fetch(url, {
+      headers: { "User-Agent": "Mozilla/5.0" }
+    });
+
+    if (!response.ok) return null;
+
+    const data = await response.json();
+    const result = data?.chart?.result?.[0];
+    const quotes = result?.indicators?.quote?.[0];
+    if (!quotes?.close) return null;
+
+    // Get the most recent non-null close
+    for (let i = quotes.close.length - 1; i >= 0; i--) {
+      if (quotes.close[i] != null) {
+        const price = quotes.close[i];
+        tickerPriceCache[symbol] = { price, timestamp: now };
+        return price;
+      }
+    }
+    return null;
+  } catch (error) {
+    console.error(`[ObservePrice] ${symbol} fetch error:`, error.message);
+    return null;
+  }
+};
+
+/**
+ * Check if we're in the market-open observation window.
+ * Returns { inWindow, minutesSinceOpen, canBuy }
+ */
+const getObservationWindowStatus = () => {
+  const { hours, minutes, dayOfWeek } = getEasternTime();
+  if (dayOfWeek === 'Sat' || dayOfWeek === 'Sun') {
+    return { inWindow: false, minutesSinceOpen: -1, canBuy: false };
+  }
+  const minutesSinceOpen = (hours * 60 + minutes) - (9 * 60 + 30);
+  const inWindow = minutesSinceOpen >= OBSERVATION_WINDOW.startMinutesSinceOpen
+    && minutesSinceOpen < OBSERVATION_WINDOW.endMinutesSinceOpen;
+  const canBuy = minutesSinceOpen >= OBSERVATION_WINDOW.minMinutesBeforeBuy;
+  return { inWindow, minutesSinceOpen, canBuy };
+};
+
+/**
+ * Start the background price sampler for market-open observation.
+ * Called when monitorAndTrade detects we're in the observation window.
+ * Samples all observationTargets every 10s and stores in observationBuffer.
+ */
+const startObservationSampler = (targets) => {
+  // Reset daily tracking
+  const today = new Date().toDateString();
+  if (observationBuysDate !== today) {
+    observationBuysExecuted.clear();
+    observationBuysDate = today;
+  }
+
+  observationTargets = targets;
+
+  // Don't start if already running
+  if (observationSamplerInterval) return;
+
+  console.log(`[Observation] Starting price sampler for: ${targets.join(", ")}`);
+
+  // Sample immediately, then every 10s
+  const sample = async () => {
+    for (const symbol of observationTargets) {
+      const price = await fetchTickerPrice(symbol);
+      if (price != null) {
+        if (!observationBuffer[symbol]) observationBuffer[symbol] = [];
+        observationBuffer[symbol].push({ price, time: Date.now() });
+      }
+    }
+  };
+
+  sample(); // first sample now
+  observationSamplerInterval = setInterval(sample, OBSERVATION_WINDOW.sampleIntervalMs);
+};
+
+/**
+ * Stop the observation sampler (called when window ends or all buys done).
+ */
+const stopObservationSampler = () => {
+  if (observationSamplerInterval) {
+    clearInterval(observationSamplerInterval);
+    observationSamplerInterval = null;
+    console.log("[Observation] Stopped price sampler");
+  }
+};
+
+/**
+ * Analyze observation buffer for a ticker and determine if it's time to buy.
+ * Returns { shouldBuy, price, reason } or { shouldBuy: false, reason }
+ *
+ * Buy triggers:
+ * 1. Short MA crosses above long MA (golden cross on micro scale)
+ * 2. Price dropped 1.5%+ from initial then recovered 0.3%+ (bounce from bottom)
+ * 3. At window end: buy if price is within 0.5% of observation low
+ */
+const analyzeObservation = (symbol, isWindowEnding) => {
+  const samples = observationBuffer[symbol];
+  if (!samples || samples.length < 3) {
+    return { shouldBuy: false, reason: `Only ${samples?.length || 0} samples — need more data` };
+  }
+
+  const prices = samples.map(s => s.price);
+  const initialPrice = prices[0];
+  const currentPrice = prices[prices.length - 1];
+  const observationLow = Math.min(...prices);
+  const observationHigh = Math.max(...prices);
+
+  // Compute short MA (last ~1 min = 6 samples) and long MA (all samples)
+  const shortWindow = Math.min(OBSERVATION_WINDOW.shortMaSamples, prices.length);
+  const shortSlice = prices.slice(-shortWindow);
+  const shortMa = shortSlice.reduce((a, b) => a + b, 0) / shortSlice.length;
+  const longMa = prices.reduce((a, b) => a + b, 0) / prices.length;
+
+  // Previous short MA (shift back 1 sample) for crossover detection
+  let prevShortMa = null;
+  if (prices.length > shortWindow) {
+    const prevShortSlice = prices.slice(-(shortWindow + 1), -1);
+    prevShortMa = prevShortSlice.reduce((a, b) => a + b, 0) / prevShortSlice.length;
+  }
+
+  // Previous long MA (all but last)
+  let prevLongMa = null;
+  if (prices.length > 1) {
+    const prevAll = prices.slice(0, -1);
+    prevLongMa = prevAll.reduce((a, b) => a + b, 0) / prevAll.length;
+  }
+
+  const dropFromInitial = ((initialPrice - observationLow) / initialPrice) * 100;
+  const recoveryFromLow = ((currentPrice - observationLow) / observationLow) * 100;
+  const distFromLow = ((currentPrice - observationLow) / observationLow) * 100;
+
+  // Trigger 1: Short MA crosses above Long MA (golden cross)
+  if (prevShortMa !== null && prevLongMa !== null) {
+    const wasBelowOrEqual = prevShortMa <= prevLongMa;
+    const isAbove = shortMa > longMa;
+    if (wasBelowOrEqual && isAbove) {
+      return {
+        shouldBuy: true,
+        price: currentPrice,
+        reason: `MA crossover (short ${shortMa.toFixed(2)} > long ${longMa.toFixed(2)}) after ${samples.length} samples, ${((Date.now() - samples[0].time) / 60000).toFixed(1)}min`
+      };
+    }
+  }
+
+  // Trigger 2: Bounce from bottom — dropped 1.5%+ then recovered 0.3%+
+  if (dropFromInitial >= OBSERVATION_WINDOW.bounceDropPercent
+    && recoveryFromLow >= OBSERVATION_WINDOW.bounceRecoverPercent) {
+    return {
+      shouldBuy: true,
+      price: currentPrice,
+      reason: `Bounce detected: dropped ${dropFromInitial.toFixed(2)}% from open, recovered ${recoveryFromLow.toFixed(2)}% from low $${observationLow.toFixed(2)}`
+    };
+  }
+
+  // Trigger 3: Window ending — buy if near the low
+  if (isWindowEnding) {
+    if (distFromLow <= OBSERVATION_WINDOW.timeoutNearLowPercent) {
+      return {
+        shouldBuy: true,
+        price: currentPrice,
+        reason: `Window ending, price $${currentPrice.toFixed(2)} within ${distFromLow.toFixed(2)}% of low $${observationLow.toFixed(2)} — buying near bottom`
+      };
+    } else {
+      return {
+        shouldBuy: false,
+        reason: `Window ending but price $${currentPrice.toFixed(2)} is ${distFromLow.toFixed(2)}% above low $${observationLow.toFixed(2)} — skipping (too far from bottom)`
+      };
+    }
+  }
+
+  return {
+    shouldBuy: false,
+    reason: `Observing: ${samples.length} samples, short MA ${shortMa.toFixed(2)} ${shortMa > longMa ? ">" : "<="} long MA ${longMa.toFixed(2)}, drop ${dropFromInitial.toFixed(2)}%`
+  };
 };
 
 /**
@@ -1071,7 +1290,7 @@ const executeBuyImmediate = async (symbol, price, reason) => {
  * 3. Re-checks market conditions before executing after delay
  */
 export const executeBuy = async (symbol, price, reason, options = {}) => {
-  const { spyPositive = null, skipDelay = false } = options;
+  const { spyPositive = null, skipDelay = false, fromObservation = false } = options;
 
   // Check if this is a bad market item
   const isDefensive = isBadMarketItem(symbol);
@@ -1097,9 +1316,34 @@ export const executeBuy = async (symbol, price, reason, options = {}) => {
     };
   }
 
+  // During observation window (9:30-9:40 ET), redirect to observation unless
+  // this call already came from the observation system
+  if (!fromObservation && !skipDelay) {
+    const obsStatus = getObservationWindowStatus();
+    if (obsStatus.inWindow) {
+      // Add to observation targets if not already there
+      if (!observationTargets.includes(symbol)) {
+        observationTargets.push(symbol);
+      }
+      console.log(`[AutoTrader] ${symbol} redirected to observation (${obsStatus.minutesSinceOpen}min since open)`);
+      return {
+        success: true,
+        queued: true,
+        observing: true,
+        message: `BUY ${symbol} deferred to observation — watching for price stabilization`
+      };
+    }
+  }
+
   // If skipDelay is true, execute immediately (for manual overrides)
   if (skipDelay) {
     console.log(`[AutoTrader] Executing ${symbol} immediately (skipDelay=true)`);
+    return await executeBuyImmediate(symbol, price, reason);
+  }
+
+  // If coming from observation, execute immediately (already waited)
+  if (fromObservation) {
+    console.log(`[AutoTrader] Executing ${symbol} immediately (observation trigger)`);
     return await executeBuyImmediate(symbol, price, reason);
   }
 
@@ -1622,6 +1866,93 @@ export const monitorAndTrade = async (tickers, positions = []) => {
     results.reasoning.push(`ROTATION LIMIT: ${rotationCheck.reason}`);
   }
 
+  // --- MARKET-OPEN OBSERVATION WINDOW ---
+  const obsStatus = getObservationWindowStatus();
+  if (obsStatus.inWindow && spyCheck.allow && rotationCheck.allowed) {
+    const isWindowEnding = obsStatus.minutesSinceOpen >= (OBSERVATION_WINDOW.endMinutesSinceOpen - 1);
+
+    // Start/update the observation sampler with current top buy candidates
+    const obsCandidates = top3BuyTickers.filter(s => !positionSymbols.includes(s) && !observationBuysExecuted.has(s));
+    if (obsCandidates.length > 0) {
+      startObservationSampler(obsCandidates);
+    }
+
+    if (!obsStatus.canBuy) {
+      // Before 9:35 — just observe, no buys yet
+      results.reasoning.push(`OBSERVATION WINDOW: ${obsStatus.minutesSinceOpen}min since open — sampling prices, buy allowed after ${OBSERVATION_WINDOW.minMinutesBeforeBuy}min`);
+      for (const sym of obsCandidates) {
+        const buf = observationBuffer[sym];
+        if (buf && buf.length > 0) {
+          results.reasoning.push(`  ${sym}: ${buf.length} samples, latest $${buf[buf.length - 1].price.toFixed(2)}`);
+        }
+      }
+    } else {
+      // 9:35-9:40 — check each candidate for buy trigger
+      results.reasoning.push(`OBSERVATION WINDOW: ${obsStatus.minutesSinceOpen}min since open — evaluating for entry${isWindowEnding ? " (window ending)" : ""}`);
+
+      const currentPositionCount = tradablePositions.length - results.executed.filter(t => t.side === "sell").length + buyCount;
+
+      for (const symbol of obsCandidates) {
+        if (currentPositionCount + buyCount >= config.maxTotalPositions) {
+          results.reasoning.push(`  ${symbol}: position limit reached — skipping`);
+          break;
+        }
+
+        const analysis = analyzeObservation(symbol, isWindowEnding);
+        results.reasoning.push(`  ${symbol}: ${analysis.reason}`);
+
+        if (analysis.shouldBuy) {
+          const ticker = sortedTickers.find(t => t.symbol === symbol);
+          const buyResult = await executeBuy(
+            symbol,
+            analysis.price,
+            `OPEN OBSERVATION: ${analysis.reason}`,
+            { spyPositive, fromObservation: true }
+          );
+
+          if (buyResult.success && buyResult.trade) {
+            results.executed.push(buyResult.trade);
+            results.reasoning.push(`  EXECUTED BUY ${symbol} @ $${analysis.price.toFixed(2)} via observation`);
+            observationBuysExecuted.add(symbol);
+            buyCount++;
+          } else {
+            results.reasoning.push(`  FAILED BUY ${symbol}: ${buyResult.error || "unknown"}`);
+          }
+        }
+      }
+
+      // If all candidates bought or window ending, stop sampler
+      if (obsCandidates.every(s => observationBuysExecuted.has(s)) || isWindowEnding) {
+        stopObservationSampler();
+        // Clear buffers
+        for (const sym of Object.keys(observationBuffer)) {
+          delete observationBuffer[sym];
+        }
+      }
+    }
+
+    // During observation window, skip the normal buy logic below
+    // (sells still happen normally above)
+    results.reasoning.push("Normal buy evaluation deferred — observation window active");
+
+    // --- REASONING: Final summary ---
+    if (results.executed.length === 0) {
+      results.reasoning.push("RESULT: No trades — observation in progress or no signals");
+    } else {
+      results.reasoning.push(`RESULT: Executed ${results.executed.length} trade(s) — ${results.executed.map(t => `${t.side.toUpperCase()} ${t.symbol}`).join(", ")}`);
+    }
+
+    return results;
+  }
+
+  // Stop observation sampler if we've left the window
+  if (!obsStatus.inWindow && observationSamplerInterval) {
+    stopObservationSampler();
+    for (const sym of Object.keys(observationBuffer)) {
+      delete observationBuffer[sym];
+    }
+  }
+
   // STEP 2: Evaluate top 3 for buy signals (only if SPY allows)
   if (spyCheck.allow && rotationCheck.allowed) {
     for (const ticker of sortedTickers) {
@@ -1734,6 +2065,8 @@ export const getTradingStatus = () => {
   const nextEval = getNextEvaluationTime();
   const rotationCheck = checkRotationFrequency();
 
+  const obsStatus = getObservationWindowStatus();
+
   return {
     enabled: config.enabled,
     mode: config.mode,
@@ -1745,6 +2078,17 @@ export const getTradingStatus = () => {
     sellThreshold: config.sellThreshold,
     dailyTradeCount,
     maxDailyTrades: config.maxDailyTrades,
+    observationWindow: {
+      active: obsStatus.inWindow,
+      minutesSinceOpen: obsStatus.minutesSinceOpen,
+      canBuy: obsStatus.canBuy,
+      samplerRunning: !!observationSamplerInterval,
+      targets: observationTargets,
+      samplesCollected: Object.fromEntries(
+        Object.entries(observationBuffer).map(([k, v]) => [k, v.length])
+      ),
+      buysExecuted: [...observationBuysExecuted]
+    },
     antiChurn: {
       minHoldPeriodDays: MIN_HOLD_PERIOD_MS / (24 * 60 * 60 * 1000),
       maxRotationsPerWeek: MAX_ROTATIONS_PER_WEEK,
@@ -1768,6 +2112,11 @@ export const setTradingEnabled = (enabled) => {
  * Get hold period status for a position (exported for MCP/UI)
  */
 export { checkHoldPeriod, checkRotationFrequency };
+
+/**
+ * Get observation window status (exported for MCP/UI)
+ */
+export { getObservationWindowStatus, observationBuffer, stopObservationSampler };
 
 // Initialize on load
 loadConfig();

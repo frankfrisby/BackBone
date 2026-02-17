@@ -489,11 +489,10 @@ export class RealtimeMessaging extends EventEmitter {
               localResponse.length > cloudResponse.length * 1.5;
 
             if (isDifferent && task.requiresFollowUp) {
-              // Send the richer response via WhatsApp
-              const whatsapp = getWhatsAppNotifications();
               const formattedResponse = result.content;
 
-              // Send via Twilio directly
+              // Send via Twilio directly — ONE send path only
+              let sentViaTwilio = false;
               try {
                 const { getTwilioWhatsApp } = await import("./twilio-whatsapp.js");
                 const wa = getTwilioWhatsApp();
@@ -505,23 +504,20 @@ export class RealtimeMessaging extends EventEmitter {
                     await wa.sendMessage(task.from, chunk);
                     if (chunks.length > 1) await new Promise(r => setTimeout(r, 500));
                   }
+                  sentViaTwilio = true;
                   console.log(`[RealtimeMessaging] Sent follow-up response for pending task`);
                 }
               } catch (sendErr) {
                 console.warn("[RealtimeMessaging] Failed to send follow-up via Twilio:", sendErr.message);
-
-                // Fallback: write to Firestore so sendTwilioResponse trigger sends it
-                await this.sendMessage(formattedResponse, {
-                  type: MESSAGE_TYPE.AI,
-                  sendToWhatsApp: true,
-                  channel: "twilio_whatsapp_response",
-                });
               }
 
-              // Also save to Firestore for conversation history
+              // Save to Firestore for conversation history only (NOT for re-sending)
+              // sendToWhatsApp=false prevents Firebase Function from sending again
               await this.sendMessage(formattedResponse, {
                 type: MESSAGE_TYPE.AI,
-                metadata: { source: "local_followup", pendingTaskId: taskId },
+                sendToWhatsApp: !sentViaTwilio, // Only use Firebase send if Twilio failed
+                channel: sentViaTwilio ? undefined : "twilio_whatsapp_response",
+                metadata: { source: "local_followup", pendingTaskId: taskId, sentViaTwilio },
               });
             }
           }

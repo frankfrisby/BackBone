@@ -660,7 +660,8 @@ export const runClaudeCodeStreaming = async (prompt, options = {}) => {
   const mcpTools = [
     "mcp__backbone-google", "mcp__backbone-linkedin", "mcp__backbone-contacts",
     "mcp__backbone-news", "mcp__backbone-life", "mcp__backbone-health",
-    "mcp__backbone-trading", "mcp__backbone-projects",
+    "mcp__backbone-brokerage", "mcp__backbone-trading", "mcp__backbone-projects",
+    "mcp__backbone-vapi", "mcp__backbone-whatsapp", "mcp__backbone-youtube",
   ];
   const allowedTools = [
     "Read", "Glob", "Grep", "WebFetch", "WebSearch", "Task",

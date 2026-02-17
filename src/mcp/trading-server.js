@@ -49,7 +49,7 @@ const getBaseUrl = () => {
 const TOOLS = [
   {
     name: "get_portfolio",
-    description: "Get current portfolio summary including equity, buying power, and P&L",
+    description: "Get Alpaca trading account summary. totalAccountValue already includes cash — do NOT add cash on top.",
     inputSchema: {
       type: "object",
       properties: {},
@@ -279,13 +279,18 @@ async function getPortfolio() {
     }
 
     const account = await response.json();
+    const equity = parseFloat(account.equity);
+    const cash = parseFloat(account.cash);
+    const positionsValue = parseFloat(account.portfolio_value) || (equity - cash);
+    const lastEquity = parseFloat(account.last_equity);
     return {
-      equity: parseFloat(account.equity),
+      totalAccountValue: equity,
+      _note: "totalAccountValue = cash + positionsValue. Do NOT add cash on top of totalAccountValue.",
+      cash,
+      positionsValue,
       buyingPower: parseFloat(account.buying_power),
-      cash: parseFloat(account.cash),
-      portfolioValue: parseFloat(account.portfolio_value),
-      dayChange: parseFloat(account.equity) - parseFloat(account.last_equity),
-      dayChangePercent: ((parseFloat(account.equity) - parseFloat(account.last_equity)) / parseFloat(account.last_equity) * 100).toFixed(2),
+      dayChange: equity - lastEquity,
+      dayChangePercent: lastEquity ? ((equity - lastEquity) / lastEquity * 100).toFixed(2) : "0.00",
       status: account.status,
       tradingBlocked: account.trading_blocked,
       mode: loadConfig().mode,

@@ -321,7 +321,7 @@ const TOOLS = [
   },
   {
     name: "get_total_brokerage_value",
-    description: "Get total portfolio value across all connected brokerages with adaptive freshness info",
+    description: "Get total net worth with category breakdown (Cash, Investment, Credit, Loan, Other Asset). Empower aggregates ALL accounts — do NOT add individual brokerage values on top.",
     inputSchema: { type: "object", properties: {}, required: [] },
   },
 ];
@@ -546,8 +546,34 @@ async function handleTool(name, args) {
       };
     }
     case "get_total_brokerage_value": {
-      const [empower, robinhood, fidelity] = await Promise.all([getEmpower(), getRobinhood(), getFidelity()]);
+      // Empower aggregates ALL linked accounts (bank, investment, retirement, credit, loans).
+      // It already includes Robinhood, Fidelity, Alpaca, etc. — DO NOT sum them separately.
+      const empower = await getEmpower();
+      const empowerData = loadBrokerageData("empower");
+      const empowerSvc = empower.getFinanceData?.() || {};
 
+      if (empowerSvc.equity || empowerData?.netWorth) {
+        const netWorth = empowerSvc.equity || empowerData.netWorth;
+        const lastUpdated = empowerSvc.lastUpdated || empowerData?.lastUpdated;
+        const freshness = checkFreshness(lastUpdated);
+        const categories = empowerData?.categories || {};
+        return {
+          netWorth,
+          _note: "Empower aggregates ALL accounts. This is total net worth across all brokerages, banks, credit, and loans. Do NOT add Robinhood/Fidelity/Alpaca on top.",
+          categories: Object.fromEntries(
+            Object.entries(categories).map(([cat, accs]) => [cat, {
+              total: accs.reduce((s, a) => s + (a.balance || 0), 0),
+              count: accs.length,
+              accounts: accs.map(a => ({ name: a.name, institution: a.institution, balance: a.balance, type: a.accountType })),
+            }])
+          ),
+          lastUpdated,
+          ...freshness,
+        };
+      }
+
+      // Fallback: no Empower — sum individual brokerages
+      const [robinhood, fidelity] = await Promise.all([getRobinhood(), getFidelity()]);
       const getEquity = (svc, id) => {
         const finData = svc.getFinanceData?.() || {};
         if (finData.equity) return { equity: finData.equity, lastUpdated: finData.lastUpdated };
@@ -555,22 +581,16 @@ async function handleTool(name, args) {
         if (scraped?.netWorth) return { equity: scraped.netWorth, lastUpdated: scraped.lastUpdated };
         return { equity: 0 };
       };
-
-      const e = getEquity(empower, "empower");
       const r = getEquity(robinhood, "robinhood");
       const f = getEquity(fidelity, "fidelity");
-      const total = (e.equity || 0) + (r.equity || 0) + (f.equity || 0);
-      const timestamps = [e.lastUpdated, r.lastUpdated, f.lastUpdated].filter(Boolean);
+      const total = (r.equity || 0) + (f.equity || 0);
+      const timestamps = [r.lastUpdated, f.lastUpdated].filter(Boolean);
       const mostRecent = timestamps.length ? timestamps.sort().pop() : null;
       const freshness = checkFreshness(mostRecent);
       return {
-        total,
-        breakdown: {
-          empower: e.equity || 0,
-          robinhood: r.equity || 0,
-          fidelity: f.equity || 0,
-        },
-        connectedCount: [e.equity, r.equity, f.equity].filter(v => v > 0).length,
+        netWorth: total,
+        _note: "No Empower data. Sum of individual brokerages only (may be incomplete).",
+        breakdown: { robinhood: r.equity || 0, fidelity: f.equity || 0 },
         lastUpdated: mostRecent,
         ...freshness,
       };

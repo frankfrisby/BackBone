@@ -13,69 +13,100 @@
   <a href="#installation">Installation</a> •
   <a href="#usage">Usage</a> •
   <a href="#integrations">Integrations</a> •
-  <a href="#architecture">Architecture</a>
+  <a href="#architecture">Architecture</a> •
+  <a href="#autonomous-agents">Agents</a>
 </p>
 
 ---
 
 ## Overview
 
-**BACKBONE** is a comprehensive, AI-powered life management system built as a terminal-based application. It integrates multiple aspects of life - health, finances, career, goals, and more - into a single intelligent dashboard that helps you track progress, make decisions, and automate routine tasks.
+**BACKBONE** is a comprehensive, AI-powered life management system built as a terminal-based application. It integrates multiple aspects of life — health, finances, career, goals, and more — into a single intelligent dashboard powered by Claude Opus 4.6.
 
-Think of it as your personal AI assistant that understands your life holistically and helps you make better decisions across all domains.
+Think of it as **Jarvis for your life**: a self-solving, proactive AI that manages your goals, trades stocks, monitors your health, scrapes your brokerage accounts, and sends you WhatsApp briefings — all autonomously.
 
 ## Features
 
 ### 🎯 Life Management
-- **Goal Tracking**: Set and track goals across categories (finance, health, career, education, personal)
-- **Progress Dashboard**: Real-time visualization of life metrics and progress
-- **Daily Accountability**: Morning briefings, check-ins, and commitment tracking
-- **Focus Timer**: Pomodoro-style focus sessions with streak tracking
-- **Learning Tracker**: Track books, courses, and educational progress
+- **Goal Tracking**: Set and track goals across categories (finance, health, career, learning, personal, social)
+- **Four-Level Hierarchy**: Core Beliefs → Backlog → Goals → Tasks, with a thinking engine that generates and prioritizes work
+- **Thinking Engine**: Runs every 15 minutes to analyze beliefs, generate backlog items, graduate high-impact ideas to goals, and update your thesis
+- **Progress Dashboard**: Real-time PWA dashboard at `localhost:3000/app` with SSE updates
+- **Daily Briefings**: Morning and evening briefs delivered via WhatsApp
+- **Proactive Scheduler**: 8 automated jobs (morning brief, market updates, goal checks, project nudges) with randomized windows and anti-spam
 
 ### 📈 Trading & Finance
-- **Stock Scoring Engine**: Comprehensive 0-10 scoring system with:
-  - Technical analysis (RSI, MACD, volume sigma)
-  - Price position analysis (60-day range)
-  - Psychological momentum adjustments
-  - Earnings proximity boost
-  - Time decay penalties
-- **Top 3 Buy Signals**: Automatically identifies best trading opportunities
-- **Portfolio Tracking**: Real-time Alpaca integration for live trading
-- **Wealth Management**: Personal Capital/Empower integration
+- **Stock Scoring Engine**: Comprehensive 0-10 scoring system with technical analysis, MACD, volume sigma, price position, psychological momentum, earnings proximity, and time decay
+- **Overnight Research**: AI-powered prediction system with 4-8 sentence analysis per ticker
+- **Research Convictions**: Boost ticker scores based on deep research (decays over 2 weeks)
+- **Auto-Trader**: Autonomous trading via Alpaca with anti-churning logic
+- **Recession Score**: 14-component macro indicator (0-10) using Yahoo Finance, FRED API, VIX, yield curve, consumer sentiment, and more
+- **Portfolio Tracking**: Real-time Alpaca integration for paper and live trading
+- **Brokerage Scraping**: Visual browser automation scrapes Empower/Personal Capital for full net worth with account categories (Cash, Investment, Credit, Loan, Other Asset)
 
 ### 🏥 Health Integration
 - **Oura Ring Sync**: Sleep, readiness, and activity scores
-- **Health Goals**: Track sleep, exercise, and wellness metrics
-- **Health Dashboard**: Visualize trends and correlations
+- **Calibrated Life Scoring**: Benchmarked against composite pinnacle (Musk wealth + Goggins health + Cook career + Gates philanthropy) on log scale
+- **Health Dashboard**: Visualize trends across sleep, exercise, and wellness
 
 ### 💼 Career & Professional
-- **LinkedIn Integration**: Profile capture and career tracking
-- **Work Projects**: Organize and track professional projects
-- **Skill Development**: Track learning and growth
+- **LinkedIn Integration**: Profile capture, enrichment (33% → 93% completeness), and career tracking
+- **Project Management**: Organized workspaces with PROJECT.md files and progress logs
+- **Skill Discovery**: Engine detects repeated actions and auto-creates skill files
+- **Excel Persistence**: Rolling data saved to spreadsheets for cross-session continuity
 
-### 🤖 AI Engine
-- **Dynamic Status**: Shows what the AI is doing (Researching, Thinking, Planning, Building, etc.)
-- **Project Threading**: Rolling message history for each project
-- **Autonomous Actions**: AI proposes and executes tasks with approval workflow
-- **Multi-Model Support**: Claude, GPT-4, Gemini - switch between tiers
+### 🤖 Autonomous AI Engine
+- **13 Specialized Agents**: Auto-trader, LinkedIn, Space AI, Research, Health, Financial, Market, Social Media, Travel, Disaster, Housing, Startup, Attention
+- **Agent Dispatcher**: Matches goals to agents via category + keyword routing
+- **Continuous Engine**: Auto-starts on server boot with adaptive rest (15m success, 30m rate-limit, 60m quiet hours)
+- **Handoff Chaining**: Saves context between engine cycles (expires after 4h)
+- **Claude Opus 4.6**: Primary model with Sonnet 4.5 fallback for rate limits
+- **Multi-Model Support**: Claude, GPT-4/GPT-5, Gemini — switch between tiers with Ctrl+T
 
-### 📦 Solution Manager
-- **Isolated Packages**: Install packages for specific solutions without affecting core
-- **Container-like**: Each solution has its own dependencies
-- **Clean Removal**: Delete solutions and their packages cleanly
+### 📱 Messaging & Notifications
+- **WhatsApp Integration**: Two-way messaging via Twilio with conversation memory (15-message context depth)
+- **Proactive Outreach**: Scheduled briefings, trade alerts, goal check-ins, and achievement notifications
+- **Cloud Function AI**: OpenAI GPT-4o-mini responds when local server is offline
+- **Vapi Voice Calls**: AI phone calls via Vapi with Cole persona
+- **Rich Formatting**: WhatsApp formatter converts markdown to WhatsApp-native formatting
 
-### 🎨 Flexible UI
-- **Three View Modes**: Minimal, Core (default), Advanced
-- **Ctrl+U Toggle**: Quickly switch between views
-- **Responsive Layout**: Adapts to terminal size
+### 🔐 Security
+- **Credential Vault**: AES-256-GCM encrypted credential store (replaces plaintext .env)
+- **PBKDF2 Key Derivation**: Master key from machine ID + auto-generated PIN
+- **Migration System**: Auto-migrates legacy credentials from .env and JSON configs
+- **AI Safety**: MCP tool responses never include credential values — only `configured: true/false`
+
+### 🌐 Browser Automation
+- **Generic Form Agent**: Reusable visual browser automation for any website
+- **Popup Dismissal**: 5-strategy popup clearing (close buttons, text-based dismiss, floating banners, X icons, DOM removal)
+- **Autofill Detection**: Detects browser-filled credentials and submits automatically
+- **Data-First Login**: Tries data pages directly, only authenticates if redirected
+- **Scroll & Capture**: 5-position scrolling with screenshots at each position for thorough data capture
+
+### 🔄 Firebase Sync
+- **Context Sync**: Comprehensive user context synced to Firebase 4x/day (7AM, 12PM, 4PM, 9PM)
+- **Cloud Backup**: Projects, memory, spreadsheets, goals, and skills backed up to Firebase Storage
+- **Cross-Device**: Work preserved across machines with restore capability
+
+### 🎨 Terminal UI
+- **Three View Modes**: Minimal, Core (default), Advanced — toggle with Ctrl+U
+- **Agent Activity Panel**: Shows which agent is working and what it's doing
+- **Onboarding Wizard**: Two-level keyboard navigation for setup (API keys, brokerages, health devices)
+- **Dynamic Title**: Terminal title shows current work context ("BACKBONE · Frank · Working: goal title")
+- **Responsive Layout**: Adapts to terminal size with resizable panels
+
+### 📄 Document Generation
+- **PDF/Word/PPTX/Excel Pipeline**: Generate professional documents from AI
+- **Excel Spreadsheets**: Persistent data tracking with formulas and formatting
+- **Skills System**: Lean Anthropic-format skill files with YAML frontmatter and progressive disclosure
 
 ## Installation
 
 ### Prerequisites
 - Node.js 18+
-- npm or yarn
+- npm
 - Git
+- Playwright (auto-installed for browser automation)
 
 ### Quick Start
 
@@ -87,46 +118,51 @@ cd BackBone
 # Install dependencies
 npm install
 
-# Copy environment template
-cp .env.example .env
-
-# Configure your API keys in .env
-# See Configuration section below
-
-# Start BACKBONE
+# Start BACKBONE (launches server + CLI)
 npm start
+```
+
+On first run, the onboarding wizard guides you through:
+1. API key setup (Anthropic, OpenAI, Google)
+2. Brokerage connections (Empower, Robinhood, Fidelity)
+3. Health device linking (Oura Ring)
+4. WhatsApp notifications setup
+
+### Windows Quick Launch
+
+```powershell
+# PowerShell
+.\Start-Backbone.ps1
+
+# Or use the batch file
+backbone.bat
 ```
 
 ## Configuration
 
-Create a `.env` file with your API keys:
+Credentials are stored in the **encrypted vault** (`~/.backbone/users/<uid>/data/.vault.enc`). Legacy `.env` files are auto-migrated on first run.
 
-```env
-# AI Models (at least one required)
-ANTHROPIC_API_KEY=sk-ant-...
-OPENAI_API_KEY=sk-...
-GOOGLE_API_KEY=...
+### Required
+- **Anthropic API Key**: Powers the Claude AI engine
 
-# Trading (optional)
-ALPACA_KEY=...
-ALPACA_SECRET=...
-ALPACA_PAPER=true  # Set to false for live trading
-
-# Health (optional)
-OURA_ACCESS_TOKEN=...
-
-# Finance (optional)
-PERSONAL_CAPITAL_EMAIL=...
-PERSONAL_CAPITAL_PASSWORD=...
-```
+### Optional Integrations
+- **Alpaca**: Paper/live stock trading
+- **Oura**: Health metrics from Oura Ring
+- **Empower**: Net worth aggregation across all accounts
+- **Twilio**: WhatsApp messaging (sandbox or paid)
+- **Firebase**: Cloud sync and backup
+- **FRED API**: Enhanced recession score with macro data
+- **Vapi**: AI phone calls
 
 ## Usage
 
 ### Starting BACKBONE
 
 ```bash
-npm start
+npm start          # Starts server (port 3000) + terminal CLI
 ```
+
+The server runs independently — closing the CLI doesn't stop background jobs (proactive scheduler, auto-trader, engine).
 
 ### Keyboard Shortcuts
 
@@ -136,8 +172,10 @@ npm start
 | `Ctrl+U` | Cycle view mode (Core → Advanced → Minimal) |
 | `Ctrl+R` | Toggle private mode (hides sensitive data) |
 | `Tab` | Autocomplete commands |
-| `↑/↓` | Navigate command palette |
-| `Esc` | Clear input / close overlay |
+| `↑/↓` | Navigate command history / palette |
+| `→` | Enter sub-menu (e.g., brokerage list) |
+| `←/Esc` | Back / clear input |
+| `U` | Update/re-scrape connected brokerage |
 
 ### Commands
 
@@ -147,14 +185,18 @@ npm start
 | `/dashboard` | Life dashboard overview |
 | `/goals` | Manage goals |
 | `/portfolio` | View trading portfolio |
-| `/tickers` | View ticker scores |
+| `/tickers` | View ticker scores and signals |
 | `/health` | View health metrics |
-| `/linkedin` | Capture LinkedIn profile |
+| `/thesis` | Current focus and thinking engine |
+| `/backlog` | Ideas pipeline |
+| `/linkedin` | LinkedIn profile management |
 | `/models` | AI model configuration |
 | `/project` | Create/manage projects |
-| `/focus` | Start focus timer |
-| `/learn` | Learning tracker |
 | `/morning` | Morning briefing |
+| `/backup` | Firebase backup status/sync |
+| `/excel` | Spreadsheet management |
+| `/skill` | Skill management (list/create/edit) |
+| `/idle` | Idle processor status |
 | `/clear` | Clear conversation |
 
 ### Ticker Scoring System
@@ -170,132 +212,210 @@ BACKBONE uses a comprehensive 0-10 scoring system:
 | 3.0-3.9 | SELL | Consider selling |
 | <3.0 | SELL-- | Strong sell signal |
 
-**Top 3 Candidates**: Tickers with score ≥6.0 are highlighted with green background.
-
-### Score Components
-
+**Score Components:**
 1. **Technical Score** (0-10): RSI-based momentum
-2. **MACD Adjustment** (-2.5 to +2.5): Multi-timeframe momentum
-3. **Volume Score** (-1.5 to +1.5): Volume sigma anomaly
-4. **Price Position** (-1.5 to +1.5): 60-day range position
-5. **Psychological** (-3.5 to +3.5): Price momentum
-6. **Earnings Boost** (0 to +2): Proximity to earnings
-7. **Penalties** (-3 to 0): Extreme price movements
+2. **Prediction Score** (0-10): Overnight AI research analysis
+3. **MACD Adjustment** (-2.5 to +2.5): Multi-timeframe momentum
+4. **Volume Score** (-1.5 to +1.5): Volume sigma anomaly
+5. **Price Position** (-1.5 to +1.5): 60-day range position
+6. **Psychological** (-3.5 to +3.5): Price momentum
+7. **Earnings Boost** (0 to +2): Proximity to earnings
+8. **Conviction Boost** (0 to +5): Research-based conviction (decays over 2 weeks)
+9. **Recession Adjustment**: Sector-specific (boosts defensive, penalizes cyclical)
+10. **Penalties** (-3 to 0): Extreme price movements
+
+## Autonomous Agents
+
+BACKBONE runs 13 specialized AI agents, each with a unique identity and skill set:
+
+| Agent | Domain | Description |
+|-------|--------|-------------|
+| **Auto-Trader** | Finance | Executes trades based on scoring algorithm |
+| **Financial** | Finance | Budget analysis, savings optimization |
+| **Market** | Finance | Market research and competitive analysis |
+| **Health** | Health | Oura data analysis, wellness recommendations |
+| **LinkedIn** | Career | Profile optimization, networking strategy |
+| **Research** | Learning | Deep research on any topic |
+| **Space AI** | Technology | Space industry and satellite analysis |
+| **Startup** | Business | Idea evaluation state machine |
+| **Social Media** | Social | Content strategy and posting |
+| **Travel** | Personal | Trip planning and optimization |
+| **Disaster** | Safety | 15-domain threat assessment |
+| **Housing** | Personal | Real estate analysis |
+| **Attention** | Productivity | Focus tracking and distraction management |
+
+Agents are matched to goals via the **Agent Dispatcher** using category + keyword routing. Each agent has an `IDENTITY.md` file that gets injected into the Claude prompt.
 
 ## Integrations
 
 ### Alpaca Trading
-Real-time portfolio tracking and trade execution.
-- Paper trading for testing
-- Live trading support
-- Position monitoring
-- Order management
+Real-time portfolio tracking and autonomous trade execution.
+- Paper and live trading modes
+- Anti-churning logic (won't re-buy recently sold tickers)
+- Position monitoring with score-based sell signals
 
 ### Oura Ring
-Health metrics integration.
-- Sleep score and stages
-- Readiness score
-- Activity tracking
-- Heart rate data
+Health metrics from your Oura Ring.
+- Sleep score, stages, and duration
+- Readiness score with contributors
+- Activity tracking and calories
+- Calibrated scoring vs. pinnacle benchmarks
+
+### Empower / Personal Capital
+Full net worth aggregation via browser automation.
+- Scrapes all linked accounts (bank, investment, retirement, credit, loans)
+- Categorized view: Cash, Investment, Credit, Loan, Other Asset
+- Holdings with prices, shares, and daily changes
+- Data bridged to MCP tools for AI queries
 
 ### LinkedIn
-Career profile capture.
-- Profile data extraction
+Career profile management.
+- Automated profile scraping and enrichment
 - Connection tracking
-- Career progress
+- Post and activity monitoring
 
-### Personal Capital / Empower
-Wealth management integration.
-- Account aggregation
-- Net worth tracking
-- Investment analysis
+### WhatsApp (Twilio)
+Two-way AI messaging.
+- Proactive briefings (morning/evening/market)
+- Trade alerts and goal notifications
+- Conversation memory (15-message context)
+- Cloud function fallback when server is offline
 
-### AI Models
-Multi-model support with tier switching.
-- **Claude** (Anthropic): Primary AI
-- **GPT-4** (OpenAI): Alternative
-- **Gemini** (Google): Backup
+### Firebase
+Cloud sync and persistence.
+- User context synced 4x/day
+- File backup to Firebase Storage
+- Cross-device restore
+- Real-time messaging bridge
 
 ## Architecture
 
 ```
 backbone/
 ├── src/
-│   ├── app.js                 # Main React/Ink application
-│   ├── commands.js            # Command registry
-│   ├── components/            # UI components
-│   │   ├── ticker-scores-panel.js
-│   │   ├── engine-status-panel.js
-│   │   ├── projects-panel.js
+│   ├── app.js                          # Main React/Ink terminal application
+│   ├── server.js                       # Express server (port 3000)
+│   ├── commands.js                     # Command registry
+│   ├── components/                     # Terminal UI components
+│   │   ├── center-column.js            # Main conversation view
+│   │   ├── onboarding-panel.js         # Setup wizard with keyboard nav
+│   │   ├── agent-activity-panel.js     # Agent status display
+│   │   ├── settings-panel.js           # Settings UI
 │   │   └── ...
-│   ├── services/              # Business logic
-│   │   ├── score-engine.js    # Ticker scoring
-│   │   ├── engine-state.js    # Engine status
-│   │   ├── solution-manager.js # Package isolation
-│   │   ├── autonomous-engine.js
-│   │   └── ...
-│   ├── data/                  # Data models
-│   └── config/                # Configuration
-├── bin/                       # CLI entry point
-├── memory/                    # Persistent markdown files
-├── projects/                  # Project workspaces
-├── solutions/                 # Isolated solution packages
-└── data/                      # Runtime data (JSON)
+│   ├── mcp/                            # MCP (Model Context Protocol) servers
+│   │   ├── trading-server.js           # Alpaca trading tools
+│   │   ├── health-server.js            # Oura health tools
+│   │   ├── brokerage-server.js         # Empower/brokerage tools
+│   │   ├── whatsapp-server.js          # WhatsApp messaging tools
+│   │   └── vapi-server.js              # Voice call tools
+│   ├── services/
+│   │   ├── ai/                         # AI orchestration
+│   │   │   ├── claude-orchestrator.js  # Main AI orchestrator with agent identity
+│   │   │   ├── claude-code-cli.js      # Claude Code CLI integration
+│   │   │   ├── multi-ai.js            # Multi-model support (Claude/GPT/Gemini)
+│   │   │   ├── model-registry.js       # Model definitions and tiers
+│   │   │   └── parallel-agents.js      # Parallel agent execution
+│   │   ├── engine/                     # Autonomous engine
+│   │   │   ├── autonomous-engine.js    # Continuous work-rest engine
+│   │   │   ├── thinking-engine.js      # Belief→backlog→goal pipeline
+│   │   │   ├── agent-dispatcher.js     # Goal-to-agent matching
+│   │   │   ├── startup-agent.js        # Startup idea state machine
+│   │   │   └── attention-agent.js      # Focus tracking
+│   │   ├── trading/                    # Trading systems
+│   │   │   ├── macro-research.js       # Yahoo Finance + FRED macro data
+│   │   │   └── recession-score.js      # 14-component recession indicator
+│   │   ├── brokerages/                 # Brokerage integrations
+│   │   │   ├── brokerage-auth.js       # Browser-based scraping + auth
+│   │   │   └── brokerage-sync.js       # Data synchronization
+│   │   ├── messaging/                  # Communication
+│   │   │   ├── whatsapp-poller.js      # Twilio polling (30s)
+│   │   │   ├── whatsapp-notifications.js
+│   │   │   ├── proactive-scheduler.js  # 8 scheduled jobs
+│   │   │   ├── realtime-messaging.js   # Cloud↔local bridge
+│   │   │   └── conversation-memory.js  # Message persistence
+│   │   ├── firebase/                   # Cloud services
+│   │   │   ├── firebase-context-sync.js # 4x/day context sync
+│   │   │   └── firebase-config.js      # Firebase initialization
+│   │   ├── browser-form-agent.js       # Generic browser automation
+│   │   ├── credential-vault.js         # AES-256-GCM encrypted vault
+│   │   └── paths.js                    # Path resolution (multi-user)
+├── .agents/                            # 13 agent identities
+│   ├── auto-trader/                    # config.json + IDENTITY.md
+│   ├── research-agent/
+│   ├── health-agent/
+│   └── ...
+├── skills/                             # Lean Anthropic-format skill files
+│   ├── skill-creator/SKILL.md          # Meta-skill for creating skills
+│   ├── disaster-assessment/SKILL.md    # Directory-based with references/
+│   ├── market-research.md              # Flat format skills
+│   └── ...
+├── tools/                              # Executable AI tools
+│   ├── tool-loader.js                  # Tool discovery and execution
+│   └── cli.js                          # CLI for running tools
+├── apps/web/                           # PWA dashboard (Next.js)
+├── dev/                                # Firebase functions, scripts, tests
+├── bin/                                # CLI entry points
+│   ├── backbone.js                     # Main entry
+│   ├── backbone.cmd                    # Windows launcher
+│   └── bootstrap-runtime.cjs          # Runtime bootstrapper
+└── installer/                          # Windows installer (Inno Setup)
 ```
 
-### Key Services
+### Data Location (Per-User)
 
-- **Score Engine**: Calculates comprehensive ticker scores (0-10)
-- **Engine State**: Manages dynamic status display
-- **Solution Manager**: Isolated package management
-- **Autonomous Engine**: AI-driven task automation
-- **Goal Tracker**: Life goal management
-- **Work Log**: Activity logging
+User data lives outside the codebase at `~/.backbone/users/<uid>/`:
+
+```
+~/.backbone/
+  active-user.json                      # Active Google account
+  users/
+    <firebase-uid>/
+      data/                             # Goals, settings, caches, configs
+        .vault.enc                      # Encrypted credential vault
+        goals.json                      # Goal definitions
+        core-beliefs.json               # Core beliefs (epics)
+        backlog.json                    # Ideas pipeline
+        user-settings.json              # User preferences
+        spreadsheets/                   # Persistent Excel files
+        user-skills/                    # Custom user-defined skills
+      memory/                           # AI memory (markdown)
+        thesis.md                       # Current focus
+        profile.md                      # User profile
+        portfolio.md                    # Portfolio snapshot
+        health.md                       # Health snapshot
+      projects/                         # Active project workspaces
+      screenshots/                      # Visual captures
+```
+
+### Key Design Decisions
+
+- **Multi-user isolation**: All paths resolved via `paths.js` per Firebase UID
+- **MCP servers**: Run as child processes, access vault directly (same OS user)
+- **Credential vault**: AES-256-GCM with PBKDF2, backward-compatible with .env fallback
+- **Engine adaptive rest**: 15m (success) → 30m (rate limit) → 60m (quiet hours)
+- **WhatsApp poller**: Polls Twilio every 30s (no webhook server needed)
+- **Skills format**: Lean YAML frontmatter + concise body, progressive disclosure via references/
 
 ## Development
 
 ### Running in Development
 
 ```bash
-# Run with auto-reload
+# Start with auto-reload
 npm run dev
 
-# Run with mock data
-USE_MOCK_DATA=true npm start
+# Start server only (no CLI)
+node src/server.js
 ```
 
-### Testing
+### Project Structure
 
-```bash
-npm test
-```
-
-### Building
-
-```bash
-npm run build
-```
-
-## Solution Manager
-
-BACKBONE includes a unique solution manager for isolated package installations:
-
-```javascript
-// Create a solution with specific packages
-const solution = await solutionManager.createSolution({
-  name: "Calendar Manager",
-  description: "Manage Google Calendar",
-  packages: ["googleapis", "google-auth-library"]
-});
-
-// Run the solution
-const result = await solutionManager.runSolution(solution.id, context);
-
-// Delete when done (removes all packages)
-await solutionManager.deleteSolution(solution.id);
-```
-
-This keeps solutions isolated from the core project dependencies.
+- `src/` — Engine source code (ES modules)
+- `apps/web/` — PWA dashboard (Next.js static export)
+- `tools/` — AI-executable tools with registry
+- `skills/` — Task instruction files (Anthropic format)
+- `dev/` — Firebase functions, build scripts, tests
+- `.agents/` — Agent identity files (config.json + IDENTITY.md)
 
 ## Contributing
 
@@ -314,14 +434,16 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## Acknowledgments
 
 - Built with [Ink](https://github.com/vadimdemedes/ink) for terminal UI
-- Powered by [Claude](https://anthropic.com) AI
+- Powered by [Claude](https://anthropic.com) AI (Opus 4.6)
 - Trading via [Alpaca](https://alpaca.markets)
 - Health data from [Oura](https://ouraring.com)
+- Browser automation via [Playwright](https://playwright.dev)
+- Messaging via [Twilio](https://twilio.com) WhatsApp API
 
 ---
 
 <p align="center">
-  <strong>BACKBONE</strong> - Your AI-Powered Life Operating System
+  <strong>BACKBONE</strong> — Your AI-Powered Life Operating System
 </p>
 
 <p align="center">

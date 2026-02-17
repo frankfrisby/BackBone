@@ -29,10 +29,18 @@ import path from "path";
 import { fetchTwilioConfig } from "../firebase/firebase-config.js";
 import { trackUserQuery, QUERY_SOURCE } from "../memory/query-tracker.js";
 import { showNotificationTitle } from "../ui/terminal-resize.js";
+import { getBaileysWhatsApp } from "./baileys-whatsapp.js";
+import { ensureRuntimeDependency, isModuleNotFoundError } from "../runtime/dependency-installer.js";
 
 import { getDataDir } from "../paths.js";
 const DATA_DIR = getDataDir();
 const TWILIO_CONFIG_PATH = path.join(DATA_DIR, "twilio-config.json");
+const formatTwilioError = (error) => ({
+  message: error?.message || String(error || "Unknown error"),
+  code: error?.code ?? null,
+  status: error?.status ?? null,
+  moreInfo: error?.moreInfo || null
+});
 
 /**
  * Twilio WhatsApp Service
@@ -42,7 +50,39 @@ export class TwilioWhatsAppService extends EventEmitter {
     super();
     this.config = this.loadConfig();
     this.client = null;
+    this.activeProvider = null;
+    this.twilioHealth = {
+      checkedAt: null,
+      authOk: null,
+      accountName: null,
+      lastError: null,
+      errorCode: null,
+      errorStatus: null,
+      moreInfo: null
+    };
+    this.baileysService = getBaileysWhatsApp();
+
+    // Forward Baileys inbound events through this legacy facade.
+    this.baileysService.on("message-received", (data) => {
+      const userId = data?.from ? this.getUserIdForPhone(data.from) : null;
+      this.emit("message-received", {
+        ...data,
+        userId
+      });
+    });
+
     this.initialized = false;
+  }
+
+  setProviderPreference(provider) {
+    const next = String(provider || "").toLowerCase() === "twilio" ? "twilio" : "baileys";
+    this.config.providerPreference = next;
+    this.saveConfig();
+    return {
+      success: true,
+      providerPreference: next,
+      activeProvider: this.activeProvider
+    };
   }
 
   /**
@@ -57,7 +97,11 @@ export class TwilioWhatsAppService extends EventEmitter {
           ...cached,
           // Don't cache credentials - fetch fresh from Firebase
           accountSid: null,
-          authToken: null
+          authToken: null,
+          providerPreference: cached.providerPreference || process.env.WHATSAPP_PROVIDER || "baileys",
+          enableBaileys: typeof cached.enableBaileys === "boolean"
+            ? cached.enableBaileys
+            : process.env.WHATSAPP_DISABLE_BAILEYS !== "1"
         };
       }
     } catch (err) {
@@ -70,7 +114,9 @@ export class TwilioWhatsAppService extends EventEmitter {
       whatsappNumber: "+14155238886", // Sandbox default
       sandboxJoinWords: null, // e.g., "join funny-elephant" - fetched from Firebase
       webhookUrl: null,
-      registeredUsers: {} // phone -> userId mapping
+      registeredUsers: {}, // phone -> userId mapping
+      providerPreference: process.env.WHATSAPP_PROVIDER || "baileys",
+      enableBaileys: process.env.WHATSAPP_DISABLE_BAILEYS !== "1"
     };
   }
 
@@ -87,7 +133,11 @@ export class TwilioWhatsAppService extends EventEmitter {
         whatsappNumber: this.config.whatsappNumber,
         webhookUrl: this.config.webhookUrl,
         registeredUsers: this.config.registeredUsers,
-        hasCredentials: !!(this.config.accountSid && this.config.authToken)
+        hasCredentials: !!(this.config.accountSid && this.config.authToken),
+        providerPreference: this.config.providerPreference || "baileys",
+        enableBaileys: this.config.enableBaileys !== false,
+        activeProvider: this.activeProvider,
+        baileys: this.baileysService.getStatus()
       };
       fs.writeFileSync(TWILIO_CONFIG_PATH, JSON.stringify(safeConfig, null, 2));
     } catch (err) {
@@ -97,9 +147,80 @@ export class TwilioWhatsAppService extends EventEmitter {
 
   /**
    * Initialize the service
-   * Fetches credentials from Firebase Firestore
+   * Provider order:
+   * 1. Baileys (if enabled and preferred)
+   * 2. Twilio
+   * 3. Baileys fallback (if Twilio preferred but unavailable)
    */
   async initialize(config = {}) {
+    if (typeof config.enableBaileys === "boolean") {
+      this.config.enableBaileys = config.enableBaileys;
+    }
+    if (config.providerPreference) {
+      this.config.providerPreference = String(config.providerPreference).toLowerCase();
+    }
+
+    const prefer = String(this.config.providerPreference || "baileys").toLowerCase();
+    const baileysEnabled = this.config.enableBaileys !== false && process.env.WHATSAPP_DISABLE_BAILEYS !== "1";
+    const tryBaileysFirst = baileysEnabled && prefer !== "twilio";
+
+    if (tryBaileysFirst) {
+      const baileys = await this.baileysService.initialize();
+      if (baileys.success) {
+        this.initialized = true;
+        this.activeProvider = "baileys";
+        this.saveConfig();
+        return {
+          success: true,
+          provider: "baileys",
+          connected: this.baileysService.connected,
+          requiresPairing: !this.baileysService.connected,
+          setupInstructions: !this.baileysService.connected
+            ? this.baileysService.getSetupInstructions()
+            : null
+        };
+      }
+    }
+
+    const twilioResult = await this.initializeTwilio(config);
+    if (twilioResult.success) {
+      this.initialized = true;
+      this.activeProvider = "twilio";
+      this.saveConfig();
+      return twilioResult;
+    }
+
+    // If Twilio was preferred but failed, still try Baileys fallback.
+    if (!tryBaileysFirst && baileysEnabled) {
+      const baileys = await this.baileysService.initialize();
+      if (baileys.success) {
+        this.initialized = true;
+        this.activeProvider = "baileys";
+        this.saveConfig();
+        return {
+          success: true,
+          provider: "baileys",
+          connected: this.baileysService.connected,
+          requiresPairing: !this.baileysService.connected,
+          setupInstructions: !this.baileysService.connected
+            ? this.baileysService.getSetupInstructions()
+            : null
+        };
+      }
+    }
+
+    return {
+      ...twilioResult,
+      setupInstructions: this.getSetupInstructions()
+    };
+  }
+
+  /**
+   * Twilio-only initialization.
+   */
+  async initializeTwilio(config = {}) {
+    const activateProvider = config.activateProvider !== false;
+    this.twilioHealth.checkedAt = new Date().toISOString();
     // Fetch credentials from Firebase Firestore
     console.log("[TwilioWhatsApp] Fetching credentials from Firebase...");
 
@@ -123,6 +244,12 @@ export class TwilioWhatsAppService extends EventEmitter {
 
     // Check required credentials
     if (!this.config.accountSid || !this.config.authToken) {
+      this.twilioHealth.authOk = false;
+      this.twilioHealth.accountName = null;
+      this.twilioHealth.lastError = "Twilio credentials not found in Firebase. Add them to Firestore: config/config_twilio";
+      this.twilioHealth.errorCode = null;
+      this.twilioHealth.errorStatus = null;
+      this.twilioHealth.moreInfo = null;
       return {
         success: false,
         error: "Twilio credentials not found in Firebase. Add them to Firestore: config/config_twilio",
@@ -132,13 +259,47 @@ export class TwilioWhatsAppService extends EventEmitter {
 
     try {
       // Dynamic import of Twilio (so it doesn't fail if not installed)
-      const twilio = await import("twilio");
+      let twilio;
+      try {
+        twilio = await import("twilio");
+      } catch (importErr) {
+        if (!isModuleNotFoundError(importErr, "twilio")) {
+          throw importErr;
+        }
+
+        console.log("[TwilioWhatsApp] Missing package detected. Installing twilio...");
+        const installResult = await ensureRuntimeDependency("twilio");
+        if (!installResult.success) {
+          this.twilioHealth.authOk = false;
+          this.twilioHealth.accountName = null;
+          this.twilioHealth.lastError = `Twilio package missing and auto-install failed: ${installResult.error}`;
+          this.twilioHealth.errorCode = null;
+          this.twilioHealth.errorStatus = null;
+          this.twilioHealth.moreInfo = null;
+          return {
+            success: false,
+            error: `Twilio package missing and auto-install failed: ${installResult.error}`,
+            setupInstructions: this.getTwilioSetupInstructions()
+          };
+        }
+
+        twilio = await import("twilio");
+      }
       this.client = twilio.default(this.config.accountSid, this.config.authToken);
 
       // Verify credentials by fetching account info
       const account = await this.client.api.accounts(this.config.accountSid).fetch();
 
       this.initialized = true;
+      if (activateProvider) {
+        this.activeProvider = "twilio";
+      }
+      this.twilioHealth.authOk = true;
+      this.twilioHealth.accountName = account?.friendlyName || null;
+      this.twilioHealth.lastError = null;
+      this.twilioHealth.errorCode = null;
+      this.twilioHealth.errorStatus = null;
+      this.twilioHealth.moreInfo = null;
       this.saveConfig();
 
       console.log("[TwilioWhatsApp] Initialized successfully");
@@ -146,37 +307,111 @@ export class TwilioWhatsAppService extends EventEmitter {
 
       return {
         success: true,
+        provider: "twilio",
         accountName: account.friendlyName,
         whatsappNumber: this.config.whatsappNumber
       };
 
     } catch (error) {
-      if (error.code === "MODULE_NOT_FOUND" || error.message.includes("Cannot find module")) {
+      if (isModuleNotFoundError(error, "twilio")) {
+        this.twilioHealth.authOk = false;
+        this.twilioHealth.accountName = null;
+        this.twilioHealth.lastError = "Twilio package not installed and could not be loaded.";
+        this.twilioHealth.errorCode = null;
+        this.twilioHealth.errorStatus = null;
+        this.twilioHealth.moreInfo = null;
         return {
           success: false,
-          error: "Twilio package not installed. Run: npm install twilio",
-          setupInstructions: this.getSetupInstructions()
+          error: "Twilio package not installed and could not be loaded.",
+          setupInstructions: this.getTwilioSetupInstructions()
         };
       }
 
+      const details = formatTwilioError(error);
+      this.twilioHealth.authOk = false;
+      this.twilioHealth.accountName = null;
+      this.twilioHealth.lastError = details.message;
+      this.twilioHealth.errorCode = details.code;
+      this.twilioHealth.errorStatus = details.status;
+      this.twilioHealth.moreInfo = details.moreInfo;
+
       return {
         success: false,
-        error: error.message
+        error: details.message,
+        code: details.code,
+        status: details.status,
+        moreInfo: details.moreInfo
       };
     }
+  }
+
+  async testTwilioConnection(config = {}) {
+    return this.initializeTwilio({
+      ...config,
+      activateProvider: false
+    });
   }
 
   /**
    * Send a WhatsApp message
    */
-  async sendMessage(to, body) {
-    if (!this.initialized || !this.client) {
-      return { success: false, error: "Service not initialized" };
-    }
-
+  async sendMessage(to, body, options = {}) {
     const phoneNumber = this.normalizePhoneNumber(to);
     if (!phoneNumber) {
       return { success: false, error: "Invalid phone number" };
+    }
+
+    const forcedProvider = String(options.forceProvider || "").toLowerCase();
+    const forceTwilio = forcedProvider === "twilio";
+    const forceBaileys = forcedProvider === "baileys";
+    const preserveProvider = options.preserveProvider === true;
+    const prefer = forceTwilio
+      ? "twilio"
+      : forceBaileys
+        ? "baileys"
+        : String(this.activeProvider || this.config.providerPreference || "baileys").toLowerCase();
+    const baileysEnabled = this.config.enableBaileys !== false && process.env.WHATSAPP_DISABLE_BAILEYS !== "1";
+    const tryBaileysFirst = baileysEnabled && !forceTwilio && prefer !== "twilio";
+    let baileysError = null;
+
+    if (tryBaileysFirst) {
+      const baileysResult = await this.baileysService.sendMessage(phoneNumber, body);
+      if (baileysResult.success) {
+        this.initialized = true;
+        this.activeProvider = "baileys";
+        this.emit("message-sent", {
+          to: phoneNumber,
+          messageId: baileysResult.messageId,
+          status: baileysResult.status || "sent",
+          provider: "baileys"
+        });
+        return baileysResult;
+      }
+      baileysError = baileysResult.error || "Baileys send failed";
+    }
+
+    if (!this.client) {
+      const init = await this.initializeTwilio({ activateProvider: !preserveProvider });
+      if (!init.success) {
+        // If Twilio fails and Baileys wasn't attempted first, try it now.
+        if (!forceTwilio && !tryBaileysFirst && baileysEnabled) {
+          const baileysResult = await this.baileysService.sendMessage(phoneNumber, body);
+          if (baileysResult.success) {
+            this.initialized = true;
+            this.activeProvider = "baileys";
+            return {
+              ...baileysResult,
+              fallbackUsed: true
+            };
+          }
+          baileysError = baileysResult.error || baileysError;
+        }
+
+        return {
+          success: false,
+          error: [baileysError, init.error].filter(Boolean).join(" | ")
+        };
+      }
     }
 
     try {
@@ -186,23 +421,30 @@ export class TwilioWhatsAppService extends EventEmitter {
         body: body
       });
 
+      this.initialized = true;
+      if (!preserveProvider) {
+        this.activeProvider = "twilio";
+      }
+
       this.emit("message-sent", {
         to: phoneNumber,
         messageId: message.sid,
-        status: message.status
+        status: message.status,
+        provider: "twilio"
       });
 
       return {
         success: true,
+        provider: "twilio",
+        fallbackUsed: Boolean(baileysError),
         messageId: message.sid,
         status: message.status
       };
-
     } catch (error) {
       console.error("[TwilioWhatsApp] Send error:", error.message);
       return {
         success: false,
-        error: error.message
+        error: [baileysError, error.message].filter(Boolean).join(" | ")
       };
     }
   }
@@ -211,13 +453,34 @@ export class TwilioWhatsAppService extends EventEmitter {
    * Send a message with media (image, document, etc.)
    */
   async sendMediaMessage(to, body, mediaUrl) {
-    if (!this.initialized || !this.client) {
-      return { success: false, error: "Service not initialized" };
-    }
-
     const phoneNumber = this.normalizePhoneNumber(to);
     if (!phoneNumber) {
       return { success: false, error: "Invalid phone number" };
+    }
+
+    const prefer = String(this.activeProvider || this.config.providerPreference || "baileys").toLowerCase();
+    const baileysEnabled = this.config.enableBaileys !== false && process.env.WHATSAPP_DISABLE_BAILEYS !== "1";
+    const tryBaileysFirst = baileysEnabled && prefer !== "twilio";
+    let baileysError = null;
+
+    if (tryBaileysFirst) {
+      const baileysResult = await this.baileysService.sendMediaMessage(phoneNumber, body, mediaUrl);
+      if (baileysResult.success) {
+        this.initialized = true;
+        this.activeProvider = "baileys";
+        return baileysResult;
+      }
+      baileysError = baileysResult.error || "Baileys media send failed";
+    }
+
+    if (!this.client) {
+      const init = await this.initializeTwilio();
+      if (!init.success) {
+        return {
+          success: false,
+          error: [baileysError, init.error].filter(Boolean).join(" | ")
+        };
+      }
     }
 
     try {
@@ -228,14 +491,22 @@ export class TwilioWhatsAppService extends EventEmitter {
         mediaUrl: [mediaUrl]
       });
 
+      this.initialized = true;
+      this.activeProvider = "twilio";
+
       return {
         success: true,
+        provider: "twilio",
+        fallbackUsed: Boolean(baileysError),
         messageId: message.sid,
         status: message.status
       };
 
     } catch (error) {
-      return { success: false, error: error.message };
+      return {
+        success: false,
+        error: [baileysError, error.message].filter(Boolean).join(" | ")
+      };
     }
   }
 
@@ -244,8 +515,9 @@ export class TwilioWhatsAppService extends EventEmitter {
    * Note: Templates must be pre-approved by WhatsApp
    */
   async sendTemplateMessage(to, templateSid, variables = {}) {
-    if (!this.initialized || !this.client) {
-      return { success: false, error: "Service not initialized" };
+    if (!this.client) {
+      const init = await this.initializeTwilio();
+      if (!init.success) return { success: false, error: init.error || "Twilio not initialized" };
     }
 
     const phoneNumber = this.normalizePhoneNumber(to);
@@ -263,12 +535,88 @@ export class TwilioWhatsAppService extends EventEmitter {
 
       return {
         success: true,
+        provider: "twilio",
         messageId: message.sid,
         status: message.status
       };
 
     } catch (error) {
       return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * Send a typing indicator for WhatsApp.
+   * Twilio route requires inbound message SID.
+   */
+  async sendTypingIndicator(messageSidOrOptions, maybeOptions = {}) {
+    const options = typeof messageSidOrOptions === "object" && messageSidOrOptions !== null
+      ? messageSidOrOptions
+      : maybeOptions;
+    const messageSid = typeof messageSidOrOptions === "string"
+      ? messageSidOrOptions
+      : options.messageSid || options.sid || null;
+    const to = options.to || options.phone || null;
+    const providerHint = String(options.provider || "").toLowerCase();
+
+    // Baileys typing indicator (phone-linked WhatsApp)
+    if (providerHint === "baileys" || (to && this.baileysService?.connected)) {
+      return this.baileysService.sendTypingIndicator(to, options.durationMs);
+    }
+
+    if (!messageSid) {
+      return { success: false, error: "messageSid is required for Twilio typing indicator" };
+    }
+
+    if (!this.config.accountSid || !this.config.authToken) {
+      const init = await this.initializeTwilio();
+      if (!init.success) return { success: false, error: init.error || "Twilio not initialized" };
+    }
+
+    try {
+      const url = "https://messaging.twilio.com/v2/Indicators/Typing.json";
+      const auth = Buffer.from(`${this.config.accountSid}:${this.config.authToken}`).toString("base64");
+
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Authorization": `Basic ${auth}`,
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: new URLSearchParams({
+          messageId: messageSid,
+          channel: "whatsapp",
+        }),
+      });
+
+      if (response.ok) return { success: true, provider: "twilio" };
+      const text = await response.text();
+      return { success: false, error: text };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  }
+
+  /**
+   * Fetch a Twilio message by SID.
+   */
+  async fetchMessage(messageSid) {
+    if (!messageSid) return null;
+    if (!this.client) {
+      const init = await this.initializeTwilio();
+      if (!init.success) return null;
+    }
+
+    try {
+      const msg = await this.client.messages(messageSid).fetch();
+      return {
+        body: msg.body || "",
+        from: msg.from?.replace("whatsapp:", "") || "",
+        dateSent: msg.dateSent,
+        sid: msg.sid,
+      };
+    } catch {
+      return null;
     }
   }
 
@@ -295,6 +643,7 @@ export class TwilioWhatsAppService extends EventEmitter {
       content: messageBody,
       hasMedia: numMedia > 0,
       mediaUrls: [],
+      provider: "twilio",
       timestamp: new Date().toISOString()
     };
 
@@ -401,7 +750,26 @@ export class TwilioWhatsAppService extends EventEmitter {
   /**
    * Get setup instructions
    */
-  getSetupInstructions() {
+  getBaileysSetupInstructions() {
+    return `
+BAILEYS WHATSAPP SETUP (PHONE-LINKED)
+=====================================
+
+1. INSTALL BAILEYS
+   npm install @whiskeysockets/baileys
+
+2. START BACKBONE
+   - BACKBONE prints a QR in terminal
+   - WhatsApp on phone -> Settings -> Linked Devices -> Link a device
+   - Scan QR
+
+3. KEEP BACKBONE RUNNING
+   - Session keys are stored locally
+   - If logged out, link again from phone
+`;
+  }
+
+  getTwilioSetupInstructions() {
     const joinWords = this.config.sandboxJoinWords || "join <your-sandbox-word>";
     const whatsappNumber = this.config.whatsappNumber || "+14155238886";
 
@@ -452,16 +820,139 @@ COST:
 `;
   }
 
+  getSetupInstructions() {
+    return `${this.getBaileysSetupInstructions()}\n${this.getTwilioSetupInstructions()}`;
+  }
+
+  async requestPairingCode(phoneNumber, options = {}) {
+    const normalized = this.normalizePhoneNumber(phoneNumber);
+    if (!normalized) {
+      return { success: false, error: "Invalid phone number" };
+    }
+    if (!/^\+1\d{10}$/.test(normalized)) {
+      return { success: false, error: "Baileys pairing currently supports US numbers only (+1XXXXXXXXXX)." };
+    }
+
+    const maxAttempts = Math.max(1, Number(options.maxAttempts) || 3);
+    const resetOnLoggedOut = options.resetOnLoggedOut !== false;
+    const freshAuth = options.freshAuth === true;
+    const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    let lastResult = null;
+
+    const initialStatus = this.baileysService.getStatus?.();
+    if (freshAuth && !initialStatus?.connected && typeof this.baileysService.clearAuthState === "function") {
+      const cleared = await this.baileysService.clearAuthState();
+      if (!cleared?.success) {
+        return {
+          success: false,
+          error: cleared?.error || "Failed to reset Baileys auth state."
+        };
+      }
+    }
+
+    const preStatus = this.baileysService.getStatus?.();
+    if (resetOnLoggedOut && preStatus?.lastDisconnectCode === 401 && typeof this.baileysService.clearAuthState === "function") {
+      const reset = await this.baileysService.clearAuthState();
+      if (!reset?.success) {
+        return {
+          success: false,
+          error: reset?.error || "Failed to reset stale Baileys auth state."
+        };
+      }
+    }
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      if (!this.baileysService.socket) {
+        const init = await this.baileysService.initialize();
+        if (!init?.success) {
+          return {
+            success: false,
+            error: init?.error || "Failed to initialize Baileys for pairing."
+          };
+        }
+      }
+
+      // Give the websocket a moment to become ready before requesting a code.
+      const statusBefore = this.baileysService.getStatus();
+      if (!statusBefore?.connected && statusBefore?.connectionState === "connecting") {
+        await delay(Math.min(1200, attempt * 400));
+      }
+
+      const result = await this.baileysService.requestPairingCode(normalized);
+      if (result?.success) {
+        return result;
+      }
+      lastResult = result || { success: false, error: "Failed to generate pairing code." };
+
+      const status = this.baileysService.getStatus();
+      const errText = String(lastResult.error || "");
+      const loggedOut = status?.lastDisconnectCode === 401;
+      const isRecoverable =
+        loggedOut ||
+        /connection\s*closed|timed?\s*out|socket|stream\s*erro|not\s*connected|connection terminated/i.test(errText);
+
+      if (!isRecoverable || attempt >= maxAttempts) {
+        break;
+      }
+
+      if (loggedOut && resetOnLoggedOut && typeof this.baileysService.clearAuthState === "function") {
+        const reset = await this.baileysService.clearAuthState();
+        if (!reset?.success) {
+          return {
+            success: false,
+            error: reset?.error || "Failed to reset stale Baileys auth state."
+          };
+        }
+      } else {
+        // Force a fresh socket on transient transport failures.
+        const restart = await this.baileysService.restartSocket?.();
+        if (restart && restart.success === false) {
+          return {
+            success: false,
+            error: restart.error || "Failed to restart Baileys socket."
+          };
+        }
+      }
+
+      await this.baileysService.initialize();
+      await delay(Math.min(2000, attempt * 600));
+    }
+
+    return lastResult || { success: false, error: "Failed to generate pairing code." };
+  }
+
+  isEventDrivenProvider() {
+    return this.activeProvider === "baileys";
+  }
+
   /**
    * Get service status
    */
   getStatus() {
+    const baileysStatus = this.baileysService.getStatus();
     return {
       initialized: this.initialized,
+      provider: this.activeProvider,
       hasCredentials: !!(this.config.accountSid && this.config.authToken),
       whatsappNumber: this.config.whatsappNumber,
       sandboxJoinWords: this.config.sandboxJoinWords,
-      registeredUsers: Object.keys(this.config.registeredUsers).length
+      registeredUsers: Object.keys(this.config.registeredUsers).length,
+      providerPreference: this.config.providerPreference || "baileys",
+      providers: {
+        baileys: baileysStatus,
+        twilio: {
+          initialized: !!this.client,
+          hasCredentials: !!(this.config.accountSid && this.config.authToken),
+          whatsappNumber: this.config.whatsappNumber,
+          authOk: this.twilioHealth.authOk,
+          accountName: this.twilioHealth.accountName,
+          lastError: this.twilioHealth.lastError,
+          errorCode: this.twilioHealth.errorCode,
+          errorStatus: this.twilioHealth.errorStatus,
+          moreInfo: this.twilioHealth.moreInfo,
+          checkedAt: this.twilioHealth.checkedAt
+        }
+      }
     };
   }
 
@@ -469,14 +960,17 @@ COST:
    * Get display data for UI
    */
   getDisplayData() {
+    const status = this.getStatus();
     return {
-      configured: this.initialized,
-      status: this.initialized ? "Active" : "Not configured",
-      provider: "Twilio",
-      whatsappNumber: this.initialized ? this.config.whatsappNumber : null,
+      configured: status.initialized,
+      status: status.initialized ? "Active" : "Not configured",
+      provider: status.provider || "none",
+      whatsappNumber: status.whatsappNumber,
       sandboxJoinWords: this.config.sandboxJoinWords,
       registeredUsers: Object.keys(this.config.registeredUsers).length,
-      setupRequired: !this.initialized ? this.getSetupInstructions() : null
+      setupRequired: !status.initialized ? this.getSetupInstructions() : null,
+      baileys: status.providers?.baileys,
+      twilio: status.providers?.twilio
     };
   }
 }

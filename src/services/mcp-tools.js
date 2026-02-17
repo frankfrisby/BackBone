@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
 
-import { getDataDir } from "./paths.js";
+import { getDataDir, getEngineRoot } from "./paths.js";
 /**
  * MCP Tools Service for BACKBONE
  * Manages available MCP servers and tools that the system can execute
@@ -9,6 +9,98 @@ import { getDataDir } from "./paths.js";
 
 const DATA_DIR = getDataDir();
 const MCP_CONFIG_PATH = path.join(DATA_DIR, "mcp-config.json");
+const MCP_RUNTIME_PATH = path.join(getEngineRoot(), ".mcp.json");
+
+const DYNAMIC_TOOL_HINTS = {
+  "backbone-google": [
+    { name: "get_recent_emails", description: "Get recent inbox emails" },
+    { name: "get_today_events", description: "Get today's calendar events" }
+  ],
+  "backbone-linkedin": [
+    { name: "get_linkedin_profile", description: "Get LinkedIn profile data" }
+  ],
+  "backbone-contacts": [
+    { name: "get_contacts", description: "List contacts" }
+  ],
+  "backbone-news": [
+    { name: "fetch_latest_news", description: "Fetch latest news" }
+  ],
+  "backbone-life": [
+    { name: "get_goals", description: "Get active goals" }
+  ],
+  "backbone-health": [
+    { name: "get_health_summary", description: "Get health summary" }
+  ],
+  "backbone-trading": [
+    { name: "get_account", description: "Get trading account information" }
+  ],
+  "backbone-projects": [
+    { name: "create_project", description: "Create project workspace" }
+  ],
+  "backbone-vapi": [
+    { name: "call_user", description: "Start an outbound AI voice call" },
+    { name: "end_call", description: "End active AI voice call" },
+    { name: "get_call_status", description: "Get active AI voice call status" }
+  ],
+  "backbone-whatsapp": [
+    { name: "send_whatsapp", description: "Send WhatsApp message" }
+  ],
+  "backbone-youtube": [
+    { name: "get_video_transcript", description: "Get video transcript" }
+  ],
+  "claude-in-chrome": [
+    { name: "browser_control", description: "Control browser session in Chrome" }
+  ]
+};
+
+const toDisplayName = (serverId = "") => {
+  return String(serverId)
+    .replace(/^backbone-/, "")
+    .replace(/^user-/, "user ")
+    .split(/[-_]/g)
+    .filter(Boolean)
+    .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(" ");
+};
+
+const loadRuntimeMcpServers = () => {
+  try {
+    if (fs.existsSync(MCP_RUNTIME_PATH)) {
+      const parsed = JSON.parse(fs.readFileSync(MCP_RUNTIME_PATH, "utf-8"));
+      return parsed?.mcpServers || {};
+    }
+  } catch (error) {
+    console.error("Failed to load runtime MCP servers:", error.message);
+  }
+  return {};
+};
+
+const mergeServerDefinition = (base = {}, incoming = {}) => {
+  const merged = {
+    ...base,
+    ...incoming
+  };
+  if (!Array.isArray(merged.tools)) {
+    merged.tools = Array.isArray(base.tools) ? base.tools : Array.isArray(incoming.tools) ? incoming.tools : [];
+  }
+  if (typeof merged.enabled !== "boolean") {
+    merged.enabled = true;
+  }
+  if (!merged.name) {
+    merged.name = "Unnamed Server";
+  }
+  if (!merged.description) {
+    merged.description = "MCP server";
+  }
+  return merged;
+};
+
+const buildDynamicServerDefinition = (serverId) => ({
+  name: toDisplayName(serverId) || serverId,
+  description: `Runtime MCP server: ${serverId}`,
+  enabled: true,
+  tools: DYNAMIC_TOOL_HINTS[serverId] || []
+});
 
 /**
  * Default MCP servers and their tools
@@ -183,16 +275,27 @@ export const DEFAULT_MCP_SERVERS = {
  * Load MCP configuration from disk
  */
 export const loadMCPConfig = () => {
+  const merged = { ...DEFAULT_MCP_SERVERS };
+
+  // Merge persisted display config
   try {
     if (fs.existsSync(MCP_CONFIG_PATH)) {
       const saved = JSON.parse(fs.readFileSync(MCP_CONFIG_PATH, "utf-8"));
-      // Merge with defaults to ensure new servers are included
-      return { ...DEFAULT_MCP_SERVERS, ...saved };
+      for (const [serverId, serverDef] of Object.entries(saved || {})) {
+        merged[serverId] = mergeServerDefinition(merged[serverId], serverDef);
+      }
     }
   } catch (error) {
     console.error("Failed to load MCP config:", error.message);
   }
-  return DEFAULT_MCP_SERVERS;
+
+  // Merge runtime servers from .mcp.json so dynamic/user servers always show up
+  const runtimeServers = loadRuntimeMcpServers();
+  for (const serverId of Object.keys(runtimeServers)) {
+    merged[serverId] = mergeServerDefinition(merged[serverId], buildDynamicServerDefinition(serverId));
+  }
+
+  return merged;
 };
 
 /**
@@ -209,6 +312,23 @@ export const saveMCPConfig = (config) => {
     console.error("Failed to save MCP config:", error.message);
     return false;
   }
+};
+
+/**
+ * Register or update a display definition for an MCP server.
+ * This does not modify .mcp.json command wiring; it updates tool list metadata.
+ */
+export const registerMCPServerDefinition = (serverId, definition = {}) => {
+  if (!serverId) return null;
+  const config = loadMCPConfig();
+  config[serverId] = mergeServerDefinition(config[serverId], {
+    name: definition.name || toDisplayName(serverId),
+    description: definition.description || `MCP server: ${serverId}`,
+    enabled: definition.enabled ?? config[serverId]?.enabled ?? true,
+    tools: Array.isArray(definition.tools) ? definition.tools : config[serverId]?.tools
+  });
+  saveMCPConfig(config);
+  return config[serverId];
 };
 
 /**

@@ -2,6 +2,8 @@
   "entrypoint": "src/services/products/space-ai-agent.js",
   "type": "engine",
   "schedule": "continuous",
+  "goalCategories": ["growth"],
+  "keywords": ["space", "satellite", "orbit", "launch", "aerospace", "earth observation"],
   "maxSessionMs": 1800000,
   "restBetweenCyclesMs": 3600000,
   "permissions": {

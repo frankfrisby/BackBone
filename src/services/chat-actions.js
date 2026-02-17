@@ -20,6 +20,7 @@ import { getToolExecutor, TOOL_TYPES } from "./tool-executor.js";
 import { sendMessage, getMultiAIConfig, TASK_TYPES } from "./ai/multi-ai.js";
 import { sendWhatsAppMessage, isPhoneVerified } from "./firebase/phone-auth.js";
 import { getCurrentFirebaseUser } from "./firebase/firebase-auth.js";
+import { getCapabilityRuntime } from "./capability-runtime.js";
 
 /**
  * Action risk levels - determines if confirmation is needed
@@ -84,6 +85,216 @@ class ChatActionsManager extends EventEmitter {
     this.initialized = false;
   }
 
+  safeJsonParse(raw) {
+    try {
+      if (typeof raw === "string") {
+        const jsonMatch = raw.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          return JSON.parse(jsonMatch[0]);
+        }
+      } else if (raw && typeof raw === "object") {
+        return raw;
+      }
+    } catch {}
+    return null;
+  }
+
+  heuristicAnalyzeMessage(message) {
+    const text = String(message || "").trim();
+    const lower = text.toLowerCase();
+    if (!text) return null;
+
+    const actionSignals = [
+      "book", "reserve", "schedule", "send", "call", "search", "find", "look up",
+      "open", "create", "write", "update", "modify", "delete", "download",
+      "install", "run", "build", "use"
+    ];
+    const isActionable = actionSignals.some(token => lower.includes(token));
+    if (!isActionable) return { isActionable: false };
+
+    const category = lower.includes("book") || lower.includes("reserve")
+      ? ACTION_CATEGORY.BOOK
+      : lower.includes("send") || lower.includes("message")
+        ? ACTION_CATEGORY.SEND_MESSAGE
+        : lower.includes("search") || lower.includes("find") || lower.includes("look up")
+          ? ACTION_CATEGORY.SEARCH
+          : lower.includes("delete")
+            ? ACTION_CATEGORY.DELETE
+            : lower.includes("update") || lower.includes("modify")
+              ? ACTION_CATEGORY.MODIFY
+              : lower.includes("create") || lower.includes("build")
+                ? ACTION_CATEGORY.CREATE
+                : ACTION_CATEGORY.GENERAL;
+
+    const isFinancial = lower.includes("buy") || lower.includes("sell") || lower.includes("purchase") || lower.includes("pay");
+    const riskLevel = isFinancial
+      ? RISK_LEVEL.CRITICAL
+      : (category === ACTION_CATEGORY.BOOK || category === ACTION_CATEGORY.SEND_MESSAGE)
+        ? RISK_LEVEL.HIGH
+        : (category === ACTION_CATEGORY.CREATE || category === ACTION_CATEGORY.MODIFY)
+          ? RISK_LEVEL.MEDIUM
+          : RISK_LEVEL.LOW;
+
+    const suggestedTools = [];
+    if (category === ACTION_CATEGORY.SEARCH) suggestedTools.push("WebSearch");
+    if (category === ACTION_CATEGORY.BOOK) suggestedTools.push("BrowserNavigate");
+    if (category === ACTION_CATEGORY.SEND_MESSAGE) suggestedTools.push("SendWhatsApp");
+
+    return {
+      isActionable: true,
+      category,
+      riskLevel,
+      summary: text.length > 120 ? `${text.slice(0, 117)}...` : text,
+      requiresConfirmation: riskLevel === RISK_LEVEL.HIGH || riskLevel === RISK_LEVEL.CRITICAL,
+      suggestedPriority: this.isTimeSensitiveRequest(text) ? 1 : 2,
+      priorityReason: this.isTimeSensitiveRequest(text) ? "Time-sensitive request detected" : "Direct user action request",
+      shouldAskPriority: false,
+      extractedDetails: {
+        otherDetails: {}
+      },
+      suggestedTools,
+      steps: [
+        "Analyze request details",
+        "Execute required tool actions",
+        "Confirm completion with clear result"
+      ]
+    };
+  }
+
+  isTimeSensitiveRequest(message, analysis = null) {
+    const lower = String(message || "").toLowerCase();
+    const fastTokens = ["urgent", "asap", "right now", "immediately", "today", "tonight", "this evening", "now"];
+    const hasFastToken = fastTokens.some(token => lower.includes(token));
+    const hasDateHint = /\b\d{1,2}:\d{2}\b/.test(lower) || /\b(mon|tue|wed|thu|fri|sat|sun)\b/.test(lower);
+    const analysisPriority = Number(analysis?.suggestedPriority || 3);
+    const extractedDate = String(analysis?.extractedDetails?.date || "");
+    return hasFastToken || hasDateHint || analysisPriority === 1 || extractedDate.length > 0;
+  }
+
+  createExecutionReport(pending, analysis, actionMessage) {
+    return {
+      actionId: pending.id,
+      summary: analysis?.summary || actionMessage,
+      category: analysis?.category || ACTION_CATEGORY.GENERAL,
+      riskLevel: analysis?.riskLevel || RISK_LEVEL.LOW,
+      timeSensitive: this.isTimeSensitiveRequest(actionMessage, analysis),
+      startedAt: new Date().toISOString(),
+      finishedAt: null,
+      status: "running",
+      steps: [],
+      failures: [],
+      capabilitySetup: null
+    };
+  }
+
+  addExecutionStep(report, payload = {}) {
+    const step = {
+      index: report.steps.length + 1,
+      timestamp: new Date().toISOString(),
+      status: payload.status || "running",
+      label: payload.label || "Executing step",
+      tool: payload.tool || null,
+      target: payload.target || null,
+      details: payload.details || null,
+      error: payload.error || null
+    };
+    report.steps.push(step);
+
+    this.emit("action-progress", {
+      actionId: report.actionId,
+      progress: step.index,
+      message: `${step.status === "failed" ? "Failed" : "Step"} ${step.index}: ${step.label}`,
+      step: step.index,
+      status: step.status,
+      tool: step.tool,
+      timestamp: step.timestamp
+    });
+
+    return step;
+  }
+
+  async executeToolStep(toolExecutor, report, label, actionConfig) {
+    this.addExecutionStep(report, {
+      label,
+      status: "running",
+      tool: actionConfig.action,
+      target: actionConfig.target
+    });
+
+    const result = await toolExecutor.execute(actionConfig);
+    if (!result?.success) {
+      const error = result?.error || `Tool failed: ${actionConfig.action}`;
+      this.addExecutionStep(report, {
+        label,
+        status: "failed",
+        tool: actionConfig.action,
+        target: actionConfig.target,
+        error
+      });
+      throw new Error(error);
+    }
+
+    this.addExecutionStep(report, {
+      label,
+      status: "completed",
+      tool: actionConfig.action,
+      target: actionConfig.target,
+      details: result
+    });
+    return result;
+  }
+
+  buildExecutionResponse(report) {
+    const lines = [];
+    lines.push(`Action: ${report.summary}`);
+    lines.push(`Status: ${report.status.toUpperCase()}`);
+    if (report.timeSensitive) {
+      lines.push("Priority: Time-sensitive request handled with immediate execution");
+    }
+    lines.push("");
+    lines.push("Execution Steps:");
+
+    if (report.steps.length === 0) {
+      lines.push("1. No executable steps were completed.");
+    } else {
+      for (const step of report.steps) {
+        const marker = step.status === "completed" ? "[ok]" : step.status === "failed" ? "[failed]" : "[running]";
+        const toolPart = step.tool ? ` (${step.tool})` : "";
+        const errorPart = step.error ? ` - ${step.error}` : "";
+        lines.push(`${step.index}. ${marker} ${step.label}${toolPart}${errorPart}`);
+      }
+    }
+
+    if (report.capabilitySetup) {
+      const machineSummary = report.capabilitySetup?.machinePlan?.summary;
+      if (machineSummary) {
+        lines.push("");
+        lines.push(`Machine plan: ${machineSummary}`);
+      }
+
+      const addedTools = report.capabilitySetup.scaffoldedTools?.length || 0;
+      const addedServers = report.capabilitySetup.scaffoldedMcpServers?.length || 0;
+      const skipped = report.capabilitySetup.skippedScaffolds?.length || 0;
+      if (addedTools > 0 || addedServers > 0) {
+        lines.push("");
+        lines.push(`Capability updates: ${addedTools} tool(s), ${addedServers} MCP server mapping(s) added.`);
+      }
+      if (skipped > 0) {
+        lines.push(`Capability updates: ${skipped} scaffold step(s) skipped because installed software is available.`);
+      }
+    }
+
+    if (report.failures.length > 0) {
+      lines.push("");
+      lines.push("Failures:");
+      report.failures.forEach((failure, idx) => {
+        lines.push(`${idx + 1}. ${failure}`);
+      });
+    }
+
+    return lines.join("\n");
+  }
+
   /**
    * Analyze a user message to detect actionable requests
    * Returns action details or null if not actionable
@@ -132,7 +343,7 @@ If the message is a question or conversation (not asking to DO something), retur
     try {
       const aiConfig = getMultiAIConfig();
       if (!aiConfig.ready) {
-        return null;
+        return this.heuristicAnalyzeMessage(message);
       }
 
       const response = await sendMessage(prompt, {
@@ -140,16 +351,15 @@ If the message is a question or conversation (not asking to DO something), retur
         maxTokens: 1000
       });
 
-      // Parse JSON from response
-      const jsonMatch = response.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        return JSON.parse(jsonMatch[0]);
+      const parsed = this.safeJsonParse(response);
+      if (parsed) {
+        return parsed;
       }
     } catch (error) {
       console.error("[ChatActions] Failed to analyze message:", error.message);
     }
 
-    return null;
+    return this.heuristicAnalyzeMessage(message);
   }
 
   /**
@@ -317,7 +527,8 @@ If the message is a question or conversation (not asking to DO something), retur
   async executeAction(pending) {
     const { action } = pending;
     const { analysis } = action;
-    const toolExecutor = getToolExecutor();
+    const actionMessage = action.originalMessage || action.message || analysis?.summary || "";
+    const report = this.createExecutionReport(pending, analysis, actionMessage);
 
     this.executingActions.set(pending.id, pending);
     this.emit("action-started", pending);
@@ -325,29 +536,78 @@ If the message is a question or conversation (not asking to DO something), retur
     const results = [];
 
     try {
+      // Auto-scaffold missing capabilities and register new tool/MCP entries.
+      try {
+        const capabilityRuntime = getCapabilityRuntime();
+        report.capabilitySetup = await capabilityRuntime.ensureForRequest({
+          message: actionMessage,
+          analysis
+        });
+
+        if (report.capabilitySetup?.machinePlan?.summary) {
+          this.addExecutionStep(report, {
+            status: "completed",
+            label: "Machine profile analyzed",
+            details: { summary: report.capabilitySetup.machinePlan.summary }
+          });
+        }
+
+        if ((report.capabilitySetup?.scaffoldedTools?.length || 0) > 0) {
+          this.addExecutionStep(report, {
+            status: "completed",
+            label: `Scaffolded ${report.capabilitySetup.scaffoldedTools.length} missing tool(s)`,
+            details: report.capabilitySetup.scaffoldedTools
+          });
+        }
+        if ((report.capabilitySetup?.scaffoldedMcpServers?.length || 0) > 0) {
+          this.addExecutionStep(report, {
+            status: "completed",
+            label: `Registered ${report.capabilitySetup.scaffoldedMcpServers.length} MCP server mapping(s)`,
+            details: report.capabilitySetup.scaffoldedMcpServers
+          });
+        }
+        if ((report.capabilitySetup?.skippedScaffolds?.length || 0) > 0) {
+          this.addExecutionStep(report, {
+            status: "completed",
+            label: `Skipped ${report.capabilitySetup.skippedScaffolds.length} scaffold item(s) due to installed local software`,
+            details: report.capabilitySetup.skippedScaffolds
+          });
+        }
+      } catch (capabilityError) {
+        report.failures.push(`Capability setup warning: ${capabilityError.message}`);
+        this.addExecutionStep(report, {
+          status: "failed",
+          label: "Capability setup encountered an error",
+          error: capabilityError.message
+        });
+      }
+
       // Execute based on category
       switch (analysis.category) {
         case ACTION_CATEGORY.SEND_MESSAGE:
-          results.push(await this.executeSendMessage(action, analysis));
+          results.push(await this.executeSendMessage(action, analysis, report));
           break;
 
         case ACTION_CATEGORY.SEARCH:
         case ACTION_CATEGORY.BROWSE:
         case ACTION_CATEGORY.RESEARCH:
-          results.push(await this.executeWebAction(action, analysis));
+          results.push(await this.executeWebAction(action, analysis, report));
           break;
 
         case ACTION_CATEGORY.PURCHASE:
         case ACTION_CATEGORY.BOOK:
-          results.push(await this.executeComplexWebAction(action, analysis));
+          results.push(await this.executeComplexWebAction(action, analysis, report, pending.id));
           break;
 
         default:
           // For other categories, use AI to determine and chain tools
-          results.push(await this.executeGenericAction(action, analysis));
+          results.push(await this.executeGenericAction(action, analysis, report));
       }
 
-      pending.result = { success: true, results };
+      report.status = "completed";
+      report.finishedAt = new Date().toISOString();
+      const responseText = this.buildExecutionResponse(report);
+      pending.result = { success: true, results, report, responseText };
       this.actionHistory.push(pending);
       this.executingActions.delete(pending.id);
       this.pendingActions.delete(pending.id);
@@ -356,7 +616,16 @@ If the message is a question or conversation (not asking to DO something), retur
       return pending.result;
 
     } catch (error) {
-      pending.result = { success: false, error: error.message };
+      report.status = "failed";
+      report.finishedAt = new Date().toISOString();
+      report.failures.push(error.message);
+      this.addExecutionStep(report, {
+        status: "failed",
+        label: "Execution halted",
+        error: error.message
+      });
+      const responseText = this.buildExecutionResponse(report);
+      pending.result = { success: false, error: error.message, report, responseText };
       this.executingActions.delete(pending.id);
       this.emit("action-failed", { pending, error });
       return pending.result;
@@ -366,7 +635,12 @@ If the message is a question or conversation (not asking to DO something), retur
   /**
    * Execute a send message action (WhatsApp, etc.)
    */
-  async executeSendMessage(action, analysis) {
+  async executeSendMessage(action, analysis, report) {
+    this.addExecutionStep(report, {
+      status: "running",
+      label: "Preparing outbound WhatsApp message"
+    });
+
     const user = getCurrentFirebaseUser();
     if (!user?.id) {
       throw new Error("Not logged in. Please sign in to send messages.");
@@ -381,6 +655,16 @@ If the message is a question or conversation (not asking to DO something), retur
     }
 
     const result = await sendWhatsAppMessage(user.id, message);
+    if (!result?.success) {
+      throw new Error(result?.error || "WhatsApp send failed");
+    }
+
+    this.addExecutionStep(report, {
+      status: "completed",
+      label: "WhatsApp message sent",
+      details: { messageId: result.messageId || null }
+    });
+
     return {
       type: "message_sent",
       platform: "whatsapp",
@@ -392,14 +676,14 @@ If the message is a question or conversation (not asking to DO something), retur
   /**
    * Execute a web search/browse action
    */
-  async executeWebAction(action, analysis) {
+  async executeWebAction(action, analysis, report) {
     const toolExecutor = getToolExecutor();
     const results = [];
 
     // First, do a web search if needed
     if (analysis.suggestedTools?.includes("WebSearch")) {
       const searchQuery = analysis.extractedDetails?.searchQuery || analysis.summary;
-      const searchResult = await toolExecutor.execute({
+      const searchResult = await this.executeToolStep(toolExecutor, report, "Run web search", {
         action: TOOL_TYPES.WEB_SEARCH,
         target: searchQuery
       });
@@ -410,14 +694,14 @@ If the message is a question or conversation (not asking to DO something), retur
     if (analysis.suggestedTools?.includes("BrowserNavigate")) {
       const url = analysis.extractedDetails?.url;
       if (url) {
-        const navResult = await toolExecutor.execute({
+        const navResult = await this.executeToolStep(toolExecutor, report, `Navigate browser to ${url}`, {
           action: TOOL_TYPES.BROWSER_NAVIGATE,
           target: url
         });
         results.push({ type: "navigate", result: navResult });
 
         // Get page content
-        const contentResult = await toolExecutor.execute({
+        const contentResult = await this.executeToolStep(toolExecutor, report, "Capture page content", {
           action: TOOL_TYPES.BROWSER_GET_CONTENT,
           target: "body"
         });
@@ -432,15 +716,12 @@ If the message is a question or conversation (not asking to DO something), retur
    * Execute a complex web action (purchase, booking)
    * This requires multi-step browser automation
    */
-  async executeComplexWebAction(action, analysis) {
+  async executeComplexWebAction(action, analysis, report, actionId) {
     const toolExecutor = getToolExecutor();
     const results = [];
-    const steps = analysis.steps || [];
-
-    this.emit("action-progress", {
-      actionId: action.id,
-      message: "Starting browser automation...",
-      progress: 0
+    this.addExecutionStep(report, {
+      status: "running",
+      label: "Starting browser automation plan"
     });
 
     // Generate a detailed execution plan using AI
@@ -480,10 +761,7 @@ Include confirmation points before any irreversible actions (submitting payments
           maxTokens: 2000
         });
 
-        const jsonMatch = planResponse.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-          executionPlan = JSON.parse(jsonMatch[0]);
-        }
+        executionPlan = this.safeJsonParse(planResponse);
       }
     } catch (error) {
       console.error("[ChatActions] Failed to generate execution plan:", error.message);
@@ -502,7 +780,7 @@ Include confirmation points before any irreversible actions (submitting payments
       const confirmationPoint = executionPlan.confirmationPoints?.find(cp => cp.beforeStep === i);
       if (confirmationPoint) {
         this.emit("action-confirmation-needed", {
-          actionId: action.id,
+          actionId,
           message: confirmationPoint.message,
           stepIndex: i
         });
@@ -513,7 +791,7 @@ Include confirmation points before any irreversible actions (submitting payments
       }
 
       this.emit("action-progress", {
-        actionId: action.id,
+        actionId,
         message: step.description,
         progress,
         currentStep: i + 1,
@@ -524,39 +802,47 @@ Include confirmation points before any irreversible actions (submitting payments
         let stepResult;
         switch (step.action) {
           case "navigate":
-            stepResult = await toolExecutor.execute({
+            stepResult = await this.executeToolStep(toolExecutor, report, step.description || `Navigate to ${step.target}`, {
               action: TOOL_TYPES.BROWSER_NAVIGATE,
               target: step.target
             });
             break;
           case "click":
-            stepResult = await toolExecutor.execute({
+            stepResult = await this.executeToolStep(toolExecutor, report, step.description || `Click ${step.target}`, {
               action: TOOL_TYPES.BROWSER_CLICK,
               target: step.target
             });
             break;
           case "type":
-            stepResult = await toolExecutor.execute({
+            stepResult = await this.executeToolStep(toolExecutor, report, step.description || `Type into ${step.target}`, {
               action: TOOL_TYPES.BROWSER_TYPE,
               target: step.value,
               params: { selector: step.target }
             });
             break;
           case "scroll":
-            stepResult = await toolExecutor.execute({
+            stepResult = await this.executeToolStep(toolExecutor, report, step.description || `Scroll ${step.target}`, {
               action: TOOL_TYPES.BROWSER_SCROLL,
               target: step.target
             });
             break;
           case "screenshot":
-            stepResult = await toolExecutor.execute({
+            stepResult = await this.executeToolStep(toolExecutor, report, step.description || "Capture screenshot", {
               action: TOOL_TYPES.BROWSER_SCREENSHOT,
               target: step.target || `step-${i}`
             });
             break;
           case "wait":
+            this.addExecutionStep(report, {
+              status: "running",
+              label: step.description || "Waiting for page state"
+            });
             await new Promise(resolve => setTimeout(resolve, parseInt(step.value) || 1000));
             stepResult = { success: true, action: "wait" };
+            this.addExecutionStep(report, {
+              status: "completed",
+              label: step.description || "Wait complete"
+            });
             break;
           default:
             stepResult = { skipped: true, reason: `Unknown action: ${step.action}` };
@@ -598,7 +884,7 @@ Include confirmation points before any irreversible actions (submitting payments
   /**
    * Execute a generic action using AI to chain tools
    */
-  async executeGenericAction(action, analysis) {
+  async executeGenericAction(action, analysis, report) {
     const toolExecutor = getToolExecutor();
     const results = [];
 
@@ -624,9 +910,8 @@ What's the first tool to use? Respond with JSON:
           maxTokens: 500
         });
 
-        const jsonMatch = response.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-          const toolCall = JSON.parse(jsonMatch[0]);
+        const toolCall = this.safeJsonParse(response);
+        if (toolCall) {
 
           // Map tool name to TOOL_TYPE
           const toolTypeMap = {
@@ -642,7 +927,7 @@ What's the first tool to use? Respond with JSON:
 
           const toolType = toolTypeMap[toolCall.tool];
           if (toolType) {
-            const result = await toolExecutor.execute({
+            const result = await this.executeToolStep(toolExecutor, report, toolCall.reasoning || `Run ${toolCall.tool}`, {
               action: toolType,
               target: toolCall.target,
               params: toolCall.params || {}
@@ -650,9 +935,17 @@ What's the first tool to use? Respond with JSON:
             results.push({ tool: toolCall.tool, result });
           }
         }
+      } else {
+        const fallbackQuery = analysis.summary || action.originalMessage || "user request";
+        const searchResult = await this.executeToolStep(toolExecutor, report, "Fallback web search for request context", {
+          action: TOOL_TYPES.WEB_SEARCH,
+          target: fallbackQuery
+        });
+        results.push({ tool: "WebSearch", result: searchResult });
       }
     } catch (error) {
       console.error("[ChatActions] Generic action failed:", error.message);
+      throw error;
     }
 
     return { type: "generic_action", results };
@@ -746,9 +1039,9 @@ Reply with 1, 2, 3, or 4 (or just say urgent/high/medium/low)`;
       analysis,
       goal,
       result,
-      response: result.success
+      response: result.responseText || (result.success
         ? `Done! ${analysis.summary}`
-        : `Failed: ${result.error}`
+        : `Failed: ${result.error}`)
     };
   }
 
@@ -802,9 +1095,9 @@ Reply with 1, 2, 3, or 4 (or just say urgent/high/medium/low)`;
         handled: true,
         confirmed: true,
         result,
-        response: result.success
+        response: result.responseText || (result.success
           ? `Action completed: ${pending.action.analysis.summary}`
-          : `Action failed: ${result.error}`
+          : `Action failed: ${result.error}`)
       };
     }
 

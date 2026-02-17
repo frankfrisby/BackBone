@@ -70,7 +70,7 @@ const CenterColumnBase = ({
     { flexDirection: "column", width: "100%", overflow: "hidden" },
 
     // Engine Status - shows Claude Code CLI streaming output
-    e(AgentActivityPanel, { actionStreamingText, cliStreaming }),
+    e(AgentActivityPanel, { actionStreamingText, actionStreamingTitle, cliStreaming, currentModelInfo }),
 
     // Conversation Panel
     e(ConversationPanel, {

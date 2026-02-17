@@ -3,6 +3,7 @@ import fs from "fs";
 import path from "path";
 
 import { dataFile } from "../paths.js";
+// Vault populates process.env at startup via migration — sync code reads env vars
 const buildHeaders = (config) => ({
   "APCA-API-KEY-ID": config.key,
   "APCA-API-SECRET-KEY": config.secret
@@ -65,7 +66,8 @@ export const getAlpacaConfig = () => {
   // Always load config file to get mode setting
   const fileConfig = loadKeysFromConfigFile();
 
-  // Use env vars for keys if available, otherwise use config file
+  // Use env vars for keys if available (vault populates process.env on init),
+  // otherwise use config file
   const key = process.env.ALPACA_KEY || fileConfig.key;
   const secret = process.env.ALPACA_SECRET || fileConfig.secret;
 

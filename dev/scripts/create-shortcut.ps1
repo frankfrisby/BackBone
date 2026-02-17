@@ -14,7 +14,7 @@ $shortcut = $WshShell.CreateShortcut($shortcutPath)
 
 # Point to cmd.exe which allows setting window properties
 $shortcut.TargetPath = "cmd.exe"
-$shortcut.Arguments = "/c cd /d `"$backboneDir`" && mode con: cols=200 lines=85 && node bin/backbone.js"
+$shortcut.Arguments = "/c cd /d `"$backboneDir`" && mode con: cols=200 lines=85 && backbone.bat"
 $shortcut.WorkingDirectory = $backboneDir
 $shortcut.Description = "BACKBONE Engine - Life Management CLI"
 $shortcut.WindowStyle = 1  # Normal window

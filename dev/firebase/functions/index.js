@@ -24,6 +24,233 @@ admin.initializeApp();
 
 const db = admin.firestore();
 const messaging = admin.messaging();
+const WHATSAPP_HISTORY_WINDOW = 30;
+const WHATSAPP_COMPRESSED_HISTORY_WINDOW = 30;
+const TWILIO_CONFIG_COLLECTION = "config";
+const TWILIO_CONFIG_DOC_ID = "config_twilio";
+
+/**
+ * Single source of truth for Twilio credentials.
+ * DO NOT change this path unless you intentionally migrate all Twilio flows.
+ */
+const getTwilioConfigFromFirestore = async () => {
+  try {
+    const doc = await db.collection(TWILIO_CONFIG_COLLECTION).doc(TWILIO_CONFIG_DOC_ID).get();
+    if (!doc.exists) return null;
+    return doc.data() || null;
+  } catch (err) {
+    console.warn("[Twilio] Could not fetch config/config_twilio:", err.message);
+    return null;
+  }
+};
+
+// ── OpenAI helper (lazy init from Firestore config) ──
+let _openaiClient = null;
+const getOpenAI = async () => {
+  if (_openaiClient) return _openaiClient;
+  try {
+    const doc = await db.collection("config").doc("config_openai").get();
+    if (doc.exists && doc.data().apiKey) {
+      const { OpenAI } = require("openai");
+      _openaiClient = new OpenAI({ apiKey: doc.data().apiKey });
+      return _openaiClient;
+    }
+  } catch {}
+  return null;
+};
+
+/**
+ * Load last N messages from Firestore for a user's conversation history.
+ * Returns array of { role: "user"|"assistant", content: string }
+ */
+const getConversationHistory = async (userId, limit = WHATSAPP_HISTORY_WINDOW) => {
+  try {
+    const snap = await db.collection("users").doc(userId)
+      .collection("messages")
+      .orderBy("createdAt", "desc")
+      .limit(limit)
+      .get();
+    if (snap.empty) return [];
+    const msgs = [];
+    snap.docs.reverse().forEach(doc => {
+      const d = doc.data();
+      if (!d.content) return;
+      msgs.push({
+        role: d.type === "user" ? "user" : "assistant",
+        content: d.content
+      });
+    });
+    return msgs;
+  } catch (err) {
+    console.warn("[getConversationHistory]", err.message);
+    return [];
+  }
+};
+
+/**
+ * Load user context from Firestore synced data.
+ * Tries comprehensive userContext doc first (synced by BACKBONE 4x/day),
+ * then falls back to individual docs for backward compat.
+ * Returns a compact string for the AI prompt.
+ */
+const loadUserContext = async (userId) => {
+  // Try comprehensive context doc first (synced by BACKBONE)
+  try {
+    const ctxDoc = await db.collection("users").doc(userId)
+      .collection("syncedData").doc("userContext").get();
+
+    if (ctxDoc.exists) {
+      const ctx = ctxDoc.data();
+      const parts = [];
+
+      // Portfolio
+      if (ctx.portfolio) {
+        const p = ctx.portfolio;
+        parts.push(`PORTFOLIO: $${p.equity || "?"} equity, $${p.dayPL >= 0 ? "+" : ""}${p.dayPL || 0} today, ${p.positionCount || 0} positions`);
+        if (p.topPositions) parts.push(`Positions: ${p.topPositions}`);
+        if (p.analysis) parts.push(`Portfolio analysis: ${p.analysis.slice(0, 500)}`);
+      }
+
+      // Health
+      if (ctx.health) {
+        const h = ctx.health;
+        const scores = [];
+        if (h.sleepScore) scores.push(`Sleep:${h.sleepScore}`);
+        if (h.readiness) scores.push(`Readiness:${h.readiness}`);
+        if (h.activity) scores.push(`Activity:${h.activity}`);
+        if (h.steps) scores.push(`Steps:${h.steps}`);
+        if (scores.length) parts.push(`HEALTH: ${scores.join(", ")}`);
+        if (h.analysis) parts.push(`Health notes: ${h.analysis.slice(0, 300)}`);
+      }
+
+      // Goals
+      if (ctx.goals) {
+        parts.push(`ACTIVE GOALS (${ctx.goals.count || 0}): ${ctx.goals.active || "none"}`);
+      }
+
+      // Projects
+      if (ctx.projects) {
+        parts.push(`PROJECTS: ${ctx.projects.slice(0, 400)}`);
+      }
+
+      // Thesis / current focus
+      if (ctx.thesis) {
+        parts.push(`CURRENT FOCUS: ${ctx.thesis.slice(0, 400)}`);
+      }
+
+      // Beliefs
+      if (ctx.beliefs) {
+        parts.push(`CORE BELIEFS: ${ctx.beliefs}`);
+      }
+
+      // Brokerage / Empower (net worth, accounts, holdings)
+      if (ctx.brokerage) {
+        const b = ctx.brokerage;
+        const brokerageParts = [];
+        if (b.netWorth) brokerageParts.push(`Net Worth: $${Number(b.netWorth).toLocaleString()}`);
+        if (b.connectedBrokerages) brokerageParts.push(`Connected: ${b.connectedBrokerages}`);
+        if (b.accountCount) brokerageParts.push(`${b.accountCount} accounts`);
+        if (b.holdingCount) brokerageParts.push(`${b.holdingCount} holdings`);
+        if (brokerageParts.length) parts.push(`BROKERAGE/NET WORTH: ${brokerageParts.join(", ")}`);
+        if (b.accounts) parts.push(`Accounts: ${b.accounts.slice(0, 600)}`);
+        if (b.topHoldings) parts.push(`Top holdings: ${b.topHoldings.slice(0, 400)}`);
+        if (b.lastSync) parts.push(`Brokerage last sync: ${b.lastSync}`);
+      }
+
+      // Recent work
+      if (ctx.recentWork) {
+        parts.push(`RECENT BACKBONE WORK: ${ctx.recentWork.slice(0, 300)}`);
+      }
+
+      // Profile preferences
+      if (ctx.profile?.preferences) {
+        parts.push(`PROFILE: ${ctx.profile.preferences.slice(0, 200)}`);
+      }
+
+      if (ctx.syncedAt) {
+        const age = Math.round((Date.now() - new Date(ctx.syncedAt).getTime()) / (60 * 60 * 1000));
+        parts.push(`(Data freshness: ${age}h ago)`);
+      }
+
+      if (parts.length > 0) return parts.join("\n");
+    }
+  } catch (err) {
+    console.warn("[loadUserContext] Comprehensive doc failed:", err.message);
+  }
+
+  // Fallback: read individual docs (backward compat)
+  const parts = [];
+  try {
+    const portfolioDoc = await db.collection("users").doc(userId)
+      .collection("syncedData").doc("portfolio").get();
+    if (portfolioDoc.exists) {
+      const p = portfolioDoc.data();
+      parts.push(`Portfolio: $${p.equity || "?"} equity, ${(p.positions || []).length} positions`);
+      if (p.positions?.length > 0) {
+        const top = p.positions.slice(0, 5).map(pos =>
+          `${pos.symbol} ${pos.qty}sh $${pos.market_value || "?"}`
+        ).join(", ");
+        parts.push(`Top positions: ${top}`);
+      }
+    }
+  } catch {}
+  try {
+    const healthDoc = await db.collection("users").doc(userId)
+      .collection("syncedData").doc("health").get();
+    if (healthDoc.exists) {
+      const h = healthDoc.data();
+      const scores = [];
+      if (h.sleepScore) scores.push(`Sleep:${h.sleepScore}`);
+      if (h.readiness) scores.push(`Readiness:${h.readiness}`);
+      if (h.activity) scores.push(`Activity:${h.activity}`);
+      if (scores.length) parts.push(`Health: ${scores.join(", ")}`);
+    }
+  } catch {}
+  try {
+    const goalsDoc = await db.collection("users").doc(userId)
+      .collection("syncedData").doc("goals").get();
+    if (goalsDoc.exists) {
+      const goals = goalsDoc.data().goals || [];
+      const active = goals.filter(g => g.status === "active").slice(0, 5);
+      if (active.length) {
+        parts.push(`Active goals: ${active.map(g => `${g.title} (${g.progress || 0}%)`).join(", ")}`);
+      }
+    }
+  } catch {}
+  return parts.length > 0 ? parts.join("\n") : null;
+};
+
+/**
+ * Generate a compressed conversation summary for the server to use as context.
+ * This way the server knows "philadelphia" = "trip planning to Philadelphia".
+ */
+const compressConversation = (messages) => {
+  if (!messages || messages.length === 0) return null;
+  // Take the last N messages and compress to role: content pairs
+  const recent = messages.slice(-WHATSAPP_COMPRESSED_HISTORY_WINDOW);
+  return recent.map(m =>
+    `${m.role === "user" ? "User" : "AI"}: ${m.content.slice(0, 200)}`
+  ).join("\n");
+};
+
+const truncateText = (value, max = 120) => {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (text.length <= max) return text;
+  return `${text.slice(0, Math.max(0, max - 3))}...`;
+};
+
+const buildCloudFallbackResponse = (messageBody, history = [], userName = "") => {
+  const namePrefix = userName ? `${userName}, g` : "G";
+  const current = truncateText(messageBody, 80) || "that";
+  // Sound natural — like the same assistant, not a different system
+  const responses = [
+    `${namePrefix}ot it — working on "${current}" now. I'll circle back with the full answer in a few.`,
+    `${namePrefix}ive me a moment on that. I'm pulling up everything I need and I'll get back to you shortly.`,
+    `${namePrefix}ood question. Let me dig into that properly and follow up — don't want to give you a half-baked answer.`,
+  ];
+  // Pick one based on message length for variety
+  return responses[messageBody.length % responses.length];
+};
 
 const normalizePhone = (value) => {
   if (!value) return null;
@@ -436,16 +663,8 @@ exports.twilioWhatsAppWebhook = functions.https.onRequest(async (req, res) => {
 
     console.log(`[Twilio] Message from ${from}: ${messageBody}`);
 
-    // Fetch Twilio config from Firestore (includes join words)
-    let twilioConfig = {};
-    try {
-      const configDoc = await db.collection("config").doc("config_twilio").get();
-      if (configDoc.exists) {
-        twilioConfig = configDoc.data();
-      }
-    } catch (err) {
-      console.warn("[Twilio] Could not fetch config:", err.message);
-    }
+    // Fetch Twilio config from Firestore (single source of truth).
+    const twilioConfig = await getTwilioConfigFromFirestore() || {};
 
     const sandboxJoinWords = twilioConfig.sandboxJoinWords || "join <your-sandbox-word>";
     const whatsappNumber = twilioConfig.whatsappNumber || "+14155238886";
@@ -454,11 +673,9 @@ exports.twilioWhatsAppWebhook = functions.https.onRequest(async (req, res) => {
       // Empty message - send help with join instructions
       const response = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Message>Hi! I'm BACKBONE. Send me a message and your local BACKBONE app will respond.
+  <Message>🦴 *BACKBONE*
 
-To join: Send "${sandboxJoinWords}" to ${whatsappNumber}
-
-Make sure BACKBONE is running on your computer to receive responses.</Message>
+Hey! Just send me a message and I'll get right on it. Finances, goals, health, research — whatever you need.</Message>
 </Response>`;
       res.set("Content-Type", "text/xml");
       return res.status(200).send(response);
@@ -503,9 +720,66 @@ Make sure BACKBONE is running on your computer to receive responses.</Message>
     // Combine message-level and user-level private mode
     const hideFromApp = isPrivate || userPrivateMode;
 
+    // ── Parse media (images) from Twilio ──────────────────────
+    const numMedia = parseInt(body.NumMedia || "0", 10);
+    let hasMedia = false;
+    let mediaUrls = [];
+    let mediaType = null;
+    let imageBase64 = null;
+    let imageContentType = null;
+
+    if (numMedia > 0 && body.MediaUrl0) {
+      hasMedia = true;
+      mediaType = body.MediaContentType0 || "image/jpeg";
+
+      // Download image from Twilio (requires Basic auth)
+      try {
+        const twilioAuth = Buffer.from(
+          `${twilioConfig.accountSid || ""}:${twilioConfig.authToken || ""}`
+        ).toString("base64");
+
+        const mediaResponse = await fetch(body.MediaUrl0, {
+          headers: { Authorization: `Basic ${twilioAuth}` },
+          redirect: "follow",
+        });
+
+        if (mediaResponse.ok) {
+          const arrayBuf = await mediaResponse.arrayBuffer();
+          const imageBuffer = Buffer.from(arrayBuf);
+          imageBase64 = imageBuffer.toString("base64");
+          imageContentType = mediaType;
+
+          // Upload to Firebase Storage
+          const ext = mediaType.includes("png") ? "png" : mediaType.includes("gif") ? "gif" : "jpg";
+          const storagePath = `backbone/whatsapp-images/${userId}/whatsapp-${Date.now()}.${ext}`;
+          const bucket = admin.storage().bucket();
+          const file = bucket.file(storagePath);
+          await file.save(imageBuffer, { contentType: mediaType, metadata: { from, userId } });
+
+          // Generate signed URL (7-day expiry)
+          const [signedUrl] = await file.getSignedUrl({
+            action: "read",
+            expires: Date.now() + 7 * 24 * 60 * 60 * 1000,
+          });
+          mediaUrls.push(signedUrl);
+
+          console.log(`[Twilio] Image uploaded to Storage: ${storagePath}`);
+        } else {
+          console.warn(`[Twilio] Media download failed: ${mediaResponse.status}`);
+        }
+      } catch (mediaErr) {
+        console.warn("[Twilio] Media processing error:", mediaErr.message);
+      }
+    }
+
+    // Load conversation history BEFORE saving (so the compressed context is accurate)
+    const prevHistory = await getConversationHistory(userId, WHATSAPP_HISTORY_WINDOW);
+    const conversationContext = compressConversation(prevHistory);
+
     // Store the incoming message - local BACKBONE will pick this up
-    await db.collection("users").doc(userId).collection("messages").add({
-      content: messageBody,
+    // Include compressed conversation context so the server knows what the user is talking about
+    const messageDoc = {
+      content: messageBody || (hasMedia ? "[Image sent]" : ""),
       type: "user",
       channel: "twilio_whatsapp",
       from,
@@ -513,13 +787,25 @@ Make sure BACKBONE is running on your computer to receive responses.</Message>
       status: "pending",
       private: hideFromApp,
       showInApp: !hideFromApp,
-      needsResponse: true,  // Flag for local app to process
-      createdAt: admin.firestore.FieldValue.serverTimestamp()
-    });
+      needsResponse: true,
+      conversationContext: conversationContext || null,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    };
+
+    // Add media fields if image was sent
+    if (hasMedia) {
+      messageDoc.hasMedia = true;
+      messageDoc.mediaUrls = mediaUrls;
+      messageDoc.mediaType = mediaType;
+    }
+
+    await db.collection("users").doc(userId).collection("messages").add(messageDoc);
 
     console.log(`[Twilio] Message saved for user ${userId}, awaiting local BACKBONE response`);
 
     // Check if the local BACKBONE app is online (active within last 5 minutes)
+    // The local app sends a presence heartbeat every 2 minutes.
+    // We use a 5-minute window to account for brief network hiccups.
     let appIsOnline = false;
     try {
       const presenceDoc = await db.collection("users").doc(userId)
@@ -530,29 +816,50 @@ Make sure BACKBONE is running on your computer to receive responses.</Message>
         const lastSeen = presence.lastSeen ? new Date(presence.lastSeen).getTime() : 0;
         const fiveMinutesAgo = Date.now() - (5 * 60 * 1000);
 
-        // App is online if status is "online" or "busy" AND seen recently
         if ((presence.status === "online" || presence.status === "busy") && lastSeen > fiveMinutesAgo) {
           appIsOnline = true;
         }
+
+        console.log(`[Twilio] Presence check: status=${presence.status}, lastSeen=${Math.round((Date.now() - lastSeen) / 1000)}s ago, online=${appIsOnline}`);
+      } else {
+        console.log("[Twilio] No presence document found — assuming offline");
       }
     } catch (err) {
       console.warn("[Twilio] Could not check presence:", err.message);
     }
 
-    // Only send "working on it" message if app is offline
-    // If app is online, it will respond quickly so no need for acknowledgment
+    // Always send typing indicator first
+    if (messageSid && twilioConfig.accountSid && twilioConfig.authToken) {
+      try {
+        const typingAuth = Buffer.from(`${twilioConfig.accountSid}:${twilioConfig.authToken}`).toString("base64");
+        await fetch("https://messaging.twilio.com/v2/Indicators/Typing.json", {
+          method: "POST",
+          headers: {
+            "Authorization": `Basic ${typingAuth}`,
+            "Content-Type": "application/x-www-form-urlencoded",
+          },
+          body: new URLSearchParams({
+            messageId: messageSid,
+            channel: "whatsapp",
+          }),
+        });
+      } catch (typingErr) {
+        console.warn("[Twilio] Typing indicator failed:", typingErr.message);
+      }
+    }
+
+    // If app is online, return empty TwiML — local BACKBONE will respond with full context
     if (appIsOnline) {
-      console.log(`[Twilio] App is online, skipping acknowledgment`);
-      // Return empty response - AI will respond directly
+      console.log(`[Twilio] App is online — deferring to local BACKBONE`);
       res.set("Content-Type", "text/xml");
       return res.status(200).send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
     }
 
-    // App is offline - send personalized acknowledgment so user knows message was received
-    console.log(`[Twilio] App is offline, sending acknowledgment`);
+    // ── App is OFFLINE: Use OpenAI to give a response from what it knows ──
+    // Also queue a pending task so the local server can follow up when it comes back.
+    console.log(`[Twilio] App is offline — generating AI response for user ${userId}`);
 
-    // Get user's display name for personalization
-    // Priority: Firestore profile > Twilio ProfileName > fallback
+    // Get user's name for personalization
     let userName = "";
     try {
       if (!userSnapshot.empty) {
@@ -561,48 +868,102 @@ Make sure BACKBONE is running on your computer to receive responses.</Message>
       } else {
         userName = profileName || "";
       }
-      // Use first name only for a personal touch
       if (userName.includes(" ")) userName = userName.split(" ")[0];
     } catch {}
 
-    // Time-of-day greeting (EST timezone)
-    const now = new Date();
-    const estOffset = -5;
-    const estHour = (now.getUTCHours() + estOffset + 24) % 24;
-    let timeGreeting = "Hey";
-    if (estHour >= 5 && estHour < 12) timeGreeting = "Good morning";
-    else if (estHour >= 12 && estHour < 17) timeGreeting = "Good afternoon";
-    else if (estHour >= 17 && estHour < 21) timeGreeting = "Good evening";
+    // Load conversation history and user context
+    const history = await getConversationHistory(userId, WHATSAPP_HISTORY_WINDOW);
+    const userContext = await loadUserContext(userId);
 
-    const name = userName || "boss";
+    let aiResponse = null;
+    const openai = await getOpenAI();
 
-    // 20 personalized messages — mix of time-aware, name-aware, and contextual
-    const thinkingMessages = [
-      `${timeGreeting}, ${name} — pulling up your data now...`,
-      `${timeGreeting}! Give me a sec, checking the latest...`,
-      `On it, ${name} — running the numbers...`,
-      `Hey ${name}, looking into this right now...`,
-      `Got your message, ${name}. Digging into it...`,
-      `${timeGreeting}, ${name}. Let me check on that...`,
-      `One moment, ${name} — analyzing this for you...`,
-      `${name}, great question — let me look into it...`,
-      `On it! Crunching the data for you, ${name}...`,
-      `Hey ${name}, I'm pulling the latest info now...`,
-      `${timeGreeting}! Working on that for you, ${name}...`,
-      `Let me gather what you need, ${name}. One sec...`,
-      `${name} — thinking through this. Back shortly...`,
-      `Got it, ${name}. Putting this together now...`,
-      `Checking your latest numbers, ${name}...`,
-      `${timeGreeting}, ${name}! Processing your request...`,
-      `Hey ${name} — assembling the details now...`,
-      `On it, ${name}. I'll have an answer in a moment...`,
-      `${name}, let me dive into the data real quick...`,
-      `Working on it, ${name}. ${estHour < 12 ? "Starting the day strong!" : estHour < 17 ? "Keeping the momentum going!" : "Wrapping up the day right!"}`,
-    ];
-    const ackMessage = thinkingMessages[Math.floor(Math.random() * thinkingMessages.length)];
+    if (openai) {
+      try {
+        const systemPrompt = `You are BACKBONE — ${userName ? userName + "'s" : "a user's"} personal AI assistant. You know them from their synced data below. Be direct, helpful, and conversational.
+
+${userContext ? `WHAT YOU KNOW:\n${userContext}\n` : ""}
+RULES:
+- Address their question FIRST. Be concise. WhatsApp format (*bold*, _italic_, •).
+- Under 1200 chars. If you have the data, give a real answer with specifics.
+- If you don't have the data for something, say "Let me check on that" or "I'll pull that up" — the backend will follow up.
+- NEVER say "I don't have access" or "I can't check." Never mention cloud/local mode or system internals.
+- Sound like a sharp friend, not a bot.`;
+
+        const messages = [{ role: "system", content: systemPrompt }];
+        for (const msg of history.slice(-15)) {
+          messages.push({ role: msg.role, content: msg.content });
+        }
+
+        if (hasMedia && imageBase64 && imageContentType) {
+          messages.push({ role: "user", content: [
+            { type: "text", text: messageBody || "What do you see in this image?" },
+            { type: "image_url", image_url: { url: `data:${imageContentType};base64,${imageBase64}` } },
+          ] });
+        } else {
+          messages.push({ role: "user", content: messageBody });
+        }
+
+        const completion = await openai.chat.completions.create({
+          model: "gpt-4.1-mini",
+          messages,
+          max_tokens: 2400,
+        });
+
+        const rawResponse = completion.choices?.[0]?.message?.content;
+        if (rawResponse) {
+          aiResponse = rawResponse
+            .replace(/^🦴\s*\*?BACKBONE\*?\s*\n*/i, "")
+            .replace(/\n*_—\s*\d{1,2}:\d{2}\s*(AM|PM)_\s*$/i, "")
+            .split(/---MSG---/i)[0]
+            .trim();
+
+          // Save to Firestore for conversation continuity
+          await db.collection("users").doc(userId).collection("messages").add({
+            content: aiResponse,
+            type: "ai",
+            channel: "twilio_whatsapp",
+            source: "cloud_openai",
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
+        }
+      } catch (aiErr) {
+        console.error("[Twilio] OpenAI error:", aiErr.message);
+      }
+    }
+
+    // Fallback if OpenAI failed
+    if (!aiResponse) {
+      aiResponse = buildCloudFallbackResponse(messageBody, history, userName);
+    }
+
+    // Queue pending task for local follow-up when BACKBONE comes back online
+    try {
+      await db.collection("users").doc(userId).collection("pendingTasks").add({
+        type: "whatsapp_followup",
+        originalMessage: messageBody,
+        from,
+        status: "pending",
+        userName: userName || null,
+        conversationContext: conversationContext || null,
+        aiQuickResponse: aiResponse,
+        requiresFollowUp: true,
+        hasMedia: hasMedia || false,
+        createdAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+    } catch (taskErr) {
+      console.warn("[Twilio] Could not queue pending task:", taskErr.message);
+    }
+
+    // Send the OpenAI response via TwiML
+    const safeResponse = aiResponse
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
+
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Message>${ackMessage}</Message>
+  <Message>${safeResponse}</Message>
 </Response>`;
 
     res.set("Content-Type", "text/xml");
@@ -613,7 +974,9 @@ Make sure BACKBONE is running on your computer to receive responses.</Message>
 
     const errorResponse = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Message>Sorry, I encountered an error. Please try again.</Message>
+  <Message>🦴 *BACKBONE*
+
+Hey, something glitched on my end. Give me a sec and try again.</Message>
 </Response>`;
     res.set("Content-Type", "text/xml");
     return res.status(200).send(errorResponse);
@@ -626,7 +989,7 @@ Make sure BACKBONE is running on your computer to receive responses.</Message>
  * When the local BACKBONE app writes an AI response to Firestore,
  * this trigger sends it to the user via Twilio WhatsApp API.
  *
- * Twilio credentials are read from Firestore (settings/twilio or user's own credentials)
+ * Twilio credentials are read only from Firestore config/config_twilio.
  */
 exports.sendTwilioResponse = functions.firestore
   .document("users/{userId}/messages/{messageId}")
@@ -653,28 +1016,14 @@ exports.sendTwilioResponse = functions.firestore
       return null;
     }
 
-    // Get Twilio credentials from Firestore
-    // Priority: 1) User's own credentials, 2) Global settings
-    let twilioAccountSid, twilioAuthToken, twilioWhatsAppNumber;
-
-    // Check user's own Twilio credentials first
-    if (userData.twilioAccountSid && userData.twilioAuthToken) {
-      twilioAccountSid = userData.twilioAccountSid;
-      twilioAuthToken = userData.twilioAuthToken;
-      twilioWhatsAppNumber = userData.twilioWhatsAppNumber || userData.whatsappPhone;
-    } else {
-      // Fall back to global settings
-      const settingsDoc = await db.collection("settings").doc("twilio").get();
-      if (settingsDoc.exists) {
-        const settings = settingsDoc.data();
-        twilioAccountSid = settings.accountSid;
-        twilioAuthToken = settings.authToken;
-        twilioWhatsAppNumber = settings.whatsappNumber;
-      }
-    }
+    // Single source of truth: Firestore config/config_twilio.
+    const twilioConfig = await getTwilioConfigFromFirestore();
+    const twilioAccountSid = twilioConfig?.accountSid || null;
+    const twilioAuthToken = twilioConfig?.authToken || null;
+    const twilioWhatsAppNumber = twilioConfig?.whatsappNumber || "+14155238886";
 
     if (!twilioAccountSid || !twilioAuthToken) {
-      console.error("[Twilio] No Twilio credentials found in Firestore");
+      console.error("[Twilio] Missing credentials in Firestore config/config_twilio");
       return null;
     }
 

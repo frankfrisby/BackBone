@@ -61,9 +61,10 @@ const AIMessage = ({ message, timestamp, modelInfo, tool }) => {
     if (name.includes("o1")) return "o1";
 
     // Anthropic Claude models
+    if (name.includes("opus-4-6") || name.includes("opus-4.6")) return "Opus 4.6";
     if (name.includes("opus-4.5") || name.includes("opus-4-5")) return "Opus 4.5";
     if (name.includes("opus-4")) return "Opus 4";
-    if (name.includes("opus")) return "Opus";
+    if (name.includes("opus")) return "Opus 4.6";
     if (name.includes("sonnet-4")) return "Sonnet 4";
     if (name.includes("sonnet-3.5") || name.includes("sonnet-3-5")) return "Sonnet 3.5";
     if (name.includes("sonnet")) return "Sonnet";
@@ -103,7 +104,7 @@ const StreamingMessage = ({ text, title, modelInfo }) => {
     if (title && title !== "Claude Code") return title;
     if (modelInfo?.displayName) return modelInfo.displayName;
     const name = (modelInfo?.name || modelInfo?.model || "").toLowerCase();
-    if (name.includes("opus")) return "Opus 4.5";
+    if (name.includes("opus")) return "Opus 4.6";
     if (name.includes("sonnet")) return "Sonnet";
     if (name.includes("gpt-5")) return "GPT-5.2";
     if (name.includes("gpt-4")) return "GPT-4";
@@ -132,7 +133,7 @@ const StreamingMessage = ({ text, title, modelInfo }) => {
  * Action streaming (for agentic tasks - Claude Code)
  */
 const ActionStreamingMessage = ({ text, title }) => {
-  // Claude Code uses Opus 4.5
+  // Claude Code uses Opus 4.6
   const modelName = title || "Claude Code CLI";
   return e(
     Box,
@@ -185,7 +186,7 @@ const PollCountdown = ({ countdown, pollingMode }) => {
  */
 const WhatsAppMessage = ({ message, timestamp, isUser, modelName }) => {
   // For AI responses via WhatsApp, show the model name
-  const displayName = isUser ? "You" : (modelName || "Opus 4.5");
+  const displayName = isUser ? "You" : (modelName || "Opus 4.6");
   return e(
     Box,
     { flexDirection: "column", marginBottom: 1, width: "100%" },

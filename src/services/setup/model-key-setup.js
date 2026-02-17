@@ -7,6 +7,7 @@ import fs from "fs";
 import path from "path";
 import { spawn } from "child_process";
 import { openUrl } from "../open-url.js";
+import { getCredentialVault } from "../credential-vault.js";
 
 import { getDataDir, engineFile } from "../paths.js";
 const DATA_DIR = getDataDir();
@@ -281,27 +282,33 @@ export const validateApiKey = async (provider, key) => {
 /**
  * Save API key to .env file
  */
-export const saveApiKeyToEnv = (provider, key) => {
+export const saveApiKeyToEnv = async (provider, key) => {
   const config = PROVIDERS[provider];
   if (!config) {
     return { success: false, error: "Unknown provider" };
   }
 
   try {
+    const envKey = config.envKey;
+
+    // Store in encrypted vault (primary)
+    try {
+      const vault = await getCredentialVault();
+      await vault.setCredential(envKey, key);
+    } catch (vaultErr) {
+      console.warn("[model-key-setup] Vault store failed, falling back to .env:", vaultErr.message);
+    }
+
+    // Also write to .env for backward compat
     let content = "";
     if (fs.existsSync(ENV_PATH)) {
       content = fs.readFileSync(ENV_PATH, "utf-8");
     }
-
-    const envKey = config.envKey;
-
-    // Update or add the key
     if (content.includes(`${envKey}=`)) {
       content = content.replace(new RegExp(`${envKey}=.*`, "g"), `${envKey}=${key}`);
     } else {
       content += `\n${envKey}=${key}`;
     }
-
     fs.writeFileSync(ENV_PATH, content.trim() + "\n");
 
     // Also set in process.env for immediate use
@@ -361,10 +368,14 @@ export const getProvidersList = () => {
 /**
  * Check if a provider is configured
  */
-export const isProviderConfigured = (provider) => {
+export const isProviderConfigured = async (provider) => {
   const config = PROVIDERS[provider];
   if (!config) return false;
-  return !!process.env[config.envKey];
+  if (process.env[config.envKey]) return true;
+  try {
+    const vault = await getCredentialVault();
+    return await vault.hasCredential(config.envKey);
+  } catch { return false; }
 };
 
 export default {

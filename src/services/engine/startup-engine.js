@@ -13,8 +13,8 @@
 import { EventEmitter } from "events";
 import fs from "fs";
 import path from "path";
-import { runClaudeCodeStreaming, getClaudeCodeStatus } from "../ai/claude-code-cli.js";
-import { sendMessage, TASK_TYPES } from "../ai/multi-ai.js";
+import { getClaudeCodeStatus } from "../ai/claude-code-cli.js";
+import { executeAgenticTask } from "../ai/multi-ai.js";
 import { getActivityNarrator } from "../ui/activity-narrator.js";
 import { getActivityTracker } from "../ui/activity-tracker.js";
 import { getIdleProcessor } from "./idle-processor.js";
@@ -390,50 +390,63 @@ class StartupEngine extends EventEmitter {
     // Build startup prompt
     const prompt = this.buildStartupPrompt(topPriority);
 
-    if (this.useClaudeCode) {
-      // Run Claude Code CLI
-      this.currentStream = await runClaudeCodeStreaming(prompt, {
-        timeout: 5 * 60_000, // 5 minutes
-        cwd: process.cwd()
-      });
+    try {
+      let sawStreamingOutput = false;
+      const result = await executeAgenticTask(
+        prompt,
+        process.cwd(),
+        (event) => {
+          if (!event) return;
 
-      if (!this.currentStream) {
-        console.error("[StartupEngine] Failed to start Claude Code CLI");
+          if (event.type === "tool") {
+            this.emit("tool", {
+              tool: event.tool,
+              model: event.model || null,
+              reasoning: event.reasoning || null
+            });
+            if (event.tool === "claude") {
+              narrator.setClaudeCodeActive(true, "running");
+            } else if (event.tool === "codex") {
+              narrator.setClaudeCodeActive(false, "codex-fallback");
+            }
+          }
+
+          if (typeof event.text === "string" && event.text.trim()) {
+            sawStreamingOutput = true;
+            this.emit("stream", event.text);
+          }
+        },
+        {
+          forceTool: "claude",
+          alwaysTryClaude: true,
+          codexTimeoutMs: 900000
+        }
+      );
+
+      narrator.setClaudeCodeActive(false, result?.success ? "complete" : "error");
+
+      if (!result?.success) {
+        const message = result?.error || "Agentic startup task failed";
+        console.error("[StartupEngine] Startup work failed:", message);
+        this.emit("work-error", new Error(message));
         return;
       }
 
-      this.currentStream.on("data", (text) => {
-        this.emit("stream", text);
-      });
-
-      this.currentStream.on("complete", (result) => {
-        console.log(`[StartupEngine] Initial work complete: ${result.success ? "success" : "failed"}`);
-        narrator.setClaudeCodeActive(false, "complete");
-
-        // Hand off to idle processor for continued work
-        const idleProcessor = getIdleProcessor();
-        idleProcessor.recordUserActivity(); // Reset idle timer
-        // Idle processor will pick up work when user goes idle
-
-        this.emit("work-complete", result);
-      });
-
-      this.currentStream.on("error", (error) => {
-        console.error("[StartupEngine] Work error:", error);
-        narrator.setClaudeCodeActive(false, "error");
-        this.emit("work-error", error);
-      });
-      return;
-    }
-
-    try {
-      const result = await sendMessage(prompt, this.context, TASK_TYPES.AGENTIC);
-      if (result?.response) {
-        this.emit("stream", result.response);
+      if (!sawStreamingOutput && result?.output) {
+        this.emit("stream", result.output);
       }
-      this.emit("work-complete", { success: true, output: result?.response || "" });
+
+      console.log(`[StartupEngine] Initial work complete via ${result?.tool || "agentic"}: success`);
+
+      // Hand off to idle processor for continued work
+      const idleProcessor = getIdleProcessor();
+      idleProcessor.recordUserActivity(); // Reset idle timer
+      // Idle processor will pick up work when user goes idle
+
+      this.emit("work-complete", result);
     } catch (error) {
-      console.error("[StartupEngine] Codex fallback error:", error?.message || error);
+      narrator.setClaudeCodeActive(false, "error");
+      console.error("[StartupEngine] Agentic fallback error:", error?.message || error);
       this.emit("work-error", error);
     }
   }

@@ -1,0 +1,18 @@
+{
+  "entrypoint": "src/services/engine/attention-agent.js",
+  "type": "engine",
+  "schedule": "continuous",
+  "maxSessionMs": 600000,
+  "restBetweenCyclesMs": 7200000,
+  "goalCategories": ["health", "growth"],
+  "keywords": ["focus", "productivity", "screen", "distract", "attention", "flow", "deep work", "pomodoro", "concentration"],
+  "permissions": {
+    "skills": [],
+    "mcp": ["backbone-health", "backbone-whatsapp"],
+    "tools": ["health-check"],
+    "filesystem": {
+      "read": ["data/oura-data.json", "memory/health.md"],
+      "write": []
+    }
+  }
+}

@@ -44,7 +44,7 @@ const ok = (msg) => console.log(`  ${GREEN}✓${RESET} ${msg}`);
 
 // Directories/files to include in the portable build
 // Include the statically exported PWA (served by src/server.js from /app).
-const INCLUDE_DIRS = ["bin", "src", "skills", "node_modules", "apps/web/out"];
+const INCLUDE_DIRS = ["bin", "src", "skills", "node_modules", "apps/web/out", "assets"];
 const INCLUDE_FILES = [
   ".env.example",
   "CLAUDE.md",
@@ -163,12 +163,12 @@ if exist "%~dp0data\\.backbone.lock" (
     )
   )
 )
-tasklist /FI "WINDOWTITLE eq BACKBONE ENGINE" 2>nul | findstr /i "cmd" >nul 2>&1
+tasklist /FI "WINDOWTITLE eq BACKBONE*" 2>nul | findstr /i "cmd" >nul 2>&1
 if not errorlevel 1 (
   exit
 )
 
-title BACKBONE ENGINE
+title BACKBONE
 
 REM Enable ANSI escape sequences
 reg add HKCU\\Console /v VirtualTerminalLevel /t REG_DWORD /d 1 /f >nul 2>&1

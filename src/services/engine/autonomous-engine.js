@@ -14,8 +14,10 @@ import { getActionApproval, APPROVAL_REQUIRED_ACTIONS, APPROVAL_STATUS } from ".
 import { getEngineHeartbeat } from "./engine-heartbeat.js";
 import { calculateDataCompleteness } from "./thinking-engine.js";
 import { getSkillDiscovery } from "./skill-discovery.js";
+import { matchGoalToAgent } from "./agent-dispatcher.js";
+import { notifyProgress, notifyBlocked, sendWhatsApp, askUser } from "../messaging/proactive-outreach.js";
 
-import { getDataDir } from "../paths.js";
+import { getDataDir, dataFile } from "../paths.js";
 /**
  * Autonomous Engine for BACKBONE
  * Core brain that generates AI-driven actions and executes them
@@ -30,6 +32,14 @@ import { getDataDir } from "../paths.js";
 
 const DATA_DIR = getDataDir();
 const ENGINE_STATE_PATH = path.join(DATA_DIR, "autonomous-state.json");
+const HANDOFF_FILE = path.join(DATA_DIR, "engine-handoff.json");
+
+// Rest duration constants (milliseconds)
+const REST_AFTER_SUCCESS = 15 * 60 * 1000;     // 15 min after successful work
+const REST_AFTER_RATE_LIMIT = 30 * 60 * 1000;  // 30 min after rate limit
+const REST_QUIET_HOURS = 60 * 60 * 1000;       // 60 min during quiet hours (22:00-07:00)
+const REST_NO_WORK = 30 * 60 * 1000;           // 30 min when no work available
+const REST_COUNTDOWN_INTERVAL = 30 * 1000;      // Emit countdown every 30s
 
 // Action statuses
 export const AI_ACTION_STATUS = {
@@ -83,13 +93,13 @@ const getDefaultState = () => ({
 
 /**
  * Get cycle interval based on current model
- * Opus 4.5: 15 minutes (to respect rate limits)
+ * Opus 4.6: 15 minutes (to respect rate limits)
  * Sonnet: 10 minutes
  */
 const getCycleIntervalForModel = () => {
   const model = getCurrentModelInUse();
   const isOpus = model.includes("opus");
-  // Opus 4.5: 15 minutes = 900000ms
+  // Opus 4.6: 15 minutes = 900000ms
   // Sonnet: 10 minutes = 600000ms
   return isOpus ? 900000 : 600000;
 };
@@ -232,17 +242,31 @@ export class AutonomousEngine extends EventEmitter {
   }
 
   /**
-   * Interruptible rest — sleeps for restPeriodMs but wakes immediately
-   * if wakeFromRest() is called (e.g., user asks a question)
+   * Interruptible rest — sleeps for the specified duration but wakes immediately
+   * if wakeFromRest() is called (e.g., user asks a question).
+   * Emits rest-countdown events every 30s for dashboard visibility.
+   *
+   * @param {string} reason - Why we're resting
+   * @param {number} [durationMs] - Override rest duration (otherwise uses adaptive calculation)
    */
-  async restBetweenCycles(reason = "rate-limit cooldown") {
-    // Recalculate rest period each cycle (completeness changes as engine works)
-    this.restPeriodMs = this._calculateRestPeriod();
+  async restBetweenCycles(reason = "work cycle complete", durationMs = null) {
+    // Determine rest duration: explicit override > quiet hours > adaptive
+    let restMs = durationMs;
+    if (!restMs) {
+      if (this._isQuietHours()) {
+        restMs = Math.max(REST_QUIET_HOURS, this._calculateRestPeriod());
+      } else {
+        restMs = this._calculateRestPeriod();
+      }
+    }
+
+    this.restPeriodMs = restMs;
     this.isResting = true;
-    this.restUntil = Date.now() + this.restPeriodMs;
+    this.restUntil = Date.now() + restMs;
+    this.restReason = reason;
     this.setEngineState("resting");
 
-    const restMinutes = Math.round(this.restPeriodMs / 60000);
+    const restMinutes = Math.round(restMs / 60000);
     console.log(`[AutonomousEngine] Resting ${restMinutes}m (${reason})`);
     if (this.narrator) {
       this.narrator.observe(`Resting ${restMinutes}m — ${reason}`);
@@ -250,35 +274,77 @@ export class AutonomousEngine extends EventEmitter {
     if (this.heartbeat) this.heartbeat.beat(`rest-start: ${reason}`);
 
     // Log rest state for header display
-    this.emit("rest-start", { restUntil: this.restUntil, reason });
+    this.emit("rest-start", { restUntil: this.restUntil, reason, durationMs: restMs });
 
-    // Interruptible sleep — heartbeat continues during rest
-    const heartbeatDuringRest = setInterval(() => {
+    // Visible countdown — emit every 30s so dashboard shows "Resting 12m left"
+    const countdownInterval = setInterval(() => {
+      if (!this.isResting) return;
+      const remaining = Math.max(0, this.restUntil - Date.now());
+      const remainMin = Math.round(remaining / 60000);
+      const remainSec = Math.round(remaining / 1000);
+
+      // Emit for dashboard/SSE
+      this.emit("rest-countdown", {
+        remainingMs: remaining,
+        remainingMin: remainMin,
+        remainingSec: remainSec,
+        reason: this.restReason
+      });
+
       if (this.heartbeat) {
-        const remaining = Math.max(0, this.restUntil - Date.now());
-        const remainMin = Math.round(remaining / 60000);
         this.heartbeat.beat(`resting: ${remainMin}m left`);
       }
-    }, 60_000);
+    }, REST_COUNTDOWN_INTERVAL);
 
     try {
       await new Promise((resolve) => {
         this.restWakeResolve = resolve;
-        setTimeout(() => {
+        this._restTimeout = setTimeout(() => {
           this.restWakeResolve = null;
           resolve("timeout");
-        }, this.restPeriodMs);
+        }, restMs);
       });
     } finally {
-      clearInterval(heartbeatDuringRest);
+      clearInterval(countdownInterval);
+      clearTimeout(this._restTimeout);
       this.isResting = false;
       this.restUntil = 0;
+      this.restReason = null;
       this.emit("rest-end");
     }
 
     console.log("[AutonomousEngine] Rest complete, resuming work");
     if (this.narrator) this.narrator.observe("Rest complete — resuming work");
     if (this.heartbeat) this.heartbeat.beat("rest-end");
+  }
+
+  /**
+   * Check if currently in quiet hours (22:00-07:00)
+   */
+  _isQuietHours() {
+    const hour = new Date().getHours();
+    return hour >= 22 || hour < 7;
+  }
+
+  /**
+   * Extend current rest period due to rate limiting.
+   * Called by claude-code-cli when it detects rate limits.
+   */
+  extendRestForRateLimit() {
+    if (this.isResting) {
+      // Extend existing rest to at least 30 min from now
+      const newRestUntil = Date.now() + REST_AFTER_RATE_LIMIT;
+      if (newRestUntil > this.restUntil) {
+        this.restUntil = newRestUntil;
+        this.restReason = "rate limit — extended rest";
+        const remainMin = Math.round((this.restUntil - Date.now()) / 60000);
+        console.log(`[AutonomousEngine] Rest extended to ${remainMin}m (rate limit)`);
+        this.emit("rest-extended", { restUntil: this.restUntil, reason: "rate-limit" });
+      }
+    } else {
+      // Not resting — start a 30min rest
+      this.restBetweenCycles("rate limit detected", REST_AFTER_RATE_LIMIT);
+    }
   }
 
   /**
@@ -308,6 +374,7 @@ export class AutonomousEngine extends EventEmitter {
       remainingMin: Math.round(remaining / 60000),
       totalRestMin,
       completeness,
+      reason: this.restReason || null,
       restUntil: new Date(this.restUntil).toISOString()
     };
   }
@@ -482,6 +549,16 @@ export class AutonomousEngine extends EventEmitter {
         // Wait for approval - don't start goal yet
         this.pendingGoal = goal;
         this.emit("awaiting-approval", { goal, approval });
+
+        // Notify user via WhatsApp so they can approve from their phone
+        askUser(
+          `I'd like to start working on: *${goal.title}*\n\n` +
+          `Category: ${goal.category || "general"}\n` +
+          `${goal.description ? `Details: ${goal.description.slice(0, 200)}\n\n` : "\n"}` +
+          `Reply "yes" to approve or "no" to skip.`,
+          { context: "goal-approval", trigger: "goal-approval", identifier: `approve_${goal.id}` }
+        ).catch(() => {});
+
         return false;
       }
     }
@@ -825,7 +902,7 @@ export class AutonomousEngine extends EventEmitter {
     // Get interval based on model (Opus: 15min, Sonnet: 30sec)
     const intervalMs = getCycleIntervalForModel();
     const intervalLabel = intervalMs >= 60000 ? `${intervalMs / 60000} minutes` : `${intervalMs / 1000} seconds`;
-    console.log(`[AutonomousEngine] Cycle interval: ${intervalLabel} (model: ${getCurrentModelInUse().includes("opus") ? "Opus 4.5" : "Sonnet"})`);
+    console.log(`[AutonomousEngine] Cycle interval: ${intervalLabel} (model: ${getCurrentModelInUse().includes("opus") ? "Opus 4.6" : "Sonnet"})`);
 
     // Start interval
     this.loopInterval = setInterval(() => {
@@ -1032,10 +1109,9 @@ export class AutonomousEngine extends EventEmitter {
                     }
                   }
                 } else {
-                  console.log("[AutonomousEngine] AI brain returned no goals — waiting 60s");
-                  if (this.narrator) this.narrator.observe("No ideas generated — will retry in 60s");
-                  this.setEngineState("idle");
-                  await this.wait(60000);
+                  console.log("[AutonomousEngine] AI brain returned no goals — resting");
+                  if (this.narrator) this.narrator.observe("No ideas generated — resting before retry");
+                  await this.restBetweenCycles("no work available", REST_NO_WORK);
                   continue;
                 }
               } catch (genError) {
@@ -1127,10 +1203,29 @@ export class AutonomousEngine extends EventEmitter {
             this.narrator.observe(`Executing via Claude Code CLI...`);
           }
 
+          // Gather user context so Claude has real data about the user
+          let userContext = {};
+          try {
+            userContext = await this.getContext();
+          } catch {}
+
+          // Match goal to a specialized agent for domain-specific identity injection
+          let agentIdentity = null;
+          try {
+            const agent = matchGoalToAgent(this.currentGoal);
+            if (agent) {
+              agentIdentity = agent.identity;
+              console.log(`[AutonomousEngine] Agent: ${agent.id} handling goal: ${this.currentGoal.title}`);
+              if (this.narrator) {
+                this.narrator.observe(`Agent: ${agent.id} activated`);
+              }
+            }
+          } catch {}
+
           // Execute goal with Claude Orchestrator (15-min timeout to prevent infinite hangs)
           const GOAL_TIMEOUT = 15 * 60 * 1000;
           const result = await Promise.race([
-            orchestrator.executeGoal(this.currentGoal, { workDir: process.cwd() }),
+            orchestrator.executeGoal(this.currentGoal, { workDir: process.cwd(), userContext, agentIdentity }),
             new Promise((_, reject) =>
               setTimeout(() => reject(new Error("Goal execution timeout (15min)")), GOAL_TIMEOUT)
             )
@@ -1223,12 +1318,36 @@ export class AutonomousEngine extends EventEmitter {
             // Otherwise loop continues and tries again
           }
 
+          // ── HANDOFF CHAINING ──
+          // Extract handoff instructions from Claude's output so next cycle continues
+          if (result.output) {
+            const handoff = this.extractHandoff(result.output);
+            if (handoff) {
+              this.saveHandoff(handoff);
+              console.log(`[AutonomousEngine] Handoff saved: ${handoff.nextTask?.slice(0, 60)}`);
+            }
+          }
+
+          // ── CONTEXT SYNC ──
+          // After meaningful work, trigger Firebase context sync so cloud AI has fresh data
+          if (result.success) {
+            this.triggerContextSync("engine work completed");
+
+            // ── PROACTIVE OUTREACH ──
+            // Only notify on goal completion, not mid-cycle (mid-cycle raw output is garbled).
+            // The completeCurrentGoal() method handles proper completion notifications.
+          }
+
           // ── WORK-REST CYCLE ──
-          // After each Claude Code execution, rest to avoid rate limits.
+          // Adaptive rest: success=15m, rate-limit=30m, quiet-hours=60m, no-work=30m
           // Rest is interruptible — wakeFromRest() skips it immediately.
           // Session ID is preserved so --resume picks up context next cycle.
           if (this.running && !this.isResting) {
-            await this.restBetweenCycles("work cycle complete — avoiding rate limits");
+            const restMs = result.success ? REST_AFTER_SUCCESS : REST_AFTER_RATE_LIMIT;
+            await this.restBetweenCycles(
+              result.success ? "work cycle complete" : "error recovery",
+              restMs
+            );
           }
 
         } else {
@@ -1758,10 +1877,15 @@ export class AutonomousEngine extends EventEmitter {
       }
     }
 
-    // Truly no goals at all
+    // Truly no goals at all — ask the user for direction
     if (this.narrator) {
       this.narrator.observe("No goals available - waiting for new goals");
     }
+
+    notifyBlocked(
+      "All goals are either completed or blocked",
+      "What should I work on next? Any priorities or tasks you'd like me to pick up?"
+    ).catch(() => {});
 
     return null;
   }
@@ -1803,6 +1927,14 @@ export class AutonomousEngine extends EventEmitter {
 
     // Show goal completion in title
     showNotificationTitle("goal", `Completed: ${completedGoal.title.slice(0, 30)}`, 30000);
+
+    // Notify user via WhatsApp — include what was actually accomplished
+    const completionSummary = completedGoal.description
+      ? `Wrapped up: ${completedGoal.description.slice(0, 150)}`
+      : `Finished working on this.`;
+    notifyProgress(completedGoal.title, completionSummary, {
+      trigger: "goal-completed",
+    }).catch(() => {});
 
     this.emit("goal-completed", completedGoal);
 
@@ -1932,6 +2064,84 @@ export class AutonomousEngine extends EventEmitter {
   stopAutonomousLoop() {
     this.running = false;
     this.emit("autonomous-stopped");
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // HANDOFF CHAINING — Persist what the next cycle should do
+  // ═══════════════════════════════════════════════════════════════
+
+  /**
+   * Save handoff instructions for the next cycle
+   */
+  saveHandoff(handoff) {
+    if (!handoff) return;
+    try {
+      const dir = path.dirname(HANDOFF_FILE);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(HANDOFF_FILE, JSON.stringify({
+        ...handoff,
+        savedAt: new Date().toISOString(),
+        fromCycle: this.cycleCount,
+        fromGoal: this.currentGoal?.title || null
+      }, null, 2));
+    } catch {}
+  }
+
+  /**
+   * Load handoff instructions from previous cycle
+   */
+  loadHandoff() {
+    try {
+      if (fs.existsSync(HANDOFF_FILE)) {
+        const handoff = JSON.parse(fs.readFileSync(HANDOFF_FILE, "utf-8"));
+        // Expire handoffs older than 4 hours
+        const savedTime = handoff.savedAt ? new Date(handoff.savedAt).getTime()
+                        : handoff.extractedAt ? handoff.extractedAt
+                        : 0;
+        if (savedTime > 0 && Date.now() - savedTime > 4 * 60 * 60 * 1000) {
+          console.log("[AutonomousEngine] Handoff expired (>4h old)");
+          return null;
+        }
+        return handoff;
+      }
+    } catch {}
+    return null;
+  }
+
+  /**
+   * Extract handoff from Claude Code output
+   */
+  extractHandoff(output) {
+    if (!output) return null;
+
+    // Look for structured handoff block
+    const handoffMatch = output.match(/HANDOFF:\s*\n([\s\S]*?)(?:\n---|\n##|\nIMPORTANT|$)/i);
+    if (handoffMatch) {
+      const raw = handoffMatch[1].trim();
+      const nextTaskMatch = raw.match(/NEXT\s*TASK:\s*(.+)/i);
+      const contextMatch = raw.match(/CONTEXT:\s*(.+)/i);
+
+      return {
+        nextTask: nextTaskMatch?.[1]?.trim() || raw.split("\n")[0],
+        context: contextMatch?.[1]?.trim() || raw.slice(0, 500),
+        fromAction: this.currentGoal?.title || "unknown"
+      };
+    }
+
+    return null;
+  }
+
+  /**
+   * Trigger a context sync to Firebase after meaningful work
+   */
+  async triggerContextSync(reason) {
+    try {
+      const { getFirebaseContextSync } = await import("../firebase/firebase-context-sync.js");
+      const sync = getFirebaseContextSync();
+      if (sync.running) {
+        sync.triggerSync(reason);
+      }
+    } catch {}
   }
 
   /**

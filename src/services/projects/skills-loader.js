@@ -1,5 +1,11 @@
 /**
  * Skills Loader - Load skills from Claude repos and local files
+ *
+ * Supports two formats:
+ *   1. Flat:      skills/<name>.md
+ *   2. Directory: skills/<name>/SKILL.md  (Anthropic format)
+ *
+ * Both formats may include YAML frontmatter (name, description).
  */
 import fs from "fs";
 import path from "path";
@@ -11,6 +17,31 @@ const SKILLS_DIR = path.join(getEngineRoot(), "skills");
 const SKILLS_INDEX_PATH = path.join(DATA_DIR, "skills-index.json");
 const USER_SKILLS_DIR = getUserSkillsDir();
 const USER_SKILLS_INDEX_PATH = path.join(USER_SKILLS_DIR, "index.json");
+
+/**
+ * Parse YAML frontmatter from a markdown string.
+ * Returns { frontmatter: {name, description, ...}, body: "remaining markdown" }
+ */
+function parseFrontmatter(content) {
+  if (!content.startsWith("---")) return { frontmatter: null, body: content };
+  const end = content.indexOf("\n---", 3);
+  if (end === -1) return { frontmatter: null, body: content };
+  const yamlBlock = content.slice(4, end).trim();
+  const fm = {};
+  for (const line of yamlBlock.split("\n")) {
+    const colon = line.indexOf(":");
+    if (colon === -1) continue;
+    const key = line.slice(0, colon).trim();
+    let val = line.slice(colon + 1).trim();
+    // Strip surrounding quotes
+    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+      val = val.slice(1, -1);
+    }
+    fm[key] = val;
+  }
+  const body = content.slice(end + 4).trim();
+  return { frontmatter: fm, body };
+}
 
 // IMPORTANT: Anthropic-only repos. Do NOT add non-Anthropic sources.
 const SKILL_REPOS = [
@@ -59,7 +90,10 @@ const DEFAULT_SKILLS = [
   { id: "file-management", name: "File Management", description: "Manage files and directories", category: "System" },
   { id: "api-integration", name: "API Integration", description: "Integrate with external APIs and webhooks", category: "Development" },
   { id: "task-automation", name: "Task Automation", description: "Automate tasks with scheduling and workflows", category: "Automation" },
-  { id: "calendar-scheduling", name: "Calendar & Scheduling", description: "Manage calendar events and scheduling", category: "Productivity" }
+  { id: "calendar-scheduling", name: "Calendar & Scheduling", description: "Manage calendar events and scheduling", category: "Productivity" },
+
+  // Meta
+  { id: "skill-creator", name: "Skill Creator", description: "Create or update BACKBONE skills following the Anthropic skill format", category: "Meta" }
 ];
 
 class SkillsLoader extends EventEmitter {
@@ -79,10 +113,27 @@ class SkillsLoader extends EventEmitter {
 
   _registerDefaultSkills() {
     for (const skill of DEFAULT_SKILLS) {
-      const filepath = path.join(SKILLS_DIR, `${skill.id}.md`);
+      // Check directory format first (skills/<id>/SKILL.md), then flat (skills/<id>.md)
+      const dirPath = path.join(SKILLS_DIR, skill.id, "SKILL.md");
+      const flatPath = path.join(SKILLS_DIR, `${skill.id}.md`);
+      const useDirFormat = fs.existsSync(dirPath);
+      const filepath = useDirFormat ? dirPath : flatPath;
+
+      // If file exists, try to extract frontmatter description (better trigger matching)
+      let description = skill.description;
+      if (fs.existsSync(filepath)) {
+        try {
+          const content = fs.readFileSync(filepath, "utf-8");
+          const { frontmatter } = parseFrontmatter(content);
+          if (frontmatter?.description) description = frontmatter.description;
+        } catch { /* keep default description */ }
+      }
+
       this.defaultSkills.set(skill.id, {
         ...skill,
+        description,
         filepath,
+        dirFormat: useDirFormat,
         isDefault: true,
         isAvailable: fs.existsSync(filepath)
       });
@@ -267,11 +318,32 @@ class SkillsLoader extends EventEmitter {
 
   getLocalSkills() {
     try {
-      return fs.readdirSync(SKILLS_DIR).filter(f => f.endsWith(".md")).map(f => {
-        const filepath = path.join(SKILLS_DIR, f);
-        const name = f.replace(".md", "");
-        return { id: name, name, filepath, isLocal: true };
-      });
+      const results = [];
+      const entries = fs.readdirSync(SKILLS_DIR, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.isFile() && entry.name.endsWith(".md")) {
+          // Flat format: skills/<name>.md
+          const filepath = path.join(SKILLS_DIR, entry.name);
+          const id = entry.name.replace(".md", "");
+          results.push({ id, name: id, filepath, isLocal: true });
+        } else if (entry.isDirectory()) {
+          // Directory format: skills/<name>/SKILL.md
+          const skillMd = path.join(SKILLS_DIR, entry.name, "SKILL.md");
+          if (fs.existsSync(skillMd)) {
+            const id = entry.name;
+            let name = id;
+            let description = "";
+            try {
+              const content = fs.readFileSync(skillMd, "utf-8");
+              const { frontmatter } = parseFrontmatter(content);
+              if (frontmatter?.name) name = frontmatter.name;
+              if (frontmatter?.description) description = frontmatter.description;
+            } catch { /* ignore */ }
+            results.push({ id, name, description, filepath: skillMd, dirFormat: true, isLocal: true });
+          }
+        }
+      }
+      return results;
     } catch (e) { return []; }
   }
 
@@ -495,23 +567,46 @@ export function getSkillsCatalog() {
   try {
     const sections = [];
 
-    // System skills
+    // System skills — scan both flat .md files and directory-based SKILL.md
     if (fs.existsSync(SKILLS_DIR)) {
-      const files = fs.readdirSync(SKILLS_DIR).filter(f => f.endsWith(".md")).sort();
-      if (files.length > 0) {
-        const lines = files.map(f => {
-          const name = f.replace(/\.md$/, "");
-          try {
-            const content = fs.readFileSync(path.join(SKILLS_DIR, f), "utf-8");
-            const firstLine = content.split("\n").find(l => l.startsWith("# "));
-            const desc = firstLine ? firstLine.replace(/^#\s*/, "").replace(/\s*Skill\s*$/, "") : name;
-            return `- ${name}: ${desc}`;
-          } catch {
-            return `- ${name}`;
+      const lines = [];
+      const entries = fs.readdirSync(SKILLS_DIR, { withFileTypes: true });
+      for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+        let skillPath = null;
+        let id = null;
+
+        if (entry.isFile() && entry.name.endsWith(".md")) {
+          id = entry.name.replace(/\.md$/, "");
+          skillPath = path.join(SKILLS_DIR, entry.name);
+        } else if (entry.isDirectory()) {
+          const dirSkill = path.join(SKILLS_DIR, entry.name, "SKILL.md");
+          if (fs.existsSync(dirSkill)) {
+            id = entry.name;
+            skillPath = dirSkill;
           }
-        });
-        sections.push(`### System Skills\n${lines.join("\n")}`);
+        }
+
+        if (!id || !skillPath) continue;
+        try {
+          const content = fs.readFileSync(skillPath, "utf-8");
+          const { frontmatter } = parseFrontmatter(content);
+          if (frontmatter?.description) {
+            // Truncate long descriptions for catalog (first sentence or 120 chars)
+            let desc = frontmatter.description;
+            const firstSentence = desc.match(/^[^.!?]+[.!?]/);
+            if (firstSentence && firstSentence[0].length < 150) desc = firstSentence[0];
+            else if (desc.length > 150) desc = desc.slice(0, 147) + "...";
+            lines.push(`- ${id}: ${desc}`);
+          } else {
+            const firstLine = content.split("\n").find(l => l.startsWith("# "));
+            const desc = firstLine ? firstLine.replace(/^#\s*/, "").replace(/\s*Skill\s*$/, "") : id;
+            lines.push(`- ${id}: ${desc}`);
+          }
+        } catch {
+          lines.push(`- ${id}`);
+        }
       }
+      if (lines.length > 0) sections.push(`### System Skills\n${lines.join("\n")}`);
     }
 
     // User-defined custom skills
@@ -538,16 +633,36 @@ export function getSkillsCatalog() {
 
 /**
  * Returns the full markdown content of a specific skill file.
+ * Checks directory format (skills/<name>/SKILL.md) first, then flat (skills/<name>.md).
  */
 export function getSkillContent(skillName) {
   try {
-    const filePath = path.join(SKILLS_DIR, `${skillName}.md`);
-    if (!fs.existsSync(filePath)) return null;
-    return fs.readFileSync(filePath, "utf-8");
+    // Directory format takes priority
+    const dirPath = path.join(SKILLS_DIR, skillName, "SKILL.md");
+    if (fs.existsSync(dirPath)) return fs.readFileSync(dirPath, "utf-8");
+    // Flat format
+    const flatPath = path.join(SKILLS_DIR, `${skillName}.md`);
+    if (fs.existsSync(flatPath)) return fs.readFileSync(flatPath, "utf-8");
+    return null;
   } catch {
     return null;
   }
 }
+
+/**
+ * Returns the path to a skill's directory (for accessing scripts/references/assets).
+ * Returns null for flat-format skills.
+ */
+export function getSkillDir(skillName) {
+  const dirPath = path.join(SKILLS_DIR, skillName);
+  if (fs.existsSync(path.join(dirPath, "SKILL.md"))) return dirPath;
+  return null;
+}
+
+/**
+ * Parse frontmatter from a skill file. Exported for use by other modules.
+ */
+export { parseFrontmatter };
 
 /**
  * Returns the full markdown content of a user-defined custom skill.

@@ -16,13 +16,17 @@ import {
 const TOOLS = [
   {
     name: "call_user",
-    description: "Call the user's phone via Vapi AI voice (Cole persona). Starts ngrok tunnel and initiates outbound call.",
+    description: "Call the user or a provided phone number via Vapi AI voice (Cole persona).",
     inputSchema: {
       type: "object",
       properties: {
         systemPrompt: {
           type: "string",
           description: "Optional custom system prompt for the voice assistant. If not provided, uses default BACKBONE Cole persona.",
+        },
+        targetNumber: {
+          type: "string",
+          description: "Optional E.164 phone number override (for example, a restaurant). If omitted, calls the user's configured phone number.",
         },
       },
       required: [],
@@ -85,8 +89,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     case "call_user": {
       try {
         await vapi.initialize();
-        const call = await vapi.callUser(args?.systemPrompt);
-        result = { success: true, callId: call.id, message: "Phone call initiated. The user's phone should be ringing." };
+        const call = await vapi.callUser(args?.systemPrompt, { targetNumber: args?.targetNumber });
+        result = {
+          success: true,
+          callId: call.id,
+          targetNumber: args?.targetNumber || null,
+          message: args?.targetNumber
+            ? "Phone call initiated to provided target number."
+            : "Phone call initiated to the user's configured number."
+        };
       } catch (err) {
         result = { success: false, error: err.message };
       }

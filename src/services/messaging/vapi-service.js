@@ -496,11 +496,15 @@ export class VapiService extends EventEmitter {
    * Start an outbound phone call to the user.
    * Uses Firebase Cloud Function as webhook — no ngrok needed.
    */
-  async callUser(customPrompt) {
+  async callUser(customPrompt, options = {}) {
     await this.initialize();
 
     const voice = this.getVoiceConfig();
     const systemPrompt = await buildSystemPrompt(customPrompt);
+    const targetNumber = typeof options === "string"
+      ? options
+      : (options?.targetNumber || options?.number || null);
+    const destinationNumber = targetNumber || this.getUserPhoneNumber();
 
     this.emit("status", { message: `Building context and initiating call (voice: ${voice.voiceId})...` });
 
@@ -508,7 +512,7 @@ export class VapiService extends EventEmitter {
       const call = await this.client.calls.create({
         phoneNumberId: this.config.phoneNumberId,
         customer: {
-          number: this.getUserPhoneNumber(),
+          number: destinationNumber,
         },
         assistant: {
           name: `BACKBONE ${voice.voiceId}`,
@@ -536,6 +540,7 @@ export class VapiService extends EventEmitter {
         id: call.id,
         status: "initiating",
         startedAt: new Date().toISOString(),
+        targetNumber: destinationNumber,
       };
       this.callTranscript = [];
       this.backgroundTasks.clear();

@@ -15,7 +15,7 @@ import { getDataDir, engineFile } from "../paths.js";
  * - low: Fastest, cheapest (gpt-4o-mini, claude-3-haiku, gemini-flash)
  * - medium: Balanced (gpt-4o, claude-3.5-sonnet, gemini-pro)
  * - high: Best quality (gpt-4o, claude-opus-4, gemini-pro)
- * - xhigh: Maximum capability (gpt-5.2, claude-opus-4.5, gemini-3-ultra)
+ * - xhigh: Maximum capability (gpt-5.2, claude-opus-4.6, gemini-3-ultra)
  */
 
 const DATA_DIR = getDataDir();
@@ -48,7 +48,7 @@ export const MODEL_TIERS = {
     label: "XHigh",
     description: "Maximum capability",
     openai: "gpt-4.5-preview",
-    anthropic: "claude-opus-4-5-20251101",
+    anthropic: "claude-opus-4-6",
     google: "gemini-2.0-flash-exp"
   }
 };

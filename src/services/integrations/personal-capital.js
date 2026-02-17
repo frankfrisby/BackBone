@@ -4,8 +4,10 @@ import os from "node:os";
 import { EventEmitter } from "events";
 
 import { getDataDir, getScreenshotsDir } from "../paths.js";
+import { loginFlow, evaluatePage, clearAllPopups, visitPages } from "../browser-form-agent.js";
+import { getCredential } from "../credential-vault.js";
 
-// Load ~/.backbone/.env for credentials (AI never reads the values)
+// Load ~/.backbone/.env for credentials (legacy fallback — vault is primary)
 const _loadBackboneEnv = () => {
   try {
     const envPath = path.join(os.homedir(), ".backbone", ".env");
@@ -56,6 +58,7 @@ const getDefaultData = () => ({
   netWorth: null,
   netWorthHistory: [],
   cashFlow: null,
+  categories: {},
   lastUpdated: null,
   authenticated: false
 });
@@ -102,33 +105,33 @@ export class PersonalCapitalService extends EventEmitter {
   }
 
   /**
-   * Get email credential (checks EMPOWER_EMAIL first, then PERSONAL_CAPITAL_EMAIL)
+   * Get email credential (vault first, then env vars)
    */
-  getEmail() {
-    return process.env.EMPOWER_EMAIL || process.env.PERSONAL_CAPITAL_EMAIL || "";
+  async getEmail() {
+    return await getCredential("EMPOWER_EMAIL") || process.env.PERSONAL_CAPITAL_EMAIL || "";
   }
 
   /**
-   * Get password credential (checks EMPOWER_PASSWORD first, then PERSONAL_CAPITAL_PASSWORD)
+   * Get password credential (vault first, then env vars)
    */
-  getPassword() {
-    return process.env.EMPOWER_PASSWORD || process.env.PERSONAL_CAPITAL_PASSWORD || "";
+  async getPassword() {
+    return await getCredential("EMPOWER_PASSWORD") || process.env.PERSONAL_CAPITAL_PASSWORD || "";
   }
 
   /**
    * Check if credentials are configured
    */
-  hasCredentials() {
-    return Boolean(this.getEmail() && this.getPassword());
+  async hasCredentials() {
+    return Boolean(await this.getEmail() && await this.getPassword());
   }
 
   /**
    * Get configuration status
    */
-  getConfig() {
-    const email = this.getEmail();
+  async getConfig() {
+    const email = await this.getEmail();
     return {
-      hasCredentials: this.hasCredentials(),
+      hasCredentials: await this.hasCredentials(),
       authenticated: this.authenticated,
       hasCachedData: !!(this.data.lastUpdated),
       lastUpdated: this.data.lastUpdated,
@@ -141,7 +144,7 @@ export class PersonalCapitalService extends EventEmitter {
    * Initialize the Personal Capital client
    */
   async initClient() {
-    if (!this.hasCredentials()) {
+    if (!(await this.hasCredentials())) {
       throw new Error("Empower credentials not configured. Set EMPOWER_EMAIL and EMPOWER_PASSWORD in ~/.backbone/.env");
     }
 
@@ -176,8 +179,8 @@ export class PersonalCapitalService extends EventEmitter {
       await this.initClient();
     }
 
-    const email = this.getEmail();
-    const password = this.getPassword();
+    const email = await this.getEmail();
+    const password = await this.getPassword();
 
     try {
       // Attempt login
@@ -229,8 +232,8 @@ export class PersonalCapitalService extends EventEmitter {
       await this.client.enterTwoFactorCode("sms", code);
 
       // Login again to complete authentication
-      const email = this.getEmail();
-      const password = this.getPassword();
+      const email = await this.getEmail();
+      const password = await this.getPassword();
       await this.client.login(email, password);
 
       this.authenticated = true;
@@ -518,8 +521,17 @@ export class PersonalCapitalService extends EventEmitter {
     try {
       console.log(`${TAG} Launching browser with BACKBONE profile (headless=${headless})...`);
 
+      // Kill any stale Chrome instances using our profile (prevents lock)
+      try {
+        const lockFile = path.join(backboneProfile, "SingletonLock");
+        if (fs.existsSync(lockFile)) {
+          console.log(`${TAG} Removing stale profile lock...`);
+          fs.unlinkSync(lockFile);
+        }
+      } catch {}
+
       context = await chromium.launchPersistentContext(backboneProfile, {
-        headless,
+        headless: false, // Always visible — Empower blocks headless + needs popup interaction
         args: [
           "--disable-blink-features=AutomationControlled",
           "--no-first-run",
@@ -527,298 +539,356 @@ export class PersonalCapitalService extends EventEmitter {
         ],
         viewport: { width: 1280, height: 900 },
         ignoreDefaultArgs: ["--enable-automation"],
-        timeout: 30000,
+        timeout: 45000,
       });
+      console.log(`${TAG} Browser launched successfully`);
 
       const page = context.pages()[0] || await context.newPage();
 
-      // Navigate to Empower dashboard
-      console.log(`${TAG} Navigating to Empower dashboard...`);
-      await page.goto("https://www.empower.com/login-v2", {
-        waitUntil: "domcontentloaded",
-        timeout,
-      });
-
-      // Wait for dashboard to load (check for net worth element or login page)
-      const currentUrl = page.url();
-      console.log(`${TAG} Current URL: ${currentUrl}`);
-
-      // Check if we're on the login page — try to auto-login using Chrome's saved credentials
-      // Helper: check if URL is a login/auth page
-      const isLoginPage = (url) => url.includes("/login") || url.includes("/signin") || url.includes("/auth");
-      // Helper: check if URL is a dashboard/post-login page
-      const isDashboard = (url) => !isLoginPage(url) && (url.includes("/dashboard") || url.includes("/page/") || url.includes("/home") || url.includes("empower.com"));
-
-      if (isLoginPage(currentUrl)) {
-        const empEmail = this.getEmail();
-        const empPassword = this.getPassword();
-        const hasCreds = empEmail && empPassword;
-        const loginWait = Math.max(timeout, 300000);
-
-        if (hasCreds) {
-          console.log(`${TAG} Have credentials from .env — attempting auto-login...`);
-
-          // Find and fill email field
-          const emailInput = await page.waitForSelector(
-            'input[type="email"], input[name="username"], input[name="email"], #username, #email, input[placeholder*="email" i], input[placeholder*="user" i]',
-            { timeout: 15000 }
-          ).catch(() => null);
-
-          if (emailInput) {
-            await emailInput.click({ clickCount: 3 }); // select all
-            await emailInput.fill(empEmail);
-            console.log(`${TAG} Email entered`);
-            await page.waitForTimeout(500);
-
-            // Some sites show password on same page, some on next page after "Continue"
-            let passwordInput = await page.waitForSelector(
-              'input[type="password"]', { timeout: 3000 }
-            ).catch(() => null);
-
-            if (!passwordInput) {
-              // Click Continue/Next to get to password page
-              const continueBtn = await page.waitForSelector(
-                'button[type="submit"], button:has-text("Continue"), button:has-text("Next"), button:has-text("Log In"), button:has-text("Sign In")',
-                { timeout: 5000 }
-              ).catch(() => null);
-              if (continueBtn) {
-                await continueBtn.click();
-                console.log(`${TAG} Clicked continue — waiting for password page...`);
-                await page.waitForTimeout(3000);
-              }
-              passwordInput = await page.waitForSelector(
-                'input[type="password"]', { timeout: 10000 }
-              ).catch(() => null);
-            }
-
-            if (passwordInput) {
-              await passwordInput.click();
-              await passwordInput.fill(empPassword);
-              console.log(`${TAG} Password entered`);
-              await page.waitForTimeout(500);
-
-              // Click login/submit
-              const submitBtn = await page.waitForSelector(
-                'button[type="submit"], button:has-text("Log In"), button:has-text("Sign In"), button:has-text("Continue"), input[type="submit"]',
-                { timeout: 5000 }
-              ).catch(() => null);
-
-              if (submitBtn) {
-                await submitBtn.click();
-                console.log(`${TAG} Login submitted — waiting for dashboard...`);
-
-                // Wait for navigation past login (handles multi-page login flows)
-                // Keep waiting as long as URL changes — Empower has multiple auth pages
-                let lastUrl = page.url();
-                let stableCount = 0;
-                const loginStart = Date.now();
-
-                while (Date.now() - loginStart < 60000) {
-                  await page.waitForTimeout(3000);
-                  const nowUrl = page.url();
-                  console.log(`${TAG} Current URL: ${nowUrl}`);
-
-                  // If we're on a 2FA/challenge page, handle it
-                  if (nowUrl.includes("challenge") || nowUrl.includes("mfa") || nowUrl.includes("verify") || nowUrl.includes("authorize")) {
-                    if (headless) {
-                      console.log(`${TAG} 2FA required — cannot proceed in headless mode`);
-                      await context.close();
-                      return {
-                        success: false,
-                        needs2FA: true,
-                        message: "2FA challenge detected. Run with headless=false to complete 2FA, or set up a trusted device.",
-                      };
-                    }
-                    console.log(`${TAG} 2FA page — waiting for user to complete (up to 3min)...`);
-                    await page.bringToFront();
-                    try {
-                      await page.waitForURL(url => !url.includes("challenge") && !url.includes("mfa") && !url.includes("verify") && !url.includes("authorize"), {
-                        timeout: 180000,
-                      });
-                      console.log(`${TAG} 2FA completed`);
-                    } catch {
-                      await context.close();
-                      return { success: false, needs2FA: true, message: "2FA timed out." };
-                    }
-                  }
-
-                  // If no longer on a login page, we're in
-                  if (!isLoginPage(nowUrl) && !nowUrl.includes("challenge") && !nowUrl.includes("mfa") && !nowUrl.includes("verify")) {
-                    console.log(`${TAG} Login complete — on dashboard`);
-                    break;
-                  }
-
-                  // If URL hasn't changed, count as stable
-                  if (nowUrl === lastUrl) {
-                    stableCount++;
-                    if (stableCount > 5) break; // stuck for 15s — probably need user help
-                  } else {
-                    stableCount = 0;
-                    lastUrl = nowUrl;
-                  }
-                }
-              }
-            } else {
-              console.log(`${TAG} Could not find password field`);
-            }
-          } else {
-            console.log(`${TAG} Could not find email field`);
-          }
-        }
-
-        // If still on login (no creds, or auto-login failed)
-        const afterLoginUrl = page.url();
-        if (isLoginPage(afterLoginUrl) || afterLoginUrl.includes("challenge") || afterLoginUrl.includes("verify")) {
-          if (headless) {
-            console.log(`${TAG} Still on login/auth page in headless — need setup`);
-            await context.close();
-            return {
-              success: false,
-              needsLogin: true,
-              message: hasCreds
-                ? "Auto-login failed. Run with headless=false to debug, or check .env credentials."
-                : "No credentials. Add EMPOWER_EMAIL and EMPOWER_PASSWORD to ~/.backbone/.env, or login via the browser scraper with headless=false",
-            };
-          }
-
-          // Non-headless fallback: wait for manual login
-          console.log(`${TAG} Waiting for manual login (up to ${Math.round(loginWait/60000)}min)...`);
-          await page.bringToFront();
-          try {
-            await page.waitForURL(url => !isLoginPage(url) && !url.includes("challenge") && !url.includes("verify"), { timeout: loginWait });
-            console.log(`${TAG} Login successful — URL: ${page.url()}`);
-            await page.waitForTimeout(5000);
-          } catch {
-            await context.close();
-            return { success: false, needsLogin: true, message: `Login timed out after ${Math.round(loginWait/60000)} minutes.` };
-          }
-        }
-
-        // Give dashboard time to fully load after login
-        await page.waitForTimeout(5000);
-      }
-
-      // Wait for the dashboard content to load
-      console.log(`${TAG} Waiting for dashboard data...`);
-      await page.waitForTimeout(5000); // Give JS time to render
-
-      // Take dashboard screenshot
       const screenshotsDir = getScreenshotsDir();
       if (!fs.existsSync(screenshotsDir)) fs.mkdirSync(screenshotsDir, { recursive: true });
-      const screenshotPath = path.join(screenshotsDir, `empower-dashboard-${Date.now()}.png`);
-      await page.screenshot({ path: screenshotPath, fullPage: true });
-      console.log(`${TAG} Dashboard screenshot saved: ${screenshotPath}`);
 
-      // Extract data from the page
-      const extractedData = await page.evaluate(() => {
-        const result = { accounts: [], netWorth: null, holdings: [] };
+      // ── Login via generic form agent ─────────────────────────────
+      const empEmail = await this.getEmail();
+      const empPassword = await this.getPassword();
 
-        // Try to find net worth (multiple selectors for robustness)
-        const netWorthSelectors = [
-          '[data-testid="net-worth-value"]',
-          '.net-worth-value',
-          '.netWorthValue',
-          '.js-net-worth',
-          '.net-worth__value',
-          'h1[class*="networth"]',
-          'span[class*="networth"]',
-          '[class*="NetWorth"] [class*="value"]',
-          '[class*="net-worth"] [class*="amount"]',
-        ];
-        for (const sel of netWorthSelectors) {
-          const el = document.querySelector(sel);
-          if (el?.textContent) {
-            const text = el.textContent.replace(/[^0-9.,\-]/g, "");
-            const value = parseFloat(text.replace(/,/g, ""));
-            if (!isNaN(value)) {
-              result.netWorth = value;
-              break;
+      const loginResult = await loginFlow(page, {
+        url: "https://participant.empower-retirement.com/participant/#/login?accu=MYERIRA",
+        email: empEmail,
+        password: empPassword,
+        screenshotsDir,
+        timeoutMs: 600000,
+        submitButton: { labels: ["Log In", "Sign In", "Continue", "Next"] },
+      });
+
+      // Check if we actually made it past login
+      const finalLoginState = loginResult.state || await evaluatePage(page, "post-login", screenshotsDir);
+      if (!finalLoginState.hasDollarAmounts && (finalLoginState.isLogin || finalLoginState.is2FA)) {
+        await context.close();
+        return {
+          success: false,
+          needsLogin: !(empEmail && empPassword),
+          needs2FA: finalLoginState.is2FA,
+          message: `Could not complete login. Screenshot saved for review.`,
+          screenshot: finalLoginState.screenshot,
+        };
+      }
+
+      // Dismiss any post-login popups
+      await clearAllPopups(page, screenshotsDir);
+
+      // ═══════════════════════════════════════════════════════════
+      // TRIANGULATION: 3 data sources captured simultaneously
+      //   1. XHR API interception — Empower's internal REST calls
+      //   2. DOM scraping — CSS selectors + brute-force dollar scan
+      //   3. Full page text — for AI-assisted parsing as fallback
+      // ═══════════════════════════════════════════════════════════
+
+      // Source 1: XHR API interception — capture Empower's internal API responses
+      const apiData = { accounts: [], holdings: [], netWorth: null, categories: {} };
+      const capturedResponses = [];
+
+      page.on("response", async (response) => {
+        try {
+          const url = response.url();
+          const status = response.status();
+          if (status < 200 || status >= 300) return;
+          const ct = response.headers()["content-type"] || "";
+          if (!ct.includes("json")) return;
+
+          // Capture any API calls that look like account/holding/net worth data
+          const isRelevant = url.includes("/api/") || url.includes("/rest/") ||
+            url.includes("account") || url.includes("holding") || url.includes("position") ||
+            url.includes("balance") || url.includes("networth") || url.includes("net-worth") ||
+            url.includes("portfolio") || url.includes("investment") || url.includes("wealth") ||
+            url.includes("participant") || url.includes("aggregation");
+
+          if (isRelevant) {
+            const body = await response.json().catch(() => null);
+            if (body) {
+              capturedResponses.push({ url: url.slice(0, 200), body });
+              console.log(`${TAG} [XHR] Captured: ${url.slice(0, 120)} (${JSON.stringify(body).length} bytes)`);
             }
           }
-        }
+        } catch { /* ignore non-JSON or closed pages */ }
+      });
 
-        // If no specific selector found, try to find any large dollar amount on the page
-        if (!result.netWorth) {
-          const allElements = document.querySelectorAll("h1, h2, h3, [class*='value'], [class*='amount'], [class*='balance'], [class*='total']");
-          for (const el of allElements) {
-            const text = el.textContent?.trim() || "";
-            const match = text.match(/\$[\d,]+\.?\d*/);
-            if (match) {
-              const value = parseFloat(match[0].replace(/[$,]/g, ""));
-              if (value > 1000 && !result.netWorth) {
-                result.netWorth = value;
+      // ── Patient wait: let the app load fully before doing anything ──
+      // Empower's SPA is slow — wait for dollar amounts to appear on screen
+      console.log(`${TAG} Waiting patiently for dashboard data to render...`);
+
+      const waitForDollarAmount = async (pg, maxWaitMs = 60000) => {
+        const startMs = Date.now();
+        while (Date.now() - startMs < maxWaitMs) {
+          const hasMoney = await pg.evaluate(() => {
+            const text = document.body?.innerText || "";
+            return /\$[\d,]{2,}/.test(text);
+          }).catch(() => false);
+          if (hasMoney) {
+            console.log(`${TAG} Dollar amounts visible after ${Math.round((Date.now() - startMs) / 1000)}s`);
+            return true;
+          }
+          await pg.waitForTimeout(2000);
+        }
+        console.log(`${TAG} Timed out waiting for dollar amounts (${Math.round(maxWaitMs / 1000)}s)`);
+        return false;
+      };
+
+      // Wait for initial page to show data (up to 60s — Empower is slow)
+      await waitForDollarAmount(page, 60000);
+      await page.waitForTimeout(5000);
+
+      // ── DOM scraper function (passed to visitPages) ──
+      const scrapeDOMOnPage = async (pg) => {
+        return await pg.evaluate(() => {
+          const result = { accounts: [], netWorth: null, holdings: [], pageTitle: document.title, url: window.location.href };
+
+          // Net worth: specific selectors then brute-force biggest $
+          const nwSels = ['[data-testid="net-worth-value"]', '.net-worth-value', '.netWorthValue', '.js-net-worth', '.net-worth__value', 'h1[class*="networth"]', 'span[class*="networth"]', '[class*="NetWorth"] [class*="value"]', '[class*="net-worth"] [class*="amount"]'];
+          for (const sel of nwSels) {
+            const el = document.querySelector(sel);
+            if (el?.textContent) {
+              const v = parseFloat(el.textContent.replace(/[^0-9.,\-]/g, "").replace(/,/g, ""));
+              if (!isNaN(v) && v > 100) { result.netWorth = v; break; }
+            }
+          }
+          if (!result.netWorth) {
+            let maxVal = 0;
+            for (const el of document.querySelectorAll("h1, h2, h3, [class*='value'], [class*='amount'], [class*='balance'], [class*='total'], span, div")) {
+              const match = el.textContent?.trim().match(/\$[\d,]+\.?\d*/);
+              if (match) { const v = parseFloat(match[0].replace(/[$,]/g, "")); if (v > maxVal) { maxVal = v; result.netWorth = v; } }
+            }
+          }
+
+          // Accounts: multiple selector patterns
+          const accSels = ['[class*="account-row"]', '[class*="AccountRow"]', 'tr[class*="account"]', '[data-testid*="account"]', '[class*="account-item"]', '[class*="account-card"]', 'li[class*="account"]', '[role="listitem"]', 'div[class*="card"]', 'div[class*="tile"]', 'article'];
+          const seenNames = new Set();
+          for (const sel of accSels) {
+            for (const row of document.querySelectorAll(sel)) {
+              const text = row.textContent?.trim() || "";
+              const dollars = [...text.matchAll(/\$[\d,]+\.?\d*/g)];
+              if (!dollars.length) continue;
+              let maxBal = 0;
+              for (const m of dollars) { const v = parseFloat(m[0].replace(/[$,]/g, "")); if (v > maxBal) maxBal = v; }
+              const name = text.split("$")[0].trim().replace(/[\n\r\t]+/g, " ").slice(0, 80);
+              if (name.length > 2 && maxBal > 0 && !seenNames.has(name)) { seenNames.add(name); result.accounts.push({ name, balance: maxBal }); }
+            }
+          }
+
+          // Holdings: table rows
+          for (const row of document.querySelectorAll("table tbody tr, [role='row']")) {
+            const cells = row.querySelectorAll("td, [role='cell']");
+            if (cells.length < 2) continue;
+            const rawName = cells[0]?.textContent?.trim() || "";
+            if (!rawName || rawName.length < 2 || rawName.toLowerCase().includes("total")) continue;
+            let symbol = "", name = rawName;
+            const tm = rawName.match(/^([A-Z]{1,5}(?:\.[A-Z]+)?)\s*(.*)/);
+            if (tm) { symbol = tm[1]; name = tm[2] || symbol; }
+            const nums = [];
+            for (let i = 1; i < cells.length; i++) { const v = parseFloat(cells[i]?.textContent?.replace(/[$,%]/g, "").replace(/,/g, "").trim()); if (!isNaN(v)) nums.push(v); }
+            if (symbol || name) result.holdings.push({ symbol, name, shares: nums[0] || null, price: nums[1] || null, value: nums[2] || nums[nums.length - 1] || null });
+          }
+          return result;
+        }).catch(() => ({ accounts: [], netWorth: null, holdings: [] }));
+      };
+
+      // ═════════════════════════════════════════════════════════
+      // Visit 3 pages: dashboard home, net worth, holdings
+      // On each: wait for data → clear popups → scroll down 5x
+      //          taking screenshot at each position → scrape DOM
+      // ═════════════════════════════════════════════════════════
+
+      const { pageResults } = await visitPages(page, [
+        { name: "empower-home", url: "https://participant.empower-retirement.com/dashboard/#/user/home", desc: "Dashboard home (accounts list)" },
+        { name: "empower-networth", url: "https://participant.empower-retirement.com/dashboard/#/net-worth", desc: "Net worth (categories)" },
+        { name: "empower-holdings", url: "https://participant.empower-retirement.com/dashboard/#/portfolio/holdings", desc: "Holdings (positions)" },
+      ], {
+        screenshotsDir,
+        scrollCount: 5,
+        waitForDataMs: 45000,
+        scrapeFn: scrapeDOMOnPage,
+      });
+
+      // ── Merge DOM scrapes from all 3 pages ──
+      const extractedData = { accounts: [], netWorth: null, holdings: [], bodyText: "" };
+
+      for (const pr of pageResults) {
+        const scrape = pr.scrapeData;
+        if (!scrape) continue;
+        if (scrape.netWorth && !extractedData.netWorth) extractedData.netWorth = scrape.netWorth;
+
+        // Accounts: merge unique by name
+        for (const acc of (scrape.accounts || [])) {
+          const key = acc.name.toLowerCase().slice(0, 30);
+          if (!extractedData.accounts.some(a => a.name.toLowerCase().slice(0, 30) === key)) {
+            extractedData.accounts.push(acc);
+          }
+        }
+        // Holdings: merge unique by symbol+name
+        for (const h of (scrape.holdings || [])) {
+          const key = (h.symbol || h.name).toLowerCase();
+          if (!extractedData.holdings.some(x => (x.symbol || x.name).toLowerCase() === key)) {
+            extractedData.holdings.push(h);
+          }
+        }
+      }
+
+      // Body text: all page texts combined
+      extractedData.bodyText = pageResults.map(pr => pr.text).join("\n\n---PAGE BREAK---\n\n").slice(0, 50000);
+
+      console.log(`${TAG} Merged DOM results: netWorth=${extractedData.netWorth}, accounts=${extractedData.accounts.length}, holdings=${extractedData.holdings.length}`);
+
+      console.log(`${TAG} DOM scrape: netWorth=${extractedData.netWorth}, accounts=${extractedData.accounts.length}, holdings=${extractedData.holdings.length}`);
+
+      // ── Parse XHR API responses ──
+      console.log(`${TAG} Processing ${capturedResponses.length} captured API responses...`);
+      for (const { url, body } of capturedResponses) {
+        try {
+          // Look for account arrays in response
+          const accountArrays = findArraysWithKey(body, ["accountName", "name", "firmName", "accountType", "balance", "currentBalance"]);
+          for (const arr of accountArrays) {
+            for (const item of arr) {
+              const name = item.accountName || item.name || item.firmName || item.description || "";
+              const balance = item.balance || item.currentBalance || item.value || item.totalBalance || 0;
+              const type = item.accountType || item.productType || item.type || "";
+              if (name && typeof balance === "number") {
+                apiData.accounts.push({ name, balance, type, institution: item.firmName || "Empower", source: "api" });
               }
             }
           }
-        }
 
-        // Try to extract account list
-        const accountRows = document.querySelectorAll('[class*="account-row"], [class*="AccountRow"], tr[class*="account"], [data-testid*="account"]');
-        for (const row of accountRows) {
-          const nameEl = row.querySelector('[class*="name"], [class*="title"], td:first-child');
-          const balanceEl = row.querySelector('[class*="balance"], [class*="value"], [class*="amount"], td:last-child');
-          if (nameEl && balanceEl) {
-            const balanceText = balanceEl.textContent?.replace(/[^0-9.,\-]/g, "");
-            const balance = parseFloat(balanceText?.replace(/,/g, ""));
-            result.accounts.push({
-              name: nameEl.textContent?.trim(),
-              balance: isNaN(balance) ? 0 : balance,
-            });
+          // Look for holdings/positions arrays
+          const holdingArrays = findArraysWithKey(body, ["ticker", "symbol", "cusip", "securityName", "holdingName", "quantity", "shares"]);
+          for (const arr of holdingArrays) {
+            for (const item of arr) {
+              const symbol = item.ticker || item.symbol || "";
+              const name = item.description || item.securityName || item.holdingName || item.name || "";
+              const shares = item.quantity || item.shares || item.units || 0;
+              const value = item.value || item.marketValue || item.currentValue || 0;
+              const price = item.price || item.currentPrice || item.lastPrice || (shares > 0 ? value / shares : 0);
+              const costBasis = item.costBasis || item.totalCostBasis || null;
+              if (symbol || name) {
+                apiData.holdings.push({ symbol, name, shares, price, value, costBasis, source: "api" });
+              }
+            }
           }
+
+          // Look for net worth value
+          if (body.netWorth != null) apiData.netWorth = body.netWorth;
+          if (body.totalNetWorth != null) apiData.netWorth = body.totalNetWorth;
+          if (body.data?.netWorth != null) apiData.netWorth = body.data.netWorth;
+          if (body.totalValue != null && !apiData.netWorth) apiData.netWorth = body.totalValue;
+
+          // Look for category breakdowns (investments, cash, credit, etc.)
+          const catKeys = ["investments", "cash", "creditCards", "loans", "otherAssets", "otherLiabilities", "retirement"];
+          for (const key of catKeys) {
+            if (body[key] != null && typeof body[key] === "number") apiData.categories[key] = body[key];
+            if (body.data?.[key] != null && typeof body.data[key] === "number") apiData.categories[key] = body.data[key];
+          }
+        } catch (e) {
+          console.log(`${TAG} [XHR] Parse error for ${url.slice(0, 60)}: ${e.message}`);
         }
-
-        // Get page title and body text for AI parsing fallback
-        result.pageTitle = document.title;
-        result.bodyText = document.body?.innerText?.slice(0, 5000) || "";
-
-        return result;
-      });
-
-      console.log(`${TAG} Extracted: netWorth=${extractedData.netWorth}, accounts=${extractedData.accounts.length}`);
-
-      // If we got net worth or accounts, update our data
-      if (extractedData.netWorth || extractedData.accounts.length > 0) {
-        if (extractedData.netWorth) {
-          this.data.netWorth = {
-            total: extractedData.netWorth,
-            date: new Date().toISOString(),
-            source: "browser_scrape",
-          };
-        }
-        if (extractedData.accounts.length > 0) {
-          this.data.accounts = extractedData.accounts.map((acc, i) => ({
-            id: `empower_${i}`,
-            name: acc.name,
-            balance: acc.balance,
-            institution: "Empower",
-            lastUpdated: new Date().toISOString(),
-          }));
-        }
-        this.data.lastUpdated = new Date().toISOString();
-        this.data.authenticated = true;
-        this.authenticated = true;
-        this.save();
-        this.emit("data-updated", this.data);
       }
 
-      // If extraction was thin, save the page text for AI parsing
-      if (!extractedData.netWorth && extractedData.accounts.length === 0 && extractedData.bodyText) {
-        const textPath = path.join(DATA_DIR, "empower-page-text.txt");
-        fs.writeFileSync(textPath, extractedData.bodyText);
-        console.log(`${TAG} Page text saved for AI parsing: ${textPath}`);
+      console.log(`${TAG} API interception: netWorth=${apiData.netWorth}, accounts=${apiData.accounts.length}, holdings=${apiData.holdings.length}, categories=${Object.keys(apiData.categories).length}`);
+
+      // ── Triangulate: merge all 3 sources, preferring API > DOM > text ──
+      const finalNetWorth = apiData.netWorth || extractedData.netWorth;
+      const finalAccounts = apiData.accounts.length > 0 ? apiData.accounts : extractedData.accounts;
+      const finalHoldings = apiData.holdings.length > 0 ? apiData.holdings : extractedData.holdings;
+      const finalCategories = apiData.categories;
+
+      // If DOM found accounts that API missed, merge them in
+      if (apiData.accounts.length > 0 && extractedData.accounts.length > 0) {
+        const apiNames = new Set(apiData.accounts.map(a => a.name.toLowerCase().slice(0, 20)));
+        for (const domAcc of extractedData.accounts) {
+          const key = domAcc.name.toLowerCase().slice(0, 20);
+          if (!apiNames.has(key)) {
+            finalAccounts.push({ ...domAcc, source: "dom" });
+          }
+        }
+      }
+
+      // ── Parse page text for any accounts/categories the other methods missed ──
+      const textAccounts = parseAccountsFromText(extractedData.bodyText);
+      if (finalAccounts.length === 0 && textAccounts.length > 0) {
+        console.log(`${TAG} Text parsing found ${textAccounts.length} accounts as fallback`);
+        finalAccounts.push(...textAccounts);
+      }
+
+      // Update our data store
+      if (finalNetWorth) {
+        this.data.netWorth = {
+          total: finalNetWorth,
+          categories: finalCategories,
+          date: new Date().toISOString(),
+          source: apiData.netWorth ? "api+browser" : "browser_scrape",
+        };
+      }
+      if (finalAccounts.length > 0) {
+        this.data.accounts = finalAccounts.map((acc, i) => ({
+          id: `empower_${i}`,
+          name: acc.name,
+          type: acc.type || "",
+          balance: acc.balance,
+          institution: acc.institution || "Empower",
+          source: acc.source || "triangulated",
+          lastUpdated: new Date().toISOString(),
+        }));
+      }
+      if (finalHoldings.length > 0) {
+        this.data.holdings = finalHoldings.map(h => ({
+          ticker: h.symbol || "",
+          name: h.name || "",
+          quantity: h.shares || 0,
+          value: h.value || 0,
+          price: h.price || 0,
+          costBasis: h.costBasis || null,
+          source: h.source || "triangulated",
+        }));
+      }
+      this.data.lastUpdated = new Date().toISOString();
+      this.data.authenticated = true;
+      this.authenticated = true;
+      this.save();
+      this.emit("data-updated", this.data);
+
+      // Always save page text for debugging (even on success)
+      const textPath = path.join(DATA_DIR, "empower-page-text.txt");
+      fs.writeFileSync(textPath, extractedData.bodyText || "");
+
+      // Save raw API responses for debugging
+      if (capturedResponses.length > 0) {
+        const apiPath = path.join(DATA_DIR, "empower-api-captures.json");
+        fs.writeFileSync(apiPath, JSON.stringify(capturedResponses.map(r => ({
+          url: r.url,
+          bodyPreview: JSON.stringify(r.body).slice(0, 2000),
+        })), null, 2));
       }
 
       await context.close();
 
+      const msg = [
+        finalNetWorth ? `Net worth: $${finalNetWorth.toLocaleString()}` : null,
+        `${finalAccounts.length} accounts`,
+        `${finalHoldings.length} holdings`,
+        Object.keys(finalCategories).length > 0 ? `Categories: ${Object.keys(finalCategories).join(", ")}` : null,
+        `Sources: API(${capturedResponses.length} calls), DOM, text`,
+      ].filter(Boolean).join(", ");
+
       return {
-        success: extractedData.netWorth !== null || extractedData.accounts.length > 0,
-        netWorth: extractedData.netWorth,
-        accounts: extractedData.accounts,
+        success: finalNetWorth !== null || finalAccounts.length > 0 || finalHoldings.length > 0,
+        netWorth: finalNetWorth,
+        accounts: finalAccounts,
+        holdings: finalHoldings,
+        categories: finalCategories,
         screenshot: screenshotPath,
-        pageText: extractedData.bodyText?.slice(0, 1000),
-        message: extractedData.netWorth
-          ? `Net worth: $${extractedData.netWorth.toLocaleString()}, ${extractedData.accounts.length} accounts found`
-          : "Dashboard loaded but couldn't extract net worth — screenshot saved for review",
+        dataSources: {
+          api: { responses: capturedResponses.length, accounts: apiData.accounts.length, holdings: apiData.holdings.length },
+          dom: { accounts: extractedData.accounts.length, holdings: extractedData.holdings.length },
+          text: { accounts: textAccounts.length },
+        },
+        message: msg,
       };
     } catch (err) {
       console.error(`${TAG} Scrape failed:`, err.message);
@@ -853,6 +923,55 @@ export class PersonalCapitalService extends EventEmitter {
 
 // Singleton instance
 let serviceInstance = null;
+
+// ── Helper: recursively find arrays containing objects with target keys ──
+function findArraysWithKey(obj, targetKeys, depth = 0) {
+  const results = [];
+  if (depth > 8 || !obj || typeof obj !== "object") return results;
+
+  if (Array.isArray(obj)) {
+    // Check if array items have any target key
+    const hasTarget = obj.some(item =>
+      item && typeof item === "object" && targetKeys.some(k => k in item)
+    );
+    if (hasTarget) results.push(obj);
+  }
+
+  // Recurse into object properties
+  for (const val of Object.values(obj)) {
+    if (val && typeof val === "object") {
+      results.push(...findArraysWithKey(val, targetKeys, depth + 1));
+    }
+  }
+  return results;
+}
+
+// ── Helper: parse accounts from raw page text ──
+function parseAccountsFromText(text) {
+  if (!text) return [];
+  const accounts = [];
+  const lines = text.split("\n").map(l => l.trim()).filter(Boolean);
+
+  // Look for patterns like: "Account Name ... $12,345.67"
+  // or "Checking ... $1,234.56"
+  const accountPatterns = [
+    /^(.{3,60}?)\s+\$?([\d,]+\.?\d*)\s*$/,
+    /^(.+?)\s+\$\s*([\d,]+\.?\d*)/,
+  ];
+
+  // Also look for category totals like "Total Investments $50,000"
+  const categoryPattern = /(?:total\s+)?(\w[\w\s]{2,30}?)\s*[:.]?\s*\$\s*([\d,]+\.?\d{0,2})/gi;
+  let match;
+  while ((match = categoryPattern.exec(text)) !== null) {
+    const name = match[1].trim();
+    const balance = parseFloat(match[2].replace(/,/g, ""));
+    if (balance > 0 && name.length > 2 && !name.toLowerCase().includes("net worth")) {
+      accounts.push({ name, balance, source: "text" });
+    }
+  }
+
+  return accounts;
+}
 
 export const getPersonalCapitalService = () => {
   if (!serviceInstance) {

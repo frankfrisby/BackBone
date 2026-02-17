@@ -7,6 +7,7 @@ import { developPlan, initPlanFields, getUnplannedGoals } from "../goals/goal-pl
 import { getSkillGapDetector } from "../projects/skill-gap-detector.js";
 import { ensureGoalsParsed, loadParsedGoals } from "../goals/core-goals-parser.js";
 import { calculateCombinedScore } from "../goals/goal-alignment-scorer.js";
+import { getAgentCatalog } from "./agent-dispatcher.js";
 
 import { getDataDir, getMemoryDir, getProjectsDir } from "../paths.js";
 /**
@@ -845,6 +846,15 @@ function buildThinkingPrompt(context) {
     .map(([k, v]) => `- **${domainLabels[k] || k}**: ${v}/10${v <= 3 ? " ⚠ GAP" : ""}`)
     .join("\n");
 
+  // Build agent catalog for goal routing
+  let agentCatalogText = "";
+  try {
+    const catalog = getAgentCatalog();
+    if (catalog.length > 0) {
+      agentCatalogText = `\n## AVAILABLE AGENTS\n\nWhen creating goals, include \`agentId\` to route the goal to a specialized agent. Match the goal's domain to the best agent:\n\n${catalog.map(a => `- **${a.id}** — categories: [${a.categories.join(", ")}], keywords: ${a.keywords.slice(0, 6).join(", ")}`).join("\n")}\n\nIf no agent fits, omit \`agentId\` and the engine will handle it generically.\n`;
+    }
+  } catch {}
+
   return `You are the Thinking Engine for BACKBONE, a life optimization system.
 
 ## THE PIPELINE
@@ -854,6 +864,7 @@ function buildThinkingPrompt(context) {
 3. **Goals** → When backlog items are impactful enough, they become goals
 4. **Projects** → Goals connect to existing projects OR create new ones
 5. **Tasks** → Discrete work executed via Claude Code
+${agentCatalogText}
 
 ## KNOWLEDGE PROFILE — ${kp.percentage}%
 
@@ -997,7 +1008,8 @@ Respond in JSON:
     "description": "...",
     "tasks": ["..."],
     "dueDate": "...",
-    "fromBacklogItem": "backlog_item_id or null"
+    "fromBacklogItem": "backlog_item_id or null",
+    "agentId": "agent-id or null"
   }],
   "projectActions": [{ "action": "reopen|create", "name": "...", "description": "...", "relatedBeliefs": ["..."] }],
   "insight": "..."
@@ -1292,7 +1304,8 @@ ${result.insight || "No specific insight this cycle."}
             progress: 0,
             createdAt: new Date().toISOString(),
             createdBy: "thinking-engine",
-            fromBacklogItem: goal.fromBacklogItem || null
+            fromBacklogItem: goal.fromBacklogItem || null,
+            agentId: goal.agentId || null
           });
 
           goalsData.goals.push(newGoal);

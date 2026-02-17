@@ -152,8 +152,8 @@ export class ClaudeOrchestrator extends EventEmitter {
 
     this.emit("started", { goal });
 
-    // Build the prompt for Claude Code
-    const prompt = this.buildClaudePrompt(goal);
+    // Build the prompt for Claude Code — include user context and agent identity
+    const prompt = this.buildClaudePrompt(goal, options.userContext, options.agentIdentity);
 
     try {
       const useAgentSdk = await this._shouldUseAgentSdk();
@@ -247,7 +247,7 @@ SECURITY RULES:
    * Build the initial prompt for Claude Code
    * Includes full goal context: criteria, tasks, and data sources
    */
-  buildClaudePrompt(goal) {
+  buildClaudePrompt(goal, userContext = {}, agentIdentity = null) {
     const title = goal.title || goal;
     const description = goal.description || "";
     const context = goal.context || "";
@@ -269,10 +269,21 @@ SECURITY RULES:
     const dataSources = goal.dataSources || goal.data_sources || [];
     const dataSourcesSection = this.buildDataSourcesSection(dataSources);
 
-    return `You are working on this goal: "${title}"
+    // Build user context section from context providers
+    const userContextSection = this.buildUserContextSection(userContext);
+
+    // Agent identity injection — specialized domain context
+    const agentSection = agentIdentity
+      ? `## AGENT IDENTITY\n${agentIdentity}\n\n---\n\n`
+      : "";
+
+    return `${agentSection}You are BACKBONE's autonomous engine, working on a goal for the user.
+
+GOAL: "${title}"
 
 ${description ? `DESCRIPTION:\n${description}\n` : ""}
 ${context ? `CONTEXT:\n${context}\n` : ""}
+${userContextSection}
 ${criteriaSection}
 ${tasksSection}
 ${dataSourcesSection}
@@ -286,12 +297,61 @@ IMPORTANT INSTRUCTIONS:
 5. VERIFY each completion criterion is met before declaring the goal complete
 6. Report progress clearly - state which task you're working on
 7. If you need clarification, ask specific questions
-8. When the goal is complete, clearly state "GOAL COMPLETE" with a summary of:
+8. Use the USER CONTEXT below to make informed decisions — the user's beliefs, health, portfolio, and conversations give you the full picture
+9. When the goal is complete, clearly state "GOAL COMPLETE" with a summary of:
    - Which criteria were met
    - Which tasks were completed
    - Any files created or modified
 
 Begin working on this goal now.`;
+  }
+
+  /**
+   * Build user context section from context providers.
+   * Gives Claude real knowledge about the user so it can work intelligently.
+   */
+  buildUserContextSection(ctx) {
+    if (!ctx || Object.keys(ctx).length === 0) return "";
+
+    const sections = [];
+
+    // Core beliefs
+    if (ctx.beliefs && Array.isArray(ctx.beliefs) && ctx.beliefs.length > 0) {
+      const beliefList = ctx.beliefs.map(b => `- ${b.name || b}: ${b.description || ""}`).join("\n");
+      sections.push(`CORE BELIEFS (what the user cares about most):\n${beliefList}`);
+    }
+
+    // Current thesis/focus
+    if (ctx.thesis && typeof ctx.thesis === "string" && ctx.thesis.length > 20) {
+      sections.push(`CURRENT FOCUS:\n${ctx.thesis.slice(0, 800)}`);
+    }
+
+    // Active goals (so Claude knows what else is in flight)
+    if (ctx.goals && Array.isArray(ctx.goals) && ctx.goals.length > 0) {
+      const goalList = ctx.goals.slice(0, 5).map(g =>
+        `- [${g.status || "active"}] ${g.title}${g.category ? ` (${g.category})` : ""}`
+      ).join("\n");
+      sections.push(`OTHER ACTIVE GOALS:\n${goalList}`);
+    }
+
+    // Portfolio snapshot
+    if (ctx.portfolio && typeof ctx.portfolio === "string" && ctx.portfolio.length > 20) {
+      sections.push(`PORTFOLIO SNAPSHOT:\n${ctx.portfolio.slice(0, 600)}`);
+    }
+
+    // Health snapshot
+    if (ctx.health && typeof ctx.health === "string" && ctx.health.length > 20) {
+      sections.push(`HEALTH SNAPSHOT:\n${ctx.health.slice(0, 400)}`);
+    }
+
+    // Conversation memory (what user has been talking about)
+    if (ctx.conversations && typeof ctx.conversations === "string" && ctx.conversations.length > 20) {
+      sections.push(`RECENT CONVERSATIONS (what the user has been discussing):\n${ctx.conversations.slice(0, 1500)}`);
+    }
+
+    if (sections.length === 0) return "";
+
+    return `USER CONTEXT (use this to make informed decisions):\n${"─".repeat(50)}\n${sections.join("\n\n")}\n${"─".repeat(50)}\n`;
   }
 
   /**
@@ -376,7 +436,7 @@ ${sourcesList}
       this.state = ORCHESTRATION_STATE.RUNNING;
 
       // Build Claude Code args — use stdin for prompt (not -p) to get real-time streaming
-      // Use Opus 4.5 by default, falls back to Sonnet if rate limited
+      // Use Opus 4.6 by default, falls back to Sonnet if rate limited
       const modelToUse = options.model || getCurrentModelInUse();
       const args = [
         "--model", modelToUse,

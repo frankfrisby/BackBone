@@ -3,6 +3,8 @@
   "type": "engine",
   "schedule": "cron",
   "cron": "0 8 * * *",
+  "goalCategories": ["career"],
+  "keywords": ["linkedin", "network", "connect", "professional", "outreach", "referral", "recruiter", "job"],
   "permissions": {
     "skills": ["web-scraping", "social-media"],
     "mcp": ["backbone-linkedin", "backbone-contacts"],

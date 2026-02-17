@@ -3,7 +3,7 @@ import { Box, Text } from "ink";
 import { getActivityNarrator, AGENT_STATES, ACTION_COLORS, STATE_COLORS } from "../services/ui/activity-narrator.js";
 import { getAutonomousEngine } from "../services/engine/autonomous-engine.js";
 import { useCoordinatedUpdates } from "../hooks/useCoordinatedUpdates.js";
-import { getAIStatus, getMultiAIConfig, getCurrentModel } from "../services/ai/multi-ai.js";
+import { getAIStatus, getMultiAIConfig } from "../services/ai/multi-ai.js";
 import { BILLING_URLS } from "../services/api-quota-monitor.js";
 import { isClaudeCodeLoggedIn, getCurrentModelInUse } from "../services/ai/claude-code-cli.js";
 import { getGoalManager } from "../services/goals/goal-manager.js";
@@ -324,7 +324,7 @@ const formatLastRanTimestamp = (isoOrMs) => {
 /**
  * Idle state display with last run timestamp
  */
-const IdleState = memo(({ waitingReasons = [], backgroundProjects = [] }) => {
+const IdleState = memo(({ waitingReasons = [], backgroundProjects = [], restStatus = null }) => {
   const bgProjectNames = {
     [BACKGROUND_PROJECT_TYPE.MARKET_RESEARCH]: "Market Research",
     [BACKGROUND_PROJECT_TYPE.FINANCIAL_GROWTH]: "Financial Growth",
@@ -343,10 +343,13 @@ const IdleState = memo(({ waitingReasons = [], backgroundProjects = [] }) => {
     e(
       Box,
       { flexDirection: "row" },
-      e(Text, { color: THEME.gray }, "○ "),
-      e(Text, { color: THEME.muted }, "Idle"),
-      // Last ran timestamp
-      lastRanLabel && e(Text, { color: THEME.dim }, ` · Last ran ${lastRanLabel}`)
+      e(Text, { color: THEME.gray }, restStatus ? "◌ " : "○ "),
+      e(Text, { color: restStatus ? THEME.warning || "#f59e0b" : THEME.muted }, restStatus ? "Resting" : "Idle"),
+      // Rest reason + countdown
+      restStatus && e(Text, { color: THEME.dim }, ` ${restStatus.remainingMin}m`),
+      restStatus?.reason && e(Text, { color: THEME.dim }, ` · ${restStatus.reason}`),
+      // Last ran timestamp (only when not resting)
+      !restStatus && lastRanLabel && e(Text, { color: THEME.dim }, ` · Last ran ${lastRanLabel}`)
     ),
     // Waiting reasons
     waitingReasons.length > 0 && e(
@@ -459,7 +462,7 @@ const ModelStatusBanner = memo(({ hasModel, tokensExceeded, provider }) => {
  * Claude Code CLI Output Stream
  * Shows real-time output from Claude Code CLI with proper formatting
  */
-const CLIOutputStream = memo(({ text, isStreaming, scrollOffset = 0, goal = "", state = "" }) => {
+const CLIOutputStream = memo(({ text, isStreaming, scrollOffset = 0, goal = "", state = "", activeTitle = "", currentModelInfo = null }) => {
   if (!text && !isStreaming) return null;
 
   // Track last activity time for flashlight timeout
@@ -484,11 +487,19 @@ const CLIOutputStream = memo(({ text, isStreaming, scrollOffset = 0, goal = "", 
     return () => clearInterval(checkInterval);
   }, [lastActivityTime]);
 
-  // Get current model - Opus 4.5 or Sonnet (fallback)
-  const currentModel = getCurrentModelInUse();
-  const isOpus = currentModel.includes("opus");
-  const modelDisplayName = isOpus ? "Opus 4.5" : "Sonnet 4";
-  const modelColor = isOpus ? "#d97706" : THEME.purple; // Amber for Opus, purple for Sonnet
+  // Show active Codex label when Codex is currently running.
+  const codexTitle = typeof activeTitle === "string" && /codex/i.test(activeTitle) ? activeTitle.trim() : "";
+  const modelDisplayName = codexTitle
+    || currentModelInfo?.displayName
+    || (() => {
+      const currentModel = getCurrentModelInUse();
+      return currentModel.includes("opus") ? "Opus 4.6" : "Sonnet 4";
+    })();
+  const modelColor = /codex/i.test(modelDisplayName)
+    ? "#10a37f"
+    : modelDisplayName.includes("Opus 4.6")
+      ? "#d97706"
+      : THEME.purple;
 
   // Running status color - orange-red (#ea580c)
   const runningColor = "#ea580c";
@@ -660,7 +671,7 @@ const CLIOutputStream = memo(({ text, isStreaming, scrollOffset = 0, goal = "", 
         ? e(FlashlightText, { text: "Running", baseColor: runningColor, bold: true, spotlightWidth: 4 })
         : e(Text, { color: statusColor, bold: true }, isStreaming ? "Running" : "Completed"),
       e(Text, { color: THEME.dim }, " · "),
-      e(Text, { color: modelColor, bold: isOpus }, modelDisplayName),
+      e(Text, { color: modelColor, bold: !/codex/i.test(modelDisplayName) }, modelDisplayName),
       // Show scroll position: lines X-Y of Z (scroll up for more)
       totalLines > visibleCount && e(
         Text,
@@ -690,7 +701,9 @@ const AgentActivityPanelBase = ({
   scrollOffset = 0,
   privateMode = false,
   actionStreamingText = "",
-  cliStreaming = false
+  actionStreamingTitle = "",
+  cliStreaming = false,
+  currentModelInfo = null
 }) => {
   const narrator = getActivityNarrator();
   const autonomousEngine = getAutonomousEngine();
@@ -778,11 +791,17 @@ const AgentActivityPanelBase = ({
   let modelName = "No Model";
   let modelColor = THEME.error;
 
-  if (claudeCodeStatus.loggedIn) {
-    // Show specific model being used (Opus 4.5 or Sonnet fallback)
+  if (cliStreaming && typeof actionStreamingTitle === "string" && /codex/i.test(actionStreamingTitle)) {
+    modelName = actionStreamingTitle.trim();
+    modelColor = "#10a37f";
+  } else if (currentModelInfo?.displayName && /codex/i.test(currentModelInfo.displayName)) {
+    modelName = currentModelInfo.displayName;
+    modelColor = "#10a37f";
+  } else if (claudeCodeStatus.loggedIn) {
+    // Show specific model being used (Opus 4.6 or Sonnet fallback)
     const currentModel = getCurrentModelInUse();
     const isOpus = currentModel.includes("opus");
-    modelName = isOpus ? "Opus 4.5" : "Sonnet 4";
+    modelName = isOpus ? "Opus 4.6" : "Sonnet 4";
     modelColor = isOpus ? "#d97706" : "#a855f7"; // Amber for Opus, Purple for Sonnet
   } else if (config.gptInstant?.ready || config.gptThinking?.ready) {
     modelName = "GPT-5.2";
@@ -834,7 +853,7 @@ const AgentActivityPanelBase = ({
     // If CLI is streaming, show its output
     (cliStreaming || actionStreamingText) ? e(
       CLIOutputStream,
-      { text: actionStreamingText, isStreaming: cliStreaming, scrollOffset, goal, state }
+      { text: actionStreamingText, isStreaming: cliStreaming, scrollOffset, goal, state, activeTitle: actionStreamingTitle, currentModelInfo }
     ) : e(
       Box,
       { flexDirection: "column" },
@@ -844,7 +863,7 @@ const AgentActivityPanelBase = ({
 
       // State display: Thinking (orange shimmer) or Idle
       isThinking && !modelStatus.isPaused && e(ThinkingState, { state: stateInfo?.text || state, goal, projectName }),
-      isIdle && e(IdleState, { waitingReasons, backgroundProjects }),
+      isIdle && e(IdleState, { waitingReasons, backgroundProjects, restStatus: engineData?.restStatus || null }),
 
       // Space before actions
       e(Text, { color: THEME.dim }, " "),

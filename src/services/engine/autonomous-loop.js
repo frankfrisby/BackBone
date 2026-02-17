@@ -1,10 +1,12 @@
 /**
- * Autonomous Loop
+ * @deprecated Use autonomous-engine.js instead. This file is superseded by
+ * the continuous autonomous engine which runs as a single persistent loop
+ * with work-rest cycles, handoff chaining, and rate-limit-aware rest.
+ *
+ * Autonomous Loop (LEGACY)
  *
  * The main continuous execution loop for the BACKBONE engine.
  * Thinks, researches, plans, acts, builds, tests, reflects, and repeats.
- *
- * This is the heart of the self-improving AI system.
  */
 
 import { spawn } from "child_process";

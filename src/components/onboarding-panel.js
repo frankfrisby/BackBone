@@ -59,6 +59,7 @@ import { loadUserSettings, updateSetting, updateSettings } from "../services/use
 import { openUrl } from "../services/open-url.js";
 import { requestPhoneCode, verifyPhoneCode, getPhoneRecord, getAnyVerifiedPhoneRecord, sendWhatsAppMessage, syncPhoneFromFirestore } from "../services/firebase/phone-auth.js";
 import { fetchTwilioConfig } from "../services/firebase/firebase-config.js";
+import { getTwilioWhatsApp } from "../services/messaging/twilio-whatsapp.js";
 import { getMobileService } from "../services/mobile.js";
 import { startOAuthFlow as startClaudeOAuth, hasValidCredentials as hasClaudeCredentials } from "../services/ai/claude-oauth.js";
 import { startOAuthFlow as startCodexOAuth, hasValidCredentials as hasCodexCredentials } from "../services/ai/codex-oauth.js";
@@ -73,6 +74,7 @@ import {
 import { startSetupWizard, stopSetupWizard, getSetupWizard } from "../services/setup/setup-wizard.js";
 import { scrapeLinkedInProfile } from "../services/integrations/linkedin-scraper.js";
 import { hasArchivedProfile, restoreProfile } from "../services/profile-manager.js";
+import { getBrokerageStatuses, connectBrokerage } from "../services/brokerages/brokerage-auth.js";
 
 const e = React.createElement;
 
@@ -172,6 +174,12 @@ const ONBOARDING_STEPS = [
     required: true,
     description: "Required for notifications and AI messaging"
   },
+  {
+    id: "communicationsWhatsapp",
+    label: "Communications (WhatsApp)",
+    required: false,
+    description: "WhatsApp channel for messaging and notifications"
+  },
   { id: "model", label: "AI Model", required: true, description: "Choose your AI assistant" },
   { id: "mobileApp", label: "Mobile App", required: false, description: "Install PWA for push notifications" },
   { id: "coreGoals", label: "Core Goals", required: true, description: "What matters to you (40+ words)" },
@@ -179,8 +187,7 @@ const ONBOARDING_STEPS = [
   { id: "alpaca", label: "Trading (Alpaca)", required: false, description: "Auto-trading" },
   { id: "oura", label: "Health (Oura)", required: false, description: "Health tracking" },
   { id: "email", label: "Email & Calendar", required: false, description: "Email access" },
-  { id: "personalCapital", label: "Personal Wealth", required: false, description: "Empower integration", disabled: true },
-  { id: "plaid", label: "Banking (Plaid)", required: false, description: "Banks, cards & investments" }
+  { id: "brokerages", label: "Brokerages", required: false, description: "Connect Empower, Robinhood, or Fidelity (optional)" }
 ];
 
 // Status colors
@@ -189,6 +196,14 @@ const STATUS_COLORS = {
   active: "#f97316",     // Orange
   complete: "#22c55e",   // Green
   error: "#ef4444"       // Red
+};
+
+const isStepRequired = (step, statuses = {}) => {
+  if (!step || step.disabled) return false;
+  if (step.id === "communicationsWhatsapp") {
+    return statuses.phone === "complete";
+  }
+  return !!step.required;
 };
 
 // Brand color (orange)
@@ -305,7 +320,7 @@ const StepIndicator = ({ status, isActive }) => {
  * - Selected + Pending: Orange highlight
  * - Not selected: Normal colors
  */
-const StepItem = ({ step, status, isActive, isSelected }) => {
+const StepItem = ({ step, status, isActive, isSelected, isRequired = step.required }) => {
   const isComplete = status === "complete";
   const isError = status === "error";
   const isDisabled = step.disabled;
@@ -324,12 +339,12 @@ const StepItem = ({ step, status, isActive, isSelected }) => {
     // Selected AND complete: light green background
     labelColor = "#166534";  // Dark green text
     bgColor = "#86efac";     // Light green background
-    indicatorPrefix = "▶ ";
+    indicatorPrefix = "> ";
   } else if (isActive) {
     // Selected but not complete: orange highlight
     labelColor = "#ffffff";  // White text
     bgColor = "#f97316";     // Orange background
-    indicatorPrefix = "▶ ";
+    indicatorPrefix = "> ";
   } else if (isComplete) {
     // Complete but not selected: normal green
     labelColor = "#22c55e";
@@ -365,8 +380,8 @@ const StepItem = ({ step, status, isActive, isSelected }) => {
           ? e(Text, { color: labelColor, backgroundColor: bgColor, bold: true }, ` ${step.label} `)
           : e(Text, { color: labelColor, bold: (isActive || isComplete) && !isDisabled, dimColor: isDisabled }, step.label),
         isDisabled && e(Text, { color: "#475569", dimColor: true }, "(Coming Soon)"),
-        !step.required && !isComplete && !isDisabled && !isActive && e(Text, { color: "#475569", dimColor: true }, "(Optional)"),
-        isComplete && !isDisabled && !isActive && e(Text, { color: "#22c55e", dimColor: true }, "✓")
+        !isRequired && !isComplete && !isDisabled && !isActive && e(Text, { color: "#475569", dimColor: true }, "(Optional)"),
+        isComplete && !isDisabled && !isActive && e(Text, { color: "#22c55e", dimColor: true }, "OK")
       ),
       // Show description when selected
       isActive && !isDisabled && e(Text, { color: isComplete ? "#166534" : descColor }, step.description),
@@ -386,7 +401,7 @@ const PrerequisitesStep = ({ onComplete, onError }) => {
   const [checking, setChecking] = useState(true);
 
   useEffect(() => {
-    // Node.js — we're running, so it's always present
+    // Node.js - we're running, so it's always present
     const nodeVer = process.version;
     const nodeMajor = parseInt(nodeVer.slice(1), 10);
     setNodeStatus({
@@ -509,7 +524,7 @@ const PrerequisitesStepWrapper = ({ onComplete, onError }) => {
 
   useInput((input, key) => {
     if (key.return) {
-      // Re-check by re-rendering — trigger via error then re-mount
+      // Re-check by re-rendering - trigger via error then re-mount
       // Simplest: just call onComplete if prerequisites now met
       const cli = isClaudeCodeInstalled();
       let codex = { installed: false, version: null };
@@ -526,7 +541,7 @@ const PrerequisitesStepWrapper = ({ onComplete, onError }) => {
       }
     }
     if (input.toLowerCase() === "s") {
-      // Skip — Claude Code is optional (other AI models work too)
+      // Skip - Claude Code is optional (other AI models work too)
       wrapperRef.current.onComplete({ skipped: true });
     }
   });
@@ -696,10 +711,16 @@ const GoogleLoginStep = ({ onComplete, onError, onLogout, onProfileRestored }) =
 const PhoneVerificationStep = ({ onComplete, onError }) => {
   const user = getCurrentFirebaseUser();
   const userId = user?.id;
-  // Phases: waiting (need login), ready (can start), phoneEntry, codeEntry, success
+  const PROVIDERS = {
+    BAILEYS: "baileys",
+    TWILIO: "twilio"
+  };
+  // Phases: waiting (need login), ready (can start), phoneEntry, codeEntry, pairingEntry, success
   const [phase, setPhase] = useState(userId ? "checking" : "waiting");
+  const [provider, setProvider] = useState(PROVIDERS.BAILEYS);
   const [phoneEntry, setPhoneEntry] = useState("+1 ");
   const [codeInput, setCodeInput] = useState("");
+  const [pairingCode, setPairingCode] = useState("");
   const [status, setStatus] = useState(userId ? "ready" : "pending");
   const [attemptsRemaining, setAttemptsRemaining] = useState(3);
   const [existingPhone, setExistingPhone] = useState(null);
@@ -732,6 +753,12 @@ const PhoneVerificationStep = ({ onComplete, onError }) => {
     loadTwilioConfig();
   }, []);
 
+  const completeStep = useCallback((payload) => {
+    if (completedRef.current) return;
+    completedRef.current = true;
+    setTimeout(() => onComplete(payload), 600);
+  }, [onComplete]);
+
   useEffect(() => {
     if (!userId) {
       setPhase("waiting");
@@ -740,36 +767,66 @@ const PhoneVerificationStep = ({ onComplete, onError }) => {
       return;
     }
 
+    let cancelled = false;
+
     const updateFromRecord = (record) => {
       if (record?.verification?.verifiedAt || record?.verification?.status === "verified") {
-        setExistingPhone(record.phoneNumber);
+        const verifiedPhone = record.phoneNumber;
+        setExistingPhone(verifiedPhone);
+        setProvider(PROVIDERS.TWILIO);
         setPhase("ready");
         setStatus("verified");
-        setMessage(`Verified: ${record.phoneNumber}`);
-        if (!completedRef.current) {
-          completedRef.current = true;
-          setTimeout(() => onComplete({ existing: true, phone: record.phoneNumber }), 800);
-        }
+        setMessage(`Verified: ${verifiedPhone}`);
+        completeStep({ existing: true, phone: verifiedPhone, provider: PROVIDERS.TWILIO });
         return true;
       }
       return false;
     };
 
-    const record = getPhoneRecord(userId);
-    if (updateFromRecord(record)) {
-      return;
-    }
+    const initialize = async () => {
+      const record = getPhoneRecord(userId);
+      if (updateFromRecord(record)) return;
 
-    // If no local record, try Firestore (other machines / web)
-    syncPhoneFromFirestore(userId).then((synced) => {
+      // If no local record, try Firestore (other machines / web)
+      const synced = await syncPhoneFromFirestore(userId).catch(() => null);
       if (updateFromRecord(synced)) return;
-    });
 
-    // Not verified - ready to start
-    setPhase("ready");
-    setStatus("ready");
-    setMessage("Verify your phone for WhatsApp notifications.");
-  }, [userId, onComplete]);
+      // Also treat an already-linked Baileys session as connected.
+      try {
+        const wa = getTwilioWhatsApp();
+        if (!wa.initialized) {
+          await wa.initialize({ providerPreference: "baileys" });
+        }
+        const waStatus = wa.getStatus();
+        const linked = Boolean(waStatus?.providers?.baileys?.connected);
+        if (linked) {
+          const settings = loadUserSettings();
+          const linkedPhone = settings?.phoneNumber || settings?.phone || null;
+          setExistingPhone(linkedPhone || "Baileys linked");
+          setProvider(PROVIDERS.BAILEYS);
+          setPhase("ready");
+          setStatus("verified");
+          setMessage(linkedPhone ? `Baileys linked: ${linkedPhone}` : "Baileys linked.");
+          completeStep({ existing: true, phone: linkedPhone, provider: PROVIDERS.BAILEYS });
+          return;
+        }
+      } catch (err) {
+        // Keep onboarding usable even if status probe fails.
+      }
+
+      if (!cancelled) {
+        // Not verified - ready to start
+        setPhase("ready");
+        setStatus("ready");
+        setMessage("Choose a WhatsApp connection method.");
+      }
+    };
+
+    initialize();
+    return () => {
+      cancelled = true;
+    };
+  }, [userId, completeStep]);
 
   // Validate phone number format (+1 required)
   const validatePhone = (phone) => {
@@ -816,9 +873,36 @@ const PhoneVerificationStep = ({ onComplete, onError }) => {
       }
 
       setStatus("sending");
-      setMessage("Sending code to WhatsApp...");
+      setPairingCode("");
+      setMessage(
+        provider === PROVIDERS.BAILEYS
+          ? "Generating Baileys pairing code..."
+          : "Sending code to WhatsApp..."
+      );
 
       try {
+        if (provider === PROVIDERS.BAILEYS) {
+          const wa = getTwilioWhatsApp();
+          if (!wa.initialized) {
+            await wa.initialize({ providerPreference: "baileys" });
+          }
+          const pairing = await wa.requestPairingCode(validation.normalized);
+          if (!pairing?.success) {
+            const errorText = pairing?.error || "Failed to generate pairing code.";
+            setStatus("error");
+            setMessage(errorText);
+            if (onError) onError(errorText);
+            return;
+          }
+
+          setPhoneEntry(validation.normalized);
+          setPairingCode(pairing.pairingCode || "");
+          setPhase("pairingEntry");
+          setStatus("pairingCode");
+          setMessage("On your phone: WhatsApp > Settings > Linked Devices > Link a device > Link with phone number instead, then enter this code and press Enter to confirm.");
+          return;
+        }
+
         const result = await requestPhoneCode(userId, validation.normalized);
 
         if (!result.success) {
@@ -847,7 +931,7 @@ const PhoneVerificationStep = ({ onComplete, onError }) => {
         if (onError) onError(error?.message);
       }
     },
-    [userId, onError]
+    [userId, provider, onError]
   );
 
   const handleVerifyCode = useCallback(
@@ -864,14 +948,14 @@ const PhoneVerificationStep = ({ onComplete, onError }) => {
         setTestCode(null);
 
         // Send welcome message via WhatsApp
-        const welcomeMessage = `Hey! 👋 You're all set up with Backbone.
+        const welcomeMessage = `Hey! You're all set up with Backbone.
 
 If you need me to do anything, just let me know. Help me help you!
 
 Some things I can help with:
-(a) 💰 Help you save money and invest more
-(b) 📈 Help with your career growth
-(c) 🏠 Improve your home life
+(a) Help you save money and invest more
+(b) Help with your career growth
+(c) Improve your home life
 
 Just reply with a, b, or c - or tell me what's on your mind!`;
 
@@ -883,8 +967,7 @@ Just reply with a, b, or c - or tell me what's on your mind!`;
         }
 
         if (!completedRef.current) {
-          completedRef.current = true;
-          setTimeout(() => onComplete({ phone: result.phoneNumber || phoneEntry }), 600);
+          completeStep({ phone: result.phoneNumber || phoneEntry, provider: PROVIDERS.TWILIO });
         }
       } else {
         setAttemptsRemaining(result.attemptsRemaining ?? 0);
@@ -898,26 +981,90 @@ Just reply with a, b, or c - or tell me what's on your mind!`;
         setCodeInput("");
       }
     },
-    [userId, phoneEntry, onComplete]
+    [userId, phoneEntry, completeStep]
   );
+
+  const checkBaileysConnection = useCallback(async () => {
+    if (!phoneEntry) return;
+    setStatus("verifying");
+    setMessage("Checking Baileys connection...");
+
+    try {
+      const wa = getTwilioWhatsApp();
+      if (!wa.initialized) {
+        await wa.initialize({ providerPreference: "baileys" });
+      }
+
+      const waStatus = wa.getStatus();
+      const linked = Boolean(waStatus?.providers?.baileys?.connected);
+
+      if (!linked) {
+        setStatus("pairingCode");
+        setMessage(
+          waStatus?.providers?.baileys?.lastError ||
+          "Still waiting for link. Enter the code in WhatsApp, then press Enter again."
+        );
+        return;
+      }
+
+      setStatus("success");
+      setPhase("success");
+      setMessage("Baileys linked!");
+
+      const settings = loadUserSettings();
+      updateSettings({
+        phoneNumber: phoneEntry,
+        phone: phoneEntry,
+        connections: {
+          ...(settings?.connections || {}),
+          phone: true
+        }
+      });
+
+      const welcomeMessage = `Hey! You're all set up with Backbone.
+
+If you need me to do anything, just tell me here.
+
+I can help with:
+(a) saving and investing
+(b) career growth
+(c) home and life organization`;
+
+      try {
+        await wa.sendMessage(phoneEntry, welcomeMessage, { forceProvider: "baileys" });
+      } catch (sendErr) {
+        // Non-fatal.
+      }
+
+      completeStep({ phone: phoneEntry, provider: PROVIDERS.BAILEYS });
+    } catch (error) {
+      setStatus("error");
+      setMessage(error?.message || "Failed to check Baileys status.");
+      if (onError) onError(error?.message);
+    }
+  }, [phoneEntry, completeStep, onError]);
 
   const enterPhoneEntry = useCallback(() => {
     completedRef.current = false;
     setPhase("phoneEntry");
     setPhoneEntry("+1 ");
     setCodeInput("");
+    setPairingCode("");
     setTestCode(null);
     setAttemptsRemaining(3);
     setStatus("ready");
-    setMessage("Enter your US phone number (+1)");
-  }, []);
+    setMessage(
+      provider === PROVIDERS.BAILEYS
+        ? "Enter your US phone number (+1) for Baileys pairing."
+        : "Enter your US phone number (+1)"
+    );
+  }, [provider]);
 
   const handleContinue = useCallback(() => {
     if (existingPhone && !completedRef.current) {
-      completedRef.current = true;
-      onComplete({ existing: true, phone: existingPhone });
+      completeStep({ existing: true, phone: existingPhone, provider });
     }
-  }, [existingPhone, onComplete]);
+  }, [existingPhone, completeStep, provider]);
 
   // Keyboard handler
   useInput((input, key) => {
@@ -926,6 +1073,21 @@ Just reply with a, b, or c - or tell me what's on your mind!`;
 
     // Ready phase - Enter or Right arrow to start verification
     if (phase === "ready") {
+      const lower = String(input || "").toLowerCase();
+      if (lower === "b") {
+        setProvider(PROVIDERS.BAILEYS);
+        if (status !== "verified") {
+          setMessage("Baileys selected. Press Enter to link your WhatsApp.");
+        }
+        return;
+      }
+      if (lower === "t") {
+        setProvider(PROVIDERS.TWILIO);
+        if (status !== "verified") {
+          setMessage("Twilio OTP selected. Press Enter to verify your phone.");
+        }
+        return;
+      }
       if (key.return || key.rightArrow) {
         if (status === "verified" && existingPhone) {
           // Already verified - Enter continues, Right re-verifies
@@ -955,6 +1117,18 @@ Just reply with a, b, or c - or tell me what's on your mind!`;
       return;
     }
 
+    // Pairing code phase - Enter checks link, Escape edits phone
+    if (phase === "pairingEntry") {
+      if (key.return) {
+        checkBaileysConnection();
+        return;
+      }
+      if (key.escape) {
+        enterPhoneEntry();
+        return;
+      }
+    }
+
     // Failed - Enter to retry
     if (status === "failed" && key.return) {
       enterPhoneEntry();
@@ -969,10 +1143,9 @@ Just reply with a, b, or c - or tell me what's on your mind!`;
       { flexDirection: "column", paddingX: 1 },
       e(Text, { color: "#e2e8f0", bold: true }, "WhatsApp Verification"),
       e(Text, { color: "#64748b" }, "Sign in with Google first."),
-      e(Text, { color: "#64748b", dimColor: true, marginTop: 1 }, "↑↓ navigate steps")
+      e(Text, { color: "#64748b", dimColor: true, marginTop: 1 }, "[Up/Down] navigate steps")
     );
   }
-
   // Ready phase - show prompt to enter verification
   if (phase === "ready") {
     const isVerified = status === "verified" && existingPhone;
@@ -981,18 +1154,47 @@ Just reply with a, b, or c - or tell me what's on your mind!`;
       { flexDirection: "column", paddingX: 1 },
       e(Text, { color: "#e2e8f0", bold: true }, "WhatsApp Verification"),
       isVerified
-        ? e(Text, { color: "#22c55e", marginTop: 1 }, `✓ ${existingPhone}`)
-        : e(Box, { flexDirection: "column" },
-            e(Text, { color: "#64748b" }, "Verify your phone for notifications."),
-            e(Text, { color: "#f59e0b", dimColor: true, marginTop: 1 }, `First, text ${twilioWhatsAppNumber}:`),
-            e(Text, { color: "#f97316", bold: true }, sandboxJoinWords)
+        ? e(Text, { color: "#22c55e", marginTop: 1 }, `Connected: ${existingPhone}`)
+        : e(
+            Box,
+            { flexDirection: "column" },
+            e(Text, { color: "#64748b" }, "Choose how to connect WhatsApp:"),
+            e(
+              Box,
+              { marginTop: 1, flexDirection: "column" },
+              e(
+                Text,
+                { color: provider === PROVIDERS.BAILEYS ? "#22c55e" : "#94a3b8" },
+                `[B] Baileys (recommended)${provider === PROVIDERS.BAILEYS ? "  <- selected" : ""}`
+              ),
+              e(
+                Text,
+                { color: provider === PROVIDERS.TWILIO ? "#22c55e" : "#94a3b8" },
+                `[T] Twilio OTP${provider === PROVIDERS.TWILIO ? "  <- selected" : ""}`
+              )
+            ),
+            provider === PROVIDERS.TWILIO
+              ? e(
+                  Box,
+                  { marginTop: 1, flexDirection: "column" },
+                  e(Text, { color: "#f59e0b", dimColor: true }, `First, text ${twilioWhatsAppNumber}:`),
+                  e(Text, { color: "#f97316", bold: true }, sandboxJoinWords)
+                )
+              : e(
+                  Box,
+                  { marginTop: 1, flexDirection: "column" },
+                  e(Text, { color: "#94a3b8" }, "Baileys links your own WhatsApp directly."),
+                  e(Text, { color: "#64748b", dimColor: true }, "No Twilio account required.")
+                )
           ),
-      e(Box, { marginTop: 1 },
+      e(
+        Box,
+        { marginTop: 1 },
         isVerified
-          ? e(Text, { color: "#64748b" }, "[Enter] Continue  [→] Re-verify")
-          : e(Text, { color: "#f97316" }, "[Enter or →] Start verification")
+          ? e(Text, { color: "#64748b" }, "[Enter] Continue  [Right] Re-verify")
+          : e(Text, { color: "#f97316" }, "[Enter or Right] Start verification")
       ),
-      e(Text, { color: "#64748b", dimColor: true }, "↑↓ navigate steps")
+      e(Text, { color: "#64748b", dimColor: true }, "Use B/T to switch provider")
     );
   }
 
@@ -1003,17 +1205,29 @@ Just reply with a, b, or c - or tell me what's on your mind!`;
       { flexDirection: "column", paddingX: 1 },
       e(Text, { color: "#e2e8f0", bold: true }, "Enter Phone Number"),
       e(Text, { color: "#64748b" }, "US numbers only (+1)"),
-      // Sandbox join instructions
-      e(Box, { marginTop: 1, flexDirection: "column" },
-        e(Text, { color: "#f59e0b", dimColor: true }, `First, text ${twilioWhatsAppNumber} on WhatsApp:`),
-        e(Text, { color: "#f97316", bold: true }, sandboxJoinWords)
-      ),
-      message && e(
-        Text,
-        { color: status === "error" ? "#ef4444" : "#94a3b8", marginTop: 1 },
-        message
-      ),
-      e(Box, { marginTop: 1 },
+      provider === PROVIDERS.TWILIO &&
+        e(
+          Box,
+          { marginTop: 1, flexDirection: "column" },
+          e(Text, { color: "#f59e0b", dimColor: true }, `First, text ${twilioWhatsAppNumber} on WhatsApp:`),
+          e(Text, { color: "#f97316", bold: true }, sandboxJoinWords)
+        ),
+      provider === PROVIDERS.BAILEYS &&
+        e(
+          Box,
+          { marginTop: 1, flexDirection: "column" },
+          e(Text, { color: "#94a3b8" }, "We will generate a pairing code for WhatsApp Linked Devices."),
+          e(Text, { color: "#64748b", dimColor: true }, "On your phone: WhatsApp > Settings > Linked Devices > Link a device > Link with phone number instead")
+        ),
+      message &&
+        e(
+          Text,
+          { color: status === "error" ? "#ef4444" : "#94a3b8", marginTop: 1 },
+          message
+        ),
+      e(
+        Box,
+        { marginTop: 1 },
         e(TextInput, {
           value: phoneEntry,
           onChange: handlePhoneChange,
@@ -1021,7 +1235,11 @@ Just reply with a, b, or c - or tell me what's on your mind!`;
           onSubmit: sendCode
         })
       ),
-      e(Text, { color: "#64748b", dimColor: true }, "[Enter] Send code  [Esc] Back")
+      e(
+        Text,
+        { color: "#64748b", dimColor: true },
+        provider === PROVIDERS.BAILEYS ? "[Enter] Get pairing code  [Esc] Back" : "[Enter] Send code  [Esc] Back"
+      )
     );
   }
 
@@ -1032,12 +1250,15 @@ Just reply with a, b, or c - or tell me what's on your mind!`;
       { flexDirection: "column", paddingX: 1 },
       e(Text, { color: "#e2e8f0", bold: true }, "Enter Verification Code"),
       e(Text, { color: "#64748b" }, `Sent to: ${phoneEntry}`),
-      message && e(
-        Text,
-        { color: status === "error" || status === "failed" ? "#ef4444" : "#94a3b8", marginTop: 1 },
-        message
-      ),
-      e(Box, { marginTop: 1 },
+      message &&
+        e(
+          Text,
+          { color: status === "error" || status === "failed" ? "#ef4444" : "#94a3b8", marginTop: 1 },
+          message
+        ),
+      e(
+        Box,
+        { marginTop: 1 },
         e(TextInput, {
           value: codeInput,
           onChange: setCodeInput,
@@ -1051,14 +1272,28 @@ Just reply with a, b, or c - or tell me what's on your mind!`;
     );
   }
 
+  // Baileys pairing phase
+  if (phase === "pairingEntry") {
+    return e(
+      Box,
+      { flexDirection: "column", paddingX: 1 },
+      e(Text, { color: "#e2e8f0", bold: true }, "Baileys Pairing"),
+      e(Text, { color: "#64748b" }, `Phone: ${phoneEntry}`),
+      pairingCode && e(Text, { color: "#22c55e", bold: true, marginTop: 1 }, `Pairing code: ${pairingCode}`),
+      e(Text, { color: "#94a3b8", marginTop: 1 }, "On your phone, open WhatsApp Linked Devices, choose Link with phone number instead, enter this code, then press Enter to check."),
+      message && e(Text, { color: status === "error" ? "#ef4444" : "#94a3b8", marginTop: 1 }, message),
+      e(Text, { color: "#64748b", dimColor: true }, "[Enter] Check connection  [Esc] Back")
+    );
+  }
+
   // Success phase
   if (phase === "success") {
     return e(
       Box,
       { flexDirection: "column", paddingX: 1 },
       e(Text, { color: "#e2e8f0", bold: true }, "WhatsApp Verification"),
-      e(Text, { color: "#22c55e", marginTop: 1 }, "✓ Phone verified!"),
-      e(Text, { color: "#64748b" }, "You'll receive WhatsApp notifications.")
+      e(Text, { color: "#22c55e", marginTop: 1 }, "Connected"),
+      e(Text, { color: "#64748b" }, provider === PROVIDERS.BAILEYS ? "Baileys is now linked." : "You'll receive WhatsApp notifications.")
     );
   }
 
@@ -1068,6 +1303,171 @@ Just reply with a, b, or c - or tell me what's on your mind!`;
     { flexDirection: "column", paddingX: 1 },
     e(Text, { color: "#e2e8f0", bold: true }, "WhatsApp Verification"),
     e(Text, { color: "#64748b" }, message || "Loading...")
+  );
+};
+
+const CommunicationsWhatsAppStep = ({ phoneConnected, onComplete }) => {
+  const settings = loadUserSettings();
+  const connectedPhone = settings?.phoneNumber || settings?.phone || null;
+  const normalizedPhone = useMemo(() => {
+    const raw = String(connectedPhone || "").trim();
+    const normalized = raw.replace(/[^\d+]/g, "");
+    if (!normalized) return null;
+    const withCountry = normalized.startsWith("+")
+      ? normalized
+      : normalized.length === 10
+        ? `+1${normalized}`
+        : normalized.length === 11 && normalized.startsWith("1")
+          ? `+${normalized}`
+          : normalized;
+    return /^\+1\d{10}$/.test(withCountry) ? withCountry : null;
+  }, [connectedPhone]);
+  const [message, setMessage] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [pairingCode, setPairingCode] = useState("");
+  const [qrAscii, setQrAscii] = useState("");
+  const [baileysStatus, setBaileysStatus] = useState(null);
+
+  const refreshBaileys = useCallback(async ({ autoPair = false, silent = false } = {}) => {
+    if (!phoneConnected) {
+      if (!silent) setMessage("Complete WhatsApp Verification first.");
+      return false;
+    }
+    if (!normalizedPhone) {
+      if (!silent) setMessage("No valid +1 phone found. Return to WhatsApp Verification.");
+      return false;
+    }
+
+    if (!silent) {
+      setMessage("Checking Baileys status...");
+    }
+    setLoading(true);
+
+    try {
+      const wa = getTwilioWhatsApp();
+      if (!wa.initialized) {
+        const init = await wa.initialize({ providerPreference: "baileys" });
+        if (!init?.success) {
+          throw new Error(init?.error || "Failed to initialize WhatsApp service.");
+        }
+      }
+
+      let status = wa.getStatus();
+      let providerState = status?.providers?.baileys || {};
+      setBaileysStatus(providerState);
+
+      if (providerState.connected) {
+        setPairingCode("");
+        setQrAscii("");
+        if (!silent) {
+          setMessage("Baileys is linked. Press Enter to confirm this communication channel.");
+        }
+        return true;
+      }
+
+      let nextPairingCode = "";
+      if (autoPair) {
+        const pairing = await wa.requestPairingCode(normalizedPhone);
+        if (pairing?.success && pairing.pairingCode) {
+          nextPairingCode = pairing.pairingCode;
+          setPairingCode(pairing.pairingCode);
+        } else {
+          setPairingCode("");
+        }
+      }
+
+      status = wa.getStatus();
+      providerState = status?.providers?.baileys || {};
+      setBaileysStatus(providerState);
+
+      const qr = typeof providerState.qrAscii === "string" ? providerState.qrAscii.trim() : "";
+      setQrAscii(qr);
+
+      if (providerState.connected) {
+        setPairingCode("");
+        setQrAscii("");
+        if (!silent) {
+          setMessage("Baileys is linked. Press Enter to confirm this communication channel.");
+        }
+        return true;
+      }
+
+      if (!silent) {
+        if (qr) {
+          setMessage("QR ready. On your phone, scan this from WhatsApp > Settings > Linked Devices > Link a device, then press Enter to re-check.");
+        } else if (nextPairingCode) {
+          setMessage("Pairing code ready. On your phone: WhatsApp > Settings > Linked Devices > Link a device > Link with phone number instead, enter this code, then press Enter to re-check.");
+        } else {
+          setMessage(
+            providerState.lastError ||
+            "Still waiting for link. Press Enter to re-check, or press G to generate a new pairing code."
+          );
+        }
+      }
+      return false;
+    } catch (error) {
+      if (!silent) {
+        setMessage(error?.message || "Failed to check Baileys status.");
+      }
+      return false;
+    } finally {
+      setLoading(false);
+    }
+  }, [phoneConnected, normalizedPhone]);
+
+  useEffect(() => {
+    refreshBaileys({ autoPair: false, silent: false });
+  }, [refreshBaileys]);
+
+  useInput((input, key) => {
+    const lower = String(input || "").toLowerCase();
+    if (lower === "g") {
+      if (!phoneConnected) {
+        setMessage("Complete WhatsApp Verification first.");
+        return;
+      }
+      refreshBaileys({ autoPair: true });
+      return;
+    }
+    if (!key.return) return;
+    if (!phoneConnected) {
+      setMessage("Complete WhatsApp Verification first.");
+      return;
+    }
+    if (baileysStatus?.connected) {
+      setMessage("");
+      onComplete({ provider: "whatsapp", phone: normalizedPhone || connectedPhone || null });
+      return;
+    }
+    refreshBaileys({ autoPair: false });
+  });
+
+  const connected = baileysStatus?.connected === true;
+  const requiresPairing = baileysStatus?.requiresPairing === true || baileysStatus?.lastDisconnectCode === 401;
+  const phoneLabel = normalizedPhone || connectedPhone || "not set";
+
+  return e(
+    Box,
+    { flexDirection: "column", paddingX: 1 },
+    e(Text, { color: "#e2e8f0", bold: true }, "Communications (WhatsApp)"),
+    phoneConnected
+      ? e(Text, { color: "#94a3b8", marginTop: 1 }, `Phone: ${phoneLabel}`)
+      : e(Text, { color: "#f59e0b", marginTop: 1 }, "Pending: complete WhatsApp Verification first"),
+    phoneConnected && e(Text, { color: connected ? "#22c55e" : "#f59e0b" }, `Baileys: ${connected ? "Connected" : "Not connected"}`),
+    phoneConnected && requiresPairing && e(Text, { color: "#f59e0b" }, "Pairing required on your phone: WhatsApp > Settings > Linked Devices"),
+    pairingCode && e(Text, { color: "#22c55e", bold: true, marginTop: 1 }, `Pairing code: ${pairingCode}`),
+    pairingCode && e(Text, { color: "#94a3b8" }, "Use your phone: Link a device > Link with phone number instead, then enter the code above."),
+    qrAscii && e(Text, { color: "#22c55e", marginTop: 1 }, "QR ready: use your phone to scan below from WhatsApp Linked Devices"),
+    qrAscii && e(Text, { color: "#22c55e" }, qrAscii),
+    loading && e(Text, { color: "#64748b", marginTop: 1 }, "Loading WhatsApp status..."),
+    message && e(Text, { color: connected ? "#64748b" : "#f59e0b", marginTop: 1 }, message),
+    phoneConnected && e(
+      Text,
+      { color: "#64748b", dimColor: true, marginTop: 1 },
+      connected
+        ? "[Enter] Confirm channel"
+        : "[Enter] Re-check link  [G] New pairing code"
+    )
   );
 };
 
@@ -1144,7 +1544,7 @@ const ModelSelectionStep = ({ onComplete, onError, onNavigationLockChange, initi
     // First check Claude Code CLI (best option)
     if (modelStatus["claude-code"]?.connected) {
       const authStatus = isClaudeCodeLoggedIn();
-      setMessage(`Claude Code connected! (${authStatus.model || "Opus 4.5"})`);
+      setMessage(`Claude Code connected! (${authStatus.model || "Opus 4.6"})`);
       setTimeout(() => onComplete({ provider: "claude-code", existing: true, model: authStatus.model }), 1000);
       return;
     }
@@ -1209,7 +1609,7 @@ const ModelSelectionStep = ({ onComplete, onError, onNavigationLockChange, initi
     // Check if already logged in
     if (cachedStatus?.connected) {
       const authStatus = isClaudeCodeLoggedIn();
-      setMessage(`Claude Code already connected! (${authStatus.model || "Opus 4.5"})`);
+      setMessage(`Claude Code already connected! (${authStatus.model || "Opus 4.6"})`);
       setTimeout(() => onComplete({ provider: "claude-code", existing: true, model: authStatus.model }), 1000);
       return;
     }
@@ -1450,7 +1850,7 @@ const ModelSelectionStep = ({ onComplete, onError, onNavigationLockChange, initi
       { flexDirection: "column", paddingX: 1 },
       e(Text, { color: "#e2e8f0", bold: true }, "AI Model"),
       isInOptionsMode
-        ? e(Text, { color: "#f97316", marginBottom: 1 }, "↑↓ Select Provider  Enter Confirm  Esc Back")
+        ? e(Text, { color: "#f97316", marginBottom: 1 }, "[Up/Down] Select Provider  Enter Confirm  Esc Back")
         : e(Text, { color: "#64748b", marginBottom: 1 }, "Press Enter to select a provider"),
 
       // Single box with orange border when in options mode
@@ -1487,11 +1887,11 @@ const ModelSelectionStep = ({ onComplete, onError, onNavigationLockChange, initi
                 { key: opt.id, flexDirection: "row", gap: 1 },
                 // Selection arrow
                 e(Text, { color: isSelected ? "#f97316" : "#1e293b" },
-                  isSelected ? "▶" : " "
+                  isSelected ? ">" : " "
                 ),
                 // Status dot
                 e(Text, { color: isConnected ? "#22c55e" : "#475569" },
-                  isConnected ? "●" : "○"
+                  isConnected ? "*" : "o"
                 ),
                 // Label
                 e(Text, {
@@ -2643,24 +3043,86 @@ const PersonalCapitalSetupStep = ({ onComplete, onSkip, onError }) => {
  * Personal Wealth (Empower) Disabled Step Component
  * Shows grayed out step with "Coming Soon" message
  */
-const PersonalWealthDisabledStep = ({ onSkip }) => {
+const BrokeragesSetupStep = ({ onComplete, onSkip, focused, onReleaseFocus }) => {
+  const [statuses, setStatuses] = useState(() => {
+    try { return getBrokerageStatuses(); } catch { return {}; }
+  });
+  const [selected, setSelected] = useState(0);
+  const [connecting, setConnecting] = useState(null);
+  const [message, setMessage] = useState("");
+  const brokerageIds = ["empower", "robinhood", "fidelity"];
+
   useInput((input, key) => {
-    // Auto-skip since this step is disabled
-    if (key.return || input.toLowerCase() === "s") {
-      onSkip();
+    if (!focused) return; // parent controls navigation until we're focused
+    if (connecting) return;
+    if (key.escape || key.leftArrow) { if (onReleaseFocus) onReleaseFocus(); return; }
+    if (input.toLowerCase() === "s") { onSkip(); return; }
+    if (key.upArrow) { setSelected(prev => Math.max(0, prev - 1)); return; }
+    if (key.downArrow) { setSelected(prev => Math.min(brokerageIds.length, prev + 1)); return; }
+    // "u" key — update/reconnect an already-connected brokerage
+    if (input.toLowerCase() === "u" && selected < brokerageIds.length) {
+      const id = brokerageIds[selected];
+      const s = statuses[id];
+      if (!s?.connected) return; // only update connected ones
+      setConnecting(id);
+      setMessage(`Updating ${s?.label || id}...`);
+      connectBrokerage(id).then(result => {
+        setStatuses(getBrokerageStatuses());
+        setMessage(result.message);
+        setConnecting(null);
+      });
+      return;
+    }
+    if (key.return) {
+      if (selected === brokerageIds.length) {
+        const anyConnected = Object.values(statuses).some(s => s.connected);
+        anyConnected ? onComplete({ brokerages: statuses }) : onSkip();
+        return;
+      }
+      const id = brokerageIds[selected];
+      const s = statuses[id];
+      if (s?.connected && !s?.expired) return;
+      setConnecting(id);
+      setMessage(`Opening ${s?.label || id} login...`);
+      connectBrokerage(id).then(result => {
+        setStatuses(getBrokerageStatuses());
+        setMessage(result.message);
+        setConnecting(null);
+      });
     }
   });
 
   return e(
     Box,
     { flexDirection: "column", paddingX: 1 },
-    e(Text, { color: "#475569", bold: true, dimColor: true }, "Personal Wealth (Empower)"),
-    e(Text, { color: "#475569", dimColor: true }, "Investment tracking via Empower"),
-    e(Box, { marginTop: 1 },
-      e(Text, { color: "#64748b" }, "\u231B Coming Soon"),
-      e(Text, { color: "#475569", dimColor: true }, "Empower integration is under development.")
+    e(Text, { color: "#f59e0b", bold: true }, "Brokerages"),
+    e(Text, { color: "#94a3b8" }, "Connect your brokerage accounts (optional)"),
+    e(Box, { marginTop: 1, flexDirection: "column" },
+      ...brokerageIds.map((id, i) => {
+        const s = statuses[id] || {};
+        const icon = s.connected ? "\u2713" : "\u25CB";
+        const color = s.connected ? "#22c55e" : "#64748b";
+        const isActive = i === selected;
+        return e(
+          Box,
+          { key: id, flexDirection: "row", gap: 1 },
+          e(Text, { color: isActive ? "#f59e0b" : "#334155" }, isActive ? "\u25B8" : " "),
+          e(Text, { color }, `${icon} ${s.label || id}`),
+          e(Text, { color: "#64748b" }, s.connected ? (isActive && focused ? " Connected [U to update]" : " Connected") : isActive && focused ? " [Enter to connect]" : "")
+        );
+      }),
+      e(
+        Box,
+        { key: "done", flexDirection: "row", gap: 1, marginTop: 1 },
+        e(Text, { color: selected === brokerageIds.length ? "#f59e0b" : "#334155" }, selected === brokerageIds.length ? "\u25B8" : " "),
+        e(Text, { color: "#22c55e" }, "[Done / Skip]")
+      )
     ),
-    e(Text, { color: "#64748b", marginTop: 1 }, "Press Enter or S to continue")
+    connecting && e(Box, { marginTop: 1 }, e(Text, { color: "#f59e0b" }, `\u23F3 ${message}`)),
+    !connecting && message && e(Text, { color: "#94a3b8", marginTop: 1 }, message),
+    focused
+      ? e(Text, { color: "#64748b", marginTop: 1 }, "\u2191\u2193 navigate \u00B7 Enter connect \u00B7 U update \u00B7 \u2190 back \u00B7 S skip")
+      : e(Text, { color: "#64748b", marginTop: 1 }, "\u2192 or Enter to browse brokerages")
   );
 };
 
@@ -2957,12 +3419,16 @@ export const OnboardingPanel = ({ onComplete, onProfileRestored, userDisplay = "
       }
       if (phoneVerified) {
         statuses.phone = "complete";
+        statuses.communicationsWhatsapp = "complete";
       }
 
-      // Check Plaid configuration
-      if (isPlaidConfigured()) {
-        statuses.plaid = "complete";
-      }
+      // Check brokerage connections
+      try {
+        const bs = getBrokerageStatuses();
+        if (Object.values(bs).some(s => s.connected)) {
+          statuses.brokerages = "complete";
+        }
+      } catch {}
 
       // Check Core Goals (required - must have 40+ words)
 
@@ -2976,7 +3442,7 @@ export const OnboardingPanel = ({ onComplete, onProfileRestored, userDisplay = "
           statuses.coreGoals = "complete";
         }
       }
-      // Also check core-beliefs.json — user may have set beliefs through the system
+      // Also check core-beliefs.json - user may have set beliefs through the system
       if (statuses.coreGoals !== "complete") {
         try {
           const fs = await import("fs");
@@ -3034,8 +3500,12 @@ export const OnboardingPanel = ({ onComplete, onProfileRestored, userDisplay = "
         }
         if (phoneVerified) {
           next.phone = "complete";
+          next.communicationsWhatsapp = "complete";
         } else if (prev.phone === "complete") {
           next.phone = "pending";
+          if (prev.communicationsWhatsapp === "complete") {
+            next.communicationsWhatsapp = "pending";
+          }
         }
         return next;
       });
@@ -3076,7 +3546,7 @@ export const OnboardingPanel = ({ onComplete, onProfileRestored, userDisplay = "
     for (let i = 0; i < ONBOARDING_STEPS.length; i++) {
       const step = ONBOARDING_STEPS[i];
       if (step.disabled) continue;
-      if (statuses[step.id] !== "complete" && step.required) {
+      if (statuses[step.id] !== "complete" && isStepRequired(step, statuses)) {
         return i;
       }
     }
@@ -3152,11 +3622,17 @@ export const OnboardingPanel = ({ onComplete, onProfileRestored, userDisplay = "
             alpaca: "alpaca",
             oura: "oura",
             email: "email",
-            plaid: "plaid"
+            brokerages: "brokerages"
           };
           const onboardingStepId = stepMap[stepId];
           if (onboardingStepId) {
-            setStepStatuses(prev => ({ ...prev, [onboardingStepId]: "complete" }));
+            setStepStatuses((prev) => {
+              const next = { ...prev, [onboardingStepId]: "complete" };
+              if (onboardingStepId === "phone") {
+                next.communicationsWhatsapp = "complete";
+              }
+              return next;
+            });
           }
         });
 
@@ -3175,6 +3651,9 @@ export const OnboardingPanel = ({ onComplete, onProfileRestored, userDisplay = "
   const handleStepComplete = useCallback((stepId, data) => {
     setStepStatuses((prev) => {
       const newStatuses = { ...prev, [stepId]: "complete" };
+      if (stepId === "phone") {
+        newStatuses.communicationsWhatsapp = "complete";
+      }
       // No auto-advance - let user navigate freely
       return newStatuses;
     });
@@ -3224,7 +3703,7 @@ export const OnboardingPanel = ({ onComplete, onProfileRestored, userDisplay = "
   }, [onComplete]);
 
   const handleProfileRestored = useCallback((user) => {
-    // Profile was restored from archive — mark all steps complete and skip onboarding
+    // Profile was restored from archive - mark all steps complete and skip onboarding
     process.stdout.write("\x1b[2J\x1b[1;1H");
     updateSetting("onboardingComplete", true);
     updateSetting("firebaseUser", user);
@@ -3236,13 +3715,12 @@ export const OnboardingPanel = ({ onComplete, onProfileRestored, userDisplay = "
     }
   }, [onComplete, onProfileRestored]);
 
-  // Check if required steps are complete
-  const requiredStepsComplete =
-    stepStatuses.prerequisites === "complete" &&
-    stepStatuses.google === "complete" &&
-    stepStatuses.phone === "complete" &&
-    stepStatuses.model === "complete" &&
-    stepStatuses.coreGoals === "complete";
+  // Check if required steps are complete (supports conditional requirements)
+  const activeSteps = ONBOARDING_STEPS.filter((s) => !s.disabled);
+  const requiredStepIds = activeSteps
+    .filter((step) => isStepRequired(step, stepStatuses))
+    .map((step) => step.id);
+  const requiredStepsComplete = requiredStepIds.every((stepId) => stepStatuses[stepId] === "complete");
 
   // Auto-save onboardingComplete when all required steps are done
   useEffect(() => {
@@ -3284,8 +3762,11 @@ export const OnboardingPanel = ({ onComplete, onProfileRestored, userDisplay = "
       return;
     }
 
-    // Right arrow on phone step (when verified) - trigger re-verify
-    // This is handled by the phone step component itself
+    // Right arrow or Enter focuses into steps that have sub-navigation (e.g. brokerages)
+    if ((key.rightArrow || key.return) && currentStep?.id === "brokerages") {
+      setNavigationLock(true);
+      return;
+    }
 
     // Ctrl+M or 'x' to go to main (only if required steps done)
     if ((key.ctrl && input === "m") || input.toLowerCase() === "x") {
@@ -3328,6 +3809,11 @@ export const OnboardingPanel = ({ onComplete, onProfileRestored, userDisplay = "
         return e(PhoneVerificationStep, {
           onComplete: (data) => handleStepComplete("phone", data),
           onError: (err) => handleStepError("phone", err)
+        });
+      case "communicationsWhatsapp":
+        return e(CommunicationsWhatsAppStep, {
+          phoneConnected: stepStatuses.phone === "complete",
+          onComplete: (data) => handleStepComplete("communicationsWhatsapp", data)
         });
       case "model":
         return e(ModelSelectionStep, {
@@ -3372,16 +3858,12 @@ export const OnboardingPanel = ({ onComplete, onProfileRestored, userDisplay = "
           onSkip: () => handleStepSkip("email"),
           onError: (err) => handleStepError("email", err)
         });
-      case "personalCapital":
-        // Personal Wealth step is disabled - show coming soon message
-        return e(PersonalWealthDisabledStep, {
-          onSkip: () => handleStepSkip("personalCapital")
-        });
-      case "plaid":
-        return e(PlaidSetupStep, {
-          onComplete: (data) => handleStepComplete("plaid", data),
-          onSkip: () => handleStepSkip("plaid"),
-          onError: (err) => handleStepError("plaid", err)
+      case "brokerages":
+        return e(BrokeragesSetupStep, {
+          focused: navigationLock,
+          onReleaseFocus: () => setNavigationLock(false),
+          onComplete: (data) => handleStepComplete("brokerages", data),
+          onSkip: () => handleStepSkip("brokerages")
         });
       default:
         return e(OptionalSetupStep, {
@@ -3393,10 +3875,9 @@ export const OnboardingPanel = ({ onComplete, onProfileRestored, userDisplay = "
   };
 
   // Calculate progress (exclude disabled steps from counts)
-  const activeSteps = ONBOARDING_STEPS.filter((s) => !s.disabled);
   const completedCount = activeSteps.filter((s) => stepStatuses[s.id] === "complete").length;
-  const requiredCount = activeSteps.filter((s) => s.required).length;
-  const requiredComplete = activeSteps.filter((s) => s.required && stepStatuses[s.id] === "complete").length;
+  const requiredCount = requiredStepIds.length;
+  const requiredComplete = requiredStepIds.filter((stepId) => stepStatuses[stepId] === "complete").length;
   const googleUser = getCurrentFirebaseUser();
   const showLogoutHint = currentStep?.id === "google" && !!googleUser;
 
@@ -3488,6 +3969,7 @@ export const OnboardingPanel = ({ onComplete, onProfileRestored, userDisplay = "
             key: step.id,
             step,
             status: stepStatuses[step.id],
+            isRequired: isStepRequired(step, stepStatuses),
             isActive: i === currentStepIndex,
             isSelected: i === currentStepIndex
           })
@@ -3525,7 +4007,7 @@ export const OnboardingPanel = ({ onComplete, onProfileRestored, userDisplay = "
       e(
         Box,
         { flexDirection: "row", gap: 2 },
-        e(Text, { color: "#f97316" }, "[↑↓] Navigate"),
+        e(Text, { color: "#f97316" }, "[Up/Down] Navigate"),
         e(Text, { color: "#64748b" }, "[Enter] Continue"),
         e(Text, { color: "#64748b" }, "[S] Skip"),
         // Exit to main - only show if required steps done

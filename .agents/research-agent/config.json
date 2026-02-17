@@ -1,0 +1,16 @@
+{
+  "entrypoint": null,
+  "type": "engine",
+  "schedule": "on-demand",
+  "goalCategories": ["learning", "growth", "career"],
+  "keywords": ["research", "investigate", "analyze", "deep-dive", "study", "paper", "literature", "report"],
+  "permissions": {
+    "skills": ["academic-research", "data-analysis", "market-research"],
+    "mcp": ["backbone-news", "backbone-youtube", "backbone-projects"],
+    "tools": ["research-stock"],
+    "filesystem": {
+      "read": ["data/", "memory/", "projects/"],
+      "write": ["projects/", "memory/"]
+    }
+  }
+}

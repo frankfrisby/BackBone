@@ -54,15 +54,20 @@ export const DEFAULT_SETTINGS = {
 
   // Base LLM (for general conversations)
   baseProvider: "anthropic", // anthropic, openai, google
-  baseModel: "claude-opus-4-5-20251101",
+  baseModel: "claude-opus-4-6",
 
   // Agentic Model (for autonomous actions)
   agenticProvider: "anthropic",
-  agenticModel: "claude-opus-4-5-20251101",
+  agenticModel: "claude-opus-4-6",
 
   // Fine-Tuning
   fineTuningEnabled: false,
   useFineTunedModel: false, // Whether to use fine-tuned model when available
+
+  // Agentic AI Routing (point = tried first, secondary = fallback)
+  // "claude" = Claude Code CLI first, Codex fallback
+  // "codex"  = Codex first, Claude Code CLI fallback
+  pointAI: "claude",
 
   // Trading
   autoTrading: true,
@@ -233,7 +238,7 @@ export const getModelConfig = (provider) => {
       envKey: "ANTHROPIC_API_KEY",
       baseUrl: "https://api.anthropic.com",
       models: {
-        "claude-opus-4-5-20251101": { name: "Claude Opus 4.5", maxTokens: 8192 },
+        "claude-opus-4-6": { name: "Claude Opus 4.6", maxTokens: 8192 },
         "claude-sonnet-4-20250514": { name: "Claude Sonnet 4", maxTokens: 8192 },
         "claude-3-5-haiku-20241022": { name: "Claude Haiku 3.5", maxTokens: 8192 }
       }

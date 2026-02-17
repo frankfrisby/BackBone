@@ -1,5 +1,8 @@
 /**
- * Continuous Improvement Engine
+ * @deprecated Best features ported to autonomous-engine.js (handoff chaining,
+ * adaptive rest, countdown events). Use autonomous-engine.js instead.
+ *
+ * Continuous Improvement Engine (v2 - LEGACY)
  *
  * A unified autonomous engine that forms a persistent feedback loop:
  *   OBSERVE → SEARCH → PLAN → EXECUTE → MEASURE → LEARN → repeat

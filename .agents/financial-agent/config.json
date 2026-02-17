@@ -1,0 +1,17 @@
+{
+  "entrypoint": null,
+  "type": "engine",
+  "schedule": "cron",
+  "cron": "0 7 * * *",
+  "goalCategories": ["finance"],
+  "keywords": ["budget", "save", "tax", "wealth", "income", "expense", "insurance", "retirement", "debt", "net worth", "credit", "mortgage"],
+  "permissions": {
+    "skills": [],
+    "mcp": ["backbone-trading", "backbone-life", "backbone-whatsapp"],
+    "tools": ["portfolio-summary"],
+    "filesystem": {
+      "read": ["data/", "memory/portfolio.md", "memory/portfolio-notes.md"],
+      "write": ["memory/portfolio-notes.md", "projects/"]
+    }
+  }
+}

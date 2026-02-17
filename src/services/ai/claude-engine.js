@@ -9,12 +9,13 @@
  * 5. Engine reads updated files to show what happened
  */
 
-import { exec } from "child_process";
+import { exec, execSync } from "child_process";
 import { EventEmitter } from "events";
 import fs from "fs";
 import path from "path";
 import os from "os";
 import { getClaudeCodeStatus } from "./claude-code-cli.js";
+import { hasValidCredentials as hasCodexCredentials } from "./codex-oauth.js";
 import { getActivityNarrator } from "../ui/activity-narrator.js";
 import { updateProjects } from "../app-store.js";
 
@@ -32,6 +33,9 @@ const ENGINE_COOLDOWN_MS = 60 * 60 * 1000;
 const CLAUDE_CMD = process.platform === "win32"
   ? path.join(os.homedir(), "AppData", "Roaming", "npm", "claude.cmd")
   : "claude";
+const CODEX_CMD = process.platform === "win32"
+  ? path.join(os.homedir(), "AppData", "Roaming", "npm", "codex.cmd")
+  : "codex";
 
 /** Read persisted engine state from disk */
 function loadEngineState() {
@@ -67,6 +71,10 @@ class ClaudeEngine extends EventEmitter {
     // Restore last run time from disk so cooldown persists across restarts
     const saved = loadEngineState();
     this.lastRunCompletedAt = saved.lastRunCompletedAt ? new Date(saved.lastRunCompletedAt).getTime() : null;
+    const savedLimitMs = Number(saved.claudeRateLimitedUntilMs);
+    this.claudeRateLimitedUntilMs = Number.isFinite(savedLimitMs)
+      ? savedLimitMs
+      : null;
   }
 
   isRateLimitOutput(text) {
@@ -75,9 +83,156 @@ class ClaudeEngine extends EventEmitter {
     return (
       lower.includes("rate limit") ||
       lower.includes("rate-limit") ||
+      lower.includes("hit your limit") ||
+      lower.includes("you've hit your limit") ||
+      lower.includes("you have hit your limit") ||
+      lower.includes("usage limit") ||
+      lower.includes("quota exceeded") ||
       lower.includes("too many requests") ||
-      lower.includes("429")
+      lower.includes("429") ||
+      (lower.includes("resets") && lower.includes("limit"))
     );
+  }
+
+  saveState() {
+    saveEngineState({
+      lastRunCompletedAt: this.lastRunCompletedAt ? new Date(this.lastRunCompletedAt).toISOString() : null,
+      claudeRateLimitedUntilMs: this.claudeRateLimitedUntilMs || null
+    });
+  }
+
+  isCodexReady() {
+    try {
+      const hasAuth = hasCodexCredentials() || Boolean(process.env.OPENAI_API_KEY);
+      if (!hasAuth) return false;
+      execSync(`"${CODEX_CMD}" --version`, {
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
+        timeout: 5000
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  clearExpiredClaudeLimit() {
+    if (this.claudeRateLimitedUntilMs && Date.now() >= this.claudeRateLimitedUntilMs) {
+      this.claudeRateLimitedUntilMs = null;
+      this.saveState();
+      this.emit("status", "Claude rate limit window expired - returning to Claude.");
+    }
+  }
+
+  parseClaudeResetUntilMs(text) {
+    const raw = text || "";
+    const lower = raw.toLowerCase();
+    if (!lower.includes("limit") && !lower.includes("rate")) return null;
+
+    const monthMap = {
+      jan: 0, january: 0,
+      feb: 1, february: 1,
+      mar: 2, march: 2,
+      apr: 3, april: 3,
+      may: 4,
+      jun: 5, june: 5,
+      jul: 6, july: 6,
+      aug: 7, august: 7,
+      sep: 8, sept: 8, september: 8,
+      oct: 9, october: 9,
+      nov: 10, november: 10,
+      dec: 11, december: 11
+    };
+
+    const parseOffsetMinutes = (date, timeZone) => {
+      try {
+        const fmt = new Intl.DateTimeFormat("en-US", {
+          timeZone,
+          timeZoneName: "shortOffset",
+          hour: "2-digit",
+          minute: "2-digit"
+        });
+        const tzName = fmt.formatToParts(date).find((p) => p.type === "timeZoneName")?.value || "";
+        const mm = tzName.match(/GMT([+-])(\d{1,2})(?::(\d{2}))?/i);
+        if (!mm) return null;
+        const sign = mm[1] === "-" ? -1 : 1;
+        const hh = Number.parseInt(mm[2], 10);
+        const min = mm[3] ? Number.parseInt(mm[3], 10) : 0;
+        return sign * (hh * 60 + min);
+      } catch {
+        return null;
+      }
+    };
+
+    const buildUtcFromLocalParts = (y, mo, d, hh24, min, timeZone) => {
+      const guess = new Date(Date.UTC(y, mo, d, hh24, min, 0));
+      const offsetMinutes = parseOffsetMinutes(guess, timeZone);
+      if (offsetMinutes == null) return null;
+      return Date.UTC(y, mo, d, hh24, min, 0) - (offsetMinutes * 60 * 1000);
+    };
+
+    // Pattern: "resets Feb 16, 11am (America/New_York)"
+    const withDate = raw.match(/resets?\s+([A-Za-z]{3,9})\s+(\d{1,2}),\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)(?:\s*\(([^)]+)\))?/i);
+    if (withDate) {
+      const monthName = (withDate[1] || "").toLowerCase();
+      const month = monthMap[monthName];
+      if (month == null) return null;
+
+      const day = Number.parseInt(withDate[2], 10);
+      const hour12 = Number.parseInt(withDate[3], 10);
+      const minute = withDate[4] ? Number.parseInt(withDate[4], 10) : 0;
+      const ampm = (withDate[5] || "").toLowerCase();
+      const timeZone = (withDate[6] && withDate[6].includes("/")) ? withDate[6].trim() : "America/New_York";
+
+      let hour = hour12 % 12;
+      if (ampm === "pm") hour += 12;
+
+      const now = new Date();
+      const year = now.getUTCFullYear();
+      let untilMs = buildUtcFromLocalParts(year, month, day, hour, minute, timeZone);
+      if (untilMs == null) return null;
+
+      // If parsed date is already in the past, assume next year.
+      if (untilMs <= Date.now() - (5 * 60 * 1000)) {
+        untilMs = buildUtcFromLocalParts(year + 1, month, day, hour, minute, timeZone) || untilMs;
+      }
+      return untilMs;
+    }
+
+    // Pattern: "resets 3pm (America/New_York)"
+    const timeOnly = raw.match(/resets?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)(?:\s*\(([^)]+)\))?/i);
+    if (!timeOnly) return null;
+
+    const hour12 = Number.parseInt(timeOnly[1], 10);
+    const minute = timeOnly[2] ? Number.parseInt(timeOnly[2], 10) : 0;
+    const ampm = (timeOnly[3] || "").toLowerCase();
+    const timeZone = (timeOnly[4] && timeOnly[4].includes("/")) ? timeOnly[4].trim() : "America/New_York";
+
+    let hour = hour12 % 12;
+    if (ampm === "pm") hour += 12;
+
+    const dateStr = new Intl.DateTimeFormat("en-CA", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(new Date());
+    const [y, mo, d] = dateStr.split("-").map((n) => Number.parseInt(n, 10));
+
+    let untilMs = buildUtcFromLocalParts(y, mo - 1, d, hour, minute, timeZone);
+    if (untilMs == null) return null;
+    if (untilMs <= Date.now()) {
+      const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000);
+      const tDateStr = new Intl.DateTimeFormat("en-CA", {
+        timeZone,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+      }).format(tomorrow);
+      const [ty, tmo, td] = tDateStr.split("-").map((n) => Number.parseInt(n, 10));
+      untilMs = buildUtcFromLocalParts(ty, tmo - 1, td, hour, minute, timeZone) || untilMs;
+    }
+    return untilMs;
   }
 
   /**
@@ -131,6 +286,18 @@ class ClaudeEngine extends EventEmitter {
     try {
       const msg = JSON.parse(line);
       const type = msg.type;
+
+      // Codex stream-json style messages can use text/delta/output_text/message.
+      const codexText =
+        (typeof msg.delta === "string" && msg.delta) ||
+        (typeof msg.text === "string" && msg.text) ||
+        (typeof msg.output_text === "string" && msg.output_text) ||
+        (typeof msg.message === "string" && msg.message) ||
+        null;
+      if (codexText) {
+        const first = codexText.split("\n").find((l) => l.trim());
+        return first ? first.trim().slice(0, 120) : null;
+      }
 
       if (type === "assistant") {
         // Extract text from assistant messages
@@ -462,11 +629,22 @@ Start by reading engine-work-log.md to see recent work, then update the priority
     }
 
     const status = await getClaudeCodeStatus();
-    const backend = backendOverride || (status.ready ? "claude" : null);
+    const codexReady = this.isCodexReady();
+    this.clearExpiredClaudeLimit();
+    const claudeLimited = this.claudeRateLimitedUntilMs && Date.now() < this.claudeRateLimitedUntilMs;
+    const backend = backendOverride || (
+      claudeLimited
+        ? (codexReady ? "codex" : (status.ready ? "claude" : null))
+        : (status.ready ? "claude" : (codexReady ? "codex" : null))
+    );
 
     if (!backend) {
-      this.emit("status", "Claude Code CLI not ready — check installation");
-      return { success: false, reason: "Claude Code CLI not ready" };
+      this.emit("status", "No CLI backend is ready (Claude/Codex) - check installation/login.");
+      return { success: false, reason: "No CLI backend ready" };
+    }
+
+    if (claudeLimited && backend === "codex") {
+      this.emit("status", `Claude rate-limited until ${new Date(this.claudeRateLimitedUntilMs).toLocaleString()} - using Codex.`);
     }
 
     this.ensureWorkFile();
@@ -475,12 +653,13 @@ Start by reading engine-work-log.md to see recent work, then update the priority
     this.currentBackend = backend;
     this.currentStartTime = Date.now();
 
+    const backendLabel = backend === "codex" ? "Codex" : "Claude";
     const narrator = getActivityNarrator();
-    narrator.setState("WORKING", "Claude terminal open");
+    narrator.setState("WORKING", `${backendLabel} terminal open`);
     narrator.setGoal("Working in terminal window");
     narrator.setClaudeCodeActive(true, "working");
 
-    this.emit("status", "Opening Claude terminal...");
+    this.emit("status", `Opening ${backendLabel} terminal...`);
     this.emit("started");
 
     // Mark that we're starting work (will detect specific project later)
@@ -489,14 +668,18 @@ Start by reading engine-work-log.md to see recent work, then update the priority
     const prompt = this.buildPrompt();
     const cwd = process.cwd();
     const backboneRoot = getBackboneRoot();
-    const addDirArg =
+    const claudeAddDirArg =
       backboneRoot && fs.existsSync(backboneRoot)
         ? `--add-dir "${backboneRoot}"`
         : "";
+    const codexHome = path.join(DATA_DIR, "codex-home");
+    try { fs.mkdirSync(codexHome, { recursive: true }); } catch {}
+    const codexModel = process.env.CODEX_CLI_MODEL || "gpt-5.3-codex";
+    const codexReasoning = String(process.env.CODEX_REASONING_EFFORT || "xhigh").trim() || "xhigh";
 
     // Write prompt to a temp file to avoid cmd.exe quoting/newline issues
     const promptPath = path.join(os.tmpdir(), `backbone-cli-prompt-${Date.now()}.txt`);
-    const logPath = path.join(os.tmpdir(), `backbone-cli-log-claude-${Date.now()}.txt`);
+    const logPath = path.join(os.tmpdir(), `backbone-cli-log-${backend}-${Date.now()}.txt`);
     this.currentLogPath = logPath;
     this.lastLogSize = 0;
     fs.writeFileSync(promptPath, prompt, "utf-8");
@@ -505,17 +688,22 @@ Start by reading engine-work-log.md to see recent work, then update the priority
 
     // Create a batch script that runs CLI and then pauses briefly so user can see result
     // IMPORTANT: Unset ANTHROPIC_API_KEY so CLI uses Pro/Max OAuth subscription instead of API key
+    const runCommand = backend === "codex"
+      ? `type "${promptPath}" | "${CODEX_CMD}" exec --json --full-auto --color never --add-dir "${codexHome}" -C "${cwd}" -m "${codexModel}" -c model_reasoning_effort=${codexReasoning} - > "${logPath}" 2>&1`
+      : `type "${promptPath}" | "${CLAUDE_CMD}" --print --verbose --output-format stream-json --dangerously-skip-permissions ${claudeAddDirArg} --allowedTools "Read,Glob,Grep,WebFetch,WebSearch,Task,Write,Edit,Bash,mcp__backbone-google,mcp__backbone-linkedin,mcp__backbone-contacts,mcp__backbone-news,mcp__backbone-life,mcp__backbone-health,mcp__backbone-trading,mcp__backbone-projects" > "${logPath}" 2>&1`;
+
     const batchContent = `@echo off
-title BACKBONE Claude
+title BACKBONE ${backendLabel}
 cd /d "${cwd}"
 set ANTHROPIC_API_KEY=
+set "CODEX_HOME=${codexHome}"
 echo.
 echo ========================================
-echo BACKBONE Claude Engine
+echo BACKBONE ${backendLabel} Engine
 echo ========================================
 echo.
-echo Running Claude Code CLI...
-type "${promptPath}" | "${CLAUDE_CMD}" --print --verbose --output-format stream-json --dangerously-skip-permissions ${addDirArg} --allowedTools "Read,Glob,Grep,WebFetch,WebSearch,Task,Write,Edit,Bash,mcp__backbone-google,mcp__backbone-linkedin,mcp__backbone-contacts,mcp__backbone-news,mcp__backbone-life,mcp__backbone-health,mcp__backbone-trading,mcp__backbone-projects" > "${logPath}" 2>&1
+echo Running ${backendLabel} CLI...
+${runCommand}
 echo.
 echo ========================================
 echo Work complete. Window closing in 5 seconds...
@@ -526,7 +714,7 @@ timeout /t 5
 `;
 
     // Write batch file
-    const batchPath = path.join(os.tmpdir(), `backbone-cli-work-claude.bat`);
+    const batchPath = path.join(os.tmpdir(), `backbone-cli-work-${backend}.bat`);
     fs.writeFileSync(batchPath, batchContent);
 
     // Open a new visible terminal window in background (behind BACKBONE) and track PID
@@ -581,13 +769,13 @@ Write-Output $p.Id
       const pid = parseInt(String(stdout || "").trim(), 10);
       if (Number.isFinite(pid)) {
         this.currentPid = pid;
-        this.emit("status", `Claude terminal PID: ${pid}`);
+        this.emit("status", `${backendLabel} terminal PID: ${pid}`);
       } else {
         this.currentPid = null;
       }
     });
 
-    this.emit("status", "Terminal opened - Claude is working");
+    this.emit("status", `Terminal opened - ${backendLabel} is working`);
 
     // Check for completion by watching the current-work.md file
     const startTime = Date.now();
@@ -623,6 +811,15 @@ Write-Output $p.Id
 
       if (rateLimited) {
         this.lastRateLimitAt = Date.now();
+        if (backend === "claude") {
+          const untilMs = this.parseClaudeResetUntilMs(logTail) || (Date.now() + 30 * 60 * 1000);
+          this.claudeRateLimitedUntilMs = untilMs;
+          this.emit("status", `Claude hit limit - using Codex until ${new Date(untilMs).toLocaleString()}.`);
+          this.saveState();
+        }
+      } else if (backend === "claude" && this.claudeRateLimitedUntilMs) {
+        this.claudeRateLimitedUntilMs = null;
+        this.saveState();
       }
 
       // Check for auth errors first - these should not retry
@@ -636,7 +833,7 @@ Write-Output $p.Id
         this.emit("status", "Work complete - files updated");
         this.emit("complete", { success: true, workStatus: currentContent });
       } else if (reason === "process-exited") {
-        this.emit("status", "Claude terminal closed");
+        this.emit("status", `${backendLabel} terminal closed`);
         this.emit("complete", { success: true, reason: "process-exited" });
       } else {
         this.emit("status", "Timeout - check terminal");
@@ -659,7 +856,7 @@ Write-Output $p.Id
       // Failed runs (auth errors, quick exits, rate limits) should NOT block the next run
       if (wasSuccessful || wasNormalExit) {
         this.lastRunCompletedAt = Date.now();
-        saveEngineState({ lastRunCompletedAt: new Date(this.lastRunCompletedAt).toISOString() });
+        this.saveState();
       }
 
       const logEntry = `\n## ${new Date().toISOString()}\n` +
@@ -675,22 +872,22 @@ Write-Output $p.Id
         return;
       }
 
-      // If Claude hit rate limit, wait and retry
+      // If the run hit a rate limit, retry quickly and let start() choose backend.
       if (!this.triedRetry && rateLimited) {
         this.triedRetry = true;
-        this.emit("status", "Claude rate-limited - retrying in 2 minutes");
+        this.emit("status", "Rate-limited - retrying in 30s (Codex fallback if available)");
         setTimeout(() => {
-          if (!this.isRunning) this.start("claude");
-        }, 120000);
+          if (!this.isRunning) this.start();
+        }, 30000);
         return;
       }
 
       // If Claude exited immediately, retry after a delay
       if (!this.triedRetry && quickExit) {
         this.triedRetry = true;
-        this.emit("status", "Claude exited quickly - retrying in 30s");
+        this.emit("status", `${backendLabel} exited quickly - retrying in 30s`);
         setTimeout(() => {
-          if (!this.isRunning) this.start("claude");
+          if (!this.isRunning) this.start();
         }, 30000);
         return;
       }
@@ -747,7 +944,7 @@ Write-Output $p.Id
         } catch {}
       }
 
-      // If Claude hasn't produced any output in 60s, retry
+      // If backend hasn't produced any output in 60s, retry
       if (
         !this.triedRetry &&
         elapsed > 60 * 1000
@@ -763,14 +960,14 @@ Write-Output $p.Id
           return;
         }
         this.triedRetry = true;
-        this.emit("status", "Claude stalled >60s - restarting");
+        this.emit("status", `${backendLabel} stalled >60s - restarting`);
         if (this.currentPid) {
           exec(`taskkill /T /F /PID ${this.currentPid}`, { windowsHide: true }, () => {});
           this.currentPid = null;
         }
         this.isRunning = false;
         setTimeout(() => {
-          if (!this.isRunning) this.start("claude");
+          if (!this.isRunning) this.start();
         }, 1000);
         clearInterval(checkInterval);
         return;
@@ -825,7 +1022,9 @@ Write-Output $p.Id
   }
 
   getStatus() {
+    this.clearExpiredClaudeLimit();
     const timeSince = this.getTimeSinceLastRun();
+    const claudeLimitActive = this.claudeRateLimitedUntilMs && Date.now() < this.claudeRateLimitedUntilMs;
     return {
       isRunning: this.isRunning,
       workCount: this.workCount,
@@ -833,7 +1032,9 @@ Write-Output $p.Id
       lastRunCompletedAt: this.lastRunCompletedAt ? new Date(this.lastRunCompletedAt).toISOString() : null,
       lastRunMinutesAgo: timeSince !== null ? Math.round(timeSince / 60000) : null,
       cooldown: this.isInCooldown(),
-      cooldownRemainingMin: this.isInCooldown() ? Math.ceil((ENGINE_COOLDOWN_MS - timeSince) / 60000) : 0
+      cooldownRemainingMin: this.isInCooldown() ? Math.ceil((ENGINE_COOLDOWN_MS - timeSince) / 60000) : 0,
+      claudeRateLimited: Boolean(claudeLimitActive),
+      claudeRateLimitedUntil: claudeLimitActive ? new Date(this.claudeRateLimitedUntilMs).toISOString() : null
     };
   }
 }

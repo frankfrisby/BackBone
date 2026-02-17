@@ -170,14 +170,50 @@ function buildWorldSnapshot() {
     const losers = [...tickers].filter(t => (t.changePercent || 0) < 0).sort((a, b) => a.changePercent - b.changePercent).slice(0, 3);
     const avgChange = tickers.reduce((s, t) => s + (t.changePercent || 0), 0) / tickers.length;
 
+    // Find SPY specifically for market context
+    const spy = tickers.find(t => t.symbol === "SPY");
+
     snapshot.marketSummary = {
       direction: avgChange >= 0 ? "up" : "down",
       avgChange: Math.round(avgChange * 100) / 100,
+      spy: spy ? { price: spy.price || spy.lastPrice, change: Math.round((spy.changePercent || 0) * 100) / 100 } : null,
       topGainers: gainers.map(t => ({ symbol: t.symbol, change: Math.round((t.changePercent || 0) * 100) / 100 })),
       topLosers: losers.map(t => ({ symbol: t.symbol, change: Math.round((t.changePercent || 0) * 100) / 100 })),
       tickerCount: tickers.length
     };
+
+    // SPY forward projection from overnight research
+    const predictionCache = loadJson(path.join(DATA_DIR, "prediction-cache.json"));
+    if (predictionCache?.predictions && snapshot.marketSummary) {
+      const predictions = Array.isArray(predictionCache.predictions)
+        ? predictionCache.predictions
+        : Object.values(predictionCache.predictions);
+      const spyPred = predictions.find(p => p?.symbol === "SPY");
+      if (spyPred?.predictionScore != null) {
+        const ps = spyPred.predictionScore;
+        const arrow = ps >= 7 ? "↑" : ps >= 5.5 ? "↗" : ps >= 4.5 ? "→" : ps >= 3 ? "↘" : "↓";
+        snapshot.marketSummary.spyProjection = { score: Math.round(ps * 10) / 10, arrow };
+      }
+    }
   }
+
+  // Recession score — macro risk context + forward projection
+  try {
+    const recessionData = loadJson(path.join(DATA_DIR, "recession-score.json"));
+    if (recessionData?.score != null) {
+      snapshot.recessionScore = {
+        score: recessionData.score,
+        label: recessionData.score <= 2 ? "Low risk" :
+               recessionData.score <= 4 ? "Mild" :
+               recessionData.score <= 6 ? "Elevated" :
+               recessionData.score <= 8 ? "High" : "Severe",
+        elevated: Object.entries(recessionData.components || {})
+          .filter(([, v]) => (v.score || 0) >= 7)
+          .map(([k, v]) => ({ factor: k, score: v.score })),
+        projection: recessionData.projection || null,
+      };
+    }
+  } catch {}
 
   return snapshot;
 }
@@ -259,6 +295,85 @@ function buildPortfolioSection() {
   }
 
   return section;
+}
+
+/**
+ * Build top 3 ticker picks with reasoning from prediction research.
+ * Each pick includes: symbol, score, price, and a short "why" explanation.
+ */
+function buildTopPicksSection() {
+  try {
+    const tickersCache = loadJson(path.join(DATA_DIR, "tickers-cache.json"));
+    const predictionCache = loadJson(path.join(DATA_DIR, "prediction-cache.json"));
+    const convictions = loadJson(path.join(DATA_DIR, "research-convictions.json"));
+
+    const tickers = Array.isArray(tickersCache) ? tickersCache : (tickersCache?.tickers || []);
+    if (tickers.length === 0) return null;
+
+    // Sort by effective score (includes conviction boosts)
+    const sorted = tickers
+      .filter(t => (t.effectiveScore || t.score || 0) >= 5) // Minimum quality bar
+      .sort((a, b) => (b.effectiveScore || b.score || 0) - (a.effectiveScore || a.score || 0))
+      .slice(0, 3);
+
+    if (sorted.length === 0) return null;
+
+    // Enrich each pick with research reasoning
+    const picks = sorted.map(t => {
+      const symbol = t.symbol;
+      const score = (t.effectiveScore || t.score || 0).toFixed(1);
+      const price = t.price || t.lastPrice;
+
+      // Get prediction research analysis if available
+      let reason = "";
+      if (predictionCache?.predictions) {
+        const pred = predictionCache.predictions[symbol] || predictionCache.predictions[symbol.toUpperCase()];
+        if (pred?.analysis) {
+          // Extract first meaningful sentence from the analysis
+          reason = pred.analysis
+            .split(/[.!]/)
+            .filter(s => s.trim().length > 15)
+            .slice(0, 2)
+            .join(". ")
+            .trim();
+          if (reason && !reason.endsWith(".")) reason += ".";
+        }
+      }
+
+      // Check for conviction boost
+      let convictionNote = "";
+      if (Array.isArray(convictions)) {
+        const c = convictions.find(cv => cv.symbol === symbol && !cv.expired);
+        if (c) {
+          convictionNote = c.reason || "";
+        }
+      }
+
+      // Build the "why" — prefer conviction reason, fallback to prediction analysis
+      let why = convictionNote || reason || "";
+      if (!why) {
+        // Generate basic reason from score components
+        const parts = [];
+        if (t.macdTrend === "bullish") parts.push("bullish MACD");
+        if ((t.volumeScore || 0) > 60) parts.push("strong volume");
+        if ((t.predictionScore || 0) >= 7) parts.push("high prediction score");
+        if (t.rsi && t.rsi < 35) parts.push("oversold RSI");
+        why = parts.length > 0 ? parts.join(", ") : "strong technical setup";
+      }
+
+      return {
+        symbol,
+        score: parseFloat(score),
+        price,
+        why: why.slice(0, 200),
+        hasConviction: !!convictionNote,
+      };
+    });
+
+    return picks;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -515,6 +630,7 @@ export function generateDailyBrief() {
   const systemActivity = buildSystemActivity();
   const worldSnapshot = buildWorldSnapshot();
   const portfolio = buildPortfolioSection();
+  const topPicks = buildTopPicksSection();
   const health = buildHealthSection();
   const goals = buildGoalsSection();
   const calendar = buildCalendarSection();
@@ -569,7 +685,10 @@ export function generateDailyBrief() {
     actionItems: actionItems.length > 0 ? actionItems : null,
     lifeScores,
 
-    // NEW: Core goals progress (wealth, income, career)
+    // Top 3 ticker picks with reasoning
+    topPicks: topPicks && topPicks.length > 0 ? topPicks : null,
+
+    // Core goals progress (wealth, income, career)
     coreGoals: coreGoals && coreGoals.length > 0 ? coreGoals : null,
     goalActions: goalActions && goalActions.length > 0 ? goalActions : null,
 
@@ -609,40 +728,37 @@ function buildSummaryLine({ health, goals, portfolio, actionItems, worldSnapshot
 function generateMorningOpening(brief) {
   const now = new Date();
   const dayName = now.toLocaleDateString("en-US", { weekday: "long" });
-  const hour = now.getHours();
 
-  // Day-specific context
   const isMonday = now.getDay() === 1;
   const isFriday = now.getDay() === 5;
   const isWeekend = now.getDay() === 0 || now.getDay() === 6;
 
-  // Health-based personalization
   const sleepScore = brief.health?.sleep?.score;
   const readinessScore = brief.health?.readiness?.score;
+  const dayPL = brief.portfolio?.dayPL;
 
-  let opening = "";
-
+  // Conversational — like a friend who knows your data
   if (isWeekend) {
-    opening = sleepScore >= 80
-      ? `Happy ${dayName}. You're well-rested — a good day to recharge or tackle something ambitious.`
-      : `Happy ${dayName}. Take it easy today; your body could use the rest.`;
-  } else if (isMonday) {
-    opening = readinessScore >= 80
-      ? `Good morning. Fresh week, strong start — your readiness is high at ${readinessScore}.`
-      : `Good morning. New week ahead. Start steady; your body's still warming up.`;
-  } else if (isFriday) {
-    opening = `Good morning. Friday's here — one more strong push to close out the week.`;
-  } else if (sleepScore && sleepScore >= 85) {
-    opening = `Good morning. Excellent sleep last night (${sleepScore}) — you're primed for a focused day.`;
-  } else if (sleepScore && sleepScore < 65) {
-    opening = `Good morning. Sleep was rough (${sleepScore}). Consider lighter cognitive load today.`;
-  } else if (readinessScore && readinessScore >= 85) {
-    opening = `Good morning. Your body is ready (${readinessScore}) — great day for challenging work or exercise.`;
-  } else {
-    opening = `Good morning. Here's what you need to know for ${dayName}.`;
+    if (sleepScore >= 80) return "Slept well. Good day to recharge or get after something you've been putting off.";
+    return "Easy day. No rush.";
   }
+  if (isMonday) {
+    if (readinessScore >= 80) return `Readiness at ${readinessScore} — you're sharp. Let's have a strong week.`;
+    return "New week. Start steady, build momentum.";
+  }
+  if (isFriday) return "Friday. One solid push and the week's yours.";
 
-  return opening;
+  if (sleepScore && sleepScore >= 85) return `Slept great last night (${sleepScore}). Good day to tackle the hard stuff.`;
+  if (sleepScore && sleepScore < 60) return `Rough sleep (${sleepScore}). Keep it light if you can.`;
+  if (readinessScore && readinessScore >= 85) return `Body's ready (${readinessScore}). Good day for a workout or deep work.`;
+
+  // Default — vary it
+  const defaults = [
+    `Here's where things stand.`,
+    `Quick rundown for ${dayName}.`,
+    `Morning. Let's get into it.`,
+  ];
+  return defaults[now.getDate() % defaults.length];
 }
 
 /**
@@ -656,92 +772,98 @@ function formatHealthNarrative(health) {
   const hrv = health.hrv;
   const activity = health.activity?.score;
 
-  let narrative = "*YOUR BODY*\n";
+  const parts = [];
 
-  // Sleep insight
-  if (sleep) {
-    if (sleep >= 85) {
-      narrative += `Sleep: ${sleep} — excellent recovery. Deep work sessions will be effective today.\n`;
-    } else if (sleep >= 70) {
-      narrative += `Sleep: ${sleep} — solid rest. You should feel steady throughout the day.\n`;
-    } else if (sleep >= 55) {
-      narrative += `Sleep: ${sleep} — below baseline. Prioritize important tasks in the morning.\n`;
-    } else {
-      narrative += `Sleep: ${sleep} — poor night. Keep today's agenda light if possible.\n`;
-    }
-  }
-
-  // Readiness insight
-  if (readiness) {
-    if (readiness >= 85) {
-      narrative += `Readiness: ${readiness} — your body is primed for physical or mental challenges.\n`;
-    } else if (readiness >= 70) {
-      narrative += `Readiness: ${readiness} — good to go for normal activities.\n`;
+  // Weave sleep + readiness into a natural sentence
+  if (sleep && readiness) {
+    if (sleep >= 85 && readiness >= 85) {
+      parts.push(`Slept great (${sleep}) and readiness is high (${readiness}) — you're firing on all cylinders today.`);
+    } else if (sleep >= 70 && readiness >= 70) {
+      parts.push(`Solid night — sleep ${sleep}, readiness ${readiness}. You're good to go.`);
+    } else if (sleep < 60) {
+      parts.push(`Rough sleep last night (${sleep}). Readiness at ${readiness}. Keep it lighter today if you can.`);
     } else if (readiness < 60) {
-      narrative += `Readiness: ${readiness} — take it easy; recovery mode recommended.\n`;
-    }
-  }
-
-  // HRV context (if significantly different from baseline)
-  if (hrv) {
-    narrative += `HRV: ${hrv}ms — `;
-    if (hrv >= 50) {
-      narrative += "strong autonomic balance.\n";
-    } else if (hrv >= 30) {
-      narrative += "within normal range.\n";
+      parts.push(`Sleep was okay (${sleep}) but readiness is low (${readiness}). Your body's saying take it easy.`);
     } else {
-      narrative += "lower than ideal; stress or fatigue likely.\n";
+      parts.push(`Sleep ${sleep}, readiness ${readiness}. Solid enough to have a productive day.`);
     }
+  } else if (sleep) {
+    if (sleep >= 85) parts.push(`Great sleep last night — ${sleep}. Take advantage of it.`);
+    else if (sleep >= 70) parts.push(`Sleep was decent — ${sleep}.`);
+    else parts.push(`Sleep was rough — ${sleep}. Go easy on yourself.`);
+  } else if (readiness) {
+    if (readiness >= 80) parts.push(`Readiness is at ${readiness}. You're good.`);
+    else if (readiness < 60) parts.push(`Readiness is low (${readiness}). Recovery day.`);
   }
 
-  return narrative;
+  // HRV only if notable
+  if (hrv && hrv < 30) {
+    parts.push(`HRV is low (${hrv}ms) — might be stress or fatigue.`);
+  }
+
+  return parts.length > 0 ? parts.join(" ") + "\n" : null;
 }
 
 /**
  * Generate market narrative with context
  */
 function formatMarketNarrative(worldSnapshot, portfolio) {
-  if (!worldSnapshot?.marketSummary) return null;
+  if (!worldSnapshot?.marketSummary && !worldSnapshot?.recessionScore) return null;
+
+  const parts = [];
 
   const ms = worldSnapshot.marketSummary;
-  const avgChange = ms.avgChange || 0;
-  const isMarketUp = avgChange >= 0;
-
-  let narrative = "*MARKETS*\n";
-
-  // Market direction with context
-  if (Math.abs(avgChange) < 0.3) {
-    narrative += `Markets are flat this morning (${avgChange >= 0 ? "+" : ""}${avgChange.toFixed(2)}%) — no strong directional move.`;
-  } else if (avgChange >= 1.5) {
-    narrative += `Strong rally underway — SPY up ${avgChange.toFixed(2)}%. Risk-on sentiment.`;
-  } else if (avgChange <= -1.5) {
-    narrative += `Selloff in progress — SPY down ${Math.abs(avgChange).toFixed(2)}%. Consider defensive positioning.`;
-  } else if (avgChange >= 0.5) {
-    narrative += `Markets trending higher (SPY +${avgChange.toFixed(2)}%) — mild bullish tone.`;
-  } else if (avgChange <= -0.5) {
-    narrative += `Markets under pressure (SPY ${avgChange.toFixed(2)}%) — cautious positioning warranted.`;
-  } else {
-    const sign = avgChange >= 0 ? "+" : "";
-    narrative += `SPY ${sign}${avgChange.toFixed(2)}% — mixed signals.`;
-  }
-
-  // Top movers with context
-  if (ms.topGainers?.length > 0) {
-    const topGainer = ms.topGainers[0];
-    narrative += `\nLeading: ${topGainer.symbol} +${topGainer.change}%`;
-    if (ms.topGainers.length > 1) {
-      narrative += `, ${ms.topGainers[1].symbol} +${ms.topGainers[1].change}%`;
+  if (ms) {
+    let marketLine = "";
+    if (ms.spy?.price) {
+      const spySign = (ms.spy.change || 0) >= 0 ? "+" : "";
+      marketLine = `SPY $${Number(ms.spy.price).toFixed(2)} (${spySign}${ms.spy.change}%)`;
+    } else {
+      const avgChange = ms.avgChange || 0;
+      const sign = avgChange >= 0 ? "+" : "";
+      marketLine = `SPY ${sign}${avgChange.toFixed(2)}%`;
     }
+
+    // Add projection arrow from overnight research
+    if (ms.spyProjection) {
+      marketLine += ` Proj ${ms.spyProjection.arrow}`;
+    }
+
+    const avgChange = ms.avgChange || 0;
+    if (Math.abs(avgChange) < 0.3) marketLine += ` — flat day.`;
+    else if (avgChange >= 1.5) marketLine += ` — strong rally.`;
+    else if (avgChange <= -1.5) marketLine += ` — selling pressure.`;
+    else if (avgChange >= 0.5) marketLine += ` — green.`;
+    else if (avgChange <= -0.5) marketLine += ` — red.`;
+    else marketLine += ` — mixed.`;
+    parts.push(marketLine);
+
+    const movers = [];
+    if (ms.topGainers?.[0]) movers.push(`${ms.topGainers[0].symbol} +${ms.topGainers[0].change}%`);
+    if (ms.topLosers?.[0]) movers.push(`${ms.topLosers[0].symbol} ${ms.topLosers[0].change}%`);
+    if (movers.length > 0) parts.push(`Movers: ${movers.join(", ")}`);
   }
 
-  if (ms.topLosers?.length > 0) {
-    const topLoser = ms.topLosers[0];
-    narrative += `\nLagging: ${topLoser.symbol} ${topLoser.change}%`;
+  const rs = worldSnapshot.recessionScore;
+  if (rs && rs.score >= 4) {
+    // Only mention recession risk when it's actually elevated
+    let riskLine = `Recession risk: ${rs.score.toFixed(1)}/10`;
+    if (rs.projection) {
+      riskLine += ` ${rs.projection.projectionArrow} ${rs.projection.projection30d}/10 in 30d`;
+    }
+    if (rs.elevated?.length > 0) riskLine += ` (${rs.elevated.map(e => e.factor).join(", ")})`;
+    parts.push(riskLine);
+  } else if (rs?.projection && rs.projection.trend === "worsening") {
+    // Warn if recession risk is low but trending up
+    parts.push(`Recession risk: ${rs.score.toFixed(1)}/10 ${rs.projection.projectionArrow} trending up`);
   }
 
-  narrative += "\n";
-  return narrative;
+  return parts.join("\n") + "\n";
 }
+
+/**
+ * Format news headlines — what's happening in the world that matters.
+ */
 
 /**
  * Generate portfolio narrative with P&L context
@@ -749,48 +871,61 @@ function formatMarketNarrative(worldSnapshot, portfolio) {
 function formatPortfolioNarrative(portfolio) {
   if (!portfolio) return null;
 
-  let narrative = "*PORTFOLIO*\n";
+  let narrative = "";
 
-  // Equity and P&L
   if (portfolio.equity) {
-    narrative += `Value: $${Number(portfolio.equity).toLocaleString()}`;
+    const eqStr = `$${Number(portfolio.equity).toLocaleString()}`;
 
     if (portfolio.dayPL != null) {
       const plSign = portfolio.dayPL >= 0 ? "+" : "";
       const plAbs = Math.abs(portfolio.dayPL);
 
       if (Math.abs(portfolio.dayPLPercent || 0) >= 3) {
-        narrative += ` — *${plSign}$${plAbs.toFixed(0)}* significant move`;
-      } else if (portfolio.dayPL >= 0) {
-        narrative += ` (${plSign}$${plAbs.toFixed(0)} today)`;
+        narrative += `Portfolio at ${eqStr} — *${plSign}$${plAbs.toFixed(0)} today*. Big move.`;
+      } else if (portfolio.dayPL >= 10) {
+        narrative += `Portfolio at ${eqStr}, up $${plAbs.toFixed(0)} today.`;
+      } else if (portfolio.dayPL <= -10) {
+        narrative += `Portfolio at ${eqStr}, down $${plAbs.toFixed(0)} today.`;
       } else {
-        narrative += ` (${plSign}$${plAbs.toFixed(0)} today)`;
+        narrative += `Portfolio at ${eqStr}. Flat day.`;
       }
+    } else {
+      narrative += `Portfolio at ${eqStr}.`;
     }
     narrative += "\n";
   }
 
-  // Positions summary
   if (portfolio.topPositions?.length > 0) {
-    narrative += "Holdings: ";
     const positionParts = portfolio.topPositions.slice(0, 3).map(pos => {
-      let part = `${pos.symbol}`;
+      let part = pos.symbol;
       if (pos.unrealizedPLPercent) {
         const sign = pos.unrealizedPLPercent >= 0 ? "+" : "";
-        part += ` (${sign}${pos.unrealizedPLPercent.toFixed(1)}%)`;
+        part += ` ${sign}${pos.unrealizedPLPercent.toFixed(1)}%`;
       }
       return part;
     });
     narrative += positionParts.join(", ") + "\n";
   }
 
-  // Active signals worth noting
-  if (portfolio.signals?.length > 0) {
-    const strongSignals = portfolio.signals.filter(s => s.score >= 8);
-    if (strongSignals.length > 0) {
-      narrative += `Strong signals: ${strongSignals.map(s => `${s.symbol} (${s.score.toFixed(1)})`).join(", ")}\n`;
+  return narrative;
+}
+
+/**
+ * Format top ticker picks with reasoning — the "what to buy" section.
+ */
+function formatTopPicksNarrative(topPicks) {
+  if (!topPicks || topPicks.length === 0) return null;
+
+  let narrative = "*Worth watching*\n";
+  topPicks.forEach((pick, i) => {
+    const priceStr = pick.price ? ` @ $${Number(pick.price).toFixed(2)}` : "";
+    narrative += `${i + 1}. *${pick.symbol}*${priceStr} — score ${pick.score}/10\n`;
+    if (pick.why) {
+      // Clean up the why — capitalize first letter, truncate
+      const why = pick.why.charAt(0).toUpperCase() + pick.why.slice(1);
+      narrative += `   _${why.slice(0, 140)}_\n`;
     }
-  }
+  });
 
   return narrative;
 }
@@ -801,7 +936,7 @@ function formatPortfolioNarrative(portfolio) {
 function formatGoalsNarrative(goals, actionItems) {
   if (!goals?.goals?.length && !actionItems?.length) return null;
 
-  let narrative = "*TODAY'S FOCUS*\n";
+  let narrative = "*On your plate*\n";
 
   // Urgent items first
   const urgent = (actionItems || []).filter(a => a.priority === "urgent");
@@ -816,8 +951,8 @@ function formatGoalsNarrative(goals, actionItems) {
     if (activeGoals.length > 0) {
       narrative += "Goals in progress:\n";
       activeGoals.slice(0, 3).forEach(g => {
-        const title = (g.title || "Untitled").length > 45
-          ? (g.title || "Untitled").slice(0, 45) + "..."
+        const title = (g.title || "Untitled").length > 80
+          ? (g.title || "Untitled").slice(0, 80) + "..."
           : (g.title || "Untitled");
         const progress = g.progress || 0;
 
@@ -841,16 +976,28 @@ function formatGoalsNarrative(goals, actionItems) {
 function formatCalendarNarrative(calendar) {
   if (!calendar || calendar.length === 0) return null;
 
-  let narrative = "*SCHEDULE*\n";
+  const now = new Date();
 
-  if (calendar.length === 1) {
-    const ev = calendar[0];
-    narrative += `${ev.time} — ${ev.title}\n`;
-  } else {
-    calendar.slice(0, 4).forEach(ev => {
-      narrative += `${ev.time} — ${ev.title}\n`;
+  // Filter out past events and sort chronologically
+  const upcoming = calendar
+    .filter(ev => {
+      if (!ev.startTime && !ev.start) return true; // Keep if no parseable time
+      const evTime = new Date(ev.startTime || ev.start);
+      return evTime > now || isNaN(evTime.getTime());
+    })
+    .sort((a, b) => {
+      const tA = new Date(a.startTime || a.start || 0);
+      const tB = new Date(b.startTime || b.start || 0);
+      return tA - tB;
     });
-  }
+
+  if (upcoming.length === 0) return null;
+
+  let narrative = "*What's ahead*\n";
+
+  upcoming.slice(0, 4).forEach(ev => {
+    narrative += `${ev.time} — ${ev.title}\n`;
+  });
 
   return narrative;
 }
@@ -861,7 +1008,7 @@ function formatCalendarNarrative(calendar) {
 function formatNewsNarrative(worldSnapshot) {
   if (!worldSnapshot?.headlines?.length) return null;
 
-  let narrative = "*WORTH KNOWING*\n";
+  let narrative = "*In the news*\n";
 
   // Pick the most relevant headlines (max 3)
   worldSnapshot.headlines.slice(0, 3).forEach(h => {
@@ -880,7 +1027,7 @@ function formatNewsNarrative(worldSnapshot) {
 function formatCoreGoalsNarrative(coreGoals, goalActions) {
   if (!coreGoals || coreGoals.length === 0) return null;
 
-  let narrative = "*GOAL PROGRESS*\n";
+  let narrative = "*Where you're at*\n";
 
   for (const goal of coreGoals) {
     const icon = goal.id === "wealth" ? "💰" :
@@ -926,64 +1073,67 @@ function generateMorningClosing(brief) {
   const sleepScore = brief.health?.sleep?.score;
   const readinessScore = brief.health?.readiness?.score;
   const hasUrgent = (brief.actionItems || []).some(a => a.priority === "urgent");
-  const marketUp = (brief.worldSnapshot?.marketSummary?.avgChange || 0) >= 0.5;
+  const hasPicks = brief.topPicks?.length > 0;
 
-  if (hasUrgent) {
-    return "_Focus on what matters most first._";
-  } else if (readinessScore >= 85 && sleepScore >= 80) {
-    return "_High energy day — make it count._";
-  } else if (sleepScore && sleepScore < 60) {
-    return "_Be kind to yourself today._";
-  } else if (marketUp) {
-    return "_Stay focused. Good luck today._";
-  } else {
-    return "_Make it a good one._";
-  }
+  if (hasUrgent) return "_Handle the priority stuff first. Everything else can wait._";
+  if (hasPicks && readinessScore >= 80) return "_Good picks on deck, energy's high. Go get it._";
+  if (sleepScore && sleepScore < 60) return "_Take it easy. Tomorrow's another day._";
+
+  // Rotate closings so it doesn't feel like a template
+  const closings = [
+    "_Let me know if you need anything._",
+    "_I'm working on your goals in the background._",
+    "_Reach out if something comes up._",
+    "_Go make it happen._",
+  ];
+  return closings[new Date().getDate() % closings.length];
 }
 
 /**
- * Format a rich morning brief for WhatsApp with bold sections and data.
- * This version is thoughtful, contextual, and well-written.
+ * Format a rich morning brief for WhatsApp.
+ * Tone: like a sharp friend who reads the news and manages your money.
+ * No corporate headers, no emoji overload, no "here's your daily brief" nonsense.
  */
 export function formatMorningWhatsApp(brief) {
   const now = new Date();
-  const dateStr = now.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+  const dayName = now.toLocaleDateString("en-US", { weekday: "long" });
+  const dateStr = now.toLocaleDateString("en-US", { month: "short", day: "numeric" });
 
-  // Build the message with narrative sections
-  let msg = `*BACKBONE*\n_${dateStr}_\n\n`;
+  // Build naturally — like a friend texting you in the morning
+  let msg = `*${dayName}, ${dateStr}*\n\n`;
 
-  // Opening — personalized based on health and day
+  // Opening — conversational, based on what matters
   msg += generateMorningOpening(brief) + "\n";
 
-  // Health narrative
+  // Health first (if you slept well, everything's easier)
   const healthSection = formatHealthNarrative(brief.health);
   if (healthSection) msg += "\n" + healthSection;
 
-  // Calendar — what's on the schedule
+  // Calendar — what's on deck
   const calendarSection = formatCalendarNarrative(brief.calendar);
   if (calendarSection) msg += "\n" + calendarSection;
 
-  // Core goals progress (wealth, income, career)
-  const coreGoalsSection = formatCoreGoalsNarrative(brief.coreGoals, brief.goalActions);
-  if (coreGoalsSection) msg += "\n" + coreGoalsSection;
-
-  // Markets narrative
-  const marketSection = formatMarketNarrative(brief.worldSnapshot, brief.portfolio);
-  if (marketSection) msg += "\n" + marketSection;
-
-  // Portfolio narrative
+  // Portfolio — how your money's doing
   const portfolioSection = formatPortfolioNarrative(brief.portfolio);
   if (portfolioSection) msg += "\n" + portfolioSection;
 
-  // Goals and focus (discrete goals/tasks)
-  const goalsSection = formatGoalsNarrative(brief.goals, brief.actionItems);
-  if (goalsSection) msg += "\n" + goalsSection;
+  // Markets + recession (context before picks)
+  const marketSection = formatMarketNarrative(brief.worldSnapshot, brief.portfolio);
+  if (marketSection) msg += "\n" + marketSection;
 
-  // News worth knowing
+  // Top picks — what's worth buying today (after market context)
+  const topPicksSection = formatTopPicksNarrative(brief.topPicks);
+  if (topPicksSection) msg += "\n" + topPicksSection;
+
+  // News — what's happening in the world
   const newsSection = formatNewsNarrative(brief.worldSnapshot);
   if (newsSection) msg += "\n" + newsSection;
 
-  // Thoughtful closing
+  // Goals — what you're working toward
+  const goalsSection = formatGoalsNarrative(brief.goals, brief.actionItems);
+  if (goalsSection) msg += "\n" + goalsSection;
+
+  // Closing — short, not cheesy
   msg += "\n" + generateMorningClosing(brief);
 
   return msg;
@@ -1032,7 +1182,7 @@ function generateEveningOpening(brief) {
 function formatTradesNarrative(portfolio) {
   if (!portfolio?.recentTrades?.length) return null;
 
-  let narrative = "*TRADES*\n";
+  let narrative = "*Trades today*\n";
 
   const trades = portfolio.recentTrades;
   const totalValue = trades.reduce((sum, t) => sum + (parseFloat(t.price) * parseFloat(t.qty || 0)), 0);
@@ -1056,7 +1206,7 @@ function formatTradesNarrative(portfolio) {
 function formatEveningPortfolioNarrative(portfolio) {
   if (!portfolio) return null;
 
-  let narrative = "*PORTFOLIO*\n";
+  let narrative = "";
 
   if (portfolio.dayPL != null) {
     const plSign = portfolio.dayPL >= 0 ? "+" : "";
@@ -1095,7 +1245,7 @@ function formatEveningActivityNarrative(health) {
 
   if (!steps && !activityScore) return null;
 
-  let narrative = "*ACTIVITY*\n";
+  let narrative = "";
 
   if (steps) {
     if (steps >= 10000) {
@@ -1193,7 +1343,8 @@ export function formatEveningWhatsApp(brief) {
   const now = new Date();
   const dateStr = now.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 
-  let msg = `*BACKBONE*\n_${dateStr} Evening_\n\n`;
+  const dayName = now.toLocaleDateString("en-US", { weekday: "long" });
+  let msg = `*${dayName} evening*\n\n`;
 
   // Opening — contextual based on the day
   msg += generateEveningOpening(brief) + "\n";

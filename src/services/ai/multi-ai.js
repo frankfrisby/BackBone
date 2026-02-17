@@ -8,6 +8,8 @@ import { getClaudeCodeStatus, runClaudeCodeStreaming } from "./claude-code-cli.j
 import { getLatestOpenAICodexModelId, kickoffModelRefresh } from "./model-registry.js";
 
 import { dataFile, getBackboneRoot } from "../paths.js";
+import { getSetting } from "../user-settings.js";
+// Vault populates process.env at startup via migration — no async import needed here
 // ═══════════════════════════════════════════════════════════════════════════
 // RATE LIMIT TRACKING - Track "wait until" times for each model
 // ═══════════════════════════════════════════════════════════════════════════
@@ -99,6 +101,22 @@ try {
     if (Number.isFinite(ms)) claudeCodeAgenticRateLimitedUntilMs = ms;
   }
 } catch { /* ignore */ }
+
+// Periodic probe window while Claude is cooldown-blocked.
+// This prevents long-running sessions from getting stuck on Codex forever.
+const DEFAULT_CLAUDE_PROBE_INTERVAL_MS = 10 * 60 * 1000;
+const parseProbeIntervalMs = (value) => {
+  const parsed = Number.parseInt(String(value ?? ""), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_CLAUDE_PROBE_INTERVAL_MS;
+  return parsed;
+};
+const parseTimeoutMs = (value, fallbackMs) => {
+  const parsed = Number.parseInt(String(value ?? ""), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallbackMs;
+  return parsed;
+};
+const CLAUDE_RATE_LIMIT_PROBE_INTERVAL_MS = parseProbeIntervalMs(process.env.BACKBONE_CLAUDE_RETRY_PROBE_MS);
+let claudeCodeRateLimitLastProbeMs = null;
 
 /**
  * Parse OpenAI API error response and return a clean message
@@ -224,7 +242,7 @@ export const MODELS = {
     contextWindow: 200000
   },
   CLAUDE_OPUS_46: {
-    id: "claude-opus-4-6-20260115",  // Hypothetical Opus 4.6 model ID
+    id: "claude-opus-4-6",
     name: "Claude Opus 4.6",
     shortName: "Opus 4.6",
     icon: "◈",
@@ -234,14 +252,14 @@ export const MODELS = {
     contextWindow: 300000
   },
   CLAUDE_OPUS: {
-    id: "claude-opus-4-5-20251101",
-    name: "Claude Opus 4.5",
-    shortName: "Opus 4.5",
+    id: "claude-opus-4-6",
+    name: "Claude Opus 4.6",
+    shortName: "Opus 4.6",
     icon: "◈",
     color: "#dc2626",
     description: "Maximum capability",
-    maxTokens: 4096,
-    contextWindow: 200000
+    maxTokens: 8192,
+    contextWindow: 300000
   },
   CLAUDE_CODE_CLI: {
     id: "claude-code-cli",
@@ -280,6 +298,7 @@ const isCodexAvailable = () => {
 };
 
 export const getMultiAIConfig = () => {
+  // Vault populates process.env on startup migration, so env vars are the source of truth
   const openaiKey = process.env.OPENAI_API_KEY;
   const anthropicKey = process.env.ANTHROPIC_API_KEY || process.env.CLAUDE_API_KEY;
   const codexAvailable = isCodexAvailable();
@@ -316,7 +335,7 @@ export const getMultiAIConfig = () => {
     },
     // Codex: Full spectrum coding (Pro/Max subscription)
     gptCodex: {
-      model: process.env.CODEX_CLI_MODEL || getLatestOpenAICodexModelId(openaiKey, "gpt-5.3-codex"),
+      model: getLatestOpenAICodexModelId(openaiKey, "gpt-5.3-codex"),
       modelInfo: MODELS.GPT52_CODEX,
       ready: codexAvailable,
       requiresCodex: true
@@ -673,7 +692,7 @@ const detectTaskType = (message) => {
 
 // ═══════════════════════════════════════════════════════════════════════════
 // SMART FALLBACK CHAIN
-// Order: Opus 4.6 → Opus 4.5 → Claude CLI → Codex (latest) → GPT 5.2 → Sonnet 4
+// Order: Opus 4.6 → Opus 4.6 → Claude CLI → Codex (latest) → GPT 5.2 → Sonnet 4
 // ═══════════════════════════════════════════════════════════════════════════
 
 const FALLBACK_CHAIN = [
@@ -828,7 +847,7 @@ export const sendMessage = async (message, context = {}, taskType = "auto") => {
   lastTaskType = taskType;
 
   // Use smart fallback chain for all requests
-  // Fallback order: Opus 4.6 → Opus 4.5 → Claude CLI → Codex (latest) → GPT 5.2 → Sonnet 4
+  // Fallback order: Opus 4.6 → Opus 4.6 → Claude CLI → Codex (latest) → GPT 5.2 → Sonnet 4
   return sendWithFallback(message, context, taskType);
 };
 
@@ -962,8 +981,13 @@ export const getAgenticCapabilities = async () => {
 /**
  * Execute agentic task with streaming output
  * Prefers Claude Code CLI, falls back to Codex CLI on Claude rate limits.
+ * Optional options.forceTool: "claude" | "codex"
+ * Optional options.alwaysTryClaude: true to probe Claude even during cooldown.
+ * Optional options.claudeProbeIntervalMs: override cooldown probe interval.
+ * Optional options.timeoutMs: override both Claude/Codex task timeout.
+ * Optional options.claudeTimeoutMs / options.codexTimeoutMs: per-tool timeout override.
  */
-export const executeAgenticTask = async (task, workDir, onOutput) => {
+export const executeAgenticTask = async (task, workDir, onOutput, options = {}) => {
   const capabilities = await getAgenticCapabilities();
 
   if (!capabilities.available) {
@@ -975,6 +999,16 @@ export const executeAgenticTask = async (task, workDir, onOutput) => {
   }
 
   const { spawn } = await import("child_process");
+  const DEFAULT_CLAUDE_TIMEOUT_MS = 180000;
+  const DEFAULT_CODEX_TIMEOUT_MS = 300000;
+  const claudeTimeoutMs = parseTimeoutMs(
+    options?.claudeTimeoutMs ?? options?.timeoutMs,
+    DEFAULT_CLAUDE_TIMEOUT_MS
+  );
+  const codexTimeoutMs = parseTimeoutMs(
+    options?.codexTimeoutMs ?? options?.timeoutMs,
+    DEFAULT_CODEX_TIMEOUT_MS
+  );
 
   const isRateLimitText = (text) => {
     const t = (text || "").toLowerCase();
@@ -1005,9 +1039,11 @@ export const executeAgenticTask = async (task, workDir, onOutput) => {
   ];
 
   const runClaudeAgentSdk = async () => {
+    currentModel = MODELS.CLAUDE_CODE_CLI;
+    lastTaskType = TASK_TYPES.AGENTIC;
     const { runClaudeAgentSdkTask } = await import("./claude-agent-sdk.js");
     const res = await runClaudeAgentSdkTask(task, workDir || process.cwd(), onOutput, {
-      timeoutMs: 180000,
+      timeoutMs: claudeTimeoutMs,
       permissionMode: process.env.BACKBONE_CLAUDE_PERMISSION_MODE || "bypassPermissions"
     });
     return {
@@ -1017,6 +1053,8 @@ export const executeAgenticTask = async (task, workDir, onOutput) => {
   };
 
   const runClaudeCodeCli = async () => {
+    currentModel = MODELS.CLAUDE_CODE_CLI;
+    lastTaskType = TASK_TYPES.AGENTIC;
     if (onOutput) onOutput({ type: "tool", tool: "claude" });
     const useStdin = process.platform === "win32";
     const claudeCmd = process.platform === "win32" ? "claude.cmd" : "claude";
@@ -1094,17 +1132,18 @@ export const executeAgenticTask = async (task, workDir, onOutput) => {
         if (!resolved) {
           resolved = true;
           proc.kill();
-          if (onOutput) onOutput({ type: "error", error: "Timeout after 3 minutes" });
+          const timeoutMin = Math.round((claudeTimeoutMs / 60000) * 10) / 10;
+          if (onOutput) onOutput({ type: "error", error: `Timeout after ${timeoutMin} minutes` });
           resolve({
             success: false,
-            error: "Request timed out after 3 minutes",
+            error: `Request timed out after ${timeoutMin} minutes`,
             output: finalText || output,
             exitCode: null,
             tool: "claude",
             rateLimited: isRateLimitText((finalText || output || "") + "\n" + (error || ""))
           });
         }
-      }, 180000);
+      }, claudeTimeoutMs);
 
       proc.stdout.on("data", (data) => {
         const chunk = data.toString();
@@ -1171,8 +1210,6 @@ export const executeAgenticTask = async (task, workDir, onOutput) => {
   };
 
   const resolveCodexModel = () => {
-    const envModel = (process.env.CODEX_CLI_MODEL || "").trim();
-    if (envModel) return envModel;
     return getLatestOpenAICodexModelId(process.env.OPENAI_API_KEY, "gpt-5.3-codex");
   };
 
@@ -1196,7 +1233,17 @@ export const executeAgenticTask = async (task, workDir, onOutput) => {
   const runCodexCli = async () => {
     const cwd = workDir || process.cwd();
     const model = resolveCodexModel();
-    const reasoning = normalizeCodexReasoningEffort(process.env.CODEX_REASONING_EFFORT || "xhigh");
+    const reasoning = normalizeCodexReasoningEffort("xhigh");
+    currentModel = {
+      ...MODELS.GPT52_CODEX,
+      id: model,
+      name: `Codex ${model} ${reasoning}`,
+      shortName: `Codex ${model}`,
+      displayName: `Codex ${model} ${reasoning}`,
+      sourceLabel: "Codex",
+      reasoning
+    };
+    lastTaskType = TASK_TYPES.AGENTIC;
     if (onOutput) onOutput({ type: "tool", tool: "codex", model, reasoning });
 
     // Codex CLI persists sessions/config under CODEX_HOME (defaults to ~/.codex).
@@ -1285,16 +1332,19 @@ export const executeAgenticTask = async (task, workDir, onOutput) => {
         if (!resolved) {
           resolved = true;
           proc.kill();
-          if (onOutput) onOutput({ type: "error", error: "Timeout after 5 minutes" });
+          const timeoutMin = Math.round((codexTimeoutMs / 60000) * 10) / 10;
+          if (onOutput) onOutput({ type: "error", error: `Timeout after ${timeoutMin} minutes` });
           resolve({
             success: false,
-            error: "Request timed out after 5 minutes",
+            error: `Request timed out after ${timeoutMin} minutes`,
             output,
             exitCode: null,
-            tool: "codex"
+            tool: "codex",
+            model,
+            reasoning
           });
         }
-      }, 300000);
+      }, codexTimeoutMs);
 
       proc.stdout.on("data", (data) => {
         const chunk = data.toString();
@@ -1332,7 +1382,9 @@ export const executeAgenticTask = async (task, workDir, onOutput) => {
             output: finalOutput,
             error,
             exitCode: code,
-            tool: "codex"
+            tool: "codex",
+            model,
+            reasoning
           });
         }
       });
@@ -1347,7 +1399,9 @@ export const executeAgenticTask = async (task, workDir, onOutput) => {
             error: err.message,
             output: "",
             exitCode: null,
-            tool: "codex"
+            tool: "codex",
+            model,
+            reasoning
           });
         }
       });
@@ -1414,25 +1468,32 @@ export const executeAgenticTask = async (task, workDir, onOutput) => {
     return untilMs;
   };
 
-  if (claudeCodeAgenticRateLimitedUntilMs && Date.now() >= claudeCodeAgenticRateLimitedUntilMs) {
+  const clearClaudeCooldown = () => {
     claudeCodeAgenticRateLimitedUntilMs = null;
+    claudeCodeRateLimitLastProbeMs = null;
     clearRateLimit("claude-code-cli");
+  };
+
+  if (claudeCodeAgenticRateLimitedUntilMs && Date.now() >= claudeCodeAgenticRateLimitedUntilMs) {
+    clearClaudeCooldown();
   }
 
-  // If Claude is known to be rate-limited right now, skip straight to Codex.
-  if (capabilities.codex && capabilities.claudeCode && claudeCodeAgenticRateLimitedUntilMs) {
-    const untilIso = new Date(claudeCodeAgenticRateLimitedUntilMs).toISOString();
-    if (onOutput) {
-      onOutput({
-        type: "stdout",
-        text: `[BACKBONE] Claude Code rate limited until ${untilIso} - using Codex now.`,
-        output: `[BACKBONE] Claude Code rate limited until ${untilIso} - using Codex now.`,
-      });
-    }
-    return runCodexCli();
-  }
+  const forcedTool = options?.forceTool === "codex" || options?.forceTool === "claude"
+    ? options.forceTool
+    : null;
+  const alwaysTryClaude = options?.alwaysTryClaude === true;
+  const probeIntervalMs = parseProbeIntervalMs(options?.claudeProbeIntervalMs ?? CLAUDE_RATE_LIMIT_PROBE_INTERVAL_MS);
 
-  if (capabilities.claudeCode) {
+  // Determine point (primary) vs secondary AI from user settings
+  const pointAI = getSetting("pointAI") || "claude";
+  const useClaudeFirst = forcedTool === "codex"
+    ? false
+    : forcedTool === "claude"
+      ? true
+      : pointAI !== "codex";
+
+  // Helper: run Claude with Agent SDK fallback to CLI
+  const runClaudeFull = async () => {
     const agentSdkEnabled =
       capabilities.claudeAgentSdk &&
       String(process.env.BACKBONE_CLAUDE_AGENT_SDK || "1") !== "0";
@@ -1441,11 +1502,8 @@ export const executeAgenticTask = async (task, workDir, onOutput) => {
 
     if (agentSdkEnabled) {
       claudeRes = await runClaudeAgentSdk();
-
       const hasText = !!(claudeRes?.output || "").trim();
-      const claudeFailed = !claudeRes?.success || !hasText;
-
-      if (claudeFailed) {
+      if (!claudeRes?.success || !hasText) {
         if (onOutput) {
           onOutput({
             type: "stdout",
@@ -1459,46 +1517,113 @@ export const executeAgenticTask = async (task, workDir, onOutput) => {
       claudeRes = await runClaudeCodeCli();
     }
 
-    const hasText = !!(claudeRes?.output || "").trim();
-    const claudeFailed = !claudeRes?.success || !hasText;
+    return claudeRes;
+  };
 
-    // If Claude is rate limited and Codex is available, switch immediately and persist the cooldown.
-    if (claudeRes?.rateLimited && capabilities.codex) {
-      const untilMs =
-        parseClaudeResetUntilMs(`${claudeRes.output || ""}\n${claudeRes.error || ""}`) ||
-        (Date.now() + 15 * 60 * 1000);
-      claudeCodeAgenticRateLimitedUntilMs = untilMs;
-      setRateLimit("claude-code-cli", new Date(untilMs).toISOString());
+  // Helper: handle Claude rate limit → persist and fallback
+  const handleClaudeRateLimit = (claudeRes) => {
+    const untilMs =
+      parseClaudeResetUntilMs(`${claudeRes.output || ""}\n${claudeRes.error || ""}`) ||
+      (Date.now() + 15 * 60 * 1000);
+    claudeCodeAgenticRateLimitedUntilMs = untilMs;
+    claudeCodeRateLimitLastProbeMs = Date.now();
+    setRateLimit("claude-code-cli", new Date(untilMs).toISOString());
+  };
 
+  // If Claude is known to be rate-limited right now, prefer Codex unless we are due for a probe.
+  if (capabilities.claudeCode && claudeCodeAgenticRateLimitedUntilMs) {
+    const nowMs = Date.now();
+    const untilIso = new Date(claudeCodeAgenticRateLimitedUntilMs).toISOString();
+    const dueForProbe =
+      alwaysTryClaude ||
+      forcedTool === "claude" ||
+      !claudeCodeRateLimitLastProbeMs ||
+      (nowMs - claudeCodeRateLimitLastProbeMs) >= probeIntervalMs;
+
+    if (!dueForProbe && capabilities.codex) {
       if (onOutput) {
         onOutput({
           type: "stdout",
-          text: "[BACKBONE] Claude Code rate limited - switching to Codex.",
-          output: "[BACKBONE] Claude Code rate limited - switching to Codex.",
+          text: `[BACKBONE] Claude Code rate limited until ${untilIso} - using Codex.`,
+          output: `[BACKBONE] Claude Code rate limited until ${untilIso} - using Codex.`,
         });
       }
-
       return runCodexCli();
     }
 
-    // If Claude failed to run for any reason and Codex is available, fall back.
-    if (claudeFailed && capabilities.codex) {
+    if (dueForProbe) {
+      claudeCodeRateLimitLastProbeMs = nowMs;
       if (onOutput) {
         onOutput({
           type: "stdout",
-          text: "[BACKBONE] Claude Code failed - using Codex.",
-          output: "[BACKBONE] Claude Code failed - using Codex.",
+          text: `[BACKBONE] Claude cooldown active until ${untilIso} - retrying Claude before fallback.`,
+          output: `[BACKBONE] Claude cooldown active until ${untilIso} - retrying Claude before fallback.`,
         });
       }
-      return runCodexCli();
     }
-
-    const { rateLimited: _rl, ...rest } = claudeRes || {};
-    return rest;
   }
 
-  if (capabilities.codex) {
-    return runCodexCli();
+  // ── Point AI: Claude first ──
+  if (useClaudeFirst) {
+    if (capabilities.claudeCode) {
+      const claudeRes = await runClaudeFull();
+      const hasText = !!(claudeRes?.output || "").trim();
+      const claudeFailed = !claudeRes?.success || !hasText;
+
+      if (claudeRes?.rateLimited && capabilities.codex) {
+        handleClaudeRateLimit(claudeRes);
+        if (onOutput) onOutput({ type: "stdout", text: "[BACKBONE] Claude rate limited - switching to Codex.", output: "[BACKBONE] Claude rate limited - switching to Codex." });
+        return runCodexCli();
+      }
+
+      if (claudeFailed && capabilities.codex) {
+        if (onOutput) onOutput({ type: "stdout", text: "[BACKBONE] Claude failed - using Codex.", output: "[BACKBONE] Claude failed - using Codex." });
+        return runCodexCli();
+      }
+
+      if (!claudeFailed && !claudeRes?.rateLimited) {
+        clearClaudeCooldown();
+      }
+
+      const { rateLimited: _rl, ...rest } = claudeRes || {};
+      return rest;
+    }
+
+    if (capabilities.codex) return runCodexCli();
+  }
+
+  // ── Point AI: Codex first ──
+  if (!useClaudeFirst) {
+    if (capabilities.codex) {
+      const codexRes = await runCodexCli();
+      const hasText = !!(codexRes?.output || "").trim();
+      const codexFailed = !codexRes?.success || !hasText;
+
+      if (codexFailed && capabilities.claudeCode) {
+        if (onOutput) onOutput({ type: "stdout", text: "[BACKBONE] Codex failed - switching to Claude.", output: "[BACKBONE] Codex failed - switching to Claude." });
+        const claudeRes = await runClaudeFull();
+        const hasClaudeText = !!(claudeRes?.output || "").trim();
+        const claudeFailed = !claudeRes?.success || !hasClaudeText;
+        if (!claudeFailed && !claudeRes?.rateLimited) {
+          clearClaudeCooldown();
+        }
+        const { rateLimited: _rl, ...rest } = claudeRes || {};
+        return rest;
+      }
+
+      return codexRes;
+    }
+
+    if (capabilities.claudeCode) {
+      const claudeRes = await runClaudeFull();
+      const hasClaudeText = !!(claudeRes?.output || "").trim();
+      const claudeFailed = !claudeRes?.success || !hasClaudeText;
+      if (!claudeFailed && !claudeRes?.rateLimited) {
+        clearClaudeCooldown();
+      }
+      const { rateLimited: _rl, ...rest } = claudeRes || {};
+      return rest;
+    }
   }
 
   return {
@@ -1610,6 +1735,7 @@ export const getAIStatus = () => {
     currentModel,
     lastTaskType,
     primaryModel: "claude-code",
+    pointAI: getSetting("pointAI") || "claude",
     anyAvailable: config.ready && (!openaiQuotaExceeded || !claudeQuotaExceeded),
     quotaStatus: {
       openai: quotaStatus.openai,

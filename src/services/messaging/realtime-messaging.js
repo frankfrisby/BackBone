@@ -153,12 +153,15 @@ export class RealtimeMessaging extends EventEmitter {
     this.listening = false;
     this.pollInterval = null;
     this.pollTimeout = null;
+    this.presenceHeartbeatTimer = null;
+    this.pendingTasksTimer = null;
     this.pollingMode = "idle";          // "idle" or "active"
     this.lastActivityTime = null;       // Last time a message was received
     this.lastMessageTime = null;
     this.messageHandler = null;
     this.presence = PRESENCE_STATUS.OFFLINE;
     this.processedMessageIds = new Set();
+    this.processedTaskIds = new Set();
 
     this.loadState();
   }
@@ -268,10 +271,19 @@ export class RealtimeMessaging extends EventEmitter {
     // Start in idle mode (poll every 3 minutes)
     this.schedulePoll();
 
+    // Start presence heartbeat (every 2 minutes keeps us "online" for the cloud function)
+    this.startPresenceHeartbeat();
+
+    // Start pending tasks processor (checks every 30s for tasks queued by cloud function)
+    this.startPendingTasksProcessor();
+
     // Initial check
     await this.checkForNewMessages();
 
-    console.log(`[RealtimeMessaging] Smart polling started (idle: 3min, active: 10sec)`);
+    // Also check for pending tasks immediately
+    await this.processPendingTasks();
+
+    console.log(`[RealtimeMessaging] Smart polling started (idle: 3min, active: 10sec, heartbeat: 2min)`);
     return { success: true };
   }
 
@@ -357,6 +369,205 @@ export class RealtimeMessaging extends EventEmitter {
   }
 
   /**
+   * Start presence heartbeat — keeps Firestore presence fresh so the cloud
+   * function knows we're online and sends typing indicator instead of GPT response.
+   * Cloud function considers us offline if lastSeen > 5 minutes ago.
+   * We heartbeat every 2 minutes to stay well within that window.
+   */
+  startPresenceHeartbeat() {
+    if (this.presenceHeartbeatTimer) clearInterval(this.presenceHeartbeatTimer);
+
+    const HEARTBEAT_INTERVAL = 2 * 60 * 1000; // 2 minutes
+
+    this.presenceHeartbeatTimer = setInterval(async () => {
+      if (!this.listening) return;
+      try {
+        await this.updatePresence(this.presence === PRESENCE_STATUS.BUSY
+          ? PRESENCE_STATUS.BUSY
+          : PRESENCE_STATUS.ONLINE);
+      } catch (err) {
+        // Non-critical — will retry next interval
+      }
+    }, HEARTBEAT_INTERVAL);
+
+    console.log("[RealtimeMessaging] Presence heartbeat started (every 2 min)");
+  }
+
+  /**
+   * Start pending tasks processor — picks up whatsapp_followup tasks
+   * queued by the cloud function when it responded with OpenAI.
+   * The local BACKBONE processes these with full context and sends a richer follow-up.
+   */
+  startPendingTasksProcessor() {
+    if (this.pendingTasksTimer) clearInterval(this.pendingTasksTimer);
+
+    const TASK_CHECK_INTERVAL = 30 * 1000; // 30 seconds
+
+    this.pendingTasksTimer = setInterval(async () => {
+      if (!this.listening) return;
+      try {
+        await this.processPendingTasks();
+      } catch (err) {
+        // Non-critical
+      }
+    }, TASK_CHECK_INTERVAL);
+  }
+
+  /**
+   * Process pending tasks from Firestore (queued by cloud function).
+   * These are follow-up tasks where the cloud gave a quick OpenAI answer
+   * and the local BACKBONE should provide a richer response with full context.
+   */
+  async processPendingTasks() {
+    if (!this.userId || !this.messageHandler) return;
+
+    try {
+      const url = `${FIRESTORE_BASE_URL}/users/${this.userId}/pendingTasks?key=${FIREBASE_CONFIG.apiKey}`;
+      const response = await this.fetchWithAuth(url);
+
+      if (!response.ok) {
+        if (response.status === 404) return; // No collection yet
+        return;
+      }
+
+      const data = await response.json();
+      const documents = data.documents || [];
+
+      for (const doc of documents) {
+        const taskId = doc.name.split("/").pop();
+        const task = parseFirestoreFields(doc.fields);
+
+        // Skip if already processed or not a whatsapp followup
+        if (task.status !== "pending" || this.processedTaskIds.has(taskId)) continue;
+        if (task.type !== "whatsapp_followup") {
+          this.processedTaskIds.add(taskId);
+          continue;
+        }
+
+        // Skip if the task is old (> 30 minutes) — the user has moved on
+        if (task.createdAt) {
+          const taskAge = Date.now() - new Date(task.createdAt).getTime();
+          if (taskAge > 30 * 60 * 1000) {
+            this.processedTaskIds.add(taskId);
+            // Mark as expired in Firestore
+            await this.updatePendingTaskStatus(taskId, "expired");
+            continue;
+          }
+        }
+
+        console.log(`[RealtimeMessaging] Processing pending task: "${(task.originalMessage || "").slice(0, 60)}"`);
+
+        // Mark task as processing
+        this.processedTaskIds.add(taskId);
+        await this.updatePendingTaskStatus(taskId, "processing");
+
+        try {
+          // Inject conversation context from the cloud function
+          const message = {
+            content: task.originalMessage || "",
+            from: task.from || "whatsapp",
+            channel: "twilio_whatsapp",
+            conversationContext: task.conversationContext || null,
+            source: "pending_task_followup",
+          };
+
+          // Process with the local message handler (full BACKBONE context)
+          const result = await this.messageHandler(message);
+
+          if (result?.content) {
+            // Check if the cloud already gave the same answer — don't send duplicates
+            const cloudResponse = (task.aiQuickResponse || "").toLowerCase().trim();
+            const localResponse = result.content.toLowerCase().trim();
+
+            // Only send follow-up if the local response is substantially different
+            const isDifferent = !cloudResponse ||
+              cloudResponse.includes("let me") ||
+              cloudResponse.includes("give me a") ||
+              cloudResponse.includes("working on") ||
+              cloudResponse.includes("pulling up") ||
+              cloudResponse.includes("i'll get back") ||
+              localResponse.length > cloudResponse.length * 1.5;
+
+            if (isDifferent && task.requiresFollowUp) {
+              // Send the richer response via WhatsApp
+              const whatsapp = getWhatsAppNotifications();
+              const formattedResponse = result.content;
+
+              // Send via Twilio directly
+              try {
+                const { getTwilioWhatsApp } = await import("./twilio-whatsapp.js");
+                const wa = getTwilioWhatsApp();
+                if (wa.initialized && task.from) {
+                  const { formatAIResponse, chunkMessage } = await import("./whatsapp-formatter.js");
+                  const formatted = formatAIResponse(formattedResponse);
+                  const chunks = chunkMessage(formatted, 1500);
+                  for (const chunk of chunks) {
+                    await wa.sendMessage(task.from, chunk);
+                    if (chunks.length > 1) await new Promise(r => setTimeout(r, 500));
+                  }
+                  console.log(`[RealtimeMessaging] Sent follow-up response for pending task`);
+                }
+              } catch (sendErr) {
+                console.warn("[RealtimeMessaging] Failed to send follow-up via Twilio:", sendErr.message);
+
+                // Fallback: write to Firestore so sendTwilioResponse trigger sends it
+                await this.sendMessage(formattedResponse, {
+                  type: MESSAGE_TYPE.AI,
+                  sendToWhatsApp: true,
+                  channel: "twilio_whatsapp_response",
+                });
+              }
+
+              // Also save to Firestore for conversation history
+              await this.sendMessage(formattedResponse, {
+                type: MESSAGE_TYPE.AI,
+                metadata: { source: "local_followup", pendingTaskId: taskId },
+              });
+            }
+          }
+
+          await this.updatePendingTaskStatus(taskId, "completed");
+        } catch (err) {
+          console.error("[RealtimeMessaging] Pending task processing error:", err.message);
+          await this.updatePendingTaskStatus(taskId, "failed", err.message);
+        }
+      }
+
+      // Trim processedTaskIds to prevent unbounded growth
+      if (this.processedTaskIds.size > 200) {
+        const arr = [...this.processedTaskIds];
+        this.processedTaskIds = new Set(arr.slice(-100));
+      }
+    } catch (err) {
+      // Silent — will retry next interval
+    }
+  }
+
+  /**
+   * Update a pending task's status in Firestore
+   */
+  async updatePendingTaskStatus(taskId, status, error = null) {
+    try {
+      const fieldPaths = ["status", "processedAt"];
+      if (error) fieldPaths.push("error");
+      const updateMask = fieldPaths.map(p => `updateMask.fieldPaths=${encodeURIComponent(p)}`).join("&");
+      const url = `${FIRESTORE_BASE_URL}/users/${this.userId}/pendingTasks/${taskId}?${updateMask}&key=${FIREBASE_CONFIG.apiKey}`;
+
+      const fields = {
+        status: { stringValue: status },
+        processedAt: { timestampValue: new Date().toISOString() },
+      };
+      if (error) fields.error = { stringValue: error };
+
+      await this.fetchWithAuth(url, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fields }),
+      });
+    } catch {}
+  }
+
+  /**
    * Stop listening for messages
    */
   async stopListening() {
@@ -370,6 +581,16 @@ export class RealtimeMessaging extends EventEmitter {
     if (this.pollInterval) {
       clearInterval(this.pollInterval);
       this.pollInterval = null;
+    }
+
+    if (this.presenceHeartbeatTimer) {
+      clearInterval(this.presenceHeartbeatTimer);
+      this.presenceHeartbeatTimer = null;
+    }
+
+    if (this.pendingTasksTimer) {
+      clearInterval(this.pendingTasksTimer);
+      this.pendingTasksTimer = null;
     }
 
     // Update presence to offline
@@ -411,19 +632,80 @@ export class RealtimeMessaging extends EventEmitter {
 
         // Skip if not a user message or already completed
         if (message.type !== MESSAGE_TYPE.USER) {
-          // For WhatsApp AI responses, emit them to show in conversation
-          if (message.type === MESSAGE_TYPE.AI && message.channel?.includes("whatsapp")) {
-            this.emit("whatsapp-response", {
-              messageId,
-              content: message.content,
-              channel: message.channel,
-              timestamp: message.createdAt
-            });
+          // For cloud AI responses (from OpenAI while offline), merge into unified message log
+          // so the local AI knows what was already said to the user
+          if (message.type === MESSAGE_TYPE.AI && !this.processedMessageIds.has(messageId)) {
+            if (message.source === "cloud_openai") {
+              try {
+                const { getUnifiedMessageLog } = await import("./unified-message-log.js");
+                const log = getUnifiedMessageLog();
+                log.addAssistantMessage(message.content, MESSAGE_CHANNEL.WHATSAPP, {
+                  source: "cloud_openai",
+                  messageId
+                });
+                console.log(`[RealtimeMessaging] Merged cloud AI response into message log`);
+
+                // Route cloud conversation to topic-specific memory files
+                // Find the user message this was replying to (replyTo field or previous user msg)
+                const userContent = message.replyTo
+                  ? documents.find(d => d.name.endsWith(message.replyTo))
+                  : null;
+                const userMsg = userContent
+                  ? parseFirestoreFields(userContent.fields)?.content
+                  : null;
+                // Also try conversationInsight from the AI message itself
+                if (userMsg || message.conversationInsight) {
+                  try {
+                    const { processConversationMemory } = await import("./conversation-memory.js");
+                    processConversationMemory(
+                      userMsg || "",
+                      message.content,
+                      { source: "cloud", channel: "whatsapp" }
+                    );
+                  } catch {}
+                }
+              } catch {}
+            }
+            // Emit for UI display
+            if (message.channel?.includes("whatsapp")) {
+              this.emit("whatsapp-response", {
+                messageId,
+                content: message.content,
+                channel: message.channel,
+                timestamp: message.createdAt
+              });
+            }
           }
           this.processedMessageIds.add(messageId);
           continue;
         }
         if (isCompleted || isProcessing) {
+          // If completed by cloud, merge user message into unified log for continuity
+          if (isCompleted && !this.processedMessageIds.has(messageId) && message.content) {
+            try {
+              const { getUnifiedMessageLog } = await import("./unified-message-log.js");
+              const log = getUnifiedMessageLog();
+              const channel = message.channel?.includes("whatsapp") ? MESSAGE_CHANNEL.WHATSAPP : "app";
+              log.addUserMessage(message.content, channel, { source: "cloud_replay", messageId });
+            } catch {}
+
+            // If this user message was completed by cloud, find the AI response and route to memory
+            try {
+              const aiDoc = documents.find(d => {
+                const f = parseFirestoreFields(d.fields);
+                return f.type === MESSAGE_TYPE.AI && f.source === "cloud_openai" && f.replyTo === messageId;
+              });
+              if (aiDoc) {
+                const aiMsg = parseFirestoreFields(aiDoc.fields);
+                const { processConversationMemory } = await import("./conversation-memory.js");
+                processConversationMemory(
+                  message.content,
+                  aiMsg.content,
+                  { source: "cloud", channel: "whatsapp" }
+                );
+              }
+            } catch {}
+          }
           this.processedMessageIds.add(messageId);
           continue;
         }
@@ -558,7 +840,7 @@ export class RealtimeMessaging extends EventEmitter {
       this.saveState();
 
       // Send error response
-      await this.sendMessage("Sorry, I encountered an error processing your message.", {
+      await this.sendMessage("Sorry, I encountered an error processing your message. Please try again.", {
         type: MESSAGE_TYPE.SYSTEM,
         replyTo: messageId,
         error: error.message
@@ -902,6 +1184,9 @@ export class RealtimeMessaging extends EventEmitter {
         : RealtimeMessaging.POLL_CONFIG.IDLE_INTERVAL / 1000 + "s",
       lastActivitySecondsAgo: timeSinceActivity,
       processedCount: this.processedMessageIds.size,
+      processedTaskCount: this.processedTaskIds.size,
+      presenceHeartbeat: !!this.presenceHeartbeatTimer,
+      pendingTasksProcessor: !!this.pendingTasksTimer,
       nextPollCountdown: this.getPollCountdown(),
       nextPollSeconds: this.getSecondsUntilNextPoll(),
       lastPollTime: this.lastPollTime
@@ -918,6 +1203,82 @@ export class RealtimeMessaging extends EventEmitter {
     this.lastMessageTime = null;
     this.saveState();
     return { success: true };
+  }
+
+  /**
+   * Sync Firebase conversations into local memory files + detect recurring themes.
+   * Call on startup and periodically to ensure cloud conversations build knowledge.
+   *
+   * @param {number} limit - Max messages to pull from Firestore
+   * @returns {Promise<{ processed: number, themes: string[] }>}
+   */
+  async syncFirebaseConversations(limit = 100) {
+    if (!this.userId) return { processed: 0, themes: [] };
+
+    try {
+      const history = await this.getConversationHistory(limit);
+      if (history.length === 0) return { processed: 0, themes: [] };
+
+      const { processConversationMemory, classifyConversationTopic } = await import("./conversation-memory.js");
+
+      // Track which message IDs we've already synced (prevent duplicates)
+      const syncStatePath = path.join(DATA_DIR, "firebase-conversation-sync.json");
+      let syncState = { lastSyncAt: null, processedIds: [] };
+      try {
+        if (fs.existsSync(syncStatePath)) {
+          syncState = JSON.parse(fs.readFileSync(syncStatePath, "utf-8"));
+        }
+      } catch {}
+
+      const alreadySynced = new Set(syncState.processedIds || []);
+      const topicCounts = {};
+      let processed = 0;
+
+      // Pair user → AI messages
+      for (let i = 0; i < history.length - 1; i++) {
+        const msg = history[i];
+        const next = history[i + 1];
+
+        if (msg.type === "user" && next.type === "ai" && !alreadySynced.has(msg.id || `${i}`)) {
+          const result = processConversationMemory(msg.content, next.content, {
+            source: next.source === "cloud_openai" ? "cloud" : "local",
+            channel: "whatsapp",
+            timestamp: msg.createdAt,
+          });
+
+          if (result) {
+            processed++;
+            topicCounts[result.topicId] = (topicCounts[result.topicId] || 0) + 1;
+          }
+
+          alreadySynced.add(msg.id || `${i}`);
+          i++; // Skip the AI message
+        }
+      }
+
+      // Save sync state (keep last 500 IDs to prevent unbounded growth)
+      syncState.lastSyncAt = new Date().toISOString();
+      syncState.processedIds = [...alreadySynced].slice(-500);
+      syncState.topicCounts = topicCounts;
+      try {
+        fs.writeFileSync(syncStatePath, JSON.stringify(syncState, null, 2));
+      } catch {}
+
+      // Detect recurring themes — topics mentioned 3+ times could be core goals
+      const recurringThemes = Object.entries(topicCounts)
+        .filter(([, count]) => count >= 3)
+        .map(([topic]) => topic);
+
+      if (recurringThemes.length > 0) {
+        console.log(`[RealtimeMessaging] Recurring conversation themes: ${recurringThemes.join(", ")}`);
+      }
+
+      console.log(`[RealtimeMessaging] Firebase conversation sync: ${processed} new pairs processed`);
+      return { processed, themes: recurringThemes, topicCounts };
+    } catch (err) {
+      console.error("[RealtimeMessaging] Firebase conversation sync error:", err.message);
+      return { processed: 0, themes: [], error: err.message };
+    }
   }
 
   /**

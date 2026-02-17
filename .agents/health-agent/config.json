@@ -1,0 +1,17 @@
+{
+  "entrypoint": null,
+  "type": "engine",
+  "schedule": "cron",
+  "cron": "0 7,21 * * *",
+  "goalCategories": ["health"],
+  "keywords": ["sleep", "exercise", "workout", "nutrition", "oura", "readiness", "recovery", "weight", "diet", "supplement", "meditation", "stress"],
+  "permissions": {
+    "skills": [],
+    "mcp": ["backbone-health", "backbone-life", "backbone-whatsapp"],
+    "tools": ["health-check"],
+    "filesystem": {
+      "read": ["data/oura-data.json", "memory/health.md", "memory/health-notes.md"],
+      "write": ["memory/health.md", "memory/health-notes.md"]
+    }
+  }
+}

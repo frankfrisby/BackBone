@@ -34,6 +34,14 @@ const toolCache = new Map();
 let indexCache = null;
 
 /**
+ * Clear cached index/modules so newly scaffolded user tools are visible immediately.
+ */
+export function refreshToolIndex() {
+  indexCache = null;
+  toolCache.clear();
+}
+
+/**
  * Resolve the active user's tools directory via filesystem reads.
  * Avoids importing paths.js (circular dep risk in tool context).
  */
@@ -339,5 +347,6 @@ export default {
   getCategories,
   runTool,
   getToolHelp,
-  getToolsForAI
+  getToolsForAI,
+  refreshToolIndex
 };

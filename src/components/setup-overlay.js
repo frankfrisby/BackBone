@@ -572,7 +572,7 @@ export const getLLMSetupTabs = (currentConfig = {}, handlers = {}) => [
         description: "#1 Recommended - auto-updating OpenAI model"
       },
       {
-        value: "claude-opus-4.5",
+        value: "claude-opus-4.6",
         label: "◈ Anthropic Claude Opus (latest)",
         description: "#2 Recommended - auto-updating Claude model"
       },
@@ -650,7 +650,7 @@ export const getModelsSetupTabs = (currentConfig = {}, handlers = {}) => {
         description: "#1 Recommended - auto-updating OpenAI model"
       },
       {
-        value: "claude-opus-4.5",
+        value: "claude-opus-4.6",
         label: "◈ Anthropic Claude Opus (latest)",
         description: "#2 Recommended - auto-updating Claude model"
       },

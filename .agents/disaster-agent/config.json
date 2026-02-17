@@ -1,0 +1,17 @@
+{
+  "entrypoint": null,
+  "type": "engine",
+  "schedule": "cron",
+  "cron": "0 8 * * 1",
+  "goalCategories": ["growth", "personal"],
+  "keywords": ["risk", "disaster", "emergency", "threat", "crisis", "preparedness", "geopolitical", "war", "cyber", "supply chain"],
+  "permissions": {
+    "skills": ["disaster-assessment", "geopolitical-analysis", "rare-earth-resources"],
+    "mcp": ["backbone-news", "backbone-trading", "backbone-life"],
+    "tools": [],
+    "filesystem": {
+      "read": ["data/", "memory/", "projects/"],
+      "write": ["projects/", "memory/"]
+    }
+  }
+}

@@ -1,12 +1,13 @@
 /**
  * BACKBONE WhatsApp MCP Server
  *
- * Provides tools for sending WhatsApp messages via Twilio.
+ * Provides tools for sending WhatsApp messages via Baileys (primary)
+ * with Twilio fallback.
  * Allows Claude Code to proactively message the user and
  * check notification/messaging status.
  *
  * Uses:
- * - TwilioWhatsAppService for message delivery
+ * - Unified WhatsApp service (Baileys + Twilio fallback) for delivery
  * - WhatsAppNotifications for structured notifications
  * - Phone number from user-settings.json or phone-auth
  */
@@ -23,7 +24,7 @@ const TOOLS = [
   {
     name: "send_whatsapp",
     description:
-      "Send a WhatsApp message to the user. Uses Twilio for delivery. The user's phone number is auto-resolved from settings.",
+      "Send a WhatsApp message to the user. Uses Baileys first, then Twilio fallback. The user's phone number is auto-resolved from settings.",
     inputSchema: {
       type: "object",
       properties: {
@@ -220,7 +221,7 @@ async function resolveUserPhone() {
 }
 
 /**
- * Get or initialize the Twilio WhatsApp service.
+ * Get or initialize the unified WhatsApp service.
  */
 async function getWhatsApp() {
   const { getTwilioWhatsApp } = await import(
@@ -316,7 +317,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           result = {
             success: false,
             error:
-              "WhatsApp notifications not enabled. Configure Twilio credentials in Firebase Firestore (config/config_twilio).",
+              "WhatsApp notifications not enabled. Configure Baileys or Twilio credentials first.",
           };
           break;
         }
@@ -362,7 +363,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           "../services/messaging/twilio-whatsapp.js"
         );
         const wa = getTwilioWhatsApp();
-        const twilioStatus = wa.getStatus();
+        const whatsappStatus = wa.getStatus();
 
         const { getWhatsAppNotifications } = await import(
           "../services/messaging/whatsapp-notifications.js"
@@ -373,7 +374,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const phone = await resolveUserPhone();
 
         result = {
-          twilio: twilioStatus,
+          whatsapp: whatsappStatus,
+          twilio: whatsappStatus?.providers?.twilio || null,
           notifications: notifStatus,
           userPhone: phone ? `${phone.slice(0, 4)}***${phone.slice(-4)}` : "not set",
         };

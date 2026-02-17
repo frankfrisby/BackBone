@@ -116,6 +116,13 @@ const normalizePhone = (phone) => {
 };
 
 /**
+ * Require US E.164 numbers only (+1XXXXXXXXXX).
+ */
+const isUSPhoneNumber = (normalizedPhone) => {
+  return /^\+1\d{10}$/.test(String(normalizedPhone || "").trim());
+};
+
+/**
  * Generate a secure 6-digit code
  */
 const generateCode = () => {
@@ -157,6 +164,13 @@ export const requestPhoneCode = async (userId, phoneNumber) => {
     };
   }
 
+  if (!isUSPhoneNumber(normalized)) {
+    return {
+      success: false,
+      error: "Only US phone numbers are supported for verification (+1XXXXXXXXXX)."
+    };
+  }
+
   // Check rate limiting
   if (isRateLimited(userId)) {
     return {
@@ -170,12 +184,12 @@ export const requestPhoneCode = async (userId, phoneNumber) => {
   const code = generateCode();
   const now = Date.now();
 
-  // Initialize WhatsApp service
+  // Initialize WhatsApp service (Twilio only for OTP verification)
   const whatsapp = getTwilioWhatsApp();
 
-  // Check if WhatsApp is configured
-  if (!whatsapp.initialized) {
-    const initResult = await whatsapp.initialize();
+  // Check if Twilio is configured
+  if (!whatsapp.client) {
+    const initResult = await whatsapp.initializeTwilio({ activateProvider: false });
     if (!initResult.success) {
       // Fall back to storing code locally (for testing without Twilio)
       console.warn("[PhoneAuth] WhatsApp not configured, storing code locally");
@@ -214,7 +228,10 @@ export const requestPhoneCode = async (userId, phoneNumber) => {
   // Send code via WhatsApp
   const message = `Your BACKBONE verification code is: ${code}\n\nThis code expires in 10 minutes.\n\nIf you didn't request this, please ignore this message.`;
 
-  const sendResult = await whatsapp.sendMessage(normalized, message);
+  const sendResult = await whatsapp.sendMessage(normalized, message, {
+    forceProvider: "twilio",
+    preserveProvider: true
+  });
 
   if (!sendResult.success) {
     return {
@@ -280,6 +297,8 @@ export const verifyPhoneCode = async (userId, code) => {
       success: true,
       status: VERIFICATION_STATUS.VERIFIED,
       phoneNumber: data.phoneNumber,
+      country: "US",
+      isAmericanUser: true,
       message: "Phone already verified"
     };
   }
@@ -326,7 +345,9 @@ export const verifyPhoneCode = async (userId, code) => {
       meta: {
         ...(data.meta || {}),
         phoneVerifiedAt: new Date().toISOString(),
-        whatsappEnabled: true
+        whatsappEnabled: true,
+        country: "US",
+        isAmericanUser: true
       }
     });
 
@@ -367,6 +388,8 @@ export const verifyPhoneCode = async (userId, code) => {
       success: true,
       status: VERIFICATION_STATUS.VERIFIED,
       phoneNumber: data.phoneNumber,
+      country: "US",
+      isAmericanUser: true,
       message: "Phone number verified successfully!"
     };
   }

@@ -24,6 +24,7 @@ import { openUrl } from "../open-url.js";
 // Import actual services for real integrations
 import { signInWithGoogle, getCurrentFirebaseUser, isSignedIn } from "../firebase/firebase-auth.js";
 import { requestPhoneCode, verifyPhoneCode, isPhoneVerified, getVerifiedPhone } from "../firebase/phone-auth.js";
+import { getTwilioWhatsApp } from "../messaging/twilio-whatsapp.js";
 import { isProviderConfigured, saveApiKeyToEnv, validateApiKey, PROVIDERS } from "./model-key-setup.js";
 import { loadAlpacaConfig, saveKeysToEnv as saveAlpacaKeys, testAlpacaConnection } from "./alpaca-setup.js";
 import { isOuraConfigured, validateOuraToken, saveOuraToken } from "../health/oura-service.js";
@@ -33,6 +34,19 @@ import { isPlaidConfigured, hasPlaidCredentials } from "../integrations/plaid-se
 import { getDataDir } from "../paths.js";
 const WIZARD_PORT = 3850;
 const DATA_DIR = getDataDir();
+const US_PHONE_REGEX = /^\+1\d{10}$/;
+
+const normalizeUsPhone = (value) => {
+  const raw = String(value || "").trim().replace(/[^\d+]/g, "");
+  if (!raw) return null;
+  let normalized = raw;
+  if (!normalized.startsWith("+")) {
+    if (normalized.length === 10) normalized = `+1${normalized}`;
+    else if (normalized.length === 11 && normalized.startsWith("1")) normalized = `+${normalized}`;
+    else normalized = `+${normalized}`;
+  }
+  return US_PHONE_REGEX.test(normalized) ? normalized : null;
+};
 
 /**
  * Company SVG Icons (official brand colors and shapes)
@@ -126,7 +140,7 @@ const SETUP_STEPS = [
     id: "whatsapp",
     name: "WhatsApp",
     icon: "whatsapp",
-    description: "Connect WhatsApp for notifications & messaging",
+    description: "Connect via Baileys (recommended) or Twilio OTP",
     required: true,
     allowMultiple: false
   },
@@ -820,6 +834,31 @@ const generateWizardPage = (stepStatuses = {}, activeStep = 'google', connectedP
       nextStep();
     }
 
+    function escapeHtmlAttr(value) {
+      return String(value || '')
+        .replace(/&/g, '&amp;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+    }
+
+    function toggleWhatsAppProviderUI(providerValue) {
+      const provider = providerValue === 'twilio' ? 'twilio' : 'baileys';
+      const hint = document.getElementById('whatsapp-provider-hint');
+      const submitLabel = document.getElementById('whatsapp-submit-label');
+
+      if (!hint || !submitLabel) return;
+
+      if (provider === 'twilio') {
+        hint.textContent = 'Twilio OTP mode: we will send a 6-digit code to your WhatsApp.';
+        submitLabel.textContent = 'Send Verification Code';
+      } else {
+        hint.textContent = 'Recommended: direct phone-link via Baileys. No Twilio account required.';
+        submitLabel.textContent = 'Get Pairing Code';
+      }
+    }
+
     async function submitStep(stepId, data = {}) {
       const contentEl = document.getElementById('content-' + stepId);
       contentEl.innerHTML = '<div style="display:flex;align-items:center;gap:8px;padding:20px;justify-content:center;"><div class="spinner"></div><span style="color:var(--text-muted)">Processing...</span></div>';
@@ -839,12 +878,22 @@ const generateWizardPage = (stepStatuses = {}, activeStep = 'google', connectedP
             if (result.testMode && result.testCode) {
               html += '<div class="message info">Test mode - Code: ' + result.testCode + '</div>';
             }
-            html += generateVerificationForm(stepId);
+            html += generateVerificationForm(stepId, result, data);
             contentEl.innerHTML = html;
           } else {
             // Step completed successfully
             stepStatuses[stepId] = 'completed';
-            connectedProviders[stepId] = result.data ? [JSON.stringify(result.data)] : ['Connected'];
+            const details = [];
+            if (result.data?.provider === 'baileys') {
+              details.push(result.data?.phone ? ('Baileys linked: ' + result.data.phone) : 'Baileys linked');
+            } else if (result.data?.phone) {
+              details.push(result.data.phone);
+            } else if (Array.isArray(result.data?.providers)) {
+              details.push(...result.data.providers);
+            } else if (result.data?.message) {
+              details.push(result.data.message);
+            }
+            connectedProviders[stepId] = details.length ? details : ['Connected'];
             updateStepUI(stepId, 'completed', result.data);
             updateProgressBar();
 
@@ -862,9 +911,31 @@ const generateWizardPage = (stepStatuses = {}, activeStep = 'google', connectedP
       }
     }
 
-    function generateVerificationForm(stepId) {
+    function generateVerificationForm(stepId, result, previousData = {}) {
       if (stepId === 'whatsapp') {
-        return '<form data-step="whatsapp" style="margin-top:16px;"><div class="form-group"><label class="form-label">Verification Code</label><input type="text" name="code" class="form-input" placeholder="Enter 6-digit code" maxlength="6" required autofocus></div><button type="submit" class="btn btn-primary" style="width:100%;">Verify Code</button></form>';
+        const provider = (result?.provider || previousData?.provider || 'baileys').toLowerCase();
+        const phone = escapeHtmlAttr(result?.phone || previousData?.phone || '');
+
+        if (provider === 'baileys') {
+          const pairingCode = escapeHtmlAttr(result?.pairingCode || '');
+          return '<div class="message info" style="margin-top:12px;">Pairing code: <strong style="letter-spacing:0.08em;">' + pairingCode + '</strong></div>' +
+            '<div class="form-hint" style="margin-bottom:8px;">On your phone: WhatsApp → Settings → Linked Devices → Link a device → Link with phone number. Enter this code.</div>' +
+            '<form data-step="whatsapp" style="margin-top:12px;">' +
+              '<input type="hidden" name="provider" value="baileys">' +
+              '<input type="hidden" name="action" value="check">' +
+              '<input type="hidden" name="phone" value="' + phone + '">' +
+              '<button type="submit" class="btn btn-primary" style="width:100%;">I entered the code - Check connection</button>' +
+            '</form>';
+        }
+
+        return '<form data-step="whatsapp" style="margin-top:16px;">' +
+          '<input type="hidden" name="provider" value="twilio">' +
+          '<div class="form-group">' +
+            '<label class="form-label">Verification Code</label>' +
+            '<input type="text" name="code" class="form-input" placeholder="Enter 6-digit code" maxlength="6" required autofocus>' +
+          '</div>' +
+          '<button type="submit" class="btn btn-primary" style="width:100%;">Verify Code</button>' +
+          '</form>';
       }
       return '';
     }
@@ -1076,6 +1147,27 @@ const generateWizardPage = (stepStatuses = {}, activeStep = 'google', connectedP
         const detail = providers.length > 0 ? providers.join(', ') : 'Integration is active';
         return '<div class="connected-info"><span class="connected-icon">' + checkIcon + '</span><div class="connected-text"><div class="connected-title">Connected</div><div class="connected-detail">' + detail + '</div></div><button class="btn-ghost" onclick="resetStep(\\'' + step.id + '\\')">' + refreshIcon + ' Reconnect</button></div>';
       }
+      if (step.id === 'whatsapp') {
+        return '<p style="color: var(--text-secondary); font-size: 14px; margin-bottom: 16px;">Connect WhatsApp to receive notifications and communicate with BACKBONE via messaging.</p>' +
+          '<form data-step="whatsapp">' +
+            '<div class="form-group">' +
+              '<label class="form-label">Connection Method</label>' +
+              '<select name="provider" class="form-input" onchange="toggleWhatsAppProviderUI(this.value)">' +
+                '<option value="baileys" selected>Baileys (Recommended)</option>' +
+                '<option value="twilio">Twilio OTP</option>' +
+              '</select>' +
+              '<div class="form-hint" id="whatsapp-provider-hint">Recommended: direct phone-link via Baileys. No Twilio account required.</div>' +
+            '</div>' +
+            '<div class="form-group">' +
+              '<label class="form-label">Phone Number</label>' +
+              '<input type="tel" name="phone" class="form-input" placeholder="+1 (555) 123-4567" required>' +
+              '<div class="form-hint">US number required (+1XXXXXXXXXX)</div>' +
+            '</div>' +
+            '<div class="btn-group">' +
+              '<button id="whatsapp-submit-label" type="submit" class="btn btn-primary" style="flex: 1;">Get Pairing Code</button>' +
+            '</div>' +
+          '</form>';
+      }
       return '<button class="btn btn-primary" onclick="submitStep(\\'' + step.id + '\\')">Connect ' + step.name + '</button>';
     }
 
@@ -1164,12 +1256,20 @@ function generateStepContent(step, status, connectedProviders = []) {
         </p>
         <form data-step="whatsapp">
           <div class="form-group">
+            <label class="form-label">Connection Method</label>
+            <select name="provider" class="form-input" onchange="toggleWhatsAppProviderUI(this.value)">
+              <option value="baileys" selected>Baileys (Recommended)</option>
+              <option value="twilio">Twilio OTP</option>
+            </select>
+            <div class="form-hint" id="whatsapp-provider-hint">Recommended: direct phone-link via Baileys. No Twilio account required.</div>
+          </div>
+          <div class="form-group">
             <label class="form-label">Phone Number</label>
             <input type="tel" name="phone" class="form-input" placeholder="+1 (555) 123-4567" required>
-            <div class="form-hint">Enter your WhatsApp phone number with country code</div>
+            <div class="form-hint">US number required (+1XXXXXXXXXX)</div>
           </div>
           <div class="btn-group">
-            <button type="submit" class="btn btn-primary" style="flex: 1;">Send Verification Code</button>
+            <button id="whatsapp-submit-label" type="submit" class="btn btn-primary" style="flex: 1;">Get Pairing Code</button>
           </div>
         </form>
         <div class="skip-section">
@@ -1533,12 +1633,24 @@ export class SetupWizard extends EventEmitter {
       this.connectedProviders.google = [user?.email || 'Google Account'];
     }
 
-    // WhatsApp - check if phone verified
-    const user = getCurrentFirebaseUser();
-    if (user && isPhoneVerified(user.id)) {
-      const phone = getVerifiedPhone(user.id);
-      this.stepStatuses.whatsapp = 'completed';
-      this.connectedProviders.whatsapp = [phone || 'Verified'];
+    // WhatsApp - prefer live Baileys link status, fallback to Twilio phone verification
+    try {
+      const wa = getTwilioWhatsApp();
+      const waStatus = wa.getStatus?.();
+      const baileyStatus = waStatus?.providers?.baileys;
+      if (baileyStatus?.connected) {
+        this.stepStatuses.whatsapp = 'completed';
+        this.connectedProviders.whatsapp = ['Baileys linked'];
+      }
+    } catch {}
+
+    if (this.stepStatuses.whatsapp !== 'completed') {
+      const user = getCurrentFirebaseUser();
+      if (user && isPhoneVerified(user.id)) {
+        const phone = getVerifiedPhone(user.id);
+        this.stepStatuses.whatsapp = 'completed';
+        this.connectedProviders.whatsapp = [phone || 'Verified'];
+      }
     }
 
     // AI Models - check for any configured provider
@@ -1639,40 +1751,89 @@ export class SetupWizard extends EventEmitter {
         }
 
         case 'whatsapp': {
-          // Handle phone verification - two phases: request code, then verify
-          if (data.code) {
-            // Phase 2: Verify the code
-            const firebaseUser = getCurrentFirebaseUser();
-            if (!firebaseUser) {
-              return { success: false, error: 'Please sign in with Google first' };
+          const firebaseUser = getCurrentFirebaseUser();
+          if (!firebaseUser) {
+            return { success: false, error: 'Please sign in with Google first' };
+          }
+
+          const provider = String(data.provider || (data.code ? 'twilio' : 'baileys')).toLowerCase() === 'twilio'
+            ? 'twilio'
+            : 'baileys';
+
+          if (provider === 'baileys') {
+            const phone = normalizeUsPhone(data.phone);
+            const wa = getTwilioWhatsApp();
+
+            // Manual re-check after user enters pairing code on phone.
+            if (String(data.action || '').toLowerCase() === 'check') {
+              if (!wa.initialized) {
+                await wa.initialize({ providerPreference: 'baileys' });
+              }
+              const status = wa.getStatus?.();
+              const connected = Boolean(status?.providers?.baileys?.connected);
+              if (!connected) {
+                return {
+                  success: true,
+                  pending: true,
+                  provider: 'baileys',
+                  phone,
+                  message: status?.providers?.baileys?.lastError || 'Still waiting for link. Enter the pairing code in WhatsApp, then check again.'
+                };
+              }
+              result.data = { provider: 'baileys', phone: phone || 'self', verified: true };
+              this.connectedProviders[stepId] = [phone ? `Baileys linked: ${phone}` : 'Baileys linked'];
+              break;
             }
+
+            if (!phone) {
+              return { success: false, error: 'US phone number required for Baileys pairing (+1XXXXXXXXXX).' };
+            }
+            if (!wa.initialized) {
+              await wa.initialize({ providerPreference: 'baileys' });
+            }
+            const pairingResult = await wa.requestPairingCode(phone);
+            if (!pairingResult?.success) {
+              return { success: false, error: pairingResult?.error || 'Could not generate Baileys pairing code.' };
+            }
+
+            return {
+              success: true,
+              pending: true,
+              provider: 'baileys',
+              phone,
+              pairingCode: pairingResult.pairingCode,
+              message: 'Enter this pairing code in WhatsApp Linked Devices.'
+            };
+          }
+
+          // Twilio OTP fallback - two phases: request code, then verify.
+          if (data.code) {
             const verifyResult = await verifyPhoneCode(firebaseUser.id, data.code);
             if (!verifyResult.success) {
               return { success: false, error: verifyResult.error, attemptsRemaining: verifyResult.attemptsRemaining };
             }
-            result.data = { phone: verifyResult.phoneNumber, verified: true };
+            result.data = { provider: 'twilio', phone: verifyResult.phoneNumber, verified: true };
             this.connectedProviders[stepId] = [verifyResult.phoneNumber];
-          } else if (data.phone) {
-            // Phase 1: Request verification code
-            const firebaseUser = getCurrentFirebaseUser();
-            if (!firebaseUser) {
-              return { success: false, error: 'Please sign in with Google first' };
-            }
-            const codeResult = await requestPhoneCode(firebaseUser.id, data.phone);
-            if (!codeResult.success) {
-              return { success: false, error: codeResult.error };
-            }
-            // Return pending state - need code verification
-            return {
-              success: true,
-              pending: true,
-              message: 'Verification code sent to WhatsApp',
-              testMode: codeResult.testMode,
-              testCode: codeResult.code // Only in test mode
-            };
-          } else {
-            return { success: false, error: 'Phone number required' };
+            break;
           }
+
+          const phone = normalizeUsPhone(data.phone);
+          if (!phone) {
+            return { success: false, error: 'US phone number required (+1XXXXXXXXXX).' };
+          }
+          const codeResult = await requestPhoneCode(firebaseUser.id, phone);
+          if (!codeResult.success) {
+            return { success: false, error: codeResult.error };
+          }
+          return {
+            success: true,
+            pending: true,
+            provider: 'twilio',
+            phone,
+            message: 'Verification code sent to WhatsApp',
+            testMode: codeResult.testMode,
+            testCode: codeResult.code // Only in test mode
+          };
           break;
         }
 

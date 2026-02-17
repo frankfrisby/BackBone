@@ -2,13 +2,22 @@
   "entrypoint": "src/services/trading/auto-trader.js",
   "type": "engine",
   "schedule": "market-hours",
+  "goalCategories": ["finance"],
+  "keywords": ["trade", "stock", "invest", "portfolio", "ticker", "earnings", "buy", "sell", "dividend", "options", "etf"],
   "permissions": {
     "skills": [],
     "mcp": ["backbone-trading"],
     "tools": ["analyze-ticker", "portfolio-summary", "add-conviction", "get-convictions"],
     "filesystem": {
       "read": ["data/"],
-      "write": ["data/trades-log.json", "data/alpaca-cache.json", "data/auto-trader-state.json"]
+      "write": ["data/trades-log.json", "data/alpaca-cache.json", "data/auto-trader-state.json", "data/trading-guardrails.json", "data/trailing-stops.json"]
     }
+  },
+  "guardrails": {
+    "minimumHoldHours": 72,
+    "maxSellsPerWeek": 4,
+    "stopLossOverrideThreshold": -8,
+    "antiChurnEnabled": true,
+    "guardrailsFile": "data/trading-guardrails.json"
   }
 }

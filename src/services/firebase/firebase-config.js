@@ -8,7 +8,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { loadFirebaseUser } from "./firebase-auth.js";
+import { getCurrentFirebaseUser } from "./firebase-auth.js";
 
 import { dataFile } from "../paths.js";
 // Firebase project config (same as firebase-auth.js)
@@ -72,27 +72,38 @@ const parseFirestoreFields = (fields) => {
 const fetchFirestoreDoc = async (collection, docId) => {
   try {
     const url = `${FIRESTORE_BASE_URL}/${collection}/${docId}?key=${FIREBASE_CONFIG.apiKey}`;
-    const user = loadFirebaseUser();
-    const headers = {};
-    if (user?.idToken) {
-      headers.Authorization = `Bearer ${user.idToken}`;
-    }
-    const response = await fetch(url, { headers });
+    const requestDoc = async (headers = {}) => {
+      const response = await fetch(url, { headers });
+      if (!response.ok) {
+        return { ok: false, status: response.status, data: null };
+      }
+      const data = await response.json();
+      return { ok: true, status: response.status, data };
+    };
 
-    if (!response.ok) {
-      if (response.status === 404) {
+    const user = getCurrentFirebaseUser();
+    const canUseAuthHeader = Boolean(user?.idToken && !user?.tokenExpired);
+    if (canUseAuthHeader) {
+      const authed = await requestDoc({ Authorization: `Bearer ${user.idToken}` });
+      if (authed.ok) {
+        return parseFirestoreFields(authed.data?.fields);
+      }
+      // Expired/stale tokens can cause hard auth failures even when doc is publicly readable.
+      if (authed.status !== 401 && authed.status !== 403) {
+        if (authed.status === 404) return null;
+        throw new Error(`Firestore error: ${authed.status}`);
+      }
+    }
+
+    const unauthenticated = await requestDoc();
+    if (!unauthenticated.ok) {
+      if (unauthenticated.status === 404 || unauthenticated.status === 403) {
         return null;
       }
-      if (response.status === 403) {
-        // Permission denied - user needs to update Firestore rules
-        return null;
-      }
-      throw new Error(`Firestore error: ${response.status}`);
+      throw new Error(`Firestore error: ${unauthenticated.status}`);
     }
 
-    const data = await response.json();
-    const parsed = parseFirestoreFields(data.fields);
-    return parsed;
+    return parseFirestoreFields(unauthenticated.data?.fields);
   } catch (error) {
     return null;
   }
@@ -201,11 +212,7 @@ export const fetchGoogleConfig = async () => {
  * Expected fields: accountSid, authToken, whatsappNumber
  */
 export const fetchTwilioConfig = async () => {
-  const config = await fetchConfigWithFallback("config_twilio", {
-    accountSid: process.env.TWILIO_ACCOUNT_SID,
-    authToken: process.env.TWILIO_AUTH_TOKEN,
-    whatsappNumber: process.env.TWILIO_WHATSAPP_NUMBER || "+14155238886"
-  });
+  const config = await fetchConfigWithFallback("config_twilio", {});
 
   // Handle common field name variations
   if (config) {

@@ -174,7 +174,7 @@ export const getLatestOpenAICodexModelId = (openaiKey, fallback = "gpt-5.3-codex
   return resolved;
 };
 
-export const getLatestAnthropicOpusModelId = (anthropicKey, fallback = "claude-opus-4-5-20251101") => {
+export const getLatestAnthropicOpusModelId = (anthropicKey, fallback = "claude-opus-4-6") => {
   const entry = getEntry("anthropic", "opus");
   const resolved = entry?.modelId || fallback;
   if (!entry || isStale(entry)) {

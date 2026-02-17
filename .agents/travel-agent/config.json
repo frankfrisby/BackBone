@@ -1,0 +1,16 @@
+{
+  "entrypoint": null,
+  "type": "engine",
+  "schedule": "on-demand",
+  "goalCategories": ["family", "personal"],
+  "keywords": ["travel", "flight", "hotel", "trip", "vacation", "destination", "itinerary", "booking", "airbnb", "road trip"],
+  "permissions": {
+    "skills": [],
+    "mcp": ["backbone-google", "backbone-whatsapp"],
+    "tools": [],
+    "filesystem": {
+      "read": ["data/", "memory/", "projects/"],
+      "write": ["projects/"]
+    }
+  }
+}

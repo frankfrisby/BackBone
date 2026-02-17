@@ -24,7 +24,7 @@ import fs from "fs";
 import path from "path";
 import { getTwilioWhatsApp } from "./twilio-whatsapp.js";
 import { formatAIResponse, chunkMessage } from "./whatsapp-formatter.js";
-import { getDataDir } from "../paths.js";
+import { getDataDir, getMemoryDir } from "../paths.js";
 import { getUnifiedMessageLog, MESSAGE_CHANNEL } from "./unified-message-log.js";
 
 const DATA_DIR = getDataDir();
@@ -132,13 +132,21 @@ class WhatsAppPoller {
     if (!wa.initialized) {
       const result = await wa.initialize();
       if (!result?.success) {
-        console.log("[WhatsAppPoller] Twilio not configured — poller disabled");
+        if (wa.isEventDrivenProvider?.()) {
+          console.log("[WhatsAppPoller] Twilio polling disabled. Using event-driven WhatsApp provider.");
+        } else {
+          console.log("[WhatsAppPoller] Twilio not configured — poller disabled");
+        }
         return;
       }
     }
 
     if (!wa.client) {
-      console.log("[WhatsAppPoller] No Twilio client — poller disabled");
+      if (wa.isEventDrivenProvider?.()) {
+        console.log("[WhatsAppPoller] No Twilio client. Event-driven WhatsApp provider is active.");
+      } else {
+        console.log("[WhatsAppPoller] No Twilio client — poller disabled");
+      }
       return;
     }
 
@@ -310,11 +318,87 @@ class WhatsAppPoller {
    */
   async _processMessage(msg) {
     const from = msg.from?.replace("whatsapp:", "") || null;
-    const content = msg.body?.trim();
+    let content = msg.body?.trim();
     const sid = msg.sid;
 
     // Mark as processed immediately to prevent double-processing
     this.processedSids.add(sid);
+
+    // Mark corresponding Firestore message as processing so RealtimeMessaging doesn't double-process
+    try {
+      const { getRealtimeMessaging } = await import("./realtime-messaging.js");
+      const rtm = getRealtimeMessaging();
+      if (rtm?.userId) {
+        // Find the Firestore message by twilioMessageId and mark it completed
+        const FIRESTORE_BASE = `https://firestore.googleapis.com/v1/projects/backboneai/databases/(default)/documents`;
+        const apiKey = "AIzaSyBKLqcnFQwNSKqHXgTBLok3l74ZmNh6_y0";
+        const url = `${FIRESTORE_BASE}/users/${rtm.userId}/messages?key=${apiKey}`;
+        const resp = await fetch(url);
+        if (resp.ok) {
+          const data = await resp.json();
+          for (const doc of (data.documents || [])) {
+            const docId = doc.name.split("/").pop();
+            const fields = doc.fields || {};
+            const twilioId = fields.twilioMessageId?.stringValue;
+            if (twilioId === sid) {
+              rtm.processedMessageIds.add(docId);
+              // Also update status so it's marked as handled
+              await rtm.updateMessageStatus(docId, "completed", null, {
+                processedBy: "whatsapp-poller"
+              });
+              break;
+            }
+          }
+        }
+      }
+    } catch {
+      // Non-critical — worst case is a duplicate response
+    }
+
+    // ── Check for media (images, files) ─────────────────────
+    let hasMedia = false;
+    let mediaList = [];
+    try {
+      const mediaItems = await msg.media().list();
+      if (mediaItems && mediaItems.length > 0) {
+        hasMedia = true;
+        mediaList = mediaItems.map(m => ({
+          mediaUrl: m.uri ? `https://api.twilio.com${m.uri.replace(".json", "")}` : null,
+          contentType: m.contentType || "image/jpeg",
+          sid: m.sid,
+        })).filter(m => m.mediaUrl);
+        console.log(`[WhatsAppPoller] Message has ${mediaList.length} media attachment(s)`);
+      }
+    } catch {
+      // Media check is best-effort — some messages won't have media subresources
+    }
+
+    // ── Check for reply context (user swiped to reply) ──────
+    let repliedToContext = null;
+    try {
+      // Twilio includes OriginalRepliedMessageSid on webhook; via REST API
+      // we check the message resource for the referenced SID
+      const repliedSid = msg.originalRepliedMessageSid || null;
+      if (repliedSid) {
+        const wa = getTwilioWhatsApp();
+        const repliedMsg = await wa.fetchMessage(repliedSid);
+        if (repliedMsg?.body) {
+          repliedToContext = {
+            sid: repliedSid,
+            body: repliedMsg.body.slice(0, 500),
+            from: repliedMsg.from,
+          };
+          console.log(`[WhatsAppPoller] Reply to: "${repliedMsg.body.slice(0, 60)}"`);
+        }
+      }
+    } catch {
+      // Reply context is best-effort
+    }
+
+    // If no text but has image, set placeholder content
+    if (!content && hasMedia) {
+      content = "[Image sent]";
+    }
 
     if (!content) return;
 
@@ -325,8 +409,19 @@ class WhatsAppPoller {
     this.stats.lastMessage = { from, content: content.slice(0, 100), time: new Date().toISOString() };
     this.stats.processed++;
 
-    // Send immediate "thinking" acknowledgment unless in active conversation
-    if (!this._isActiveConversation()) {
+    // Send typing indicator (shows "BACKBONE is typing..." + blue ticks)
+    // Falls back to text acknowledgment if typing indicator fails
+    let sentTyping = false;
+    try {
+      const wa = getTwilioWhatsApp();
+      const typingResult = await wa.sendTypingIndicator(sid);
+      sentTyping = typingResult.success;
+    } catch {
+      // Best-effort
+    }
+
+    // Only send text "thinking" message if typing indicator failed AND not in active conversation
+    if (!sentTyping && !this._isActiveConversation()) {
       try {
         const ack = this._pickThinkingMessage();
         await this._sendRawMessage(from, `_${ack}_`);
@@ -344,6 +439,9 @@ class WhatsAppPoller {
           messageId: sid,
           timestamp: msg.dateSent?.toISOString() || new Date().toISOString(),
           channel: "whatsapp",
+          hasMedia,
+          mediaList,
+          repliedToContext,
         });
 
         if (responseText) {
@@ -357,35 +455,54 @@ class WhatsAppPoller {
     }
 
     // Default: use built-in AI processing with context
-    await this._processWithAI(from, content);
+    await this._processWithAI(from, content, repliedToContext);
   }
 
   /**
    * Process a message using Claude AI with full user context + conversation history
    */
-  async _processWithAI(from, content) {
+  async _processWithAI(from, content, repliedToContext = null) {
     try {
       const messageLog = getUnifiedMessageLog();
 
       // Log incoming message
       messageLog.addUserMessage(content, MESSAGE_CHANNEL.WHATSAPP, { from });
 
-      // Build conversation history
-      const recentMessages = messageLog.getMessagesForAI(12);
+      // Build conversation history (last 30 messages for full context)
+      const recentMessages = messageLog.getMessagesForAI(36);
       const conversationHistory = recentMessages
-        .slice(-10)
+        .slice(-30)
         .map(m => `${m.role === "user" ? "User" : "BACKBONE"}: ${m.content}`)
         .join("\n");
 
       // Load user context from local data files
       const context = this._loadContext();
 
+      // Search knowledge-db for relevant context based on the message
+      const knowledgeContext = await this._searchKnowledge(content);
+      if (knowledgeContext) context.knowledgeSearch = knowledgeContext;
+
+      // Load relevant memory files for deeper context
+      const memoryContext = this._loadMemoryContext();
+      if (memoryContext) context.memoryNotes = memoryContext;
+
+      // Build reply context section if user swiped to reply
+      let replySection = "";
+      if (repliedToContext?.body) {
+        replySection = `
+*REPLYING TO THIS MESSAGE:*
+"${repliedToContext.body.slice(0, 500)}"
+
+The user swiped to reply to the message above. Their response "${content}" is specifically about that message. Answer in context of what they're replying to.
+`;
+      }
+
       // Build AI prompt with conversation history
       const prompt = `You are BACKBONE, an executive AI assistant. The user messaged you on WhatsApp.
 
-*CONVERSATION HISTORY (most recent):*
+*CONVERSATION HISTORY (last 30 messages):*
 ${conversationHistory || "(first message — no prior history)"}
-
+${replySection}
 *Current message:* "${content}"
 
 *FORMATTING RULES (CRITICAL):*
@@ -402,44 +519,42 @@ Use WhatsApp-native formatting in your response:
 *USER DATA:*
 ${JSON.stringify(context, null, 2)}
 
-IMPORTANT: You are in a CONVERSATION. Read the history above. If the user is answering a question you asked, or following up on a prior topic, respond in context. Be concise, actionable, and data-rich.`;
+*WHAT YOU HAVE ACCESS TO:*
+- *Net worth & accounts:* Empower (Personal Capital) aggregates ALL accounts — bank, investment, retirement, credit cards, loans. Data is synced 2x daily (6am + 4:30pm). The netWorth, brokerageAccounts, and empowerAccounts fields above contain this data.
+- *Trading portfolio:* Alpaca paper/live trading with real-time positions, P&L, buying power.
+- *Health:* Oura Ring data (sleep, readiness, activity scores).
+- *Goals & projects:* Active goals with progress tracking.
+- *Tickers:* Scored tickers (0-10) with buy/sell signals.
+- If the user asks about net worth, finances, account balances, or holdings — USE THE DATA ABOVE. Don't say you need to check — the data is right here.
 
-      // Use Claude Code CLI (Pro/Max subscription) — no API key needed
+IMPORTANT: You are in a CONVERSATION. Read the history above carefully. The user may be following up on a prior topic, answering your question, or referencing something discussed earlier. Use the conversation history, knowledge search results, and memory notes to give informed, contextual responses. Be concise, actionable, and data-rich.`;
+
+      // Use agentic executor (Claude -> Codex fallback on rate limits)
       let responseText = null;
+      let agenticError = null;
       try {
-        const { runClaudeCodePrompt } = await import("../ai/claude-code-cli.js");
-        const cliResult = await runClaudeCodePrompt(prompt, { timeout: 90000 });
-        if (cliResult.success && cliResult.output) {
-          responseText = cliResult.output.trim();
+        const { executeAgenticTask, getAgenticCapabilities } = await import("../ai/multi-ai.js");
+        const capabilities = await getAgenticCapabilities();
+        if (capabilities.available) {
+          const agentResult = await executeAgenticTask(prompt, process.cwd(), null, {
+            alwaysTryClaude: true
+          });
+          if (agentResult.success && agentResult.output) {
+            responseText = agentResult.output.trim();
+          } else {
+            agenticError = agentResult.error || "Agentic CLI returned no output";
+            console.log("[WhatsAppPoller] Agentic execution failed:", agenticError);
+          }
         } else {
-          console.log("[WhatsAppPoller] CLI failed, trying multi-ai fallback:", cliResult.error);
+          agenticError = "No CLI agent tools available (Claude/Codex CLI)";
+          console.log("[WhatsAppPoller] No agentic tools available");
         }
       } catch (cliErr) {
-        console.log("[WhatsAppPoller] CLI unavailable:", cliErr.message);
+        agenticError = cliErr.message || "Agentic CLI unavailable";
+        console.log("[WhatsAppPoller] Agentic execution unavailable:", agenticError);
       }
 
-      // Fallback: try multi-ai
-      if (!responseText) {
-        try {
-          const { sendMessage } = await import("../ai/multi-ai.js");
-          const aiResponse = await sendMessage(prompt, { format: "text", maxTokens: 1000 });
-          if (typeof aiResponse === "string") {
-            responseText = aiResponse;
-          } else if (aiResponse?.content) {
-            responseText = aiResponse.content;
-          } else if (aiResponse?.message) {
-            responseText = aiResponse.message;
-          } else if (aiResponse?.response) {
-            responseText = aiResponse.response;
-          } else if (aiResponse?.error) {
-            console.error("[WhatsAppPoller] multi-ai error:", aiResponse.error);
-          }
-        } catch (aiErr) {
-          console.error("[WhatsAppPoller] multi-ai fallback failed:", aiErr.message);
-        }
-      }
-
-      const finalResponse = responseText || "Hmm, I drew a blank on that one. Could you rephrase?";
+      const finalResponse = responseText || `Agentic CLI is unavailable right now (${String(agenticError || "unknown error").slice(0, 120)}). Try again in a moment.`;
 
       // Log assistant response
       messageLog.addAssistantMessage(finalResponse, MESSAGE_CHANNEL.WHATSAPP);
@@ -469,6 +584,33 @@ IMPORTANT: You are in a CONVERSATION. Read the history above. If the user is ans
           pl: p.unrealized_pl, plPercent: p.unrealized_plpc
         }))
       };
+    } catch {}
+
+    // Brokerage / Empower — net worth, accounts, holdings (synced 2x daily: 6am + 4:30pm)
+    try {
+      const brokerage = JSON.parse(fs.readFileSync(path.join(DATA_DIR, "brokerage-portfolio.json"), "utf-8"));
+      context.netWorth = brokerage.totalNetWorth;
+      context.brokerageLastSync = brokerage.lastSync;
+      context.brokerageAccounts = brokerage.accounts?.slice(0, 10);
+      context.brokerageHoldings = brokerage.holdings?.slice(0, 20).map(h => ({
+        name: h.name, value: h.value, shares: h.shares, brokerage: h.brokerage
+      }));
+      context.brokerageHoldingCount = brokerage.holdingCount;
+      context.connectedBrokerages = brokerage.connectedBrokerages?.map(b => b.label);
+    } catch {}
+
+    // Empower auth — has detailed account breakdown (checking, savings, investment, retirement, credit)
+    try {
+      const empower = JSON.parse(fs.readFileSync(path.join(DATA_DIR, "empower-auth.json"), "utf-8"));
+      if (empower.accounts) {
+        context.empowerAccounts = empower.accounts.map(a => ({
+          name: a.name || a.firmName, type: a.accountType || a.productType,
+          balance: a.balance || a.currentBalance, institution: a.firmName
+        }));
+      }
+      if (empower.netWorth && !context.netWorth) {
+        context.netWorth = empower.netWorth;
+      }
     } catch {}
 
     // Life scores
@@ -531,6 +673,56 @@ IMPORTANT: You are in a CONVERSATION. Read the history above. If the user is ans
     } catch {}
 
     return context;
+  }
+
+  /**
+   * Search the SQLite knowledge-db for context relevant to the user's message.
+   * Returns top 5 results as condensed text, or null if nothing found.
+   * Note: This is async because knowledge-db uses dynamic import (ESM).
+   */
+  async _searchKnowledge(query) {
+    try {
+      const { searchKeyword } = await import("../memory/knowledge-db.js");
+      const results = searchKeyword(query, { limit: 5 });
+      if (!results || results.length === 0) return null;
+      return results.map(r => ({
+        source: r.source_path || r.title || "unknown",
+        text: (r.text || "").slice(0, 300)
+      }));
+    } catch {
+      // knowledge-db may not be initialized — graceful fallback
+      return null;
+    }
+  }
+
+  /**
+   * Load key memory .md files for higher-level user context.
+   * Reads profile, thesis (current focus), portfolio notes, and health notes.
+   */
+  _loadMemoryContext() {
+    const memoryDir = getMemoryDir();
+    const context = {};
+    const files = [
+      { key: "profile", file: "profile.md", maxChars: 500 },
+      { key: "thesis", file: "thesis.md", maxChars: 400 },
+      { key: "portfolio", file: "portfolio.md", maxChars: 400 },
+      { key: "health", file: "health.md", maxChars: 300 },
+      { key: "goals", file: "goals.md", maxChars: 300 },
+    ];
+    let loaded = 0;
+    for (const { key, file, maxChars } of files) {
+      try {
+        const filePath = path.join(memoryDir, file);
+        if (fs.existsSync(filePath)) {
+          const raw = fs.readFileSync(filePath, "utf-8").trim();
+          if (raw.length > 0) {
+            context[key] = raw.length > maxChars ? raw.slice(0, maxChars) + "..." : raw;
+            loaded++;
+          }
+        }
+      } catch { /* skip missing files */ }
+    }
+    return loaded > 0 ? context : null;
   }
 
   /**

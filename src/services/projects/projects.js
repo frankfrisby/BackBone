@@ -298,6 +298,9 @@ export const createProject = (rawName, { source = "manual", createdAt = new Date
   const projectPath = path.join(PROJECTS_DIR, folderName);
   fs.mkdirSync(projectPath, { recursive: true });
 
+  // Every project gets an images/ folder for captured screenshots, charts, etc.
+  fs.mkdirSync(path.join(projectPath, "images"), { recursive: true });
+
   const displayDate = formatDisplayDate(createdAt);
   const displayName = buildProjectDisplayName(name, createdAt);
   const goalsPath = path.join(projectPath, "goals.md");

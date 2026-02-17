@@ -1,0 +1,17 @@
+{
+  "entrypoint": null,
+  "type": "engine",
+  "schedule": "cron",
+  "cron": "0 9 * * 6",
+  "goalCategories": ["finance", "family"],
+  "keywords": ["house", "rent", "mortgage", "real estate", "property", "neighborhood", "move", "apartment", "renovation", "home"],
+  "permissions": {
+    "skills": [],
+    "mcp": ["backbone-news", "backbone-life", "backbone-whatsapp"],
+    "tools": [],
+    "filesystem": {
+      "read": ["data/", "memory/", "projects/"],
+      "write": ["projects/", "memory/"]
+    }
+  }
+}

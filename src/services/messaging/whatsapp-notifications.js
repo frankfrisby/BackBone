@@ -23,6 +23,7 @@ import { getVerifiedPhone } from "../firebase/phone-auth.js";
 import { showNotificationTitle, restoreBaseTitle } from "../ui/terminal-resize.js";
 import { sendPush, sendMorningBriefPush, sendTradeAlertPush, getPushStatus, PUSH_TYPE } from "./push-notifications.js";
 import { formatTradeNotification, formatBriefForWhatsApp } from "./whatsapp-formatter.js";
+import { shouldSendMessage, recordSentMessage } from "./message-dedup-guard.js";
 
 /**
  * Notification types
@@ -172,10 +173,25 @@ class WhatsAppNotifications extends EventEmitter {
       return { success: false, error: "Notifications not enabled" };
     }
 
-    // Check for duplicates
+    // Check for duplicates (identifier-based)
     const identifier = options.identifier || message.substring(0, 50);
     if (!options.allowDuplicate && this.hasBeenSent(type, identifier)) {
       return { success: false, error: "Already sent", duplicate: true };
+    }
+
+    // Smart content dedup — checks message similarity against recent history
+    // Skips for replies to user and forced sends
+    if (!options.isReply && !options.allowDuplicate) {
+      const guardCheck = shouldSendMessage(message, {
+        type,
+        isReply: options.isReply || false,
+        isFollowUp: options.isFollowUp || false,
+        force: options.force || false,
+      });
+      if (!guardCheck.allowed) {
+        console.log(`[WhatsAppNotifications] Blocked by dedup guard: ${guardCheck.reason}`);
+        return { success: false, error: guardCheck.reason, blocked: true };
+      }
     }
 
     // Check quiet hours (unless urgent)
@@ -183,9 +199,9 @@ class WhatsAppNotifications extends EventEmitter {
       return { success: false, error: "Quiet hours", quietHours: true };
     }
 
-    // Format the message with type emoji
-    const emoji = this.getTypeEmoji(type);
-    const formattedMessage = `${emoji} ${message}`;
+    // Format the message with type emoji — skip for briefs (they have their own formatting)
+    const skipEmoji = type === NOTIFICATION_TYPE.MORNING_BRIEF || type === NOTIFICATION_TYPE.EVENING_BRIEF;
+    const formattedMessage = skipEmoji ? message : `${this.getTypeEmoji(type)} ${message}`;
 
     try {
       const whatsapp = getTwilioWhatsApp();
@@ -201,6 +217,9 @@ class WhatsAppNotifications extends EventEmitter {
       if (result.success) {
         // Mark as sent to prevent duplicates
         this.markAsSent(type, identifier);
+
+        // Record in smart dedup guard (content-based tracking)
+        try { recordSentMessage(message, { type }); } catch {}
 
         // Log to unified message log
         const messageLog = getUnifiedMessageLog();

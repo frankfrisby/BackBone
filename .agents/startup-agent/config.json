@@ -1,0 +1,34 @@
+{
+  "entrypoint": "src/services/engine/startup-agent.js",
+  "type": "product",
+  "schedule": "continuous",
+  "maxSessionMs": 1800000,
+  "restBetweenCyclesMs": 3600000,
+  "goalCategories": ["career", "growth"],
+  "keywords": ["startup", "business", "launch", "product", "MVP", "revenue", "SaaS", "entrepreneur", "founder", "venture"],
+  "permissions": {
+    "skills": ["market-research", "data-analysis", "api-integration"],
+    "mcp": ["backbone-life", "backbone-news", "backbone-projects", "backbone-youtube"],
+    "tools": ["research-stock", "goal-progress"],
+    "filesystem": {
+      "read": ["data/", "memory/", "projects/"],
+      "write": ["projects/", "memory/"]
+    }
+  },
+  "phases": {
+    "discovery": { "order": 1, "description": "Research markets, identify opportunities, generate ideas" },
+    "validation": { "order": 2, "description": "Validate demand, size market, prove problem exists" },
+    "design": { "order": 3, "description": "Define MVP, architecture, tech stack" },
+    "build": { "order": 4, "description": "Build the product iteratively" },
+    "launch": { "order": 5, "description": "Ship to users, get feedback, iterate" },
+    "mature": { "order": 6, "description": "Scale, optimize revenue, automate operations" }
+  },
+  "graduation": {
+    "discovery_to_validation": "Top 3 opportunities scored, winner selected with rationale",
+    "validation_to_design": "Market > $10M, demand signals confirmed, value prop defined",
+    "design_to_build": "MVP scope locked, architecture documented",
+    "build_to_launch": "Core features built, deployed, tested",
+    "launch_to_mature": "First paying users or clear monetization path",
+    "mature_done": "Product generates revenue independently"
+  }
+}

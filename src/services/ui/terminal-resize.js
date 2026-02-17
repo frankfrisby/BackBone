@@ -4,6 +4,7 @@
  */
 
 import { spawn, exec } from "child_process";
+import fs from "fs";
 
 // Size presets (in characters - columns x rows)
 // 2200x1100 pixels approx 240 columns x 64 rows (assuming ~9px char width, ~17px char height)
@@ -323,18 +324,29 @@ export const supportsResize = () => {
 let baseTitle = "BACKBONE";
 let currentWork = null; // Persistent work context (goal, project, query)
 let tempTitleTimeout = null;
+let titleRefreshInterval = null;
+let lastSetTitle = "BACKBONE"; // Track what we last set for refresh
 
 /**
- * Set terminal title using ANSI escape sequence
- * Works on Windows Terminal, iTerm2, most Linux terminals
+ * Set terminal title using ANSI OSC escape sequence.
+ * Works on Windows Terminal, cmd.exe (with VirtualTerminalLevel=1), iTerm2, Linux.
+ *
+ * Writes directly to fd 1 (raw stdout) to bypass stream wrappers like
+ * SyncedStdout or Ink's custom stdout, which can swallow escape sequences.
+ *
  * @param {string} title - The title to set
  */
 export const setTerminalTitle = (title) => {
-  if (process.stdout.isTTY) {
-    // Use OSC escape sequence to set window title
-    // \x1b]0; - Set both icon name and window title
-    // \x07 - Bell character (terminator)
-    process.stdout.write(`\x1b]0;${title}\x07`);
+  if (!title) return;
+  lastSetTitle = title;
+
+  const esc = `\x1b]0;${title}\x07`;
+  try {
+    // Write directly to fd 1 — bypasses any Node stream wrappers
+    fs.writeSync(1, esc);
+  } catch {
+    // Fallback: use process.stdout
+    try { process.stdout.write(esc); } catch {}
   }
 };
 
@@ -446,7 +458,42 @@ export const restoreBaseTitle = () => {
     clearTimeout(tempTitleTimeout);
     tempTitleTimeout = null;
   }
-  setTerminalTitle(baseTitle);
+  if (currentWork) {
+    setTerminalTitle(`${baseTitle} · ${currentWork}`);
+  } else {
+    setTerminalTitle(baseTitle);
+  }
+};
+
+/**
+ * Start a title guard that periodically re-asserts the BACKBONE title.
+ * This prevents child processes (e.g., Claude Code CLI) from permanently
+ * stealing the terminal title. Refreshes every 5 seconds.
+ */
+export const startTitleGuard = () => {
+  stopTitleGuard(); // Clear any existing guard
+  titleRefreshInterval = setInterval(() => {
+    // Re-assert whatever title we last set (bypasses stream wrappers)
+    if (lastSetTitle) {
+      try {
+        fs.writeSync(1, `\x1b]0;${lastSetTitle}\x07`);
+      } catch {
+        try { process.stdout.write(`\x1b]0;${lastSetTitle}\x07`); } catch {}
+      }
+    }
+  }, 5000); // Every 5 seconds
+  // Don't let this interval keep the process alive
+  if (titleRefreshInterval.unref) titleRefreshInterval.unref();
+};
+
+/**
+ * Stop the title guard interval
+ */
+export const stopTitleGuard = () => {
+  if (titleRefreshInterval) {
+    clearInterval(titleRefreshInterval);
+    titleRefreshInterval = null;
+  }
 };
 
 export default {
@@ -465,7 +512,9 @@ export default {
   showTemporaryTitle,
   showActivityTitle,
   showNotificationTitle,
-  restoreBaseTitle
+  restoreBaseTitle,
+  startTitleGuard,
+  stopTitleGuard
 };
 
 

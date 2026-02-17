@@ -143,6 +143,18 @@ const getFidelity = async () => {
   return _fidelity;
 };
 
+/**
+ * Load scraped brokerage data from {id}-data.json (written by brokerage-auth.js).
+ * Fallback data source when service singletons have no data.
+ */
+const loadBrokerageData = (brokerageId) => {
+  try {
+    const p = path.join(DATA_DIR, `${brokerageId}-data.json`);
+    if (fs.existsSync(p)) return JSON.parse(fs.readFileSync(p, "utf-8"));
+  } catch {}
+  return null;
+};
+
 // ─── Tools ───────────────────────────────────────────────────
 
 const TOOLS = [
@@ -325,7 +337,7 @@ async function handleTool(name, args) {
       const fidelity = await getFidelity();
       const freshness = loadFreshness();
       return {
-        empower: empower.getConfig?.() || { connected: false },
+        empower: (await empower.getConfig?.()) || { connected: false },
         robinhood: robinhood.getConfig?.() || { connected: false },
         fidelity: fidelity.getConfig?.() || { connected: false },
         freshness: { thresholdH: freshness.thresholdH, recentChecks: (freshness.checks || []).length },
@@ -437,7 +449,8 @@ async function handleTool(name, args) {
     }
     case "empower_scrape": {
       const svc = await getEmpower();
-      const result = await svc.scrapeWithBrowser({ headless: args.headless !== false });
+      // Always use visible Chrome — Empower blocks headless (Cloudflare) and needs popup interaction
+      const result = await svc.scrapeWithBrowser({ headless: false });
       if (result.success) {
         const state = loadFreshness();
         state.lastRefresh = new Date().toISOString();
@@ -515,30 +528,49 @@ async function handleTool(name, args) {
     case "get_all_brokerage_positions": {
       const [empower, robinhood, fidelity] = await Promise.all([getEmpower(), getRobinhood(), getFidelity()]);
       const freshness = checkFreshness(empower.data.lastUpdated);
+
+      // Merge service data with scraped data fallback
+      const mergeData = (svc, id) => {
+        const svcData = svc.getDisplayData?.();
+        if (svcData && Object.keys(svcData).length > 1) return svcData;
+        const scraped = loadBrokerageData(id);
+        if (scraped) return { ...scraped, source: "scraped" };
+        return { connected: false };
+      };
+
       return {
-        empower: empower.getDisplayData?.() || { connected: false },
-        robinhood: robinhood.getDisplayData?.() || { connected: false },
-        fidelity: fidelity.getDisplayData?.() || { connected: false },
+        empower: mergeData(empower, "empower"),
+        robinhood: mergeData(robinhood, "robinhood"),
+        fidelity: mergeData(fidelity, "fidelity"),
         ...freshness,
       };
     }
     case "get_total_brokerage_value": {
       const [empower, robinhood, fidelity] = await Promise.all([getEmpower(), getRobinhood(), getFidelity()]);
-      const eData = empower.getFinanceData?.() || {};
-      const rData = robinhood.getFinanceData?.() || {};
-      const fData = fidelity.getFinanceData?.() || {};
-      const total = (eData.equity || 0) + (rData.equity || 0) + (fData.equity || 0);
-      const timestamps = [eData.lastUpdated, rData.lastUpdated, fData.lastUpdated].filter(Boolean);
+
+      const getEquity = (svc, id) => {
+        const finData = svc.getFinanceData?.() || {};
+        if (finData.equity) return { equity: finData.equity, lastUpdated: finData.lastUpdated };
+        const scraped = loadBrokerageData(id);
+        if (scraped?.netWorth) return { equity: scraped.netWorth, lastUpdated: scraped.lastUpdated };
+        return { equity: 0 };
+      };
+
+      const e = getEquity(empower, "empower");
+      const r = getEquity(robinhood, "robinhood");
+      const f = getEquity(fidelity, "fidelity");
+      const total = (e.equity || 0) + (r.equity || 0) + (f.equity || 0);
+      const timestamps = [e.lastUpdated, r.lastUpdated, f.lastUpdated].filter(Boolean);
       const mostRecent = timestamps.length ? timestamps.sort().pop() : null;
       const freshness = checkFreshness(mostRecent);
       return {
         total,
         breakdown: {
-          empower: eData.equity || 0,
-          robinhood: rData.equity || 0,
-          fidelity: fData.equity || 0,
+          empower: e.equity || 0,
+          robinhood: r.equity || 0,
+          fidelity: f.equity || 0,
         },
-        connectedCount: [eData.equity, rData.equity, fData.equity].filter(v => v > 0).length,
+        connectedCount: [e.equity, r.equity, f.equity].filter(v => v > 0).length,
         lastUpdated: mostRecent,
         ...freshness,
       };

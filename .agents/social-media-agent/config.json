@@ -1,0 +1,17 @@
+{
+  "entrypoint": null,
+  "type": "engine",
+  "schedule": "cron",
+  "cron": "0 10,16 * * *",
+  "goalCategories": ["career", "growth"],
+  "keywords": ["social", "post", "content", "twitter", "youtube", "engagement", "brand", "audience", "followers", "creator"],
+  "permissions": {
+    "skills": ["social-media"],
+    "mcp": ["backbone-linkedin", "backbone-youtube", "backbone-whatsapp"],
+    "tools": [],
+    "filesystem": {
+      "read": ["data/", "memory/", "projects/"],
+      "write": ["projects/", "memory/"]
+    }
+  }
+}

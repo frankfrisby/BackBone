@@ -247,12 +247,13 @@ function getFredApiKey() {
  * These change slowly (weekly/monthly) so we cache for 24 hours.
  */
 async function fetchSoftIndicators(existingData, forceRefresh = false) {
-  // Check if soft data is still fresh (skip check if forceRefresh or if data has all nulls)
+  // Check if soft data is still fresh — require at least 4 of 8 fields populated
+  // Previously accepted 1 field (fedFundsRate derived from T-bill) as "valid", leaving 7 nulls
   if (!forceRefresh && existingData?.softIndicators?.fetchedAt) {
     const age = Date.now() - new Date(existingData.softIndicators.fetchedAt).getTime();
-    const hasData = Object.entries(existingData.softIndicators)
-      .some(([k, v]) => k !== "fetchedAt" && v != null);
-    if (age < SOFT_DATA_MAX_AGE && hasData) {
+    const populatedCount = Object.entries(existingData.softIndicators)
+      .filter(([k, v]) => k !== "fetchedAt" && v != null).length;
+    if (age < SOFT_DATA_MAX_AGE && populatedCount >= 4) {
       return existingData.softIndicators;
     }
   }

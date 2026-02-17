@@ -506,8 +506,8 @@ export const runClaudeCodePrompt = async (prompt, options = {}) => {
   });
 };
 
-// Model configuration - Opus 4.5 by default, Sonnet as fallback
-export const PREFERRED_MODEL = "claude-opus-4-5-20251101";
+// Model configuration - Opus 4.6 by default, Sonnet as fallback
+export const PREFERRED_MODEL = "claude-opus-4-6";
 export const FALLBACK_MODEL = "claude-sonnet-4-20250514";
 
 // Track current model state for rate limit fallback
@@ -523,7 +523,7 @@ export const getCurrentModelInUse = () => {
   if (rateLimitedUntil && Date.now() > rateLimitedUntil) {
     rateLimitedUntil = null;
     currentModelInUse = PREFERRED_MODEL;
-    console.log("[ClaudeCodeCLI] Rate limit cooldown expired, switching back to Opus 4.5");
+    console.log("[ClaudeCodeCLI] Rate limit cooldown expired, switching back to Opus 4.6");
   }
   return currentModelInUse;
 };
@@ -590,7 +590,7 @@ export { detectAuthError };
  * Run Claude Code with streaming output
  * Returns an EventEmitter that emits 'data', 'tool', 'complete', and 'error' events
  *
- * Uses Opus 4.5 by default, automatically falls back to Sonnet on rate limits
+ * Uses Opus 4.6 by default, automatically falls back to Sonnet on rate limits
  *
  * Events:
  * - 'data': Raw text output
@@ -677,7 +677,7 @@ export const runClaudeCodeStreaming = async (prompt, options = {}) => {
   console.log(`[ClaudeCodeCLI] Spawning: claude --model ${modelToUse} --print`);
   console.log(`[ClaudeCodeCLI] Prompt length: ${prompt.length} chars`);
   console.log(`[ClaudeCodeCLI] CWD: ${options.cwd || process.cwd()}`);
-  console.log(`[ClaudeCodeCLI] Using ${isUsingFallback ? "FALLBACK (Sonnet)" : "PREFERRED (Opus 4.5)"} model`);
+  console.log(`[ClaudeCodeCLI] Using ${isUsingFallback ? "FALLBACK (Sonnet)" : "PREFERRED (Opus 4.6)"} model`);
 
   // Remove ANTHROPIC_API_KEY so CLI uses Pro/Max OAuth subscription instead of API key
   const cleanEnv = getClaudeProcessEnv();
@@ -805,7 +805,7 @@ export const runClaudeCodeStreaming = async (prompt, options = {}) => {
 
     // If rate limit detected and we were using Opus, retry with Sonnet
     if (rateLimitDetected && modelToUse === PREFERRED_MODEL && !options._isRetry) {
-      console.log(`[ClaudeCodeCLI] Rate limited on Opus 4.5, switching to Sonnet fallback`);
+      console.log(`[ClaudeCodeCLI] Rate limited on Opus 4.6, switching to Sonnet fallback`);
 
       // Set rate limit cooldown
       rateLimitedUntil = Date.now() + RATE_LIMIT_COOLDOWN_MS;
@@ -818,6 +818,13 @@ export const runClaudeCodeStreaming = async (prompt, options = {}) => {
         reason: "rate_limit",
         cooldownMs: RATE_LIMIT_COOLDOWN_MS
       });
+
+      // Notify autonomous engine to extend rest period
+      try {
+        const { getAutonomousEngine } = await import("../engine/autonomous-engine.js");
+        const engine = getAutonomousEngine();
+        engine.extendRestForRateLimit();
+      } catch {}
 
       // Retry with fallback model
       console.log(`[ClaudeCodeCLI] Retrying with Sonnet...`);

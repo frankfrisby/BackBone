@@ -142,9 +142,12 @@ All `data/`, `memory/`, `projects/` paths below refer to `~/.backbone/users/<uid
 3. **INFO_RETRIEVE** — User wants information about themselves or their data
    → Read from `data/`, `memory/`, or `projects/` as appropriate
 
-4. **PORTFOLIO** — Finance or portfolio question
-   → Use MCP backbone-trading tools (`get_portfolio`, `get_positions`, `get_trading_signals`)
+4. **PORTFOLIO / NET WORTH / FINANCE** — Finance, portfolio, or net worth question
+   → For **net worth**: Use MCP backbone-brokerage tools (`empower_get_networth`, `get_total_brokerage_value`). Empower (Personal Capital) aggregates ALL accounts — bank, investment, retirement, credit cards, loans. This is the source of truth for net worth.
+   → For **trading positions**: Use MCP backbone-trading tools (`get_portfolio`, `get_positions`, `get_trading_signals`)
+   → For **all brokerage accounts**: Use MCP backbone-brokerage tools (`empower_get_accounts`, `empower_get_overview`, `get_all_brokerage_positions`)
    → Read `memory/portfolio.md` (snapshot), `memory/portfolio-notes.md` (analysis), and `memory/tickers.md` (signals)
+   → If brokerage data is stale (response includes `stale: true`), suggest refreshing with `empower_scrape`
 
 5. **HEALTH** — Health question
    → Use MCP backbone-health tools (`get_health_summary`, `get_sleep_data`)
@@ -272,29 +275,30 @@ node tools/cli.js run get-convictions
 ```
 
 ## Skills Catalog
-These are detailed instruction files in `skills/`. Read the relevant file when handling a matching task:
+Skills are instruction files in `skills/`. Two formats: flat (`skills/<name>.md`) or directory (`skills/<name>/SKILL.md`). Skills with YAML frontmatter get better trigger matching. Read the relevant file when handling a matching task:
 
+- **skill-creator**: Create or update BACKBONE skills following the Anthropic format
 - **academic-research**: Academic Research — literature review, paper analysis, citation management
 - **api-integration**: API Integration — connect to REST/GraphQL APIs, authentication, data sync
 - **calendar-scheduling**: Calendar & Scheduling — manage events, reminders, availability
 - **claude-code-cli**: Claude Code CLI — terminal commands, file operations, system tasks
 - **data-analysis**: Data Analysis — analyze datasets, statistics, visualizations
 - **database-operations**: Database Operations — SQL, NoSQL, data modeling, queries
-- **disaster-assessment**: Disaster & Crisis Assessment — 15 threat domains: markets, credit, bonds, housing, geopolitical, jobs, food scarcity, energy, climate/storms, natural disasters (earthquakes/floods/hurricanes), biological warfare/pathogens, space/cosmic, AI/tech risk, societal, mass devastation/collapse
-- **economic-policy**: Economic Policy Research — economic analysis, policy evaluation
+- **disaster-assessment**: Disaster & Crisis Assessment — 15 threat domains (directory format with references)
+- **economic-policy**: Economic Policy — indicators, Fed policy, macro analysis
 - **elevenlabs-voice**: ElevenLabs Voice AI — text-to-speech, voice cloning, audio generation
 - **email-automation**: Email Automation — compose, send, manage email workflows
 - **excel-spreadsheet**: Excel Spreadsheet Creation — create and format Excel files
 - **file-management**: File Management — organize, move, rename, backup files
 - **geopolitical-analysis**: Geopolitical Analysis — international relations, risk assessment
 - **image-processing**: Image Processing — edit, convert, analyze images
-- **linkedin-enrichment**: LinkedIn Profile Enrichment — auto-populate user profile from public web sources when completeness < 70%. Uses enrich-linkedin-profile tool (plan → search → enrich)
+- **linkedin-enrichment**: LinkedIn Profile Enrichment — auto-populate user profile from public web sources
 - **market-research**: Market Research — competitive analysis, market sizing, trends
 - **openai-platform**: OpenAI Platform — GPT API usage, fine-tuning, embeddings
-- **pdf-document**: PDF Document Creation — generate and manipulate PDF files
+- **pdf-document**: PDF Document — create, modify, merge, extract from PDFs
 - **powerpoint-presentation**: PowerPoint Presentation Creation — create slide decks
-- **rare-earth-resources**: Rare Earth Materials & Resources — supply chain, mineral analysis
-- **role-model**: Role Model Discovery — identify top 5 people who best represent who the user is becoming based on LinkedIn, beliefs, goals, and interests. Re-evaluates weekly or after profile/belief updates
+- **rare-earth-resources**: Rare Earth & Critical Resources — supply chain, mineral analysis
+- **role-model**: Role Model Discovery — identify top 5 role models from LinkedIn, beliefs, goals
 - **sms-messaging**: SMS Messaging — send and manage text messages
 - **social-media**: Social Media Integration — posting, analytics, management
 - **task-automation**: Task Automation — automate repetitive workflows

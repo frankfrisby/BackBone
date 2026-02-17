@@ -8,6 +8,7 @@ import fetch from "node-fetch";
 import fs from "fs";
 import path from "path";
 import { getDataDir } from "../services/paths.js";
+import { getCredential } from "../services/credential-vault.js";
 
 /**
  * BACKBONE Health MCP Server
@@ -18,9 +19,12 @@ const DATA_DIR = getDataDir();
 const OURA_CACHE = path.join(DATA_DIR, "oura-cache.json");
 const OURA_TOKEN_FILE = path.join(DATA_DIR, "oura-token.json");
 
-// Load Oura token — env var first, fallback to config file (MCP child processes don't inherit .env)
-const getOuraToken = () => {
-  if (process.env.OURA_ACCESS_TOKEN) return process.env.OURA_ACCESS_TOKEN;
+// Load Oura token — vault first, env var, then config file fallback
+const getOuraToken = async () => {
+  // Vault + env fallback
+  const vaultToken = await getCredential("OURA_ACCESS_TOKEN");
+  if (vaultToken) return vaultToken;
+  // Legacy config file
   try {
     if (fs.existsSync(OURA_TOKEN_FILE)) {
       const config = JSON.parse(fs.readFileSync(OURA_TOKEN_FILE, "utf-8"));
@@ -30,8 +34,8 @@ const getOuraToken = () => {
   return null;
 };
 
-const getOuraHeaders = () => ({
-  Authorization: `Bearer ${getOuraToken()}`,
+const getOuraHeaders = async () => ({
+  Authorization: `Bearer ${await getOuraToken()}`,
   "Content-Type": "application/json",
 });
 
@@ -127,7 +131,7 @@ async function fetchOura(endpoint, params = {}) {
 
   try {
     const response = await fetch(url.toString(), {
-      headers: getOuraHeaders(),
+      headers: await getOuraHeaders(),
     });
 
     if (!response.ok) {

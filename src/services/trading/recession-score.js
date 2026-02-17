@@ -484,6 +484,120 @@ function saveScore(scoreData) {
   } catch { /* ignore */ }
 }
 
+// ─── RECESSION HISTORY + FORWARD PROJECTION ─────────────────────
+
+const RECESSION_HISTORY_PATH = path.join(DATA_DIR, "recession-history.json");
+const MAX_HISTORY = 90; // Keep 90 data points (~90 calculations over days)
+
+/**
+ * Load recession score history
+ */
+function loadHistory() {
+  try {
+    if (fs.existsSync(RECESSION_HISTORY_PATH)) {
+      return JSON.parse(fs.readFileSync(RECESSION_HISTORY_PATH, "utf-8"));
+    }
+  } catch { /* ignore */ }
+  return [];
+}
+
+/**
+ * Append a score to history (deduplicated by hour)
+ */
+function appendHistory(score, calculatedAt) {
+  try {
+    const history = loadHistory();
+    const hourKey = new Date(calculatedAt).toISOString().slice(0, 13); // "2026-02-12T23"
+
+    // Don't duplicate the same hour
+    if (history.length > 0) {
+      const lastHour = new Date(history[history.length - 1].at).toISOString().slice(0, 13);
+      if (lastHour === hourKey) return;
+    }
+
+    history.push({ score, at: calculatedAt });
+
+    // Trim to max
+    while (history.length > MAX_HISTORY) history.shift();
+
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(RECESSION_HISTORY_PATH, JSON.stringify(history, null, 2));
+  } catch { /* ignore */ }
+}
+
+/**
+ * Calculate recession trend and forward projection.
+ *
+ * Uses linear regression on recent history to determine:
+ * - trend: "improving" | "worsening" | "stable"
+ * - velocity: rate of change per day
+ * - projection30d: projected score in 30 days
+ * - projectionArrow: ↓ ↘ → ↗ ↑ based on projected direction
+ */
+function calculateProjection() {
+  const history = loadHistory();
+  if (history.length < 3) return null; // Need at least 3 data points
+
+  // Use last 14 data points (roughly 2 weeks)
+  const recent = history.slice(-14);
+  const n = recent.length;
+
+  // Linear regression: score = a + b*t (t in days from first point)
+  const t0 = new Date(recent[0].at).getTime();
+  const points = recent.map(h => ({
+    t: (new Date(h.at).getTime() - t0) / (24 * 60 * 60 * 1000), // days
+    score: h.score,
+  }));
+
+  const sumT = points.reduce((s, p) => s + p.t, 0);
+  const sumS = points.reduce((s, p) => s + p.score, 0);
+  const sumTS = points.reduce((s, p) => s + p.t * p.score, 0);
+  const sumT2 = points.reduce((s, p) => s + p.t * p.t, 0);
+
+  const meanT = sumT / n;
+  const meanS = sumS / n;
+
+  const denom = sumT2 - n * meanT * meanT;
+  if (Math.abs(denom) < 0.001) {
+    // Flat — no slope
+    return {
+      trend: "stable",
+      velocity: 0,
+      currentScore: recent[recent.length - 1].score,
+      projection30d: recent[recent.length - 1].score,
+      projectionArrow: "→",
+      dataPoints: n,
+    };
+  }
+
+  const slope = (sumTS - n * meanT * meanS) / denom; // score change per day
+  const currentScore = recent[recent.length - 1].score;
+
+  // Project 30 days forward (clamped 0-10)
+  const projected = Math.max(0, Math.min(10, currentScore + slope * 30));
+  const delta = projected - currentScore;
+
+  let trend = "stable";
+  if (delta >= 0.5) trend = "worsening";
+  else if (delta <= -0.5) trend = "improving";
+
+  // Arrow: recession risk direction (higher = worse, so ↑ = worsening)
+  let arrow = "→";
+  if (delta >= 1.5) arrow = "↑";       // risk rising fast
+  else if (delta >= 0.5) arrow = "↗";  // risk rising
+  else if (delta <= -1.5) arrow = "↓"; // risk falling fast
+  else if (delta <= -0.5) arrow = "↘"; // risk falling
+
+  return {
+    trend,
+    velocity: Math.round(slope * 1000) / 1000, // score/day
+    currentScore,
+    projection30d: Math.round(projected * 10) / 10,
+    projectionArrow: arrow,
+    dataPoints: n,
+  };
+}
+
 
 /**
  * Get current recession score (cached or fresh)
@@ -497,6 +611,16 @@ function getRecessionScore() {
 
   // Calculate fresh from ticker cache + macro knowledge
   const fresh = calculateFromTickerCache();
+
+  // Track history for forward projection
+  appendHistory(fresh.score, fresh.calculatedAt || new Date().toISOString());
+
+  // Add forward projection
+  const projection = calculateProjection();
+  if (projection) {
+    fresh.projection = projection;
+  }
+
   saveScore(fresh);
   return fresh;
 }
@@ -509,6 +633,7 @@ export {
   getRecessionLabel,
   calculateRecessionScore,
   calculateFromTickerCache,
+  calculateProjection,
   SECTOR_CLASSIFICATIONS
 };
 

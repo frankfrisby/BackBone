@@ -4,7 +4,7 @@ import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 import fetch from "node-fetch";
-import { getDataDir, getActiveUser } from "./services/paths.js";
+import { getDataDir, getMemoryDir, getActiveUser } from "./services/paths.js";
 import {
   createLinkedInAuthRequest,
   exchangeLinkedInCode,
@@ -469,6 +469,22 @@ if (WebSocketServer) {
 
 // ── API Endpoints ────────────────────────────────────────────
 
+// Point AI switching (claude ↔ codex)
+app.get("/api/point-ai", async (req, res) => {
+  const { getSetting } = await import("./services/user-settings.js");
+  res.json({ pointAI: getSetting("pointAI") || "claude" });
+});
+app.post("/api/point-ai", async (req, res) => {
+  const { updateSetting, getSetting } = await import("./services/user-settings.js");
+  const { pointAI } = req.body;
+  if (!["claude", "codex"].includes(pointAI)) {
+    return res.status(400).json({ error: "pointAI must be 'claude' or 'codex'" });
+  }
+  updateSetting("pointAI", pointAI);
+  console.log(`[Settings] Point AI switched to: ${pointAI}`);
+  res.json({ pointAI, message: `Point AI set to ${pointAI}` });
+});
+
 // Chat
 app.post("/api/chat", async (req, res) => {
   try {
@@ -550,6 +566,47 @@ app.post("/api/health", async (req, res) => {
   try {
     const result = await handleHealth();
     res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Machine Profile (local software/capability discovery)
+app.get("/api/machine-profile", async (req, res) => {
+  try {
+    const { getMachineProfileManager } = await import("./services/machine-profile.js");
+    const manager = getMachineProfileManager();
+    const profile = await manager.discoverProfile();
+    res.json(profile);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/machine-profile/refresh", async (req, res) => {
+  try {
+    const { getMachineProfileManager } = await import("./services/machine-profile.js");
+    const manager = getMachineProfileManager();
+    const profile = await manager.discoverProfile({ forceRefresh: true });
+    res.json(profile);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/machine-profile/plan", async (req, res) => {
+  try {
+    const { message, analysis, capabilityIds } = req.body || {};
+    const { getMachineProfileManager } = await import("./services/machine-profile.js");
+    const manager = getMachineProfileManager();
+    const profile = await manager.discoverProfile();
+    const plan = manager.planForRequest({
+      message: message || "",
+      analysis: analysis || null,
+      capabilityIds: Array.isArray(capabilityIds) ? capabilityIds : [],
+      machineProfile: profile
+    });
+    res.json({ profile, plan });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -723,15 +780,16 @@ app.post("/api/videos", async (req, res) => {
 });
 
 // ── Autonomous Engine ─────────────────────────────────────────
-let autonomousLoop = null;
 
 app.get("/api/engine/status", async (req, res) => {
   try {
-    if (!autonomousLoop) {
-      res.json({ running: false, status: "not_started" });
-      return;
-    }
-    res.json(autonomousLoop.getStatus());
+    const { getAutonomousEngine } = await import("./services/engine/autonomous-engine.js");
+    const engine = getAutonomousEngine();
+    res.json({
+      running: engine.running,
+      ...engine.getDisplayData(),
+      handoff: engine.loadHandoff()
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -739,13 +797,15 @@ app.get("/api/engine/status", async (req, res) => {
 
 app.post("/api/engine/start", async (req, res) => {
   try {
-    if (autonomousLoop && autonomousLoop.running) {
+    const { getAutonomousEngine } = await import("./services/engine/autonomous-engine.js");
+    const engine = getAutonomousEngine();
+    if (engine.running) {
       res.json({ ok: false, message: "Engine already running" });
       return;
     }
-    const { getAutonomousLoop } = await import("./services/engine/autonomous-loop.js");
-    autonomousLoop = await getAutonomousLoop();
-    autonomousLoop.start(); // Don't await - runs in background
+    engine.startAutonomousLoop().catch(err => {
+      console.error("[Engine] Loop exited:", err.message);
+    });
     res.json({ ok: true, message: "Engine started" });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -754,11 +814,13 @@ app.post("/api/engine/start", async (req, res) => {
 
 app.post("/api/engine/stop", async (req, res) => {
   try {
-    if (!autonomousLoop || !autonomousLoop.running) {
+    const { getAutonomousEngine } = await import("./services/engine/autonomous-engine.js");
+    const engine = getAutonomousEngine();
+    if (!engine.running) {
       res.json({ ok: false, message: "Engine not running" });
       return;
     }
-    await autonomousLoop.stop();
+    engine.stopAutonomousLoop();
     res.json({ ok: true, message: "Engine stopped" });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -767,11 +829,13 @@ app.post("/api/engine/stop", async (req, res) => {
 
 app.post("/api/engine/pause", async (req, res) => {
   try {
-    if (!autonomousLoop) {
-      res.json({ ok: false, message: "Engine not started" });
+    const { getAutonomousEngine } = await import("./services/engine/autonomous-engine.js");
+    const engine = getAutonomousEngine();
+    if (!engine.running) {
+      res.json({ ok: false, message: "Engine not running" });
       return;
     }
-    autonomousLoop.pause();
+    engine.stopAutonomousLoop();
     res.json({ ok: true, message: "Engine paused" });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -780,11 +844,15 @@ app.post("/api/engine/pause", async (req, res) => {
 
 app.post("/api/engine/resume", async (req, res) => {
   try {
-    if (!autonomousLoop) {
-      res.json({ ok: false, message: "Engine not started" });
+    const { getAutonomousEngine } = await import("./services/engine/autonomous-engine.js");
+    const engine = getAutonomousEngine();
+    if (engine.running) {
+      res.json({ ok: false, message: "Engine already running" });
       return;
     }
-    autonomousLoop.resume();
+    engine.startAutonomousLoop().catch(err => {
+      console.error("[Engine] Loop exited:", err.message);
+    });
     res.json({ ok: true, message: "Engine resumed" });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -919,6 +987,120 @@ app.post("/api/engine/continuous/nudge", async (req, res) => {
   }
 });
 
+// ── Firebase Context Sync API ─────────────────────────────────
+
+app.get("/api/context-sync/status", async (req, res) => {
+  try {
+    const { getFirebaseContextSync } = await import("./services/firebase/firebase-context-sync.js");
+    const sync = getFirebaseContextSync();
+    res.json(sync.getStatus());
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/context-sync/trigger", async (req, res) => {
+  try {
+    const { getFirebaseContextSync } = await import("./services/firebase/firebase-context-sync.js");
+    const sync = getFirebaseContextSync();
+    const success = await sync.syncAll();
+    res.json({ ok: success, message: success ? "Context synced" : "Debounced or failed" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Parallel Agents API ──────────────────────────────────────
+
+app.get("/api/agents/status", async (req, res) => {
+  try {
+    const { getParallelAgentsManager } = await import("./services/ai/parallel-agents.js");
+    const manager = getParallelAgentsManager();
+    res.json(manager.getStatus());
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/api/agents/history", async (req, res) => {
+  try {
+    const { getParallelAgentsManager } = await import("./services/ai/parallel-agents.js");
+    const manager = getParallelAgentsManager();
+    res.json(manager.getHistory());
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/api/agents/output/:agentId", async (req, res) => {
+  try {
+    const { getParallelAgentsManager } = await import("./services/ai/parallel-agents.js");
+    const manager = getParallelAgentsManager();
+    const output = manager.getAgentOutput(req.params.agentId);
+    if (!output) return res.status(404).json({ error: "Agent not found" });
+    res.json(output);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/agents/run", async (req, res) => {
+  try {
+    const { tasks, timeout, model } = req.body;
+    if (!Array.isArray(tasks) || tasks.length === 0) {
+      return res.status(400).json({ error: "Provide an array of tasks: [{ name, task }]" });
+    }
+    const { getParallelAgentsManager } = await import("./services/ai/parallel-agents.js");
+    const manager = getParallelAgentsManager();
+
+    // Wire SSE broadcasts
+    manager.removeAllListeners("agent-progress");
+    manager.on("agent-progress", (event) => broadcastEvent("agents", event));
+    manager.on("session-completed", (event) => broadcastEvent("agents", { type: "session-completed", ...event }));
+
+    // Start async — respond immediately with session ID
+    const sessionPromise = manager.runParallel(tasks, { timeout, model });
+    // Wait just a moment for validation errors
+    await new Promise(r => setTimeout(r, 200));
+
+    const status = manager.getStatus();
+    if (!status.active && status.state !== "running") {
+      // Probably failed validation
+      const result = await sessionPromise;
+      return res.json(result);
+    }
+
+    res.json({ success: true, sessionId: status.sessionId, agents: status.agents.map(a => ({ id: a.id, name: a.name, state: a.state })) });
+
+    // Let the session complete in background
+    sessionPromise.catch(err => console.error("[ParallelAgents] Session error:", err.message));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/agents/stop", async (req, res) => {
+  try {
+    const { getParallelAgentsManager } = await import("./services/ai/parallel-agents.js");
+    const manager = getParallelAgentsManager();
+    const result = manager.stopAll();
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/agents/stop/:agentId", async (req, res) => {
+  try {
+    const { getParallelAgentsManager } = await import("./services/ai/parallel-agents.js");
+    const manager = getParallelAgentsManager();
+    const result = manager.stopAgent(req.params.agentId);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── WhatsApp Integration Helpers ─────────────────────────────
 
 /**
@@ -1009,13 +1191,14 @@ async function handleChat(message) {
   if (!message) return { role: "assistant", content: "No message provided.", timestamp: Date.now() };
 
   let chatResult = null;
+  let agenticError = null;
 
-  // Primary path: use Claude Code CLI (leverages Pro/Max subscription, no API key needed)
+  // Primary path: use agentic executor (Claude -> Codex fallback on rate limits)
   try {
-    const { runClaudeCodePrompt, getClaudeCodeStatus } = await import("./services/ai/claude-code-cli.js");
-    const cliStatus = await getClaudeCodeStatus();
+    const { executeAgenticTask, getAgenticCapabilities } = await import("./services/ai/multi-ai.js");
+    const capabilities = await getAgenticCapabilities();
 
-    if (cliStatus.ready) {
+    if (capabilities.available) {
       // Load context files for the prompt
       let contextSnippet = "";
       try {
@@ -1034,41 +1217,30 @@ async function handleChat(message) {
 
       const prompt = `You are BACKBONE, a life optimization AI assistant. You help the user manage their portfolio, health, goals, and daily life. Be concise and actionable. Keep responses under 3 sentences for data queries, longer for analysis or advice.${contextSnippet}\n\nUser: ${message}`;
 
-      const result = await runClaudeCodePrompt(prompt, { timeout: 60000 });
+      const result = await executeAgenticTask(prompt, process.cwd(), null, {
+        alwaysTryClaude: true
+      });
       if (result.success && result.output) {
         chatResult = { role: "assistant", content: result.output.trim(), timestamp: Date.now() };
       } else {
-        // If CLI call failed, fall through to API fallback
-        console.log("[Server] Claude Code CLI chat failed, trying API fallback:", result.error);
+        agenticError = result.error || "Agentic CLI returned no output";
+        console.log("[Server] Agentic chat failed:", agenticError);
       }
+    } else {
+      agenticError = "No CLI agent tools available (Claude/Codex CLI)";
     }
   } catch (cliErr) {
-    console.log("[Server] Claude Code CLI unavailable for chat:", cliErr.message);
+    agenticError = cliErr.message || "Agentic CLI unavailable";
+    console.log("[Server] Agentic tools unavailable for chat:", agenticError);
   }
 
-  // Fallback: use multi-ai (requires ANTHROPIC_API_KEY or OPENAI_API_KEY)
+  // CLI-only behavior: do not fall back to API chat path.
   if (!chatResult) {
-    try {
-      const { sendMessage: sendAI } = await import("./services/ai/multi-ai.js");
-
-      const context = {
-        systemPrompt: `You are BACKBONE, a life optimization AI assistant. You help the user manage their portfolio, health, goals, and daily life. Be concise and actionable. If the user asks about their data (portfolio, health, goals, etc.), provide a brief summary and note that the view has been generated for them. Keep responses under 3 sentences for data queries, longer for analysis or advice.`
-      };
-
-      const result = await sendAI(message, context);
-      const content = typeof result === "string"
-        ? result
-        : result?.response || result?.content || "I processed your request.";
-
-      chatResult = { role: "assistant", content, timestamp: Date.now() };
-    } catch (err) {
-      console.error("AI chat error:", err.message);
-      chatResult = {
-        role: "assistant",
-        content: `I received your request. The AI service is not available right now, but I've loaded the relevant view for you.`,
-        timestamp: Date.now(),
-      };
-    }
+    chatResult = {
+      role: "assistant",
+      content: `Agentic CLI is unavailable right now (${agenticError || "unknown error"}). Start Claude/Codex CLI and try again.`,
+      timestamp: Date.now(),
+    };
   }
 
   // Mirror the response to WhatsApp (async, non-blocking)
@@ -1528,9 +1700,14 @@ app.post("/api/vapi/call", async (req, res) => {
     const { getVapiService } = await import("./services/messaging/vapi-service.js");
     const vapiService = getVapiService();
     await vapiService.initialize();
-    const { customPrompt } = req.body || {};
-    const result = await vapiService.callUser(customPrompt || undefined);
-    res.json({ success: true, callId: result?.id || result, status: "initiated" });
+    const { customPrompt, targetNumber } = req.body || {};
+    const result = await vapiService.callUser(customPrompt || undefined, { targetNumber: targetNumber || null });
+    res.json({
+      success: true,
+      callId: result?.id || result,
+      targetNumber: targetNumber || null,
+      status: "initiated"
+    });
   } catch (err) {
     console.error("Vapi call error:", err.message);
     res.status(500).json({ success: false, error: err.message });
@@ -1610,6 +1787,161 @@ app.get("/api/whatsapp/poller", async (req, res) => {
   }
 });
 
+app.get("/api/realtime/status", async (req, res) => {
+  try {
+    const { getRealtimeMessaging } = await import("./services/messaging/realtime-messaging.js");
+    res.json(getRealtimeMessaging().getStatus());
+  } catch (err) {
+    res.json({ error: err.message });
+  }
+});
+
+app.get("/api/whatsapp/status", async (req, res) => {
+  try {
+    const { getTwilioWhatsApp } = await import("./services/messaging/twilio-whatsapp.js");
+    const { loadUserSettings } = await import("./services/user-settings.js");
+    const wa = getTwilioWhatsApp();
+    const autoPair = String(req.query?.autoPair || "").toLowerCase();
+    const shouldAutoPair = autoPair === "1" || autoPair === "true" || autoPair === "yes";
+    const testTwilio = String(req.query?.testTwilio || "").toLowerCase();
+    const shouldTestTwilio = testTwilio === "1" || testTwilio === "true" || testTwilio === "yes";
+
+    const normalizeUsPhone = (raw) => {
+      const normalized = String(raw || "").replace(/[^\d+]/g, "");
+      if (!normalized) return null;
+      const usNormalized = normalized.startsWith("+")
+        ? normalized
+        : normalized.length === 10
+          ? `+1${normalized}`
+          : normalized.length === 11 && normalized.startsWith("1")
+            ? `+${normalized}`
+            : normalized;
+      return /^\+1\d{10}$/.test(usNormalized) ? usNormalized : null;
+    };
+
+    if (!wa.initialized) {
+      await wa.initialize();
+    }
+
+    let pairing = null;
+    if (shouldAutoPair) {
+      const statusNow = wa.getStatus?.();
+      const connected = Boolean(statusNow?.providers?.baileys?.connected);
+      if (!connected) {
+        const requestedPhone = req.query?.phone || null;
+        const settingsPhone = loadUserSettings()?.phoneNumber || null;
+        const phone = normalizeUsPhone(requestedPhone) || normalizeUsPhone(settingsPhone);
+        if (phone) {
+          pairing = await wa.requestPairingCode(phone, { maxAttempts: 4, resetOnLoggedOut: true, freshAuth: false });
+        } else {
+          pairing = {
+            success: false,
+            error: "US phone number required for Baileys pairing (+1XXXXXXXXXX)."
+          };
+        }
+      }
+    }
+
+    let twilio = null;
+    if (shouldTestTwilio) {
+      twilio = await wa.testTwilioConnection();
+    }
+
+    const status = wa.getStatus();
+    res.json({
+      ...status,
+      pairing,
+      twilio
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post("/api/whatsapp/baileys/pairing-code", async (req, res) => {
+  try {
+    const phoneNumber = req.body?.phoneNumber || req.body?.phone || null;
+    if (!phoneNumber) {
+      return res.status(400).json({ success: false, error: "phoneNumber is required" });
+    }
+    const normalized = String(phoneNumber).replace(/[^\d+]/g, "");
+    const usNormalized = normalized.startsWith("+")
+      ? normalized
+      : normalized.length === 10
+        ? `+1${normalized}`
+        : normalized.length === 11 && normalized.startsWith("1")
+          ? `+${normalized}`
+          : normalized;
+    if (!/^\+1\d{10}$/.test(usNormalized)) {
+      return res.status(400).json({
+        success: false,
+        error: "US phone number required for Baileys pairing (+1XXXXXXXXXX)."
+      });
+    }
+
+    const { getTwilioWhatsApp } = await import("./services/messaging/twilio-whatsapp.js");
+    const wa = getTwilioWhatsApp();
+    if (!wa.initialized) {
+      await wa.initialize({ providerPreference: "baileys" });
+    }
+    const result = await wa.requestPairingCode(usNormalized, { maxAttempts: 4, resetOnLoggedOut: true, freshAuth: false });
+    if (!result.success) {
+      return res.status(400).json(result);
+    }
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post("/api/whatsapp/twilio/test", async (req, res) => {
+  try {
+    const { getTwilioWhatsApp } = await import("./services/messaging/twilio-whatsapp.js");
+    const wa = getTwilioWhatsApp();
+    const payload = req.body || {};
+    const overrides = {};
+    if (payload.accountSid) overrides.accountSid = String(payload.accountSid).trim();
+    if (payload.authToken) overrides.authToken = String(payload.authToken).trim();
+    if (payload.whatsappNumber) overrides.whatsappNumber = String(payload.whatsappNumber).trim();
+
+    const result = await wa.testTwilioConnection(overrides);
+    const status = wa.getStatus?.();
+    const response = {
+      ...result,
+      twilio: status?.providers?.twilio || null
+    };
+    if (!result?.success) {
+      return res.status(400).json(response);
+    }
+    res.json(response);
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post("/api/whatsapp/provider", async (req, res) => {
+  try {
+    const provider = String(req.body?.provider || "").toLowerCase();
+    if (provider !== "baileys" && provider !== "twilio") {
+      return res.status(400).json({
+        success: false,
+        error: "provider must be 'baileys' or 'twilio'"
+      });
+    }
+
+    const { getTwilioWhatsApp } = await import("./services/messaging/twilio-whatsapp.js");
+    const wa = getTwilioWhatsApp();
+    const result = wa.setProviderPreference(provider);
+    const status = wa.getStatus?.();
+    res.json({
+      ...result,
+      status
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ── Proactive Scheduler Status & Trigger ──────────────────────
 
 app.get("/api/proactive/status", async (req, res) => {
@@ -1633,6 +1965,26 @@ app.post("/api/proactive/trigger", async (req, res) => {
   }
 });
 
+// ── Email Digest API ──────────────────────────────────────────
+app.get("/api/email-digest/status", async (req, res) => {
+  try {
+    const { getDigestStatus } = await import("./services/messaging/email-digest.js");
+    res.json(getDigestStatus());
+  } catch (err) {
+    res.json({ error: err.message });
+  }
+});
+
+app.post("/api/email-digest/trigger", async (req, res) => {
+  try {
+    const { runEmailDigest } = await import("./services/messaging/email-digest.js");
+    const result = await runEmailDigest({ sendWhatsApp: true, topN: 5 });
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── WhatsApp Webhook (Twilio) ─────────────────────────────────
 app.post("/api/whatsapp/webhook", async (req, res) => {
   try {
@@ -1649,6 +2001,24 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
     const messageData = whatsapp.handleWebhook(req.body);
     const userPhone = messageData.from;
     const userMessage = messageData.content?.trim();
+    const messageSid = req.body?.MessageSid || req.body?.SmsSid || null;
+
+    // Check for reply context (user swiped to reply to a message)
+    let repliedToContext = null;
+    const repliedSid = req.body?.OriginalRepliedMessageSid || null;
+    if (repliedSid) {
+      try {
+        const repliedMsg = await whatsapp.fetchMessage(repliedSid);
+        if (repliedMsg?.body) {
+          repliedToContext = {
+            sid: repliedSid,
+            body: repliedMsg.body.slice(0, 500),
+            from: repliedMsg.from,
+          };
+          console.log(`[WhatsApp Webhook] Reply to: "${repliedMsg.body.slice(0, 60)}"`);
+        }
+      } catch {}
+    }
 
     console.log("[WhatsApp Webhook] Received from:", userPhone, "Content:", userMessage?.slice(0, 100));
 
@@ -1662,6 +2032,35 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
     // Send immediate acknowledgment
     res.type("text/xml");
     res.send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
+
+    // Send typing indicator (shows "BACKBONE is typing..." + blue ticks)
+    if (messageSid) {
+      try { await whatsapp.sendTypingIndicator(messageSid); } catch {}
+    }
+
+    // Try deterministic action execution first (step-by-step progress + clear completion report)
+    try {
+      const { processWhatsAppActionRequest } = await import("./services/messaging/whatsapp-actions.js");
+      const actionFlow = await processWhatsAppActionRequest({
+        message: userMessage,
+        from: userPhone,
+        sendProgress: async (progressText) => {
+          await whatsapp.sendMessage(userPhone, `_${progressText}_`);
+        }
+      });
+
+      if (actionFlow?.handled) {
+        const formatted = formatAIResponse(actionFlow.response || "Action processed.");
+        const chunks = chunkMessage(formatted, 1500);
+        for (const chunk of chunks) {
+          await whatsapp.sendMessage(userPhone, chunk);
+        }
+        console.log("[WhatsApp Webhook] Action flow handled request for", userPhone);
+        return;
+      }
+    } catch (actionErr) {
+      console.log("[WhatsApp Webhook] Action flow fallback:", actionErr.message);
+    }
 
     // Process the request with full context
     try {
@@ -1744,10 +2143,85 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
         }
       } catch {}
 
-      // Build the AI prompt — instruct WhatsApp-native formatting
+      // ── Conversation history (last 30 messages) ──
+      let conversationHistory = "(first message — no prior history)";
+      try {
+        const { getUnifiedMessageLog, MESSAGE_CHANNEL } = await import("./services/messaging/unified-message-log.js");
+        const messageLog = getUnifiedMessageLog();
+        // Log incoming message
+        messageLog.addUserMessage(userMessage, MESSAGE_CHANNEL.WHATSAPP, { from: userPhone });
+
+        // Check if this answers a pending question from BACKBONE
+        try {
+          const { matchResponseToQuestion, markQuestionAnswered } = await import("./services/messaging/proactive-outreach.js");
+          const pendingQ = matchResponseToQuestion(userMessage);
+          if (pendingQ) {
+            markQuestionAnswered(pendingQ.id, userMessage);
+            console.log(`[WhatsApp Webhook] Matched response to question ${pendingQ.id}`);
+          }
+        } catch {}
+
+        const recent = messageLog.getMessagesForAI(36);
+        if (recent.length > 0) {
+          conversationHistory = recent.slice(-30)
+            .map(m => `${m.role === "user" ? "User" : "BACKBONE"}: ${m.content}`)
+            .join("\n");
+        }
+      } catch (e) { console.log("[WhatsApp Webhook] Message log error:", e.message); }
+
+      // ── Knowledge-db search for relevant context ──
+      try {
+        const { searchKeyword } = await import("./services/memory/knowledge-db.js");
+        const results = searchKeyword(userMessage, { limit: 5 });
+        if (results && results.length > 0) {
+          context.knowledgeSearch = results.map(r => ({
+            source: r.source_path || r.title || "unknown",
+            text: (r.text || "").slice(0, 300)
+          }));
+        }
+      } catch { /* knowledge-db may not be initialized */ }
+
+      // ── Memory files for deeper context ──
+      try {
+        const memDir = getMemoryDir();
+        const memFiles = [
+          { key: "profile", file: "profile.md", max: 500 },
+          { key: "thesis", file: "thesis.md", max: 400 },
+          { key: "portfolio", file: "portfolio.md", max: 400 },
+          { key: "health", file: "health.md", max: 300 },
+          { key: "goals", file: "goals.md", max: 300 },
+        ];
+        const memContext = {};
+        for (const { key, file, max } of memFiles) {
+          try {
+            const fp = path.join(memDir, file);
+            if (fs.existsSync(fp)) {
+              const raw = fs.readFileSync(fp, "utf-8").trim();
+              if (raw.length > 0) memContext[key] = raw.length > max ? raw.slice(0, max) + "..." : raw;
+            }
+          } catch {}
+        }
+        if (Object.keys(memContext).length > 0) context.memoryNotes = memContext;
+      } catch {}
+
+      // Build reply context section if user swiped to reply
+      let replySection = "";
+      if (repliedToContext?.body) {
+        replySection = `
+*REPLYING TO THIS MESSAGE:*
+"${repliedToContext.body.slice(0, 500)}"
+
+The user swiped to reply to the message above. Their response "${userMessage}" is specifically about that message. Answer in context of what they're replying to.
+`;
+      }
+
+      // Build the AI prompt with full context
       const prompt = `You are BACKBONE, an executive AI assistant. The user messaged you on WhatsApp.
 
-*User message:* "${userMessage}"
+*CONVERSATION HISTORY (last 30 messages):*
+${conversationHistory}
+${replySection}
+*Current message:* "${userMessage}"
 
 *FORMATTING RULES (CRITICAL):*
 Use WhatsApp-native formatting in your response:
@@ -1763,41 +2237,31 @@ Use WhatsApp-native formatting in your response:
 *USER CONTEXT:*
 ${JSON.stringify(context, null, 2)}
 
-Respond to the user's question with specific data from the context above. Be concise, actionable, and data-rich. If they ask about markets, mention specific tickers and scores. If about health, cite Oura scores. If about portfolio, cite positions and P&L. If they ask what the engine is doing, mention the last action and next planned task.`;
+IMPORTANT: You are in a CONVERSATION. Read the history above carefully. The user may be following up on a prior topic, answering your question, or referencing something discussed earlier. Use the conversation history, knowledge search results, and memory notes to give informed, contextual responses. Be concise, actionable, and data-rich.`;
 
-      // Use Claude Code CLI (Pro/Max subscription) — no API key needed
+      // Use agentic executor (Claude -> Codex fallback on rate limits)
       let responseText = null;
+      let agenticError = null;
       try {
-        const { runClaudeCodePrompt } = await import("./services/ai/claude-code-cli.js");
-        const cliResult = await runClaudeCodePrompt(prompt, { timeout: 90000 });
-        if (cliResult.success && cliResult.output) {
-          responseText = cliResult.output.trim();
+        const { executeAgenticTask, getAgenticCapabilities } = await import("./services/ai/multi-ai.js");
+        const capabilities = await getAgenticCapabilities();
+        if (capabilities.available) {
+          const agentResult = await executeAgenticTask(prompt, process.cwd(), null, {
+            alwaysTryClaude: true
+          });
+          if (agentResult.success && agentResult.output) {
+            responseText = agentResult.output.trim();
+          } else {
+            agenticError = agentResult.error || "Agentic CLI returned no output";
+            console.log("[WhatsApp Webhook] Agentic execution failed:", agenticError);
+          }
         } else {
-          console.log("[WhatsApp Webhook] CLI failed, trying multi-ai fallback:", cliResult.error);
+          agenticError = "No CLI agent tools available (Claude/Codex CLI)";
+          console.log("[WhatsApp Webhook] No agentic tools available");
         }
       } catch (cliErr) {
-        console.log("[WhatsApp Webhook] CLI unavailable:", cliErr.message);
-      }
-
-      // Fallback: try multi-ai (requires API key)
-      if (!responseText) {
-        try {
-          const { sendMessage } = await import("./services/ai/multi-ai.js");
-          const aiResponse = await sendMessage(prompt, { format: "text", maxTokens: 1000 });
-          if (typeof aiResponse === "string") {
-            responseText = aiResponse;
-          } else if (aiResponse?.content) {
-            responseText = aiResponse.content;
-          } else if (aiResponse?.message) {
-            responseText = aiResponse.message;
-          } else if (aiResponse?.response) {
-            responseText = aiResponse.response;
-          } else if (aiResponse?.error) {
-            console.error("[WhatsApp Webhook] multi-ai error:", aiResponse.error);
-          }
-        } catch (aiErr) {
-          console.error("[WhatsApp Webhook] multi-ai fallback failed:", aiErr.message);
-        }
+        agenticError = cliErr.message || "Agentic CLI unavailable";
+        console.log("[WhatsApp Webhook] Agentic execution unavailable:", agenticError);
       }
 
       if (responseText) {
@@ -1808,10 +2272,17 @@ Respond to the user's question with specific data from the context above. Be con
         for (const chunk of chunks) {
           await whatsapp.sendMessage(userPhone, chunk);
         }
+
+        // Log assistant response for conversation continuity
+        try {
+          const { getUnifiedMessageLog, MESSAGE_CHANNEL } = await import("./services/messaging/unified-message-log.js");
+          getUnifiedMessageLog().addAssistantMessage(formatted, MESSAGE_CHANNEL.WHATSAPP);
+        } catch {}
+
         console.log("[WhatsApp Webhook] Sent response to", userPhone, `(${chunks.length} chunks)`);
       } else {
-        console.error("[WhatsApp Webhook] No response text. aiResponse:", JSON.stringify(aiResponse)?.slice(0, 300));
-        await whatsapp.sendMessage(userPhone, "_Something went wrong generating a response. The AI service may be temporarily unavailable._");
+        console.error("[WhatsApp Webhook] No response text from agentic CLI:", agenticError);
+        await whatsapp.sendMessage(userPhone, `_Agentic CLI is unavailable right now (${String(agenticError || "unknown error").slice(0, 120)}). Try again in a moment._`);
       }
     } catch (aiErr) {
       console.error("[WhatsApp Webhook] AI processing failed:", aiErr.message);
@@ -1905,7 +2376,7 @@ if (fs.existsSync(webAppOutDir)) {
 
 // ── Start Server ─────────────────────────────────────────────
 
-server.listen(PORT, () => {
+server.listen(PORT, async () => {
   console.log(`BACKBONE backend listening on ${PORT}`);
   if (WebSocketServer) {
     console.log(`WebSocket available at ws://localhost:${PORT}/ws`);
@@ -1918,6 +2389,17 @@ server.listen(PORT, () => {
     launchDesktopPWA();
   }
 
+  // Migrate legacy credentials to encrypted vault (idempotent, runs once)
+  try {
+    const { migrateCredentialsToVault } = await import("./services/credential-vault-migration.js");
+    const result = await migrateCredentialsToVault();
+    if (result.migrated.length > 0) {
+      console.log(`[Vault] Migrated ${result.migrated.length} credentials: ${result.migrated.join(", ")}`);
+    }
+  } catch (e) {
+    console.warn("[Vault] Migration skipped:", e.message);
+  }
+
   // Start WhatsApp message poller (polls Twilio API for incoming messages)
   startWhatsAppPoller();
 
@@ -1926,6 +2408,31 @@ server.listen(PORT, () => {
 
   // Kick off macro economic research (yield curve, VIX, credit, soft indicators)
   startMacroResearch();
+
+  // Ensure all projects have an images/ folder for captured screenshots/charts
+  try {
+    const { ensureAllProjectImageDirs } = await import("./services/projects/project-images.js");
+    const { created } = ensureAllProjectImageDirs();
+    if (created.length > 0) {
+      console.log(`[Server] Created images/ dirs for ${created.length} projects`);
+    }
+  } catch {}
+
+  // Initialize realtime-messaging (Firebase Firestore polling + presence)
+  // This MUST happen before pending tasks and conversation sync
+  await initializeRealtimeMessaging();
+
+  // Check for pending tasks queued while we were offline
+  startPendingTaskProcessor();
+
+  // Sync Firebase conversations into local memory (catch up on cloud AI chats)
+  syncFirebaseConversationsOnStartup();
+
+  // Initialize Firebase context sync (syncs user data to Firestore for cloud AI)
+  startFirebaseContextSync();
+
+  // Auto-start the autonomous engine (continuous loop, no manual start needed)
+  startAutonomousEngine();
 });
 
 /**
@@ -1941,87 +2448,365 @@ async function startWhatsAppPoller() {
 
     // Set the message handler — uses the same AI processing as the webhook
     poller.setMessageHandler(async (messageData) => {
-      const { from, content } = messageData;
-      console.log(`[WhatsAppPoller] Processing: "${content?.slice(0, 80)}"`);
-      logActivity("system", `WhatsApp message received: "${content?.slice(0, 60)}"`);
+      const { from, content, hasMedia, mediaList } = messageData;
+      console.log(`[WhatsAppPoller] Processing: "${content?.slice(0, 80)}"${hasMedia ? " [+media]" : ""}`);
+      logActivity("system", `WhatsApp message received: "${content?.slice(0, 60)}"${hasMedia ? " [+image]" : ""}`);
 
       // ── Log incoming message to unified history ──────────────
       messageLog.addUserMessage(content, MESSAGE_CHANNEL.WHATSAPP, { from });
 
+      try {
+        const { processWhatsAppActionRequest } = await import("./services/messaging/whatsapp-actions.js");
+        const actionFlow = await processWhatsAppActionRequest({
+          message: content,
+          from,
+          alreadyLoggedUserMessage: true,
+          sendProgress: async (progressText) => {
+            const { getTwilioWhatsApp } = await import("./services/messaging/twilio-whatsapp.js");
+            const wa = getTwilioWhatsApp();
+            if (wa.initialized) {
+              await wa.sendMessage(from, `_${progressText}_`);
+            }
+          }
+        });
+
+        if (actionFlow?.handled) {
+          return actionFlow.response;
+        }
+      } catch (actionErr) {
+        console.log("[WhatsAppPoller] Action flow fallback:", actionErr.message);
+      }
+
+      // ── Check if this is a response to a pending question ──
+      try {
+        const { matchResponseToQuestion, markQuestionAnswered } = await import("./services/messaging/proactive-outreach.js");
+        const pendingQ = matchResponseToQuestion(content);
+        if (pendingQ) {
+          markQuestionAnswered(pendingQ.id, content);
+          console.log(`[WhatsAppPoller] Matched response to question ${pendingQ.id}: "${pendingQ.question?.slice(0, 60)}"`);
+        }
+      } catch {}
+
+      // ── Process media (images) if present ──────────────────
+      let imageContext = "";
+      if (hasMedia && mediaList?.length > 0) {
+        try {
+          const { processWhatsAppImage } = await import("./services/messaging/whatsapp-image-handler.js");
+          const { getTwilioWhatsApp } = await import("./services/messaging/twilio-whatsapp.js");
+          const wa = getTwilioWhatsApp();
+          const twilioConfig = { accountSid: wa.config?.accountSid, authToken: wa.config?.authToken };
+
+          for (const media of mediaList.slice(0, 3)) { // Process up to 3 images
+            try {
+              const result = await processWhatsAppImage(
+                { mediaUrl: media.mediaUrl, contentType: media.contentType },
+                twilioConfig
+              );
+              console.log(`[WhatsAppPoller] Image processed: ${result.localPath}`);
+
+              // Try to describe the image using OpenAI vision (quick, non-blocking)
+              let imageDescription = "";
+              try {
+                const { describeImageWithVision } = await import("./services/messaging/whatsapp-image-handler.js");
+                imageDescription = await describeImageWithVision(result.buffer, result.contentType);
+              } catch {}
+
+              if (imageDescription) {
+                imageContext += `\n[The user sent an image. Image description: ${imageDescription}. Saved at ${result.localPath}]`;
+              } else {
+                imageContext += `\n[The user sent an image saved at ${result.localPath}. Use the Read tool to view this image file and describe what you see.]`;
+              }
+            } catch (imgErr) {
+              console.error("[WhatsAppPoller] Image processing error:", imgErr.message);
+            }
+          }
+        } catch (importErr) {
+          console.error("[WhatsAppPoller] Image handler import error:", importErr.message);
+        }
+      }
+
+      // ── Detect if this is about a goal/project ─────────────
+      let workIntent = null;
+      let projectFindings = "";
+      try {
+        const { classifyWorkIntent, loadGoalsAndProjects, loadProjectFindings } = await import("./services/messaging/whatsapp-auto-work.js");
+        const { goals, projects } = loadGoalsAndProjects();
+        workIntent = classifyWorkIntent(content, goals, projects);
+
+        // If it matches a project, load existing findings for the AI
+        if (workIntent?.match?.id) {
+          const findings = loadProjectFindings(workIntent.match.id);
+          if (findings) {
+            projectFindings = `\n\n*EXISTING PROJECT FINDINGS (use this data in your response!):*\n${JSON.stringify(findings, null, 2).slice(0, 2000)}`;
+          }
+        }
+      } catch (classifyErr) {
+        // Non-critical — continue without classification
+      }
+
+      // ── Load user's priority list so AI knows what they care about ──
+      let priorityContext = "";
+      try {
+        const { getTopPriorities } = await import("./services/messaging/work-priority.js");
+        const priorities = getTopPriorities(5);
+        if (priorities.length > 0) {
+          priorityContext = `\n\n*USER'S CURRENT PRIORITIES (what they've been asking about):*\n${priorities.map((p, i) => `${i + 1}. ${p.title} (${p.type}, mentioned ${p.mentions}x${p.findings ? ", findings ready" : ""})`).join("\n")}`;
+        }
+      } catch {}
+
       // ── Build conversation history for context ───────────────
-      const recentMessages = messageLog.getMessagesForAI(12);
+      const recentMessages = messageLog.getMessagesForAI(36);
       const conversationHistory = recentMessages
-        .slice(-10) // Last 10 messages (user + assistant)
+        .slice(-30) // Last 30 messages (user + assistant)
         .map(m => `${m.role === "user" ? "User" : "BACKBONE"}: ${m.content}`)
         .join("\n");
 
       // Load static data context (portfolio, health, goals)
       const context = poller._loadContext();
 
-      const prompt = `You are BACKBONE, an executive AI assistant. The user messaged you on WhatsApp.
+      // ── Load calendar events for context ──────────────────
+      let calendarContext = "";
+      try {
+        const todayEvents = await new Promise((resolve) => {
+          import("../mcp/google-mail-calendar-server.js").then(mod => {
+            if (mod.getTodayEvents) return mod.getTodayEvents().then(resolve);
+            resolve({ events: [] });
+          }).catch(() => resolve({ events: [] }));
+        });
+        const upcomingEvents = await new Promise((resolve) => {
+          import("../mcp/google-mail-calendar-server.js").then(mod => {
+            if (mod.getUpcomingEvents) return mod.getUpcomingEvents(7, 20).then(resolve);
+            resolve({ events: [] });
+          }).catch(() => resolve({ events: [] }));
+        });
+        const allEvents = [...(todayEvents?.events || []), ...(upcomingEvents?.events || [])];
+        // Deduplicate by id
+        const seen = new Set();
+        const unique = allEvents.filter(e => { if (seen.has(e.id)) return false; seen.add(e.id); return true; });
+        if (unique.length > 0) {
+          calendarContext = `\n\n*CALENDAR (next 7 days):*\n${unique.slice(0, 15).map(e => {
+            const start = e.start ? new Date(e.start).toLocaleString("en-US", { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "TBD";
+            return `- ${e.title || e.summary} — ${start}${e.location ? " @ " + e.location : ""}`;
+          }).join("\n")}`;
+        } else {
+          calendarContext = "\n\n*CALENDAR:* No events scheduled for the next 7 days.";
+        }
+      } catch {}
+
+      const prompt = `You are BACKBONE, a personal AI assistant. You're like a sharp, proactive buddy who's always got the user's back. You help manage their life: finances, health, goals, projects, and daily decisions.
 
 *CONVERSATION HISTORY (most recent):*
 ${conversationHistory || "(first message — no prior history)"}
 
 *Current message:* "${content}"
-
-*FORMATTING RULES (CRITICAL):*
-Use WhatsApp-native formatting in your response:
-- *bold* for emphasis (single asterisks)
-- _italic_ for secondary emphasis (underscores)
-- Bullet points with - or •
-- Keep under 1500 characters
-- No markdown headers (##), no [links](url)
-- Use emojis sparingly for visual scanning
-
+${imageContext ? `\n*MEDIA:*${imageContext}\n` : ""}
 *USER DATA:*
 ${JSON.stringify(context, null, 2)}
+${projectFindings}
+${priorityContext}
+${calendarContext}
 
-IMPORTANT: You are in a CONVERSATION. Read the history above. If the user is answering a question you asked, or following up on a prior topic, respond in context. Do not ask "what are you talking about?" — check the history.
-Be concise, actionable, and data-rich.`;
+PERSONALITY:
+- Talk like a smart friend — casual, warm, direct. Not a corporate bot.
+- Be conversational. "Got it, let me check" not "I will now process your request."
+- You're in a REAL conversation. Read the history above. Follow up on prior topics naturally.
+- Be proactive: suggest next steps, share related insights, ask follow-up questions.
+- If the user is asking about a goal or project, give them REAL data from the findings above — specific numbers, progress, next steps. Don't be vague.
+- If you're going to do deeper work, say so: "Let me dig into this more — I'll hit you back with details."
 
-      // Use Claude Code CLI (Pro/Max subscription) — no API key needed
+CALENDAR MANAGEMENT:
+The user can add or delete calendar events by talking to you. If they say things like "schedule a meeting", "add to my calendar", "block off time", "cancel my 3pm", etc.:
+- For ADDING: Include a line at the END of your response in this exact format:
+  [CALENDAR_ADD] title | YYYY-MM-DDTHH:MM | YYYY-MM-DDTHH:MM | location (optional)
+  Example: [CALENDAR_ADD] Team standup | 2026-02-12T09:00 | 2026-02-12T09:30 | Zoom
+- For DELETING: Include a line at the END:
+  [CALENDAR_DELETE] event title or keyword to match
+- Confirm the action naturally in your message text: "Got it, added that to your calendar" etc.
+- If details are missing (time, date), ask them. Don't guess.
+- Use the CALENDAR context above to check for conflicts.
+
+RESPONSE FORMAT:
+You can send MULTIPLE messages separated by "---MSG---". This makes the conversation feel natural, like texting with a real person. Examples:
+- First message: Quick acknowledgment + main answer with data
+- Second message: Supporting details, next steps, or a follow-up question
+- Or just one message if it's a simple answer
+
+Each message should be under 1500 characters. Use WhatsApp formatting:
+- *bold* for emphasis (single asterisks)
+- _italic_ for secondary emphasis
+- Bullet points with - or •
+- No markdown headers (##), no [links](url)
+- Use emojis sparingly
+
+IMPORTANT: Don't force multiple messages if one is enough. But don't cram everything into one wall of text either. Match the natural flow of how a person would text.`;
+
+      // Use agentic executor (Claude -> Codex fallback on rate limits)
       let responseText = null;
+      let agenticError = null;
       try {
-        const { runClaudeCodePrompt } = await import("./services/ai/claude-code-cli.js");
-        const cliResult = await runClaudeCodePrompt(prompt, { timeout: 90000 });
-        if (cliResult.success && cliResult.output) {
-          responseText = cliResult.output.trim();
+        const { executeAgenticTask, getAgenticCapabilities } = await import("./services/ai/multi-ai.js");
+        const capabilities = await getAgenticCapabilities();
+        if (capabilities.available) {
+          const agentResult = await executeAgenticTask(prompt, process.cwd(), null, {
+            alwaysTryClaude: true
+          });
+          if (agentResult.success && agentResult.output) {
+            responseText = agentResult.output.trim();
+          } else {
+            agenticError = agentResult.error || "Agentic CLI returned no output";
+            console.log("[WhatsAppPoller] Agentic execution failed:", agenticError);
+          }
         } else {
-          console.log("[WhatsAppPoller] CLI failed, trying multi-ai fallback:", cliResult.error);
+          agenticError = "No CLI agent tools available (Claude/Codex CLI)";
+          console.log("[WhatsAppPoller] No agentic tools available");
         }
       } catch (cliErr) {
-        console.log("[WhatsAppPoller] CLI unavailable:", cliErr.message);
+        agenticError = cliErr.message || "Agentic CLI unavailable";
+        console.log("[WhatsAppPoller] Agentic execution unavailable:", agenticError);
       }
 
-      // Fallback: try multi-ai
-      if (!responseText) {
-        try {
-          const { sendMessage } = await import("./services/ai/multi-ai.js");
-          const aiResponse = await sendMessage(prompt, { format: "text", maxTokens: 1000 });
-          if (typeof aiResponse === "string") {
-            responseText = aiResponse;
-          } else if (aiResponse?.content) {
-            responseText = aiResponse.content;
-          } else if (aiResponse?.message) {
-            responseText = aiResponse.message;
-          } else if (aiResponse?.response) {
-            responseText = aiResponse.response;
-          } else if (aiResponse?.error) {
-            console.error("[WhatsAppPoller] multi-ai error:", aiResponse.error);
+      // If agentic CLI failed, use a natural fallback instead of exposing technical errors
+      let finalResponse = responseText;
+      if (!finalResponse) {
+        const fallbacks = [
+          "Got it — let me work on that and get back to you shortly.",
+          "Give me a moment on this one. I'll dig in and follow up.",
+          "I'm on it. Let me pull things together and circle back.",
+          "Working on that now — I'll hit you back with the details.",
+        ];
+        finalResponse = fallbacks[Math.floor(Math.random() * fallbacks.length)];
+        console.log(`[WhatsAppPoller] Using natural fallback (agentic error: ${String(agenticError || "unknown").slice(0, 100)})`);
+      }
+
+      // ── Process calendar action tags before sending ──────────
+      try {
+        if (finalResponse.includes("[CALENDAR_ADD]") || finalResponse.includes("[CALENDAR_DELETE]")) {
+          const { processCalendarActions } = await import("./services/messaging/calendar-actions.js");
+          const { cleanText, actions } = await processCalendarActions(finalResponse);
+          finalResponse = cleanText;
+          if (actions.length > 0) {
+            console.log(`[WhatsAppPoller] Executed ${actions.length} calendar action(s):`, actions.map(a => `${a.type}: ${a.title || a.keyword}`).join(", "));
           }
-        } catch (aiErr) {
-          console.error("[WhatsAppPoller] multi-ai fallback failed:", aiErr.message);
         }
+      } catch (calErr) {
+        console.error("[WhatsAppPoller] Calendar action error:", calErr.message);
+        // Strip tags even if processing fails so user doesn't see raw tags
+        finalResponse = finalResponse.replace(/\[CALENDAR_(ADD|DELETE)\].*/gi, "").replace(/\n{3,}/g, "\n\n").trim();
       }
 
-      const finalResponse = responseText || "_Something went wrong generating a response. The AI service may be temporarily unavailable._";
+      // ── Split multi-message responses on ---MSG--- delimiter ──
+      const messages = finalResponse.split(/---MSG---/i).map(m => m.trim()).filter(Boolean);
 
-      // ── Log assistant response to unified history ────────────
-      messageLog.addAssistantMessage(finalResponse, MESSAGE_CHANNEL.WHATSAPP);
+      // ── Save conversation to topic-specific memory files ──────
+      // Runs async in background — non-blocking
+      import("./services/messaging/conversation-memory.js").then(({ processConversationMemory }) => {
+        processConversationMemory(content, finalResponse, { source: "local", channel: "whatsapp" });
+      }).catch(() => {});
 
-      return finalResponse;
+      if (messages.length <= 1) {
+        // Single message — return as normal
+        messageLog.addAssistantMessage(finalResponse, MESSAGE_CHANNEL.WHATSAPP);
+
+        // Kick off background work if this is a goal/project query
+        if (workIntent?.shouldWork) {
+          console.log(`[WhatsAppPoller] Detected ${workIntent.type} query — starting background work`);
+          import("./services/messaging/whatsapp-auto-work.js").then(({ startBackgroundWork }) => {
+            startBackgroundWork(workIntent, content, from).catch(err =>
+              console.error("[WhatsAppPoller] Background work error:", err.message)
+            );
+          }).catch(() => {});
+        }
+
+        return finalResponse;
+      }
+
+      // Multi-message: send the first one as the return value,
+      // then send additional messages with natural delays
+      const firstMsg = messages[0];
+      messageLog.addAssistantMessage(firstMsg, MESSAGE_CHANNEL.WHATSAPP);
+
+      // Send follow-up messages in the background with delays
+      (async () => {
+        const { getTwilioWhatsApp } = await import("./services/messaging/twilio-whatsapp.js");
+        const { formatAIResponse } = await import("./services/messaging/whatsapp-formatter.js");
+        const wa = getTwilioWhatsApp();
+        if (!wa.initialized) return;
+
+        for (let i = 1; i < messages.length; i++) {
+          // Natural typing delay: 1.5-3s between messages
+          await new Promise(r => setTimeout(r, 1500 + Math.random() * 1500));
+          const formatted = formatAIResponse(messages[i]);
+          await wa.sendMessage(from, formatted);
+          messageLog.addAssistantMessage(messages[i], MESSAGE_CHANNEL.WHATSAPP);
+        }
+      })().catch(err => console.error("[WhatsAppPoller] Follow-up send error:", err.message));
+
+      // ── Kick off background work if this is a goal/project query ──
+      if (workIntent?.shouldWork) {
+        console.log(`[WhatsAppPoller] Detected ${workIntent.type} query — starting background work`);
+        import("./services/messaging/whatsapp-auto-work.js").then(({ startBackgroundWork }) => {
+          startBackgroundWork(workIntent, content, from).catch(err =>
+            console.error("[WhatsAppPoller] Background work error:", err.message)
+          );
+        }).catch(() => {});
+      }
+
+      return firstMsg;
     });
+
+    // Event-driven ingress for Baileys (no Twilio polling/webhook needed).
+    try {
+      const { getTwilioWhatsApp } = await import("./services/messaging/twilio-whatsapp.js");
+      const waService = getTwilioWhatsApp();
+      if (!waService.initialized) {
+        await waService.initialize();
+      }
+
+      const seenBaileysMessageIds = new Set();
+      waService.on("message-received", async (data) => {
+        if (!data || data.provider !== "baileys") return;
+
+        const messageId = data.messageId || `baileys_${Date.now()}`;
+        if (seenBaileysMessageIds.has(messageId)) return;
+        seenBaileysMessageIds.add(messageId);
+        if (seenBaileysMessageIds.size > 1000) {
+          const first = seenBaileysMessageIds.values().next().value;
+          if (first) seenBaileysMessageIds.delete(first);
+        }
+
+        try {
+          // Show "typing..." in WhatsApp immediately while work is running.
+          if (data.from) {
+            try {
+              await waService.sendTypingIndicator({
+                provider: "baileys",
+                to: data.from,
+                durationMs: 5000
+              });
+            } catch {}
+          }
+
+          const responseText = await poller.messageHandler?.({
+            from: data.from,
+            content: data.content,
+            messageId,
+            timestamp: data.timestamp || new Date().toISOString(),
+            channel: "whatsapp",
+            hasMedia: Boolean(data.hasMedia),
+            mediaList: data.mediaList || [],
+            repliedToContext: data.repliedToContext || null,
+          });
+
+          if (responseText && data.from) {
+            await poller._sendResponse(data.from, responseText);
+          }
+        } catch (err) {
+          console.error("[WhatsApp:Baileys] Message handling error:", err.message);
+        }
+      });
+    } catch (baileysErr) {
+      console.log("[Server] Baileys event ingress not active:", baileysErr.message);
+    }
 
     await poller.start();
   } catch (err) {
@@ -2081,6 +2866,496 @@ async function startMacroResearch() {
     interval.unref();
   } catch (err) {
     console.log("[Server] Macro research not started:", err.message);
+  }
+}
+
+/**
+ * Initialize realtime-messaging with the Firebase user ID.
+ * This enables: Firestore message polling, presence reporting (so the cloud
+ * function knows we're online), pending task processing, and conversation sync.
+ */
+async function initializeRealtimeMessaging() {
+  try {
+    const { loadFirebaseUser } = await import("./services/firebase/firebase-auth.js");
+    const user = loadFirebaseUser();
+
+    const { getRealtimeMessaging } = await import("./services/messaging/realtime-messaging.js");
+    const messaging = getRealtimeMessaging();
+
+    // Use Firebase user if available, otherwise fall back to saved userId from previous session
+    const userId = user?.localId || messaging.userId;
+    if (!userId) {
+      console.log("[RealtimeMessaging] No Firebase user and no saved userId — skipping initialization");
+      return;
+    }
+
+    // Initialize with user ID (sets presence to online)
+    await messaging.initialize(userId, user?.idToken || null);
+    console.log(`[RealtimeMessaging] Initialized for user ${userId.slice(0, 8)}...`);
+
+    // Set message handler — reuse the same AI processing pipeline as the WhatsApp poller
+    messaging.setMessageHandler(async (message) => {
+      const content = message.content || "";
+      console.log(`[RealtimeMessaging] Handling message: "${content.slice(0, 80)}"`);
+
+      try {
+        // Try WhatsApp action flow first (calendar, trades, etc.)
+        const { processWhatsAppActionRequest } = await import("./services/messaging/whatsapp-actions.js");
+        const actionFlow = await processWhatsAppActionRequest({
+          message: content,
+          from: message.from || "firestore",
+          alreadyLoggedUserMessage: true,
+        });
+        if (actionFlow?.handled) {
+          return { content: actionFlow.response, type: "ai" };
+        }
+      } catch {}
+
+      // Build context and process with agentic executor
+      const { getUnifiedMessageLog } = await import("./services/messaging/unified-message-log.js");
+      const messageLog = getUnifiedMessageLog();
+      const recentMessages = messageLog.getMessagesForAI(36);
+      const conversationHistory = recentMessages
+        .slice(-30)
+        .map(m => `${m.role === "user" ? "User" : "BACKBONE"}: ${m.content}`)
+        .join("\n");
+
+      // Load brokerage/financial context
+      let financialContext = "";
+      try {
+        const brokeragePath = path.join(getDataDir(), "brokerage-portfolio.json");
+        if (fs.existsSync(brokeragePath)) {
+          const bp = JSON.parse(fs.readFileSync(brokeragePath, "utf-8"));
+          financialContext = `\n*FINANCIAL DATA (from Empower, synced ${bp.lastSync}):*\nNet worth: $${bp.totalNetWorth?.toLocaleString() || "?"}\nHoldings: ${bp.holdingCount || 0} positions\nAccounts: ${bp.accountCount || 0}\n`;
+          if (bp.holdings?.length > 0) {
+            financialContext += `Top holdings: ${bp.holdings.slice(0, 10).map(h => `${h.name} $${h.value}`).join(", ")}\n`;
+          }
+        }
+      } catch {}
+
+      // Load Alpaca trading context
+      let tradingContext = "";
+      try {
+        const alpacaPath = path.join(getDataDir(), "alpaca-cache.json");
+        if (fs.existsSync(alpacaPath)) {
+          const ac = JSON.parse(fs.readFileSync(alpacaPath, "utf-8"));
+          tradingContext = `\n*TRADING (Alpaca):*\nEquity: $${ac.account?.equity || "?"}, Cash: $${ac.account?.cash || "?"}\n`;
+        }
+      } catch {}
+
+      const prompt = `You are BACKBONE, a personal AI assistant responding to a WhatsApp message.
+
+*CONVERSATION HISTORY:*
+${conversationHistory || "(no prior history)"}
+
+*Current message:* "${content}"
+${financialContext}${tradingContext}
+*CAPABILITIES:* You have access to Empower (net worth, all accounts — bank, investment, retirement, credit cards), Alpaca trading, Oura health data, goals, and projects. If the data is in the context above, USE IT to answer directly.
+
+Respond naturally. Be direct, helpful, conversational. Use WhatsApp formatting (*bold*, _italic_, bullets with •).
+Under 1500 chars. If you need multiple messages, split with ---MSG---.
+Address the user's actual question FIRST. Don't pivot to other topics.`;
+
+      try {
+        const { executeAgenticTask, getAgenticCapabilities } = await import("./services/ai/multi-ai.js");
+        const capabilities = await getAgenticCapabilities();
+        if (capabilities.available) {
+          const result = await executeAgenticTask(prompt, process.cwd(), null, { alwaysTryClaude: true });
+          if (result.success && result.output) {
+            const response = result.output.trim();
+            messageLog.addAssistantMessage(response, "whatsapp");
+            return { content: response, type: "ai" };
+          }
+        }
+      } catch (err) {
+        console.log("[RealtimeMessaging] Agentic execution failed:", err.message);
+      }
+
+      // Fallback
+      const fallback = "Got it — let me work on that and get back to you shortly.";
+      messageLog.addAssistantMessage(fallback, "whatsapp");
+      return { content: fallback, type: "ai" };
+    });
+
+    // Start listening for incoming Firestore messages
+    await messaging.startListening();
+    console.log("[RealtimeMessaging] Firestore polling started (presence: online)");
+  } catch (err) {
+    console.log("[RealtimeMessaging] Init failed:", err.message);
+  }
+}
+
+/**
+ * Sync Firebase conversations into local memory files on startup.
+ * Catches up on any conversations that happened while BACKBONE was offline
+ * so the knowledge base stays current.
+ */
+async function syncFirebaseConversationsOnStartup() {
+  try {
+    const { getRealtimeMessaging } = await import("./services/messaging/realtime-messaging.js");
+    const messaging = getRealtimeMessaging();
+    if (!messaging.userId) {
+      console.log("[ConversationSync] No userId — skipping Firebase conversation sync");
+      return;
+    }
+
+    const result = await messaging.syncFirebaseConversations(100);
+    if (result.processed > 0) {
+      console.log(`[ConversationSync] Synced ${result.processed} conversation(s) from Firebase`);
+      if (result.themes?.length > 0) {
+        console.log(`[ConversationSync] Recurring themes: ${result.themes.join(", ")}`);
+      }
+    }
+  } catch (err) {
+    console.log("[ConversationSync] Firebase conversation sync skipped:", err.message);
+  }
+}
+
+/**
+ * Process pending tasks that were queued by the cloud function while
+ * the local server was offline. Checks Firestore for tasks, processes them
+ * with Claude AI, and sends follow-up WhatsApp messages with findings.
+ *
+ * Flow: User messages while offline → Cloud function queues pendingTask →
+ *       Server comes online → This processor picks it up → Does real work →
+ *       Sends follow-up WhatsApp with results + images
+ */
+async function startPendingTaskProcessor() {
+  try {
+    const { getRealtimeMessaging } = await import("./services/messaging/realtime-messaging.js");
+    const messaging = getRealtimeMessaging();
+    if (!messaging.userId) {
+      console.log("[PendingTasks] No userId — skipping pending task check");
+      return;
+    }
+
+    // Check for pending tasks in Firestore
+    const FIRESTORE_BASE = `https://firestore.googleapis.com/v1/projects/backboneai/databases/(default)/documents`;
+    const url = `${FIRESTORE_BASE}/users/${messaging.userId}/pendingTasks?key=AIzaSyBKLqcnFQwNSKqHXgTBLok3l74ZmNh6_y0&pageSize=10`;
+
+    const resp = await messaging.fetchWithAuth(url);
+    if (!resp.ok) return;
+
+    const data = await resp.json();
+    const docs = data.documents || [];
+    const pending = [];
+
+    for (const doc of docs) {
+      const fields = {};
+      for (const [key, val] of Object.entries(doc.fields || {})) {
+        if (val.stringValue !== undefined) fields[key] = val.stringValue;
+        else if (val.booleanValue !== undefined) fields[key] = val.booleanValue;
+        else if (val.integerValue !== undefined) fields[key] = parseInt(val.integerValue, 10);
+        else if (val.timestampValue !== undefined) fields[key] = val.timestampValue;
+      }
+      if (fields.status === "pending" && fields.type === "whatsapp_followup") {
+        pending.push({ id: doc.name, fields });
+      }
+    }
+
+    if (pending.length === 0) {
+      console.log("[PendingTasks] No pending tasks from cloud");
+      return;
+    }
+
+    console.log(`[PendingTasks] Found ${pending.length} pending task(s) from cloud — processing`);
+
+    for (const task of pending) {
+      try {
+        // Mark as processing in Firestore
+        await messaging.fetchWithAuth(`${task.id}?updateMask.fieldPaths=status&key=AIzaSyBKLqcnFQwNSKqHXgTBLok3l74ZmNh6_y0`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ fields: { status: { stringValue: "processing" } } })
+        });
+
+        const msg = task.fields.originalMessage;
+        const userName = task.fields.userName || "bud";
+        console.log(`[PendingTasks] Processing: "${msg?.slice(0, 80)}"`);
+
+        // Use agentic executor to do real work on this (Claude -> Codex fallback on rate limits)
+        const { executeAgenticTask, getAgenticCapabilities } = await import("./services/ai/multi-ai.js");
+        const prompt = `The user (${userName}) sent this WhatsApp message while the system was offline.
+An initial quick response was already sent: "${task.fields.aiQuickResponse?.slice(0, 200) || "acknowledged"}"
+
+Now you need to do the REAL work. Research this properly, check the user's data, and provide a thorough follow-up.
+
+User's message: "${msg}"
+
+${task.fields.conversationContext ? `Recent conversation context:\n${task.fields.conversationContext}` : ""}
+
+INSTRUCTIONS:
+- Give a thorough, actionable response based on real data
+- Use WhatsApp formatting: *bold*, _italic_, bullet points
+- Keep under 1500 chars
+- Be conversational — this is a follow-up, so start naturally like "Hey, circling back on that..." or "Alright, dug into it —"
+- Don't repeat what the quick response said
+- Include specific numbers, data, or findings`;
+
+        let result = { success: false, output: "", error: "No agentic tools available." };
+        const capabilities = await getAgenticCapabilities();
+        if (capabilities.available) {
+          result = await executeAgenticTask(prompt, process.cwd(), null);
+        }
+
+        if (result.success && result.output?.trim()) {
+          // Send follow-up via WhatsApp
+          const { getWhatsAppNotifications } = await import("./services/messaging/whatsapp-notifications.js");
+          const notif = getWhatsAppNotifications();
+          if (!notif.enabled) await notif.initialize("default");
+
+          await notif.send("system", result.output.trim(), {
+            identifier: `followup_${Date.now()}`,
+            allowDuplicate: true
+          });
+
+          console.log(`[PendingTasks] Follow-up sent for: "${msg?.slice(0, 40)}"`);
+        }
+
+        // Mark as completed
+        await messaging.fetchWithAuth(`${task.id}?updateMask.fieldPaths=status&updateMask.fieldPaths=completedAt&key=AIzaSyBKLqcnFQwNSKqHXgTBLok3l74ZmNh6_y0`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ fields: {
+            status: { stringValue: "completed" },
+            completedAt: { timestampValue: new Date().toISOString() }
+          }})
+        });
+
+      } catch (taskErr) {
+        console.error(`[PendingTasks] Error processing task:`, taskErr.message);
+        // Mark as failed
+        try {
+          await messaging.fetchWithAuth(`${task.id}?updateMask.fieldPaths=status&updateMask.fieldPaths=error&key=AIzaSyBKLqcnFQwNSKqHXgTBLok3l74ZmNh6_y0`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ fields: {
+              status: { stringValue: "failed" },
+              error: { stringValue: taskErr.message }
+            }})
+          });
+        } catch {}
+      }
+    }
+  } catch (err) {
+    console.log("[PendingTasks] Processor not started:", err.message);
+  }
+}
+
+/**
+ * Initialize Firebase context sync — syncs user data to Firestore for cloud AI.
+ * The proactive scheduler handles 4x/day scheduled syncs.
+ * This does the initial sync on startup + provides on-change triggers.
+ */
+async function startFirebaseContextSync() {
+  try {
+    const { getFirebaseContextSync } = await import("./services/firebase/firebase-context-sync.js");
+    const { loadFirebaseUser } = await import("./services/firebase/firebase-auth.js");
+    const user = loadFirebaseUser();
+    // Fall back to RealtimeMessaging's saved userId if no firebase-user.json
+    let userId = user?.localId || user?.uid;
+    if (!userId) {
+      try {
+        const { getRealtimeMessaging } = await import("./services/messaging/realtime-messaging.js");
+        userId = getRealtimeMessaging().userId;
+      } catch {}
+    }
+    if (!userId) {
+      console.log("[ContextSync] No Firebase user — skipping");
+      return;
+    }
+
+    const sync = getFirebaseContextSync();
+    sync.initialize(userId);
+
+    // Immediate sync on startup — ensures Firebase always has fresh data
+    // Force first sync (bypass debounce since this is boot)
+    sync.lastSyncTime = 0;
+    sync.syncAll().then(ok => {
+      if (ok) console.log("[ContextSync] Initial sync complete — Firebase has user data");
+      else console.log("[ContextSync] Initial sync returned false (no data or auth issue)");
+    }).catch(err => {
+      console.error("[ContextSync] Initial sync failed:", err.message);
+    });
+
+    console.log("[ContextSync] Initialized — syncing now + 4x/day via proactive scheduler");
+  } catch (err) {
+    console.log("[ContextSync] Not started:", err.message);
+  }
+}
+
+/**
+ * Auto-start the autonomous engine on server boot.
+ * Runs as a continuous loop — work, rest, repeat — until CLI is closed.
+ * Replaces the old manual POST /api/engine/start pattern.
+ */
+async function startAutonomousEngine() {
+  try {
+    const { getAutonomousEngine } = await import("./services/engine/autonomous-engine.js");
+    const engine = getAutonomousEngine();
+
+    if (engine.running) {
+      console.log("[Engine] Already running");
+      return;
+    }
+
+    // ── Wire core services so the engine can work autonomously ──────────
+    try {
+      const { getGoalManager } = await import("./services/goals/goal-manager.js");
+      const goalManager = getGoalManager();
+      await goalManager.initialize();
+      engine.goalManager = goalManager;
+
+      // Wire AI brain for goal generation when no goals exist
+      let aiBrain = null;
+      try {
+        const { getAIBrain } = await import("./services/ai/ai-brain.js");
+        aiBrain = getAIBrain();
+        engine.setAIBrain(aiBrain);
+      } catch {}
+
+      // Register context providers — these feed user data into Claude's prompt
+      const memDir = getMemoryDir();
+      const dataDir = getDataDir();
+
+      engine.registerContextProvider("beliefs", async () => {
+        try {
+          const p = path.join(dataDir, "core-beliefs.json");
+          if (fs.existsSync(p)) {
+            const data = JSON.parse(fs.readFileSync(p, "utf-8"));
+            return data.beliefs || data;
+          }
+        } catch {}
+        return [];
+      });
+
+      engine.registerContextProvider("goals", async () => {
+        try { return goalManager.getActiveGoals(); } catch {}
+        return [];
+      });
+
+      engine.registerContextProvider("portfolio", async () => {
+        try {
+          const p = path.join(memDir, "portfolio.md");
+          if (fs.existsSync(p)) return fs.readFileSync(p, "utf-8").slice(0, 1000);
+        } catch {}
+        return "";
+      });
+
+      engine.registerContextProvider("health", async () => {
+        try {
+          const p = path.join(memDir, "health.md");
+          if (fs.existsSync(p)) return fs.readFileSync(p, "utf-8").slice(0, 500);
+        } catch {}
+        return "";
+      });
+
+      engine.registerContextProvider("conversations", async () => {
+        try {
+          const files = ["family.md", "conversations.md", "career.md", "travel.md", "profile-notes.md"];
+          const snippets = [];
+          for (const f of files) {
+            const fp = path.join(memDir, f);
+            if (fs.existsSync(fp)) {
+              const content = fs.readFileSync(fp, "utf-8");
+              if (content.length > 50) snippets.push(`[${f}] ${content.slice(-500)}`);
+            }
+          }
+          return snippets.join("\n---\n").slice(0, 2000);
+        } catch {}
+        return "";
+      });
+
+      engine.registerContextProvider("thesis", async () => {
+        try {
+          const p = path.join(memDir, "thesis.md");
+          if (fs.existsSync(p)) return fs.readFileSync(p, "utf-8").slice(0, 800);
+        } catch {}
+        return "";
+      });
+
+      // Wire same context into AI brain so goal generation has user data
+      if (aiBrain) {
+        aiBrain.registerContextProvider("profile", async () => {
+          try {
+            const p = path.join(memDir, "profile.md");
+            if (fs.existsSync(p)) return fs.readFileSync(p, "utf-8").slice(0, 800);
+          } catch {}
+          return "";
+        });
+        aiBrain.registerContextProvider("beliefs", async () => {
+          try {
+            const p = path.join(dataDir, "core-beliefs.json");
+            if (fs.existsSync(p)) return JSON.parse(fs.readFileSync(p, "utf-8"));
+          } catch {}
+          return {};
+        });
+        aiBrain.registerContextProvider("conversations", async () => {
+          try {
+            const files = ["family.md", "conversations.md", "career.md", "travel.md", "profile-notes.md"];
+            const snippets = [];
+            for (const f of files) {
+              const fp = path.join(memDir, f);
+              if (fs.existsSync(fp)) {
+                const content = fs.readFileSync(fp, "utf-8");
+                if (content.length > 50) snippets.push(`[${f}] ${content.slice(-300)}`);
+              }
+            }
+            return snippets.join("\n").slice(0, 1500);
+          } catch {}
+          return "";
+        });
+        aiBrain.registerContextProvider("portfolio", async () => {
+          try {
+            const p = path.join(memDir, "portfolio.md");
+            if (fs.existsSync(p)) return fs.readFileSync(p, "utf-8").slice(0, 600);
+          } catch {}
+          return "";
+        });
+        aiBrain.registerContextProvider("health", async () => {
+          try {
+            const p = path.join(memDir, "health.md");
+            if (fs.existsSync(p)) return fs.readFileSync(p, "utf-8").slice(0, 400);
+          } catch {}
+          return "";
+        });
+      }
+
+      console.log("[Engine] Context providers wired: beliefs, goals, portfolio, health, conversations, thesis");
+    } catch (ctxErr) {
+      console.log("[Engine] Context provider setup partial:", ctxErr.message);
+    }
+
+    // Wire engine events to SSE broadcast + activity log
+    engine.on("rest-start", ({ restUntil, reason }) => {
+      broadcastEvent("engine", { status: "resting", restUntil, reason });
+    });
+    engine.on("rest-countdown", ({ remainingMin, reason }) => {
+      broadcastEvent("engine", { status: "resting", remainingMin, reason });
+    });
+    engine.on("rest-end", () => {
+      broadcastEvent("engine", { status: "working" });
+    });
+    engine.on("rest-extended", ({ restUntil, reason }) => {
+      broadcastEvent("engine", { status: "resting", restUntil, reason, extended: true });
+    });
+    engine.on("goal-completed", (goal) => {
+      logActivity("engine", `Goal completed: ${goal.title}`);
+      broadcastEvent("engine", { status: "goal_completed", goal: goal.title });
+    });
+    engine.on("claude-start", ({ goal }) => {
+      broadcastEvent("engine", { status: "executing", goal: goal?.title });
+    });
+
+    // Start the continuous autonomous loop (non-blocking)
+    console.log("[Engine] Auto-starting autonomous engine...");
+    engine.startAutonomousLoop().catch(err => {
+      console.error("[Engine] Loop exited:", err.message);
+    });
+
+    logActivity("engine", "Autonomous engine auto-started on server boot");
+  } catch (err) {
+    console.log("[Engine] Auto-start skipped:", err.message);
   }
 }
 

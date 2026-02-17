@@ -98,6 +98,87 @@ const JOB_DEFS = [
     conditional: true,
     description: "AI decides if anything time-sensitive is worth sharing",
   },
+  {
+    id: "context-sync-morning",
+    type: "context-sync",
+    windowStart: [7, 0],
+    windowEnd: [7, 15],
+    weekdaysOnly: false,
+    conditional: false,
+    description: "Sync user context to Firebase for cloud AI",
+  },
+  {
+    id: "context-sync-midday",
+    type: "context-sync",
+    windowStart: [12, 0],
+    windowEnd: [12, 15],
+    weekdaysOnly: false,
+    conditional: false,
+    description: "Sync user context to Firebase for cloud AI",
+  },
+  {
+    id: "context-sync-afternoon",
+    type: "context-sync",
+    windowStart: [16, 0],
+    windowEnd: [16, 15],
+    weekdaysOnly: false,
+    conditional: false,
+    description: "Sync user context to Firebase for cloud AI",
+  },
+  {
+    id: "context-sync-evening",
+    type: "context-sync",
+    windowStart: [21, 0],
+    windowEnd: [21, 15],
+    weekdaysOnly: false,
+    conditional: false,
+    description: "Sync user context to Firebase for cloud AI",
+  },
+  {
+    id: "brokerage-sync-morning",
+    type: "brokerage",
+    windowStart: [6, 0],
+    windowEnd: [6, 15],
+    weekdaysOnly: false,
+    conditional: false,
+    description: "Morning brokerage data sync (Empower, Robinhood, Fidelity)",
+  },
+  {
+    id: "brokerage-sync-afternoon",
+    type: "brokerage",
+    windowStart: [16, 30],
+    windowEnd: [16, 45],
+    weekdaysOnly: false,
+    conditional: false,
+    description: "Afternoon brokerage data sync (Empower, Robinhood, Fidelity)",
+  },
+  {
+    id: "email-digest-morning",
+    type: "email",
+    windowStart: [7, 0],
+    windowEnd: [7, 30],
+    weekdaysOnly: false,
+    conditional: false,
+    description: "Morning email digest — top useful emails",
+  },
+  {
+    id: "email-digest-midday",
+    type: "email",
+    windowStart: [12, 0],
+    windowEnd: [12, 30],
+    weekdaysOnly: false,
+    conditional: false,
+    description: "Midday email digest — top useful emails",
+  },
+  {
+    id: "email-digest-evening",
+    type: "email",
+    windowStart: [17, 0],
+    windowEnd: [17, 30],
+    weekdaysOnly: false,
+    conditional: false,
+    description: "Evening email digest — top useful emails",
+  },
 ];
 
 // ── Helpers ─────────────────────────────────────────────────────
@@ -302,6 +383,15 @@ class ProactiveScheduler extends EventEmitter {
         case "adhoc":
           result = await this._executeAdhocIntel(job.def);
           break;
+        case "email":
+          result = await this._executeEmailDigest(job.def);
+          break;
+        case "context-sync":
+          result = await this._executeContextSync(job.def);
+          break;
+        case "brokerage":
+          result = await this._executeBrokerageSync(job.def);
+          break;
         default:
           result = { success: false, error: `Unknown type: ${job.def.type}` };
       }
@@ -309,9 +399,12 @@ class ProactiveScheduler extends EventEmitter {
       job.lastResult = result;
 
       if (result.success) {
-        this.dailyMessageCount++;
+        // Context sync and brokerage sync don't send chat messages — don't count against daily cap
+        if (job.def.type !== "context-sync" && job.def.type !== "brokerage") {
+          this.dailyMessageCount++;
+        }
         this.emit("job-fired", { jobId: id, type: job.def.type, result });
-        console.log(`${TAG} ${id} — sent (${this.dailyMessageCount}/${this.maxDailyMessages} today)`);
+        console.log(`${TAG} ${id} — ${job.def.type === "context-sync" ? "synced" : "sent"} (${this.dailyMessageCount}/${this.maxDailyMessages} today)`);
       } else if (result.skipped) {
         console.log(`${TAG} ${id} — skipped: ${result.reason || result.error}`);
       } else {
@@ -423,30 +516,86 @@ class ProactiveScheduler extends EventEmitter {
       }
     } catch {}
 
+    // SPY price — always include for market context
+    let spyInfo = "";
+    try {
+      const tickers = tickersCache?.tickers || [];
+      const spy = tickers.find(t => t.symbol === "SPY");
+      if (spy) {
+        const sign = (spy.changePercent || 0) >= 0 ? "+" : "";
+        spyInfo = `\nSPY: $${Number(spy.price || spy.lastPrice).toFixed(2)} (${sign}${(spy.changePercent || 0).toFixed(2)}%)`;
+      }
+    } catch {}
+
+    // News headlines for world context
+    let newsInfo = "";
+    try {
+      const newsCache = readJsonSafe(path.join(dataDir, "news-cache.json"));
+      if (newsCache?.articles?.length > 0) {
+        const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+        const recent = newsCache.articles
+          .filter(a => new Date(a.publishedAt || a.date).getTime() > cutoff)
+          .slice(0, 3)
+          .map(a => a.title);
+        if (recent.length > 0) {
+          newsInfo = `\nTODAY'S NEWS:\n${recent.map(t => `- ${t}`).join("\n")}`;
+        }
+      }
+    } catch {}
+
     const promptLabel = {
       "market-open": "pre-market opening snapshot",
       "market-midday": "midday market alert (significant move detected)",
       "market-close": "end-of-day market recap",
     }[def.id] || "market update";
 
+    // Load prediction research for top pick reasoning
+    let predictionInfo = "";
+    try {
+      const predictions = readJsonSafe(path.join(dataDir, "prediction-cache.json"));
+      if (predictions?.predictions && topTickers.length > 0) {
+        const insights = topTickers.slice(0, 4).map(t => {
+          const pred = predictions.predictions[t.symbol];
+          if (pred?.analysis) {
+            const reason = pred.analysis.split(/[.!]/).filter(s => s.trim().length > 10).slice(0, 1).join("").trim();
+            return `${t.symbol} (${t.score}): ${reason}`;
+          }
+          return `${t.symbol} (${t.score})`;
+        });
+        predictionInfo = `\nTOP PICKS WITH REASONING:\n${insights.join("\n")}`;
+      }
+    } catch {}
+
     const prompt = `Generate a concise WhatsApp ${promptLabel} for the user.
+
+MARKET CONTEXT:${spyInfo}
+${recessionInfo}
+${newsInfo}
 
 PORTFOLIO:
 Equity: $${portfolio.equity || "?"} | Cash: $${portfolio.cash || "?"}
 Positions: ${JSON.stringify(positions)}
 
 TOP TICKERS BY SCORE: ${JSON.stringify(topTickers)}
-${recessionInfo}${convictionsInfo}${recentTradesInfo}
+${predictionInfo}
+${convictionsInfo}${recentTradesInfo}
+
+TONE: You're a sharp friend who manages their money. Not a financial newsletter.
+Write like you'd text a friend about their portfolio — concise, real, no fluff.
 
 RULES:
-- Use WhatsApp formatting: *bold*, _italic_, bullet points with -
-- Keep under 800 characters
-- Include key numbers (P&L, % changes)
-- Mention recession score if >= 5 (caution+), or convictions if noteworthy
-- Be actionable: highlight what needs attention
-- No markdown headers, no [links]
-- If this is a midday alert, emphasize the big mover
-- End with one actionable insight
+- Use WhatsApp formatting: *bold*, _italic_
+- Keep under 1000 characters
+- Always mention SPY price and direction up front for market context
+- Always mention recession score (e.g. "recession risk 3.2/10 — low")
+- Include 1-2 relevant news headlines if they affect the market or portfolio
+- Include actual numbers (P&L, %, $)
+- If market-open: lead with SPY + recession, then portfolio, then top 2-3 picks worth watching with one-line reasoning
+- If midday alert: what moved, why, and whether to act
+- If market-close: how the day went, SPY close, recession context, any moves for tomorrow
+- Don't start with "Good morning" or greetings
+- Don't end with "let me know" or "happy trading" type filler
+- One concrete insight or action at the end
 
 Return ONLY the message text, nothing else.`;
 
@@ -457,8 +606,9 @@ Return ONLY the message text, nothing else.`;
 
   async _executeGoalCheck(def) {
     const goalsPath = path.join(getDataDir(), "goals.json");
-    const goals = readJsonSafe(goalsPath);
-    if (!goals || !Array.isArray(goals)) {
+    const goalsRaw = readJsonSafe(goalsPath);
+    const goals = Array.isArray(goalsRaw) ? goalsRaw : (goalsRaw?.goals || []);
+    if (goals.length === 0) {
       return { success: false, skipped: true, reason: "No goals data" };
     }
 
@@ -506,20 +656,23 @@ Return ONLY the message text, nothing else.`;
 
     const allGoals = [...stalledSummary, ...nearCompleteSummary];
 
-    const prompt = `Generate a motivating WhatsApp goal check-in nudge.
+    const prompt = `Write a short WhatsApp nudge about the user's goals.
 
 GOALS NEEDING ATTENTION:
 ${JSON.stringify(allGoals, null, 2)}
 
-RULES:
-- Use WhatsApp formatting: *bold*, _italic_, bullet points
-- Keep under 600 characters
-- For "near-complete" goals: celebrate the progress and encourage the final push
-- For "stalled" goals: be encouraging, not naggy, suggest one small next step
-- Prioritize near-complete goals (they're almost wins!)
-- No markdown headers, no [links]
+TONE: You're a friend who cares about their progress, not a productivity app.
+Write like you'd text a friend — casual, real, no motivational poster vibes.
 
-Return ONLY the message text, nothing else.`;
+RULES:
+- WhatsApp formatting: *bold*, _italic_
+- Under 500 characters
+- Near-complete goals: acknowledge the work done, one push left
+- Stalled goals: mention it honestly, suggest one tiny next step
+- Don't be preachy or use exclamation marks excessively
+- No "You've got this!" or "Keep going!" type filler
+
+Return ONLY the message text.`;
 
     return this._generateAndSend(prompt, "reminder");
   }
@@ -589,7 +742,8 @@ Return ONLY the message text, nothing else.`;
     const memoryDir = getMemoryDir();
 
     // Gather broad context
-    const goals = readJsonSafe(path.join(dataDir, "goals.json")) || [];
+    const goalsRaw = readJsonSafe(path.join(dataDir, "goals.json")) || [];
+    const goals = Array.isArray(goalsRaw) ? goalsRaw : (goalsRaw?.goals || []);
     const thesis = readTextSafe(path.join(memoryDir, "thesis.md")).slice(0, 1000);
     const beliefs = readJsonSafe(path.join(dataDir, "core-beliefs.json")) || [];
     const portfolio = readJsonSafe(path.join(dataDir, "alpaca-cache.json"));
@@ -632,12 +786,88 @@ Return ONLY the message text or "SKIP".`;
     return this._sendMessage(content.trim(), "system");
   }
 
+  // ── Email Digest execution ─────────────────────────────────
+
+  async _executeEmailDigest(def) {
+    try {
+      const { runEmailDigest } = await import("./email-digest.js");
+      const result = await runEmailDigest({ sendWhatsApp: true, topN: 5 });
+      if (result.success && result.emails?.length > 0) {
+        return { success: true, message: `Email digest: ${result.emails.length} emails surfaced` };
+      }
+      return { success: false, skipped: true, reason: result.reason || "No important emails" };
+    } catch (err) {
+      console.error(`${TAG} Email digest error:`, err.message);
+      return { success: false, error: err.message };
+    }
+  }
+
+  // ── Context sync to Firebase ────────────────────────────────
+
+  async _executeContextSync(_def) {
+    try {
+      const { getFirebaseContextSync } = await import("../firebase/firebase-context-sync.js");
+      const sync = getFirebaseContextSync();
+      // Initialize with user ID from Firebase user file if not already set
+      if (!sync.userId) {
+        const { loadFirebaseUser } = await import("../firebase/firebase-auth.js");
+        const user = loadFirebaseUser();
+        if (user?.localId || user?.uid) {
+          sync.initialize(user.localId || user.uid);
+        }
+      }
+      const success = await sync.syncAll();
+      if (success) {
+        return { success: true, message: "Context synced to Firebase" };
+      }
+      return { success: false, skipped: true, reason: "Debounced or no data" };
+    } catch (err) {
+      console.error(`${TAG} Context sync error:`, err.message);
+      return { success: false, error: err.message };
+    }
+  }
+
+  // ── Brokerage sync execution ────────────────────────────────
+
+  async _executeBrokerageSync(_def) {
+    try {
+      const { syncAllBrokerages, getSyncStatus } = await import("../brokerages/brokerage-sync.js");
+      const { getBrokerageStatuses } = await import("../brokerages/brokerage-auth.js");
+
+      const statuses = getBrokerageStatuses();
+      const anyConnected = Object.values(statuses).some(s => s.connected);
+      if (!anyConnected) {
+        return { success: false, skipped: true, reason: "No brokerages connected" };
+      }
+
+      // Build a notify function that sends via WhatsApp
+      let notifyFn = null;
+      try {
+        const { getWhatsAppNotifications } = await import("./whatsapp-notifications.js");
+        const notif = getWhatsAppNotifications();
+        if (notif.enabled) {
+          notifyFn = (msg) => notif.send("system", msg);
+        }
+      } catch {}
+
+      const result = await syncAllBrokerages({ notify: notifyFn });
+
+      if (result.success) {
+        return { success: true, message: result.message };
+      }
+      return { success: false, error: result.message };
+    } catch (err) {
+      console.error(`${TAG} Brokerage sync error:`, err.message);
+      return { success: false, error: err.message };
+    }
+  }
+
   // ── Content generation via Claude Code CLI ──────────────────
 
   async _generateContent(prompt) {
     try {
       const { runClaudeCodePrompt } = await import("../ai/claude-code-cli.js");
-      const result = await runClaudeCodePrompt(prompt, { timeout: 90_000 });
+      const result = await runClaudeCodePrompt(prompt, { timeout: 180_000 });
       if (result.success && result.output) {
         return result.output.trim();
       }

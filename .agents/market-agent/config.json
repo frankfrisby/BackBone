@@ -1,0 +1,17 @@
+{
+  "entrypoint": null,
+  "type": "engine",
+  "schedule": "cron",
+  "cron": "0 9,15 * * 1-5",
+  "goalCategories": ["finance", "growth"],
+  "keywords": ["market", "competitor", "trend", "industry", "sector", "TAM", "landscape", "macro", "economy", "gdp"],
+  "permissions": {
+    "skills": ["market-research", "economic-policy", "geopolitical-analysis"],
+    "mcp": ["backbone-news", "backbone-trading", "backbone-youtube"],
+    "tools": ["research-stock", "analyze-ticker"],
+    "filesystem": {
+      "read": ["data/", "memory/", "projects/"],
+      "write": ["projects/", "memory/"]
+    }
+  }
+}

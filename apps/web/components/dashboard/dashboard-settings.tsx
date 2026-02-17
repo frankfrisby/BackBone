@@ -22,16 +22,99 @@ interface DashboardSettingsProps {
   onClose: () => void;
 }
 
+const WHATSAPP_PHONE_KEY = "backbone.whatsapp.phone";
+
+function getApiBase(): string {
+  if (typeof window === "undefined") return "http://localhost:3000";
+  const port = parseInt(window.location.port, 10);
+  if (port === 3000 || window.location.pathname.startsWith("/app")) {
+    return window.location.origin;
+  }
+  return "http://localhost:3000";
+}
+
+function normalizeUsPhone(input: string): string | null {
+  const cleaned = String(input || "").replace(/[^\d+]/g, "");
+  let normalized = cleaned;
+  if (!normalized.startsWith("+")) {
+    if (normalized.length === 10) normalized = `+1${normalized}`;
+    else if (normalized.length === 11 && normalized.startsWith("1")) normalized = `+${normalized}`;
+    else normalized = `+${normalized}`;
+  }
+  return /^\+1\d{10}$/.test(normalized) ? normalized : null;
+}
+
 export function DashboardSettings({ onClose }: DashboardSettingsProps) {
   const { config, updateConfig } = useDashboardConfig();
   const { sources } = useConnectedSources();
   const [widgets, setWidgets] = useState<WidgetConfig[]>(() =>
     Array.isArray(config?.widgets) ? config.widgets : []
   );
+  const [phoneNumber, setPhoneNumber] = useState("+1");
+  const [waStatus, setWaStatus] = useState<any>(null);
+  const [waLoading, setWaLoading] = useState(false);
+  const [waMessage, setWaMessage] = useState<string | null>(null);
+  const [pairingCode, setPairingCode] = useState<string | null>(null);
 
   useEffect(() => {
     setWidgets(Array.isArray(config?.widgets) ? config.widgets : []);
   }, [config?.widgets]);
+
+  const fetchWhatsAppStatus = async () => {
+    setWaLoading(true);
+    try {
+      const resp = await fetch(`${getApiBase()}/api/whatsapp/status`);
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data?.error || "Could not load WhatsApp status");
+      setWaStatus(data);
+      setWaMessage(null);
+    } catch (err: any) {
+      setWaMessage(err?.message || "Could not load WhatsApp status");
+    } finally {
+      setWaLoading(false);
+    }
+  };
+
+  const handlePairingCode = async () => {
+    const normalized = normalizeUsPhone(phoneNumber);
+    if (!normalized) {
+      setWaMessage("Use a valid US number in +1XXXXXXXXXX format.");
+      return;
+    }
+
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(WHATSAPP_PHONE_KEY, normalized);
+    }
+
+    setWaLoading(true);
+    setPairingCode(null);
+    try {
+      const resp = await fetch(`${getApiBase()}/api/whatsapp/baileys/pairing-code`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ phoneNumber: normalized })
+      });
+      const data = await resp.json();
+      if (!resp.ok || !data?.success) {
+        throw new Error(data?.error || "Could not generate pairing code");
+      }
+      setPairingCode(data.pairingCode || null);
+      setWaMessage(`Pairing code ready for ${normalized}. Enter it in WhatsApp Linked Devices.`);
+      await fetchWhatsAppStatus();
+    } catch (err: any) {
+      setWaMessage(err?.message || "Could not generate pairing code");
+    } finally {
+      setWaLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      const saved = window.localStorage.getItem(WHATSAPP_PHONE_KEY);
+      if (saved) setPhoneNumber(saved);
+    }
+    fetchWhatsAppStatus();
+  }, []);
 
   const handleToggle = (sourceId: string) => {
     setWidgets((prev) =>
@@ -187,6 +270,79 @@ export function DashboardSettings({ onClose }: DashboardSettingsProps) {
               </div>
             );
           })}
+
+          <div className="mt-4 pt-4 border-t border-[#1a1a1a] space-y-3">
+            <div>
+              <p className="text-[12px] font-medium text-white">WhatsApp (Baileys)</p>
+              <p className="text-[10px] text-neutral-600">
+                Link your phone directly. This is separate from Twilio OTP.
+              </p>
+            </div>
+
+            <div className="grid grid-cols-3 gap-2 text-[10px]">
+              <div className="rounded-lg border border-[#1a1a1a] bg-[#0f0f0f] px-2.5 py-2">
+                <p className="text-neutral-600">Provider</p>
+                <p className="text-neutral-300">{waStatus?.provider || "baileys"}</p>
+              </div>
+              <div className="rounded-lg border border-[#1a1a1a] bg-[#0f0f0f] px-2.5 py-2">
+                <p className="text-neutral-600">Baileys</p>
+                <p className={waStatus?.providers?.baileys?.connected ? "text-green-400" : "text-amber-400"}>
+                  {waStatus?.providers?.baileys?.connected ? "Connected" : "Not connected"}
+                </p>
+              </div>
+              <div className="rounded-lg border border-[#1a1a1a] bg-[#0f0f0f] px-2.5 py-2">
+                <p className="text-neutral-600">Twilio</p>
+                <p className={waStatus?.providers?.twilio?.hasCredentials ? "text-green-400" : "text-neutral-400"}>
+                  {waStatus?.providers?.twilio?.hasCredentials ? "Configured" : "Not configured"}
+                </p>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <input
+                type="tel"
+                value={phoneNumber}
+                onChange={(e) => setPhoneNumber(e.target.value)}
+                placeholder="+1XXXXXXXXXX"
+                className="w-full rounded-lg border border-[#1a1a1a] bg-[#0f0f0f] px-3 py-2 text-[12px] text-white outline-none focus:border-blue-500"
+              />
+              <div className="flex gap-2">
+                <button
+                  onClick={handlePairingCode}
+                  disabled={waLoading}
+                  className="px-3 py-2 text-[11px] font-medium text-white bg-green-600 hover:bg-green-500 disabled:opacity-50 transition-colors rounded-lg"
+                >
+                  {waLoading ? "Working..." : "Get Pairing Code"}
+                </button>
+                <button
+                  onClick={fetchWhatsAppStatus}
+                  disabled={waLoading}
+                  className="px-3 py-2 text-[11px] font-medium text-neutral-200 bg-[#171717] hover:bg-[#1f1f1f] disabled:opacity-50 transition-colors rounded-lg border border-[#262626]"
+                >
+                  Refresh Status
+                </button>
+              </div>
+            </div>
+
+            {pairingCode && (
+              <div className="rounded-lg border border-green-500/40 bg-green-500/10 px-3 py-2">
+                <p className="text-[10px] text-green-300">Pairing code</p>
+                <p className="text-[16px] tracking-[0.12em] font-semibold text-green-200">{pairingCode}</p>
+              </div>
+            )}
+
+            {waStatus?.providers?.baileys?.lastError && (
+              <p className="text-[10px] text-red-400">
+                Last error: {waStatus.providers.baileys.lastError}
+              </p>
+            )}
+            {waMessage && (
+              <p className="text-[10px] text-amber-300">{waMessage}</p>
+            )}
+            <p className="text-[10px] text-neutral-600">
+              In WhatsApp on your phone: Settings, then Linked Devices, then Link with phone number.
+            </p>
+          </div>
         </div>
 
         {/* Footer */}

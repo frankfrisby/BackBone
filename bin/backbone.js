@@ -2,14 +2,15 @@
 import "dotenv/config";
 import { createElement } from "react";
 import { render } from "ink";
-import { exec } from "child_process";
+import { exec, spawn } from "child_process";
 import fs from "fs";
 import path from "path";
+import { format as formatValue } from "util";
 import App from "../src/app.js";
 import { loadLinkedInProfile } from "../src/services/integrations/linkedin-scraper.js";
 import { Writable } from "stream";
 import { checkForUpdates, consumeUpdateState } from "../src/services/setup/auto-updater.js";
-import { ensureUserDirs, dataFile, memoryFile, getDataDir, getBackboneHome, getBackboneRoot, getEngineRoot, getActiveUserId, migrateToUserScoped, isLegacyInstall } from "../src/services/paths.js";
+import { ensureUserDirs, dataFile, memoryFile, getDataDir, getBackboneHome, getBackboneRoot, getEngineRoot, getActiveUserId, getActiveUser, migrateToUserScoped, isLegacyInstall } from "../src/services/paths.js";
 import { mountAllExtensions } from "../src/services/mount-user-extensions.js";
 
 // ── Singleton lock — prevent multiple instances ────────────────
@@ -116,6 +117,8 @@ const ensureFirstRun = () => {
 
   for (const [fullPath, content] of Object.entries(seeds)) {
     if (!fs.existsSync(fullPath)) {
+      const dir = path.dirname(fullPath);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
       fs.writeFileSync(fullPath, content);
     }
   }
@@ -125,6 +128,186 @@ ensureFirstRun();
 
 // Acquire lock before anything else
 acquireLock();
+
+// ── Runtime log routing (prevents console output from destabilizing Ink UI) ─────────────
+const RUNTIME_LOG_PATH = dataFile("runtime.log");
+const LOG_WINDOW_LOCK_PATH = dataFile(".runtime-log-window.lock");
+
+let runtimeLogStream = null;
+let originalConsoleMethods = null;
+let originalStderrWrite = null;
+let logRoutingInitialized = false;
+
+const parseDiagnosticsSettings = () => {
+  try {
+    const settingsPath = dataFile("user-settings.json");
+    if (!fs.existsSync(settingsPath)) {
+      return {
+        separateLogWindow: true,
+        mirrorConsoleInMainWindow: false
+      };
+    }
+    const settings = JSON.parse(fs.readFileSync(settingsPath, "utf-8"));
+    const diagnostics = settings?.diagnostics || {};
+    return {
+      separateLogWindow: typeof diagnostics.separateLogWindow === "boolean"
+        ? diagnostics.separateLogWindow
+        : true,
+      mirrorConsoleInMainWindow: typeof diagnostics.mirrorConsoleInMainWindow === "boolean"
+        ? diagnostics.mirrorConsoleInMainWindow
+        : false
+    };
+  } catch {
+    return {
+      separateLogWindow: true,
+      mirrorConsoleInMainWindow: false
+    };
+  }
+};
+
+const ensureRuntimeLogFile = () => {
+  try {
+    const dir = path.dirname(RUNTIME_LOG_PATH);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    if (!fs.existsSync(RUNTIME_LOG_PATH)) fs.writeFileSync(RUNTIME_LOG_PATH, "");
+    if (!runtimeLogStream) {
+      runtimeLogStream = fs.createWriteStream(RUNTIME_LOG_PATH, { flags: "a" });
+    }
+  } catch {
+    // Best effort only.
+  }
+};
+
+const writeRuntimeLog = (level, message) => {
+  try {
+    ensureRuntimeLogFile();
+    if (!runtimeLogStream) return;
+    const timestamp = new Date().toISOString();
+    const lines = String(message ?? "").split(/\r?\n/);
+    for (const line of lines) {
+      if (!line) continue;
+      runtimeLogStream.write(`[${timestamp}] [${level}] ${line}\n`);
+    }
+  } catch {
+    // Never break app flow from diagnostics logging.
+  }
+};
+
+const isPidAlive = (pid) => {
+  if (!pid || Number.isNaN(Number(pid))) return false;
+  try {
+    process.kill(Number(pid), 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+const maybeLaunchLogWindow = (enabled) => {
+  if (!enabled) return;
+  if (process.platform !== "win32") return;
+
+  try {
+    if (fs.existsSync(LOG_WINDOW_LOCK_PATH)) {
+      const lock = JSON.parse(fs.readFileSync(LOG_WINDOW_LOCK_PATH, "utf-8"));
+      if (isPidAlive(lock?.pid)) return;
+    }
+  } catch {}
+
+  try {
+    const escapedPath = RUNTIME_LOG_PATH.replace(/'/g, "''");
+    const psCommand = [
+      `$p='${escapedPath}'`,
+      "if (!(Test-Path -LiteralPath $p)) { New-Item -ItemType File -Path $p -Force | Out-Null }",
+      "$host.UI.RawUI.WindowTitle='BACKBONE Diagnostics'",
+      "Write-Host 'BACKBONE diagnostics log stream' -ForegroundColor Cyan",
+      "Write-Host ('File: ' + $p) -ForegroundColor DarkGray",
+      "Get-Content -LiteralPath $p -Tail 120 -Wait"
+    ].join("; ");
+
+    const child = spawn("powershell.exe", [
+      "-NoLogo",
+      "-NoExit",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-WindowStyle",
+      "Minimized",
+      "-Command",
+      psCommand
+    ], {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: false
+    });
+    child.unref();
+
+    fs.writeFileSync(LOG_WINDOW_LOCK_PATH, JSON.stringify({
+      pid: child.pid,
+      launchedAt: new Date().toISOString(),
+      logPath: RUNTIME_LOG_PATH
+    }, null, 2));
+  } catch (err) {
+    writeRuntimeLog("WARN", `Failed to launch diagnostics window: ${err?.message || err}`);
+  }
+};
+
+const initRuntimeLogRouting = () => {
+  if (logRoutingInitialized) return;
+  logRoutingInitialized = true;
+
+  const settings = parseDiagnosticsSettings();
+  const mirrorConsoleInMainWindow = process.env.BACKBONE_CONSOLE_MIRROR
+    ? process.env.BACKBONE_CONSOLE_MIRROR === "1"
+    : settings.mirrorConsoleInMainWindow;
+  const separateLogWindow = process.env.BACKBONE_LOG_WINDOW
+    ? process.env.BACKBONE_LOG_WINDOW === "1"
+    : settings.separateLogWindow;
+
+  ensureRuntimeLogFile();
+  writeRuntimeLog("SYSTEM", "Runtime diagnostics logging initialized");
+  writeRuntimeLog("SYSTEM", `Main console mirror: ${mirrorConsoleInMainWindow ? "enabled" : "disabled"}`);
+  writeRuntimeLog("SYSTEM", `Separate log window: ${separateLogWindow ? "enabled" : "disabled"}`);
+
+  originalConsoleMethods = {
+    log: console.log.bind(console),
+    info: console.info.bind(console),
+    warn: console.warn.bind(console),
+    error: console.error.bind(console),
+    debug: console.debug ? console.debug.bind(console) : console.log.bind(console)
+  };
+
+  const routeConsole = (level, originalMethod, args) => {
+    const text = formatValue(...args);
+    writeRuntimeLog(level, text);
+    if (mirrorConsoleInMainWindow) {
+      originalMethod(...args);
+    }
+  };
+
+  console.log = (...args) => routeConsole("INFO", originalConsoleMethods.log, args);
+  console.info = (...args) => routeConsole("INFO", originalConsoleMethods.info, args);
+  console.warn = (...args) => routeConsole("WARN", originalConsoleMethods.warn, args);
+  console.error = (...args) => routeConsole("ERROR", originalConsoleMethods.error, args);
+  console.debug = (...args) => routeConsole("DEBUG", originalConsoleMethods.debug, args);
+
+  originalStderrWrite = process.stderr.write.bind(process.stderr);
+  process.stderr.write = (chunk, encoding, callback) => {
+    const cb = typeof encoding === "function" ? encoding : callback;
+    const enc = typeof encoding === "string" ? encoding : "utf8";
+    const text = Buffer.isBuffer(chunk) ? chunk.toString(enc) : String(chunk);
+    writeRuntimeLog("STDERR", text);
+
+    if (mirrorConsoleInMainWindow) {
+      return originalStderrWrite(chunk, encoding, callback);
+    }
+    if (typeof cb === "function") cb();
+    return true;
+  };
+
+  maybeLaunchLogWindow(separateLogWindow);
+};
+
+initRuntimeLogRouting();
 
 // Release lock on any exit
 process.on("exit", releaseLock);
@@ -136,6 +319,96 @@ if (process.platform === "win32") {
   process.env.FORCE_COLOR = "1";
   process.env.TERM = process.env.TERM || "xterm-256color";
 }
+
+// ── Auto-start server if not running ────────────────────────────
+const ensureServerRunning = async () => {
+  const http = await import("http");
+
+  const isServerUp = () =>
+    new Promise((resolve) => {
+      const req = http.default.get("http://localhost:3000/health", { timeout: 2000 }, (res) => {
+        res.resume();
+        resolve(res.statusCode === 200);
+      });
+      req.on("error", () => resolve(false));
+      req.on("timeout", () => { req.destroy(); resolve(false); });
+    });
+
+  if (await isServerUp()) return; // Server already running
+
+  // Start the server as a detached background process
+  const { spawn } = await import("child_process");
+  const serverPath = path.join(getEngineRoot(), "src", "server.js");
+
+  const env = { ...process.env, BACKBONE_NO_BROWSER: "1" };
+  const serverProc = spawn(process.execPath, [serverPath], {
+    cwd: getEngineRoot(),
+    detached: true,
+    stdio: "ignore",
+    env,
+    windowsHide: true,
+  });
+  serverProc.unref();
+
+  // Wait for server to be ready (up to 15s)
+  for (let i = 0; i < 30; i++) {
+    await new Promise((r) => setTimeout(r, 500));
+    if (await isServerUp()) return;
+  }
+  // Server didn't start in time — continue anyway, some features may be degraded
+};
+
+await ensureServerRunning();
+
+// ── Server watchdog — restart server if it crashes ──────────────
+const startServerWatchdog = async () => {
+  const http = await import("http");
+
+  const isServerUp = () =>
+    new Promise((resolve) => {
+      const req = http.default.get("http://localhost:3000/health", { timeout: 3000 }, (res) => {
+        res.resume();
+        resolve(res.statusCode === 200);
+      });
+      req.on("error", () => resolve(false));
+      req.on("timeout", () => { req.destroy(); resolve(false); });
+    });
+
+  const restartServer = async () => {
+    const { spawn } = await import("child_process");
+    const serverPath = path.join(getEngineRoot(), "src", "server.js");
+    const env = { ...process.env, BACKBONE_NO_BROWSER: "1" };
+    const serverProc = spawn(process.execPath, [serverPath], {
+      cwd: getEngineRoot(),
+      detached: true,
+      stdio: "ignore",
+      env,
+      windowsHide: true,
+    });
+    serverProc.unref();
+
+    // Wait for it to come up
+    for (let i = 0; i < 20; i++) {
+      await new Promise(r => setTimeout(r, 500));
+      if (await isServerUp()) return true;
+    }
+    return false;
+  };
+
+  // Check every 30 seconds
+  setInterval(async () => {
+    try {
+      if (!(await isServerUp())) {
+        console.log("[Watchdog] Server down — restarting...");
+        const ok = await restartServer();
+        if (ok) console.log("[Watchdog] Server restarted successfully");
+        else console.log("[Watchdog] Server restart failed");
+      }
+    } catch {}
+  }, 30_000);
+};
+
+startServerWatchdog();
 
 /**
  * Center window on screen immediately on startup (before rendering)
@@ -342,6 +615,10 @@ const cleanup = () => {
   process.stdout.write(ANSI.CURSOR_SHOW);
   process.stdout.write(ANSI.ALTERNATE_SCREEN_OFF);
   process.stdout.write(ANSI.RESET);
+  if (runtimeLogStream) {
+    try { runtimeLogStream.end(); } catch {}
+    runtimeLogStream = null;
+  }
 };
 
 process.on("exit", cleanup);
@@ -353,46 +630,47 @@ process.on("uncaughtException", (err) => {
   process.exit(1);
 });
 
-// Set console title
+// Set console title — always use ANSI escape (process.title shows raw path on Windows)
 const setConsoleTitle = (title) => {
-  if (process.platform === "win32") {
-    process.title = title;
-  } else {
+  if (process.stdout.isTTY) {
     process.stdout.write(`\x1b]0;${title}\x07`);
   }
 };
 
-// Get user name
-const getUserName = () => {
+// Get user's first name for title display
+const getUserFirstName = () => {
+  // Try LinkedIn profile first (most reliable)
   try {
     const profile = loadLinkedInProfile();
-    return profile?.profile?.name || null;
-  } catch {
-    return null;
-  }
-};
+    const fullName = profile?.profile?.name;
+    if (fullName) return fullName.split(" ")[0];
+  } catch {}
 
-// Get app name from settings (sync)
-const getAppNameSync = () => {
+  // Try active-user.json (Firebase user)
+  try {
+    const activeUser = getActiveUser();
+    if (activeUser?.displayName) return activeUser.displayName.split(" ")[0];
+  } catch {}
+
+  // Try user-settings.json
   try {
     const settingsPath = dataFile("user-settings.json");
     if (fs.existsSync(settingsPath)) {
       const settings = JSON.parse(fs.readFileSync(settingsPath, "utf-8"));
-      return settings.appName || "Backbone";
+      if (settings.displayName) return settings.displayName.split(" ")[0];
     }
-  } catch {
-    // Ignore
-  }
-  return "Backbone";
+  } catch {}
+
+  return null;
 };
 
-const appName = getAppNameSync();
-const userName = getUserName();
-// Title MUST include "BACKBONE ENGINE" — singleton checks in launchers match on this
-setConsoleTitle(userName ? `BACKBONE ENGINE · ${userName}` : "BACKBONE ENGINE");
+const userName = getUserFirstName();
+// Title format: BACKBONE · [FirstName]
+// Singleton checks in launchers match on "BACKBONE" in the window title
+setConsoleTitle(userName ? `BACKBONE · ${userName}` : "BACKBONE");
 
 export const updateConsoleTitle = (name) => {
-  setConsoleTitle(name ? `BACKBONE ENGINE · ${name}` : "BACKBONE ENGINE");
+  setConsoleTitle(name ? `BACKBONE · ${name}` : "BACKBONE");
 };
 
 // --- Auto-update check (silent, before app loads) ---

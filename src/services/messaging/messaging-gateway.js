@@ -174,7 +174,13 @@ export class MessagingGateway extends EventEmitter {
       const waResult = await this.whatsAppService.initialize();
 
       if (waResult.success) {
-        results.whatsapp = { success: true, phoneNumber: waResult.whatsappNumber, provider: "Twilio" };
+        results.whatsapp = {
+          success: true,
+          phoneNumber: waResult.whatsappNumber || null,
+          provider: waResult.provider || this.whatsAppService?.activeProvider || "twilio",
+          connected: waResult.connected ?? undefined,
+          requiresPairing: waResult.requiresPairing ?? undefined
+        };
         this.config.enabledChannels.push(CHANNEL.WHATSAPP);
 
         // Forward events

@@ -1,6 +1,6 @@
 import { DrawingDocument } from './core/DrawingDocument.js';
 import { Renderer2D } from './canvas/Renderer2D.js';
-import { Renderer3D } from './scene3d/Renderer3D.js';
+// Renderer3D loaded lazily on demand to avoid blocking 2D mode
 import { ToolController } from './tools/ToolController.js';
 import { SelectTool } from './tools/SelectTool.js';
 import { LineTool } from './tools/LineTool.js';
@@ -201,7 +201,7 @@ class CADApp {
   }
 
   // View mode
-  setViewMode(mode) {
+  async setViewMode(mode) {
     if (mode === this.viewMode) return;
     this.viewMode = mode;
     const viewport = document.getElementById('viewport');
@@ -213,6 +213,7 @@ class CADApp {
       container.className = 'renderer-3d';
       container.id = 'container-3d';
       viewport.appendChild(container);
+      const { Renderer3D } = await import('./scene3d/Renderer3D.js');
       this.renderer3d = new Renderer3D(container, this.doc);
       this.renderer3d.start();
     } else {

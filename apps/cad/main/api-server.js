@@ -82,5 +82,13 @@ export function startApiServer(mainWindow) {
     } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
   });
 
-  app.listen(9847, () => console.log('CAD API server on :9847'));
+  const server = app.listen(9847, () => console.log('CAD API server on :9847'));
+  server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      console.warn('CAD API: Port 9847 in use, trying 9848...');
+      app.listen(9848, () => console.log('CAD API server on :9848'));
+    } else {
+      console.error('CAD API server error:', err.message);
+    }
+  });
 }

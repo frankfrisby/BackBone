@@ -1,0 +1,8 @@
+{
+  "settings": { "units": "mm", "gridSize": 10, "snapSize": 5 },
+  "layers": {
+    "0": { "name": "0", "color": "#ffffff", "visible": true, "locked": false }
+  },
+  "entities": [],
+  "blocks": {}
+}

@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BACKBONE CAD</title>
+  <link rel="stylesheet" href="ui/styles/main.css">
+  <link rel="stylesheet" href="ui/styles/toolbar.css">
+  <link rel="stylesheet" href="ui/styles/ribbon.css">
+  <link rel="stylesheet" href="ui/styles/properties.css">
+  <link rel="stylesheet" href="ui/styles/commandline.css">
+</head>
+<body>
+  <div id="app"></div>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "../node_modules/three/build/three.module.js",
+      "three/examples/jsm/controls/OrbitControls.js": "../node_modules/three/examples/jsm/controls/OrbitControls.js"
+    }
+  }
+  </script>
+  <script type="module" src="index.js"></script>
+</body>
+</html>

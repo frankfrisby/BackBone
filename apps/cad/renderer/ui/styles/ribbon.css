@@ -1,0 +1,48 @@
+.ribbon {
+  grid-area: ribbon;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  padding: 0 8px;
+}
+
+.ribbon-group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 8px;
+  border-right: 1px solid var(--border);
+  height: 100%;
+}
+
+.ribbon-group:last-child { border-right: none; }
+
+.ribbon button {
+  background: none;
+  border: 1px solid transparent;
+  color: var(--text-secondary);
+  padding: 4px 8px;
+  font-size: 11px;
+  cursor: pointer;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+
+.ribbon button:hover {
+  background: var(--bg-hover);
+  border-color: var(--border);
+}
+
+.ribbon button.active {
+  background: var(--accent);
+  color: white;
+}
+
+.ribbon .separator {
+  width: 1px;
+  height: 24px;
+  background: var(--border);
+  margin: 0 4px;
+}

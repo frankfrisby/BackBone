@@ -85,6 +85,56 @@ export class PersonalCapitalService extends EventEmitter {
         const data = JSON.parse(fs.readFileSync(PC_DATA_PATH, "utf-8"));
         this.data = { ...getDefaultData(), ...data };
       }
+
+      // Fix: if holdings look like account summaries (name contains $, or name === ticker),
+      // they were mis-parsed from the dashboard. Clean them up.
+      if (this.data.holdings?.length > 0) {
+        const cleaned = this.data.holdings.filter(h => {
+          const name = h.name || h.ticker || "";
+          // Skip entries that are clearly account names, not securities
+          if (name.includes("$")) return false;
+          if (name.length > 60) return false; // Account descriptions are long
+          if (/\s{5,}/.test(name)) return false; // Multiple spaces = scraped layout text
+          if (/^(Cash|Investment|Savings|Checking|Credit|Loan|Mortgage|Roth|Traditional|Retirement|Other Asset|Car|Thrift|Robinhood|Fidelity|Capital One|Citizens|Empower|You Index|Holding)\b/i.test(name) && !h.shares && !h.quantity) return false;
+          if (h.name === h.ticker && !h.shares && !h.quantity && !h.price) return false;
+          // Skip table headers
+          if (/SharesPriceChange|1.day|90.day/i.test(name)) return false;
+          return true;
+        });
+        if (cleaned.length < this.data.holdings.length) {
+          console.log(`[Empower] Cleaned ${this.data.holdings.length - cleaned.length} mis-parsed holdings (account summaries mistaken for securities)`);
+          this.data.holdings = cleaned;
+        }
+      }
+
+      // Fix: if netWorth.date is epoch (1970), replace with lastUpdated
+      if (this.data.netWorth?.date) {
+        const dateMs = new Date(this.data.netWorth.date).getTime();
+        if (dateMs < 86400000) { // Before Jan 2, 1970
+          this.data.netWorth.date = this.data.lastUpdated || new Date().toISOString();
+        }
+      }
+
+      // Fallback: merge from empower-auth.json if primary has no data
+      if ((this.data.holdings || []).length === 0 || (this.data.accounts || []).length === 0) {
+        try {
+          const authPath = path.join(DATA_DIR, "empower-auth.json");
+          if (fs.existsSync(authPath)) {
+            const auth = JSON.parse(fs.readFileSync(authPath, "utf-8"));
+            if ((this.data.holdings || []).length === 0 && auth.holdings?.length > 0) {
+              console.log(`[Empower] Loading ${auth.holdings.length} holdings from empower-auth.json fallback`);
+              this.data.holdings = auth.holdings;
+            }
+            if ((this.data.accounts || []).length === 0 && auth.accounts?.length > 0) {
+              console.log(`[Empower] Loading ${auth.accounts.length} accounts from empower-auth.json fallback`);
+              this.data.accounts = auth.accounts;
+            }
+            if (!this.data.netWorth && auth.netWorth) {
+              this.data.netWorth = auth.netWorth;
+            }
+          }
+        } catch {}
+      }
     } catch (error) {
       console.error("Failed to load Personal Capital data:", error.message);
     }

@@ -712,10 +712,17 @@ export class PersonalCapitalService extends EventEmitter {
             }
           }
           if (!result.netWorth) {
-            let maxVal = 0;
-            for (const el of document.querySelectorAll("h1, h2, h3, [class*='value'], [class*='amount'], [class*='balance'], [class*='total'], span, div")) {
-              const match = el.textContent?.trim().match(/\$[\d,]+\.?\d*/);
-              if (match) { const v = parseFloat(match[0].replace(/[$,]/g, "")); if (v > maxVal) { maxVal = v; result.netWorth = v; } }
+            // Look for dollar amount near "Net Worth" text on the page
+            const allEls = document.querySelectorAll("h1, h2, h3, h4, span, div, p, [class*='value'], [class*='amount'], [class*='balance'], [class*='total']");
+            for (const el of allEls) {
+              const text = el.textContent?.trim() || "";
+              if (/net\s*worth/i.test(text)) {
+                const match = text.match(/\$[\d,]+\.?\d*/);
+                if (match) {
+                  const v = parseFloat(match[0].replace(/[$,]/g, ""));
+                  if (v > 100) { result.netWorth = v; break; }
+                }
+              }
             }
           }
 
@@ -803,15 +810,28 @@ export class PersonalCapitalService extends EventEmitter {
       console.log(`${TAG} Processing ${capturedResponses.length} captured API responses...`);
       for (const { url, body } of capturedResponses) {
         try {
-          // Look for account arrays in response
-          const accountArrays = findArraysWithKey(body, ["accountName", "name", "firmName", "accountType", "balance", "currentBalance"]);
-          for (const arr of accountArrays) {
-            for (const item of arr) {
+          // Prefer Empower's structured spData.accounts from getAccounts2
+          const sp = body.spData || body.data || {};
+          if (sp.accounts && Array.isArray(sp.accounts) && sp.accounts.length > 0) {
+            for (const item of sp.accounts) {
               const name = item.accountName || item.name || item.firmName || item.description || "";
-              const balance = item.balance || item.currentBalance || item.value || item.totalBalance || 0;
+              const balance = item.currentBalance ?? item.balance ?? item.value ?? item.totalBalance ?? 0;
               const type = item.accountType || item.productType || item.type || "";
               if (name && typeof balance === "number") {
                 apiData.accounts.push({ name, balance, type, institution: item.firmName || "Empower", source: "api" });
+              }
+            }
+          } else {
+            // Fallback: generic array search for non-Empower APIs
+            const accountArrays = findArraysWithKey(body, ["accountName", "name", "firmName", "accountType", "balance", "currentBalance"]);
+            for (const arr of accountArrays) {
+              for (const item of arr) {
+                const name = item.accountName || item.name || item.firmName || item.description || "";
+                const balance = item.balance || item.currentBalance || item.value || item.totalBalance || 0;
+                const type = item.accountType || item.productType || item.type || "";
+                if (name && typeof balance === "number") {
+                  apiData.accounts.push({ name, balance, type, institution: item.firmName || "Empower", source: "api" });
+                }
               }
             }
           }
@@ -832,24 +852,57 @@ export class PersonalCapitalService extends EventEmitter {
             }
           }
 
-          // Look for net worth value
-          if (body.netWorth != null) apiData.netWorth = body.netWorth;
-          if (body.totalNetWorth != null) apiData.netWorth = body.totalNetWorth;
-          if (body.data?.netWorth != null) apiData.netWorth = body.data.netWorth;
-          if (body.totalValue != null && !apiData.netWorth) apiData.netWorth = body.totalValue;
+          // Look for net worth value — Empower uses spData.networth (lowercase)
+          const spNet = body.spData || body.data || body;
+          if (spNet.networth != null && typeof spNet.networth === "number") apiData.netWorth = spNet.networth;
+          else if (spNet.netWorth != null && typeof spNet.netWorth === "number") apiData.netWorth = spNet.netWorth;
+          else if (body.netWorth != null && typeof body.netWorth === "number") apiData.netWorth = body.netWorth;
+          else if (body.totalNetWorth != null && typeof body.totalNetWorth === "number") apiData.netWorth = body.totalNetWorth;
 
-          // Look for category breakdowns (investments, cash, credit, etc.)
+          // Look for category breakdowns — Empower puts these in spData
+          const catSource = spNet !== body ? spNet : body;
+          const catKeyMap = {
+            investmentAccountsTotal: "investments",
+            cashAccountsTotal: "cash",
+            creditCardAccountsTotal: "creditCards",
+            loanAccountsTotal: "loans",
+            mortgageAccountsTotal: "mortgage",
+            otherLiabilitiesAccountsTotal: "otherLiabilities",
+            assets: "assets",
+            liabilities: "liabilities",
+          };
+          for (const [srcKey, destKey] of Object.entries(catKeyMap)) {
+            if (catSource[srcKey] != null && typeof catSource[srcKey] === "number") {
+              apiData.categories[destKey] = catSource[srcKey];
+            }
+          }
+          // Also check old generic keys for non-Empower APIs
           const catKeys = ["investments", "cash", "creditCards", "loans", "otherAssets", "otherLiabilities", "retirement"];
           for (const key of catKeys) {
-            if (body[key] != null && typeof body[key] === "number") apiData.categories[key] = body[key];
-            if (body.data?.[key] != null && typeof body.data[key] === "number") apiData.categories[key] = body.data[key];
+            if (!apiData.categories[key] && body[key] != null && typeof body[key] === "number") apiData.categories[key] = body[key];
           }
         } catch (e) {
           console.log(`${TAG} [XHR] Parse error for ${url.slice(0, 60)}: ${e.message}`);
         }
       }
 
-      console.log(`${TAG} API interception: netWorth=${apiData.netWorth}, accounts=${apiData.accounts.length}, holdings=${apiData.holdings.length}, categories=${Object.keys(apiData.categories).length}`);
+      // Deduplicate API-intercepted accounts (multiple API calls return same accounts)
+      const dedupeByKey = (arr, keyFn) => {
+        const seen = new Map();
+        for (const item of arr) {
+          const key = keyFn(item);
+          const existing = seen.get(key);
+          // Keep the one with the higher balance/value (more complete data)
+          if (!existing || (item.balance || item.value || 0) > (existing.balance || existing.value || 0)) {
+            seen.set(key, item);
+          }
+        }
+        return [...seen.values()];
+      };
+      apiData.accounts = dedupeByKey(apiData.accounts, a => (a.name || "").toLowerCase().slice(0, 30) + "|" + (a.balance || 0));
+      apiData.holdings = dedupeByKey(apiData.holdings, h => ((h.symbol || h.name || "").toLowerCase()));
+
+      console.log(`${TAG} API interception (deduped): netWorth=${apiData.netWorth}, accounts=${apiData.accounts.length}, holdings=${apiData.holdings.length}, categories=${Object.keys(apiData.categories).length}`);
 
       // ── Triangulate: merge all 3 sources, preferring API > DOM > text ──
       const finalNetWorth = apiData.netWorth || extractedData.netWorth;
@@ -921,8 +974,18 @@ export class PersonalCapitalService extends EventEmitter {
         const apiPath = path.join(DATA_DIR, "empower-api-captures.json");
         fs.writeFileSync(apiPath, JSON.stringify(capturedResponses.map(r => ({
           url: r.url,
-          bodyPreview: JSON.stringify(r.body).slice(0, 2000),
+          bodyPreview: JSON.stringify(r.body).slice(0, 5000),
         })), null, 2));
+      }
+
+      // Take final screenshot before closing
+      let screenshotPath = null;
+      try {
+        screenshotPath = path.join(screenshotsDir, `empower-final-${Date.now()}.png`);
+        await page.screenshot({ path: screenshotPath, fullPage: false });
+      } catch (ssErr) {
+        console.warn(`${TAG} Screenshot failed:`, ssErr.message);
+        screenshotPath = null;
       }
 
       await context.close();

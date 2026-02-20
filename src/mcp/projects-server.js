@@ -5,6 +5,7 @@ import {
   ListToolsRequestSchema
 } from "@modelcontextprotocol/sdk/types.js";
 import { createProject, listProjects, createProjectAction } from "../services/projects/projects.js";
+import { getProjectManager } from "../services/projects/project-manager.js";
 
 const TOOLS = [
   {
@@ -39,6 +40,44 @@ const TOOLS = [
         name: { type: "string", description: "Action name" }
       },
       required: ["project", "name"]
+    }
+  },
+  {
+    name: "archive_project",
+    description: "Archive a completed/old project. Moves it to .archive/ permanently. Use for projects that are done or no longer active.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Project name to archive" }
+      },
+      required: ["name"]
+    }
+  },
+  {
+    name: "restore_project",
+    description: "Restore an archived project back to active",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Archived project name to restore" }
+      },
+      required: ["name"]
+    }
+  },
+  {
+    name: "list_archived_projects",
+    description: "List all archived projects",
+    inputSchema: {
+      type: "object",
+      properties: {}
+    }
+  },
+  {
+    name: "get_project_status_summary",
+    description: "Get count of active, paused, completed, and archived projects",
+    inputSchema: {
+      type: "object",
+      properties: {}
     }
   }
 ];
@@ -75,6 +114,26 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
     case "create_project_action": {
       result = createProjectAction(args.project, args.name);
+      break;
+    }
+    case "archive_project": {
+      const pm = getProjectManager();
+      result = pm.archiveProject(args.name);
+      break;
+    }
+    case "restore_project": {
+      const pm = getProjectManager();
+      result = pm.restoreFromArchive(args.name);
+      break;
+    }
+    case "list_archived_projects": {
+      const pm = getProjectManager();
+      result = pm.listArchived();
+      break;
+    }
+    case "get_project_status_summary": {
+      const pm = getProjectManager();
+      result = pm.getStatusSummary();
       break;
     }
     default:

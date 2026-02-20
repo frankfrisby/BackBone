@@ -328,7 +328,7 @@ const TOOLS = [
 
 // ─── Tool Handlers ───────────────────────────────────────────
 
-async function handleTool(name, args) {
+export async function handleTool(name, args) {
   switch (name) {
     // ── Status ──
     case "get_brokerage_status": {
@@ -388,7 +388,7 @@ async function handleTool(name, args) {
       // Group by category
       const categories = { cash: [], investments: [], creditCards: [], loans: [], assets: [], other: [] };
       for (const acc of accounts) {
-        const type = (acc.type || "").toLowerCase();
+        const type = String(acc.type || "").toLowerCase();
         if (type.includes("cash") || type.includes("checking") || type.includes("saving")) categories.cash.push(acc);
         else if (type.includes("invest") || type.includes("401k") || type.includes("ira") || type.includes("brokerage") || type.includes("retirement")) categories.investments.push(acc);
         else if (type.includes("credit")) categories.creditCards.push(acc);
@@ -455,6 +455,28 @@ async function handleTool(name, args) {
         const state = loadFreshness();
         state.lastRefresh = new Date().toISOString();
         saveFreshness(state);
+
+        // Sync scraped data to empower-auth.json so brokerage-sync picks it up
+        try {
+          const authPath = path.join(DATA_DIR, "empower-auth.json");
+          const auth = fs.existsSync(authPath) ? JSON.parse(fs.readFileSync(authPath, "utf-8")) : {};
+          if (result.netWorth) auth.netWorth = result.netWorth;
+          if (result.accounts?.length > 0) auth.accounts = result.accounts;
+          if (result.holdings?.length > 0) auth.holdings = result.holdings;
+          auth.lastSynced = new Date().toISOString();
+          fs.writeFileSync(authPath, JSON.stringify(auth, null, 2));
+        } catch (e) {
+          console.error("[empower_scrape] Failed to sync to empower-auth.json:", e.message);
+        }
+
+        // Also update brokerage-portfolio.json directly
+        try {
+          const { syncAllBrokerages } = await import("../services/brokerages/brokerage-sync.js");
+          // Don't re-scrape, just re-sync from cached auth files
+          await syncAllBrokerages();
+        } catch (e) {
+          console.error("[empower_scrape] Portfolio sync failed:", e.message);
+        }
       }
       return result;
     }
@@ -552,21 +574,33 @@ async function handleTool(name, args) {
       const empowerData = loadBrokerageData("empower");
       const empowerSvc = empower.getFinanceData?.() || {};
 
-      if (empowerSvc.equity || empowerData?.netWorth) {
-        const netWorth = empowerSvc.equity || empowerData.netWorth;
-        const lastUpdated = empowerSvc.lastUpdated || empowerData?.lastUpdated;
+      // Also check in-memory service data (netWorth object has .total)
+      const svcNetWorth = empower.data?.netWorth?.total;
+      const svcCategories = empower.data?.netWorth?.categories || {};
+      const svcLastUpdated = empower.data?.lastUpdated;
+
+      if (svcNetWorth || empowerSvc.equity || empowerData?.netWorth) {
+        const netWorth = svcNetWorth || empowerSvc.equity || empowerData.netWorth;
+        const lastUpdated = svcLastUpdated || empowerSvc.lastUpdated || empowerData?.lastUpdated;
         const freshness = checkFreshness(lastUpdated);
-        const categories = empowerData?.categories || {};
+        // Categories can be { key: number } (from API) or { key: [accounts] }
+        const rawCats = Object.keys(svcCategories).length > 0 ? svcCategories : (empowerData?.categories || {});
+        const categories = {};
+        for (const [cat, val] of Object.entries(rawCats)) {
+          if (typeof val === "number") {
+            categories[cat] = { total: val };
+          } else if (Array.isArray(val)) {
+            categories[cat] = {
+              total: val.reduce((s, a) => s + (a.balance || 0), 0),
+              count: val.length,
+              accounts: val.map(a => ({ name: a.name, institution: a.institution, balance: a.balance, type: a.accountType })),
+            };
+          }
+        }
         return {
           netWorth,
           _note: "Empower aggregates ALL accounts. This is total net worth across all brokerages, banks, credit, and loans. Do NOT add Robinhood/Fidelity/Alpaca on top.",
-          categories: Object.fromEntries(
-            Object.entries(categories).map(([cat, accs]) => [cat, {
-              total: accs.reduce((s, a) => s + (a.balance || 0), 0),
-              count: accs.length,
-              accounts: accs.map(a => ({ name: a.name, institution: a.institution, balance: a.balance, type: a.accountType })),
-            }])
-          ),
+          categories,
           lastUpdated,
           ...freshness,
         };

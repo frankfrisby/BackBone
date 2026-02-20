@@ -687,12 +687,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     case "get_top_tickers": {
       try {
         const count = args.count || 10;
-        const tickers = await fetchTickers();
-        if (!tickers || tickers.error) {
-          result = { error: tickers?.error || "Failed to fetch tickers. Yahoo Finance server may not be running." };
+        const tickerData = await fetchTickers();
+        if (!tickerData || tickerData.error) {
+          result = { error: tickerData?.error || "Failed to fetch tickers. Yahoo Finance server may not be running." };
           break;
         }
-        const ranked = rankTickers(tickers);
+        const tickers = tickerData.tickers || tickerData;
+        const ranked = rankTickers(Array.isArray(tickers) ? tickers : []);
         const top = ranked.slice(0, count).map(t => ({
           symbol: t.symbol,
           score: t.score?.toFixed(2),
@@ -712,13 +713,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     case "get_worst_tickers": {
       try {
         const count = args.count || 10;
-        const tickers = await fetchTickers();
-        if (!tickers || tickers.error) {
-          result = { error: tickers?.error || "Failed to fetch tickers." };
+        const tickerData = await fetchTickers();
+        if (!tickerData || tickerData.error) {
+          result = { error: tickerData?.error || "Failed to fetch tickers." };
           break;
         }
+        const tickers = tickerData.tickers || tickerData;
         // Sort ascending by score (worst first)
-        const sorted = [...tickers]
+        const sorted = [...(Array.isArray(tickers) ? tickers : [])]
           .filter(t => t.score != null)
           .sort((a, b) => a.score - b.score)
           .slice(0, count)

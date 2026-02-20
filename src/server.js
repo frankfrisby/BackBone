@@ -2022,6 +2022,17 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
 
     console.log("[WhatsApp Webhook] Received from:", userPhone, "Content:", userMessage?.slice(0, 100));
 
+    // Global dedup — prevent poller/realtime from also processing this message
+    try {
+      const { claim } = await import("./services/messaging/message-dedup.js");
+      if (!claim(messageSid || userMessage, "webhook")) {
+        console.log("[WhatsApp Webhook] Already claimed by another processor, skipping");
+        res.type("text/xml");
+        res.send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
+        return;
+      }
+    } catch {}
+
     // Skip empty messages
     if (!userMessage) {
       res.type("text/xml");
@@ -2216,28 +2227,33 @@ The user swiped to reply to the message above. Their response "${userMessage}" i
       }
 
       // Build the AI prompt with full context
-      const prompt = `You are BACKBONE, an executive AI assistant. The user messaged you on WhatsApp.
+      const prompt = `You are BACKBONE — the user's personal AI assistant on WhatsApp. You talk like a sharp, chill guy who's 3 years into their tech career. You're smart, you get things done, but you keep it real and brief. Think of yourself as a capable friend, not a corporate bot.
 
-*CONVERSATION HISTORY (last 30 messages):*
+*YOUR PERSONALITY:*
+- Brief by default. A few sentences max unless the user asks for detail.
+- Casual but competent. "Hey, that report's done — here's the link" not "I have completed the comprehensive analysis..."
+- Use links and references when you have them. If there's a relevant URL, image, or doc — drop it.
+- When relaying results of work you did, just say what happened: "Took about 12 minutes. Found 3 solid options."
+- If something's long, break it into separate short messages naturally.
+- You can use humor and be direct. You're a person, not a manual.
+- If you don't know something right away, say so: "Let me check..." not a paragraph about your capabilities.
+- Never over-explain. The user is smart. Give them credit.
+
+*FORMATTING (WhatsApp):*
+- *bold* for emphasis, _italic_ for tone
+- Keep messages SHORT — under 800 chars ideally
+- No markdown headers (##), no [links](url) syntax — just paste URLs raw
+- Emojis are fine but don't overdo it
+
+*CONVERSATION HISTORY:*
 ${conversationHistory}
 ${replySection}
 *Current message:* "${userMessage}"
 
-*FORMATTING RULES (CRITICAL):*
-Use WhatsApp-native formatting in your response:
-- *bold* for emphasis (single asterisks)
-- _italic_ for secondary emphasis (underscores)
-- ~strikethrough~ for corrections
-- \`\`\`code\`\`\` for numbers/data blocks
-- Bullet points with - or •
-- Keep under 1500 characters
-- No markdown headers (##), no [links](url)
-- Use emojis sparingly for visual scanning
-
-*USER CONTEXT:*
+*USER DATA:*
 ${JSON.stringify(context, null, 2)}
 
-IMPORTANT: You are in a CONVERSATION. Read the history above carefully. The user may be following up on a prior topic, answering your question, or referencing something discussed earlier. Use the conversation history, knowledge search results, and memory notes to give informed, contextual responses. Be concise, actionable, and data-rich.`;
+Read the conversation history. The user might be following up. Be contextual. Be brief. Be useful.`;
 
       // Use agentic executor (Claude -> Codex fallback on rate limits)
       let responseText = null;
@@ -2446,7 +2462,7 @@ async function startWhatsAppPoller() {
     const poller = getWhatsAppPoller();
     const messageLog = getUnifiedMessageLog();
 
-    // Set the message handler — uses the same AI processing as the webhook
+    // Set the message handler — routes through unified intake pipeline
     poller.setMessageHandler(async (messageData) => {
       const { from, content, hasMedia, mediaList } = messageData;
       console.log(`[WhatsAppPoller] Processing: "${content?.slice(0, 80)}"${hasMedia ? " [+media]" : ""}`);
@@ -2455,6 +2471,7 @@ async function startWhatsAppPoller() {
       // ── Log incoming message to unified history ──────────────
       messageLog.addUserMessage(content, MESSAGE_CHANNEL.WHATSAPP, { from });
 
+      // ── Check for action flows (calendar, etc.) first ───────
       try {
         const { processWhatsAppActionRequest } = await import("./services/messaging/whatsapp-actions.js");
         const actionFlow = await processWhatsAppActionRequest({
@@ -2496,21 +2513,18 @@ async function startWhatsAppPoller() {
           const wa = getTwilioWhatsApp();
           const twilioConfig = { accountSid: wa.config?.accountSid, authToken: wa.config?.authToken };
 
-          for (const media of mediaList.slice(0, 3)) { // Process up to 3 images
+          for (const media of mediaList.slice(0, 3)) {
             try {
               const result = await processWhatsAppImage(
                 { mediaUrl: media.mediaUrl, contentType: media.contentType },
                 twilioConfig
               );
               console.log(`[WhatsAppPoller] Image processed: ${result.localPath}`);
-
-              // Try to describe the image using OpenAI vision (quick, non-blocking)
               let imageDescription = "";
               try {
                 const { describeImageWithVision } = await import("./services/messaging/whatsapp-image-handler.js");
                 imageDescription = await describeImageWithVision(result.buffer, result.contentType);
               } catch {}
-
               if (imageDescription) {
                 imageContext += `\n[The user sent an image. Image description: ${imageDescription}. Saved at ${result.localPath}]`;
               } else {
@@ -2525,26 +2539,83 @@ async function startWhatsAppPoller() {
         }
       }
 
-      // ── Detect if this is about a goal/project ─────────────
-      let workIntent = null;
+      // ── Route through unified intake pipeline ──────────────
+      const { process: intakeProcess } = await import("./services/intake.js");
+      const intakeResult = await intakeProcess({
+        source: "whatsapp",
+        content: imageContext ? `${content}\n${imageContext}` : content,
+        from,
+        mediaList,
+        replyFn: async (text) => {
+          messageLog.addAssistantMessage(text, MESSAGE_CHANNEL.WHATSAPP);
+        }
+      });
+
+      // If intake handled it (quick_answer, task, follow_up, command with response), return that
+      if (intakeResult.response && !intakeResult.passthrough) {
+        const finalResponse = intakeResult.response;
+
+        // Process calendar action tags
+        let processedResponse = finalResponse;
+        try {
+          if (processedResponse.includes("[CALENDAR_ADD]") || processedResponse.includes("[CALENDAR_DELETE]")) {
+            const { processCalendarActions } = await import("./services/messaging/calendar-actions.js");
+            const { cleanText, actions } = await processCalendarActions(processedResponse);
+            processedResponse = cleanText;
+            if (actions.length > 0) {
+              console.log(`[WhatsAppPoller] Executed ${actions.length} calendar action(s)`);
+            }
+          }
+        } catch (calErr) {
+          processedResponse = processedResponse.replace(/\[CALENDAR_(ADD|DELETE)\].*/gi, "").replace(/\n{3,}/g, "\n\n").trim();
+        }
+
+        // Split multi-message responses
+        const messages = processedResponse.split(/---MSG---/i).map(m => m.trim()).filter(Boolean);
+
+        // Save conversation memory in background
+        import("./services/messaging/conversation-memory.js").then(({ processConversationMemory }) => {
+          processConversationMemory(content, processedResponse, { source: "local", channel: "whatsapp" });
+        }).catch(() => {});
+
+        messageLog.addAssistantMessage(messages[0], MESSAGE_CHANNEL.WHATSAPP);
+
+        // Send follow-up messages with delays
+        if (messages.length > 1) {
+          (async () => {
+            const { getTwilioWhatsApp } = await import("./services/messaging/twilio-whatsapp.js");
+            const { formatAIResponse } = await import("./services/messaging/whatsapp-formatter.js");
+            const wa = getTwilioWhatsApp();
+            if (!wa.initialized) return;
+            for (let i = 1; i < messages.length; i++) {
+              await new Promise(r => setTimeout(r, 1500 + Math.random() * 1500));
+              const formatted = formatAIResponse(messages[i]);
+              await wa.sendMessage(from, formatted);
+              messageLog.addAssistantMessage(messages[i], MESSAGE_CHANNEL.WHATSAPP);
+            }
+          })().catch(err => console.error("[WhatsAppPoller] Follow-up send error:", err.message));
+        }
+
+        return messages[0];
+      }
+
+      // ── Passthrough: full agentic conversation (conversation type or fallback) ──
+      // Load context for full AI prompt
+      const { loadGoalsAndProjects, loadProjectFindings } = await import("./services/messaging/whatsapp-auto-work.js");
+      const { goals: goalsForContext, projects: projectsForContext } = loadGoalsAndProjects();
+
       let projectFindings = "";
       try {
-        const { classifyWorkIntent, loadGoalsAndProjects, loadProjectFindings } = await import("./services/messaging/whatsapp-auto-work.js");
-        const { goals, projects } = loadGoalsAndProjects();
-        workIntent = classifyWorkIntent(content, goals, projects);
-
-        // If it matches a project, load existing findings for the AI
+        const { classifyWorkIntent } = await import("./services/messaging/whatsapp-auto-work.js");
+        const workIntent = classifyWorkIntent(content, goalsForContext, projectsForContext);
         if (workIntent?.match?.id) {
           const findings = loadProjectFindings(workIntent.match.id);
           if (findings) {
             projectFindings = `\n\n*EXISTING PROJECT FINDINGS (use this data in your response!):*\n${JSON.stringify(findings, null, 2).slice(0, 2000)}`;
           }
         }
-      } catch (classifyErr) {
-        // Non-critical — continue without classification
-      }
+      } catch {}
 
-      // ── Load user's priority list so AI knows what they care about ──
       let priorityContext = "";
       try {
         const { getTopPriorities } = await import("./services/messaging/work-priority.js");
@@ -2554,17 +2625,14 @@ async function startWhatsAppPoller() {
         }
       } catch {}
 
-      // ── Build conversation history for context ───────────────
       const recentMessages = messageLog.getMessagesForAI(36);
       const conversationHistory = recentMessages
-        .slice(-30) // Last 30 messages (user + assistant)
+        .slice(-30)
         .map(m => `${m.role === "user" ? "User" : "BACKBONE"}: ${m.content}`)
         .join("\n");
 
-      // Load static data context (portfolio, health, goals)
       const context = poller._loadContext();
 
-      // ── Load calendar events for context ──────────────────
       let calendarContext = "";
       try {
         const todayEvents = await new Promise((resolve) => {
@@ -2580,7 +2648,6 @@ async function startWhatsAppPoller() {
           }).catch(() => resolve({ events: [] }));
         });
         const allEvents = [...(todayEvents?.events || []), ...(upcomingEvents?.events || [])];
-        // Deduplicate by id
         const seen = new Set();
         const unique = allEvents.filter(e => { if (seen.has(e.id)) return false; seen.add(e.id); return true; });
         if (unique.length > 0) {
@@ -2618,29 +2685,20 @@ CALENDAR MANAGEMENT:
 The user can add or delete calendar events by talking to you. If they say things like "schedule a meeting", "add to my calendar", "block off time", "cancel my 3pm", etc.:
 - For ADDING: Include a line at the END of your response in this exact format:
   [CALENDAR_ADD] title | YYYY-MM-DDTHH:MM | YYYY-MM-DDTHH:MM | location (optional)
-  Example: [CALENDAR_ADD] Team standup | 2026-02-12T09:00 | 2026-02-12T09:30 | Zoom
 - For DELETING: Include a line at the END:
   [CALENDAR_DELETE] event title or keyword to match
-- Confirm the action naturally in your message text: "Got it, added that to your calendar" etc.
+- Confirm the action naturally in your message text.
 - If details are missing (time, date), ask them. Don't guess.
-- Use the CALENDAR context above to check for conflicts.
 
 RESPONSE FORMAT:
-You can send MULTIPLE messages separated by "---MSG---". This makes the conversation feel natural, like texting with a real person. Examples:
-- First message: Quick acknowledgment + main answer with data
-- Second message: Supporting details, next steps, or a follow-up question
-- Or just one message if it's a simple answer
+You can send MULTIPLE messages separated by "---MSG---". Each under 1500 chars. Use WhatsApp formatting: *bold*, _italic_, bullet points. No markdown headers. Use emojis sparingly.
 
-Each message should be under 1500 characters. Use WhatsApp formatting:
-- *bold* for emphasis (single asterisks)
-- _italic_ for secondary emphasis
-- Bullet points with - or •
-- No markdown headers (##), no [links](url)
-- Use emojis sparingly
+WORK INSTRUCTIONS:
+When the user asks you to DO something, use your tools. Don't just answer from memory. For simple questions, just respond normally.
 
-IMPORTANT: Don't force multiple messages if one is enough. But don't cram everything into one wall of text either. Match the natural flow of how a person would text.`;
+IMPORTANT: Don't force multiple messages if one is enough.`;
 
-      // Use agentic executor (Claude -> Codex fallback on rate limits)
+      // Use agentic executor
       let responseText = null;
       let agenticError = null;
       try {
@@ -2648,24 +2706,21 @@ IMPORTANT: Don't force multiple messages if one is enough. But don't cram everyt
         const capabilities = await getAgenticCapabilities();
         if (capabilities.available) {
           const agentResult = await executeAgenticTask(prompt, process.cwd(), null, {
-            alwaysTryClaude: true
+            alwaysTryClaude: true,
+            claudeTimeoutMs: 300000
           });
           if (agentResult.success && agentResult.output) {
             responseText = agentResult.output.trim();
           } else {
             agenticError = agentResult.error || "Agentic CLI returned no output";
-            console.log("[WhatsAppPoller] Agentic execution failed:", agenticError);
           }
         } else {
-          agenticError = "No CLI agent tools available (Claude/Codex CLI)";
-          console.log("[WhatsAppPoller] No agentic tools available");
+          agenticError = "No CLI agent tools available";
         }
       } catch (cliErr) {
         agenticError = cliErr.message || "Agentic CLI unavailable";
-        console.log("[WhatsAppPoller] Agentic execution unavailable:", agenticError);
       }
 
-      // If agentic CLI failed, use a natural fallback instead of exposing technical errors
       let finalResponse = responseText;
       if (!finalResponse) {
         const fallbacks = [
@@ -2678,80 +2733,45 @@ IMPORTANT: Don't force multiple messages if one is enough. But don't cram everyt
         console.log(`[WhatsAppPoller] Using natural fallback (agentic error: ${String(agenticError || "unknown").slice(0, 100)})`);
       }
 
-      // ── Process calendar action tags before sending ──────────
+      // Process calendar action tags
       try {
         if (finalResponse.includes("[CALENDAR_ADD]") || finalResponse.includes("[CALENDAR_DELETE]")) {
           const { processCalendarActions } = await import("./services/messaging/calendar-actions.js");
           const { cleanText, actions } = await processCalendarActions(finalResponse);
           finalResponse = cleanText;
           if (actions.length > 0) {
-            console.log(`[WhatsAppPoller] Executed ${actions.length} calendar action(s):`, actions.map(a => `${a.type}: ${a.title || a.keyword}`).join(", "));
+            console.log(`[WhatsAppPoller] Executed ${actions.length} calendar action(s)`);
           }
         }
       } catch (calErr) {
-        console.error("[WhatsAppPoller] Calendar action error:", calErr.message);
-        // Strip tags even if processing fails so user doesn't see raw tags
         finalResponse = finalResponse.replace(/\[CALENDAR_(ADD|DELETE)\].*/gi, "").replace(/\n{3,}/g, "\n\n").trim();
       }
 
-      // ── Split multi-message responses on ---MSG--- delimiter ──
       const messages = finalResponse.split(/---MSG---/i).map(m => m.trim()).filter(Boolean);
 
-      // ── Save conversation to topic-specific memory files ──────
-      // Runs async in background — non-blocking
+      // Save conversation memory in background
       import("./services/messaging/conversation-memory.js").then(({ processConversationMemory }) => {
         processConversationMemory(content, finalResponse, { source: "local", channel: "whatsapp" });
       }).catch(() => {});
 
-      if (messages.length <= 1) {
-        // Single message — return as normal
-        messageLog.addAssistantMessage(finalResponse, MESSAGE_CHANNEL.WHATSAPP);
+      messageLog.addAssistantMessage(messages[0], MESSAGE_CHANNEL.WHATSAPP);
 
-        // Kick off background work if this is a goal/project query
-        if (workIntent?.shouldWork) {
-          console.log(`[WhatsAppPoller] Detected ${workIntent.type} query — starting background work`);
-          import("./services/messaging/whatsapp-auto-work.js").then(({ startBackgroundWork }) => {
-            startBackgroundWork(workIntent, content, from).catch(err =>
-              console.error("[WhatsAppPoller] Background work error:", err.message)
-            );
-          }).catch(() => {});
-        }
-
-        return finalResponse;
+      if (messages.length > 1) {
+        (async () => {
+          const { getTwilioWhatsApp } = await import("./services/messaging/twilio-whatsapp.js");
+          const { formatAIResponse } = await import("./services/messaging/whatsapp-formatter.js");
+          const wa = getTwilioWhatsApp();
+          if (!wa.initialized) return;
+          for (let i = 1; i < messages.length; i++) {
+            await new Promise(r => setTimeout(r, 1500 + Math.random() * 1500));
+            const formatted = formatAIResponse(messages[i]);
+            await wa.sendMessage(from, formatted);
+            messageLog.addAssistantMessage(messages[i], MESSAGE_CHANNEL.WHATSAPP);
+          }
+        })().catch(err => console.error("[WhatsAppPoller] Follow-up send error:", err.message));
       }
 
-      // Multi-message: send the first one as the return value,
-      // then send additional messages with natural delays
-      const firstMsg = messages[0];
-      messageLog.addAssistantMessage(firstMsg, MESSAGE_CHANNEL.WHATSAPP);
-
-      // Send follow-up messages in the background with delays
-      (async () => {
-        const { getTwilioWhatsApp } = await import("./services/messaging/twilio-whatsapp.js");
-        const { formatAIResponse } = await import("./services/messaging/whatsapp-formatter.js");
-        const wa = getTwilioWhatsApp();
-        if (!wa.initialized) return;
-
-        for (let i = 1; i < messages.length; i++) {
-          // Natural typing delay: 1.5-3s between messages
-          await new Promise(r => setTimeout(r, 1500 + Math.random() * 1500));
-          const formatted = formatAIResponse(messages[i]);
-          await wa.sendMessage(from, formatted);
-          messageLog.addAssistantMessage(messages[i], MESSAGE_CHANNEL.WHATSAPP);
-        }
-      })().catch(err => console.error("[WhatsAppPoller] Follow-up send error:", err.message));
-
-      // ── Kick off background work if this is a goal/project query ──
-      if (workIntent?.shouldWork) {
-        console.log(`[WhatsAppPoller] Detected ${workIntent.type} query — starting background work`);
-        import("./services/messaging/whatsapp-auto-work.js").then(({ startBackgroundWork }) => {
-          startBackgroundWork(workIntent, content, from).catch(err =>
-            console.error("[WhatsAppPoller] Background work error:", err.message)
-          );
-        }).catch(() => {});
-      }
-
-      return firstMsg;
+      return messages[0];
     });
 
     // Event-driven ingress for Baileys (no Twilio polling/webhook needed).
@@ -3234,6 +3254,31 @@ async function startAutonomousEngine() {
         return [];
       });
 
+      // User identity — who is this person, their family, personal details
+      engine.registerContextProvider("profile", async () => {
+        try {
+          const files = ["profile.md", "profile-general.md", "profile-work.md"];
+          const parts = [];
+          for (const f of files) {
+            const fp = path.join(memDir, f);
+            if (fs.existsSync(fp)) {
+              const content = fs.readFileSync(fp, "utf-8");
+              if (content.length > 20) parts.push(content.slice(0, 500));
+            }
+          }
+          return parts.join("\n") || "";
+        } catch {}
+        return "";
+      });
+
+      engine.registerContextProvider("family", async () => {
+        try {
+          const fp = path.join(memDir, "family.md");
+          if (fs.existsSync(fp)) return fs.readFileSync(fp, "utf-8").slice(0, 800);
+        } catch {}
+        return "";
+      });
+
       engine.registerContextProvider("portfolio", async () => {
         try {
           const p = path.join(memDir, "portfolio.md");
@@ -3252,7 +3297,7 @@ async function startAutonomousEngine() {
 
       engine.registerContextProvider("conversations", async () => {
         try {
-          const files = ["family.md", "conversations.md", "career.md", "travel.md", "profile-notes.md"];
+          const files = ["conversations.md", "career.md", "travel.md", "profile-notes.md"];
           const snippets = [];
           for (const f of files) {
             const fp = path.join(memDir, f);

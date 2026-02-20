@@ -324,6 +324,15 @@ class WhatsAppPoller {
     // Mark as processed immediately to prevent double-processing
     this.processedSids.add(sid);
 
+    // Global dedup — prevent webhook/realtime from also processing this message
+    try {
+      const { claim } = await import("./message-dedup.js");
+      if (!claim(sid, "poller")) {
+        console.log(`[WhatsAppPoller] Message ${sid} already claimed by another processor, skipping`);
+        return;
+      }
+    } catch {}
+
     // Mark corresponding Firestore message as processing so RealtimeMessaging doesn't double-process
     try {
       const { getRealtimeMessaging } = await import("./realtime-messaging.js");
@@ -409,26 +418,37 @@ class WhatsAppPoller {
     this.stats.lastMessage = { from, content: content.slice(0, 100), time: new Date().toISOString() };
     this.stats.processed++;
 
-    // Send typing indicator (shows "BACKBONE is typing..." + blue ticks)
-    // Falls back to text acknowledgment if typing indicator fails
+    // Send typing indicator and keep it alive while processing
+    const wa = getTwilioWhatsApp();
     let sentTyping = false;
     try {
-      const wa = getTwilioWhatsApp();
       const typingResult = await wa.sendTypingIndicator(sid);
       sentTyping = typingResult.success;
-    } catch {
-      // Best-effort
-    }
+    } catch {}
 
-    // Only send text "thinking" message if typing indicator failed AND not in active conversation
     if (!sentTyping && !this._isActiveConversation()) {
       try {
         const ack = this._pickThinkingMessage();
         await this._sendRawMessage(from, `_${ack}_`);
-      } catch {
-        // Best-effort — don't block processing if ack fails
-      }
+      } catch {}
     }
+
+    // Keep typing indicator alive every 8s + send "still working" after 30s
+    const typingStart = Date.now();
+    let sentStillWorking = false;
+    const typingInterval = setInterval(async () => {
+      try {
+        await wa.sendTypingIndicator(sid);
+      } catch {}
+      // After 30s, send a brief nudge (once)
+      if (!sentStillWorking && Date.now() - typingStart > 30000) {
+        sentStillWorking = true;
+        try { await this._sendRawMessage(from, "_Still working on it..._"); } catch {}
+      }
+    }, 8000);
+    if (typeof typingInterval.unref === "function") typingInterval.unref();
+
+    const stopTyping = () => clearInterval(typingInterval);
 
     // If we have a custom message handler, use it
     if (this.messageHandler) {
@@ -443,11 +463,13 @@ class WhatsAppPoller {
           mediaList,
           repliedToContext,
         });
+        stopTyping();
 
         if (responseText) {
           await this._sendResponse(from, responseText);
         }
       } catch (err) {
+        stopTyping();
         console.error("[WhatsAppPoller] Handler error:", err.message);
         await this._sendResponse(from, `Hit a snag processing that: _${err.message.slice(0, 100)}_\nTry again in a moment.`);
       }
@@ -455,7 +477,11 @@ class WhatsAppPoller {
     }
 
     // Default: use built-in AI processing with context
-    await this._processWithAI(from, content, repliedToContext);
+    try {
+      await this._processWithAI(from, content, repliedToContext);
+    } finally {
+      stopTyping();
+    }
   }
 
   /**
@@ -498,36 +524,38 @@ The user swiped to reply to the message above. Their response "${content}" is sp
       }
 
       // Build AI prompt with conversation history
-      const prompt = `You are BACKBONE, an executive AI assistant. The user messaged you on WhatsApp.
+      const prompt = `You are BACKBONE — the user's personal AI assistant on WhatsApp. You talk like a sharp, chill guy who's 3 years into their tech career. You're smart, you get things done, but you keep it real and brief. Think of yourself as a capable friend, not a corporate bot.
 
-*CONVERSATION HISTORY (last 30 messages):*
-${conversationHistory || "(first message — no prior history)"}
+*YOUR PERSONALITY:*
+- Brief by default. A few sentences max unless the user asks for detail.
+- Casual but competent. "Hey, that report's done — here's the link" not "I have completed the comprehensive analysis..."
+- Use links and references when you have them. If there's a relevant URL, image, or doc — drop it.
+- When relaying results of work you did, just say what happened: "Took about 12 minutes. Found 3 solid options."
+- If something's long, break it into separate short messages naturally. Don't dump a wall of text.
+- You can use humor and be direct. You're a person, not a manual.
+- If you don't know something right away, say so: "Let me check..." not a paragraph about your capabilities.
+- Never over-explain. The user is smart. Give them credit.
+
+*FORMATTING (WhatsApp):*
+- *bold* for emphasis, _italic_ for tone
+- Keep messages SHORT — under 800 chars ideally
+- No markdown headers (##), no [links](url) syntax — just paste URLs raw
+- Emojis are fine but don't overdo it
+- For lists, use bullets (- or •)
+- If content is long, split into 2-3 separate messages naturally
+
+*CONVERSATION HISTORY:*
+${conversationHistory || "(first message)"}
 ${replySection}
 *Current message:* "${content}"
-
-*FORMATTING RULES (CRITICAL):*
-Use WhatsApp-native formatting in your response:
-- *bold* for emphasis (single asterisks)
-- _italic_ for secondary emphasis (underscores)
-- ~strikethrough~ for corrections
-- \`\`\`code\`\`\` for numbers/data blocks
-- Bullet points with - or •
-- Keep under 1500 characters
-- No markdown headers (##), no [links](url)
-- Use emojis sparingly for visual scanning
 
 *USER DATA:*
 ${JSON.stringify(context, null, 2)}
 
-*WHAT YOU HAVE ACCESS TO:*
-- *Net worth & accounts:* Empower (Personal Capital) aggregates ALL accounts — bank, investment, retirement, credit cards, loans. Data is synced 2x daily (6am + 4:30pm). The netWorth, brokerageAccounts, and empowerAccounts fields above contain this data.
-- *Trading portfolio:* Alpaca paper/live trading with real-time positions, P&L, buying power.
-- *Health:* Oura Ring data (sleep, readiness, activity scores).
-- *Goals & projects:* Active goals with progress tracking.
-- *Tickers:* Scored tickers (0-10) with buy/sell signals.
-- If the user asks about net worth, finances, account balances, or holdings — USE THE DATA ABOVE. Don't say you need to check — the data is right here.
+*WHAT YOU KNOW:*
+Net worth, accounts, portfolio, health (Oura), goals, tickers — all in the data above. Use it directly. Don't say "let me check" when the data is right there.
 
-IMPORTANT: You are in a CONVERSATION. Read the history above carefully. The user may be following up on a prior topic, answering your question, or referencing something discussed earlier. Use the conversation history, knowledge search results, and memory notes to give informed, contextual responses. Be concise, actionable, and data-rich.`;
+Read the conversation history. The user might be following up. Be contextual. Be brief. Be useful.`;
 
       // Use agentic executor (Claude -> Codex fallback on rate limits)
       let responseText = null;

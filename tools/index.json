@@ -219,6 +219,39 @@
       ]
     },
     {
+      "id": "browser-agent",
+      "name": "Browser Agent",
+      "description": "AI-driven browser agent that navigates any website, reads content, clicks buttons, fills forms, and extracts information. Uses the user's real Chrome profile (all logins preserved).",
+      "category": "web",
+      "file": "browser-agent.js",
+      "inputs": {
+        "url": { "type": "string", "description": "Starting URL (optional — AI can figure it out)" },
+        "goal": { "type": "string", "required": true, "description": "What to accomplish (e.g., 'read my top 3 emails')" },
+        "maxSteps": { "type": "number", "default": 20, "description": "Max browser actions before stopping" }
+      },
+      "examples": [
+        { "goal": "go to gmail and read my top 3 unread emails" },
+        { "url": "https://outlook.live.com", "goal": "check for emails from Amazon" },
+        { "url": "https://finance.yahoo.com", "goal": "get the current S&P 500 price and top market movers" }
+      ]
+    },
+    {
+      "id": "browser-capture",
+      "name": "Browser Capture",
+      "description": "Open a real Chrome browser, navigate to a URL, capture screenshot, page text, links, API responses, and full HTML. Saves everything to data/captures/.",
+      "category": "web",
+      "file": "browser-capture.js",
+      "inputs": {
+        "url": { "type": "string", "required": true, "description": "URL to open and capture" },
+        "wait": { "type": "number", "default": 3000, "description": "Wait time in ms for dynamic content" },
+        "headless": { "type": "boolean", "default": false, "description": "Run without visible browser window" }
+      },
+      "examples": [
+        { "url": "https://finance.yahoo.com" },
+        { "url": "https://www.reddit.com/r/investing", "wait": 5000 }
+      ]
+    },
+    {
       "id": "enrich-linkedin-profile",
       "name": "Enrich LinkedIn Profile",
       "description": "Enrich any user's LinkedIn profile from public web sources. Two-phase: plan (get search queries) then enrich (save results).",
@@ -252,6 +285,7 @@
     "messaging": "Proactive messaging and alerts to the user",
     "documents": "Document generation — LaTeX, PDF, Word, Excel",
     "media": "Media processing — video analysis, audio transcription, image processing",
-    "profile": "User profile management — LinkedIn enrichment, identity"
+    "profile": "User profile management — LinkedIn enrichment, identity",
+    "web": "Browser automation — open websites, capture content, scrape pages"
   }
 }

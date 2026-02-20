@@ -14,21 +14,38 @@ export class Grid2D {
     const major = minor * 10;
 
     // Minor grid
-    ctx.strokeStyle = '#2a2a2a';
+    ctx.strokeStyle = '#2d2d2d';
     ctx.lineWidth = 0.5 / camera.scale;
     this._drawGridLines(ctx, topLeft, bottomRight, minor);
 
     // Major grid
-    ctx.strokeStyle = '#3a3a3a';
+    ctx.strokeStyle = '#404040';
     ctx.lineWidth = 1 / camera.scale;
     this._drawGridLines(ctx, topLeft, bottomRight, major);
 
     // Origin axes
-    ctx.lineWidth = 1.5 / camera.scale;
-    ctx.strokeStyle = '#553333';
+    ctx.lineWidth = 2 / camera.scale;
+    ctx.strokeStyle = '#8b3333';
     ctx.beginPath(); ctx.moveTo(topLeft.x, 0); ctx.lineTo(bottomRight.x, 0); ctx.stroke();
-    ctx.strokeStyle = '#335533';
+    ctx.strokeStyle = '#338b33';
     ctx.beginPath(); ctx.moveTo(0, topLeft.y); ctx.lineTo(0, bottomRight.y); ctx.stroke();
+
+    // Origin marker
+    ctx.fillStyle = '#ffffff';
+    const r = 3 / camera.scale;
+    ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.fill();
+
+    // Axis labels
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    const ox = camera.worldToScreen(0, 0);
+    ctx.font = '10px Consolas, monospace';
+    ctx.fillStyle = '#8b3333';
+    ctx.fillText('X', Math.min(Math.max(ox.x + 15, 15), canvasW - 15), ox.y - 5);
+    ctx.fillStyle = '#338b33';
+    ctx.fillText('Y', ox.x + 5, Math.min(Math.max(ox.y - 15, 15), canvasH - 10));
+    ctx.restore();
+    camera.applyTransform(ctx);
   }
 
   _drawGridLines(ctx, tl, br, spacing) {

@@ -1,4 +1,4 @@
-import { createEntity } from './Entity.js';
+import { createEntity } from './EntityRegistry.js';
 import { Layer } from './Layer.js';
 import { UndoManager } from './UndoManager.js';
 

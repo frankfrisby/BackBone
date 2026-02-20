@@ -16,6 +16,7 @@ import { calculateDataCompleteness } from "./thinking-engine.js";
 import { getSkillDiscovery } from "./skill-discovery.js";
 import { matchGoalToAgent } from "./agent-dispatcher.js";
 import { notifyProgress, notifyBlocked, sendWhatsApp, askUser } from "../messaging/proactive-outreach.js";
+import { advancePipeline, getPipeline, getDeliveryAction } from "./task-pipeline.js";
 
 import { getDataDir, dataFile } from "../paths.js";
 /**
@@ -1068,13 +1069,70 @@ export class AutonomousEngine extends EventEmitter {
           }
         }
 
+        // 0.5. DRAIN WORK QUEUE — process rate-limited work that was queued
+        try {
+          const { getWorkQueue } = await import("../work-queue.js");
+          const wq = getWorkQueue();
+          if (wq.size() > 0) {
+            const item = wq.peek();
+            console.log(`[AutonomousEngine] Work queue has ${wq.size()} items, next: ${item?.id}`);
+            // Items in the work queue are goals that were deferred — they'll be
+            // picked up naturally via goal priority (source: "whatsapp" goals have priority 1)
+          }
+        } catch {}
+
+        // 0. CHECK FOR PENDING TASKS — lightweight tasks execute before goals
+        if (!this.currentGoal) {
+          try {
+            const { getPendingTasks, executeTask } = await import("./task-executor.js");
+            const pendingTasks = getPendingTasks();
+            if (pendingTasks.length > 0) {
+              const task = pendingTasks[0]; // FIFO — oldest first
+              console.log(`[AutonomousEngine] Executing task (not goal): "${task.title}"`);
+              this.setEngineState("working");
+              if (this.narrator) {
+                this.narrator.setState("WORKING");
+                this.narrator.observe(`Task: ${task.title}`);
+              }
+
+              // Gather context so Claude knows the user
+              let userContext = {};
+              try { userContext = await this.getContext(); } catch {}
+
+              await executeTask(task, userContext);
+              console.log(`[AutonomousEngine] Task done: "${task.title}"`);
+              if (this.heartbeat) this.heartbeat.recordWork(`Task: ${task.title}`);
+
+              // Rest briefly then check for more tasks
+              await this.restBetweenCycles("task completed", 60000); // 1 min rest after task
+              continue;
+            }
+          } catch (err) {
+            console.error("[AutonomousEngine] Task check failed:", err.message);
+          }
+        }
+
         // 1. AUTO-START: Check for current goal, auto-select if none
         if (!this.currentGoal) {
           this.setEngineState("thinking");
 
           if (this.goalManager) {
             await this.goalManager.initialize();
-            this.currentGoal = this.goalManager.getCurrentGoal();
+
+            // User-requested goals (from intake/WhatsApp) get priority over engine-generated goals
+            try {
+              const activeGoals = this.goalManager.getActiveGoals?.() || [];
+              const userGoal = activeGoals.find(g => g.source === "whatsapp" && g.priority <= 1);
+              if (userGoal) {
+                console.log(`[AutonomousEngine] Prioritizing user-requested goal: "${userGoal.title}"`);
+                this.currentGoal = userGoal;
+                await this.goalManager.setCurrentGoal(userGoal);
+              }
+            } catch {}
+
+            if (!this.currentGoal) {
+              this.currentGoal = this.goalManager.getCurrentGoal();
+            }
           }
 
           if (!this.currentGoal) {
@@ -1222,7 +1280,13 @@ export class AutonomousEngine extends EventEmitter {
             }
           } catch {}
 
+          // Advance pipeline to "executing" stage (sends WhatsApp notification)
+          if (this.currentGoal?.id) {
+            advancePipeline(this.currentGoal.id, "executing").catch(() => {});
+          }
+
           // Execute goal with Claude Orchestrator (15-min timeout to prevent infinite hangs)
+          this._goalStartTime = Date.now();
           const GOAL_TIMEOUT = 15 * 60 * 1000;
           const result = await Promise.race([
             orchestrator.executeGoal(this.currentGoal, { workDir: process.cwd(), userContext, agentIdentity }),
@@ -1234,6 +1298,33 @@ export class AutonomousEngine extends EventEmitter {
             error: err.message,
             output: "Timed out"
           }));
+
+          // Record attempt in goal manager (for cooldown tracking)
+          if (this.goalManager && this.currentGoal) {
+            const goalId = this.currentGoal.id || this.currentGoal.goalId;
+            if (goalId) {
+              const attemptInfo = this.goalManager.recordAttempt(goalId, Date.now() - (this._goalStartTime || Date.now()));
+              console.log(`[AutonomousEngine] Goal attempt #${attemptInfo.count} for: ${this.currentGoal.title}`);
+
+              // Escalation after 3 failed attempts — ask user whether to continue or drop
+              if (!result.success && attemptInfo.count >= 3) {
+                console.log(`[AutonomousEngine] 3+ failed attempts — escalating to user`);
+                askUser(
+                  `I've tried "${this.currentGoal.title}" ${attemptInfo.count} times without success. Should I keep trying or drop it?`,
+                  { goalId, attempts: attemptInfo.count }
+                ).catch(() => {});
+
+                // Put on hold pending user response
+                if (this.goalManager.onHoldGoals) {
+                  this.goalManager.onHoldGoals.set(goalId, {
+                    reason: "escalated_to_user",
+                    reviewAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+                    notes: `Failed ${attemptInfo.count} attempts`
+                  });
+                }
+              }
+            }
+          }
 
           // Signal Claude Code CLI has finished
           this.emit("claude-end", { success: result.success, goal: this.currentGoal });
@@ -1333,9 +1424,11 @@ export class AutonomousEngine extends EventEmitter {
           if (result.success) {
             this.triggerContextSync("engine work completed");
 
-            // ── PROACTIVE OUTREACH ──
-            // Only notify on goal completion, not mid-cycle (mid-cycle raw output is garbled).
-            // The completeCurrentGoal() method handles proper completion notifications.
+            // ── LIVE ALERTS — check for novel/urgent findings in output ──
+            try {
+              const { checkEngineInsights } = await import("../messaging/live-alerts.js");
+              await checkEngineInsights(this.currentGoal?.title || "background work", result.output || "");
+            } catch {}
           }
 
           // ── WORK-REST CYCLE ──
@@ -1928,13 +2021,62 @@ export class AutonomousEngine extends EventEmitter {
     // Show goal completion in title
     showNotificationTitle("goal", `Completed: ${completedGoal.title.slice(0, 30)}`, 30000);
 
-    // Notify user via WhatsApp — include what was actually accomplished
-    const completionSummary = completedGoal.description
-      ? `Wrapped up: ${completedGoal.description.slice(0, 150)}`
-      : `Finished working on this.`;
-    notifyProgress(completedGoal.title, completionSummary, {
-      trigger: "goal-completed",
-    }).catch(() => {});
+    // Advance pipeline to "delivering" then "done"
+    if (completedGoal.id) {
+      await advancePipeline(completedGoal.id, "delivering").catch(() => {});
+    }
+
+    // Notify user via WhatsApp — ALL goals get detailed findings (not just whatsapp-sourced)
+    const projectName = completedGoal.project;
+    if (projectName) {
+      try {
+        const { condenseFindingsForWhatsApp } = await import("../intake.js");
+        const detailed = await condenseFindingsForWhatsApp(projectName);
+
+        // Check delivery action — email, document, or whatsapp
+        const deliveryAction = getDeliveryAction(completedGoal.id) || "whatsapp";
+
+        if (deliveryAction === "email" && detailed) {
+          // Deliver via email draft
+          try {
+            const { callTool } = await import("../mcp-direct.js");
+            await callTool("backbone-google", "draft_email", {
+              to: completedGoal.from || "me",
+              subject: `BACKBONE: ${completedGoal.title}`,
+              body: detailed,
+              reason: `Goal completed: ${completedGoal.title}`,
+            });
+            sendWhatsApp(`Done with *${completedGoal.title}* — I drafted an email with the full results. Check your drafts.`).catch(() => {});
+          } catch (emailErr) {
+            console.error("[AutonomousEngine] Email delivery failed:", emailErr.message);
+            // Fallback to WhatsApp
+            if (detailed) sendWhatsApp(detailed).catch(() => {});
+          }
+        } else if (detailed) {
+          sendWhatsApp(detailed).catch(() => {});
+        } else {
+          notifyProgress(completedGoal.title, "Wrapped up — results are in your project folder.", {
+            trigger: "goal-completed",
+          }).catch(() => {});
+        }
+      } catch {
+        notifyProgress(completedGoal.title, "Done! Check your project folder for details.", {
+          trigger: "goal-completed",
+        }).catch(() => {});
+      }
+    } else {
+      const completionSummary = completedGoal.description
+        ? `Wrapped up: ${completedGoal.description.slice(0, 150)}`
+        : `Finished working on this.`;
+      notifyProgress(completedGoal.title, completionSummary, {
+        trigger: "goal-completed",
+      }).catch(() => {});
+    }
+
+    // Mark pipeline done
+    if (completedGoal.id) {
+      await advancePipeline(completedGoal.id, "done").catch(() => {});
+    }
 
     this.emit("goal-completed", completedGoal);
 

@@ -1,6 +1,12 @@
 /**
  * WhatsApp Auto-Work
  *
+ * @deprecated Use src/services/intake.js instead. This module's functionality
+ * has been subsumed by the unified intake pipeline:
+ * - classifyWorkIntent() → replaced by LLM classification in intake.js
+ * - startBackgroundWork() → replaced by goal creation + engine execution
+ * - loadGoalsAndProjects() / loadProjectFindings() → still used by intake.js (re-exported)
+ *
  * When the user asks about a goal or project via WhatsApp, this module:
  * 1. Detects the intent (goal inquiry, project question, research request)
  * 2. Matches it to an existing goal/project (or creates one)
@@ -268,6 +274,13 @@ ${thesis ? `CURRENT THESIS:\n${thesis}\n` : ""}
 ${portfolio ? `PORTFOLIO CONTEXT:\n${portfolio}\n` : ""}
 
 YOUR TASK:
+MANDATORY: You MUST use tools to do this research. Do NOT answer from memory alone.
+- Use WebSearch for current data, prices, news, comparisons
+- Use Read to check existing user files in memory/ and data/
+- Use Write to save your findings persistently
+- Use MCP tools (backbone-trading, backbone-health, etc.) for live data
+- Use Bash if you need to run any system commands
+
 1. Research this topic thoroughly — use web search, check the user's data, analyze what you find
 2. Produce concrete, actionable findings (not vague summaries)
 3. Include specific numbers, dates, comparisons, or data points where possible

@@ -23,6 +23,7 @@
     "preserver": "node bin/bootstrap-runtime.cjs",
     "test": "node dev/tests/autonomous-system.test.js",
     "server": "node src/server.js",
+    "restart": "node bin/restart.js",
     "server:pwa": "BACKBONE_NO_BROWSER=0 node src/server.js",
     "webapp": "cd apps/web && npm run build",
     "webapp:dev": "cd apps/web && npm run dev",

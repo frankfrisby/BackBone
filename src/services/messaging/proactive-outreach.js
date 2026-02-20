@@ -31,6 +31,61 @@ let lastOutreachTime = 0;
 let hourlyCount = 0;
 let hourlyResetTime = 0;
 
+// ── Notification Dedup & Context Awareness ──────────────────
+// Tracks what was already communicated to avoid repeating the same info.
+// Persisted so restarts don't cause re-sends.
+const SENT_LOG_PATH = path.join(DATA_DIR, "outreach-sent-log.json");
+const SENT_LOG_MAX = 200;
+const DEDUP_WINDOW_MS = 4 * 60 * 60 * 1000; // 4 hours — don't resend same content within this window
+
+function loadSentLog() {
+  try {
+    if (fs.existsSync(SENT_LOG_PATH)) {
+      return JSON.parse(fs.readFileSync(SENT_LOG_PATH, "utf-8"));
+    }
+  } catch {}
+  return [];
+}
+
+function saveSentLog(log) {
+  try {
+    fs.writeFileSync(SENT_LOG_PATH, JSON.stringify(log.slice(-SENT_LOG_MAX), null, 2));
+  } catch {}
+}
+
+/**
+ * Create a fingerprint for dedup — uses identifier, goal title, or first 80 chars of message
+ */
+function messageFingerprint(message, options = {}) {
+  if (options.identifier) return options.identifier;
+  // Extract goal title from formatted messages like "*Goal Title*\n\n..."
+  const titleMatch = message.match(/^\*([^*]+)\*/);
+  if (titleMatch) return `goal:${titleMatch[1].slice(0, 50)}`;
+  return `msg:${message.replace(/\s+/g, " ").slice(0, 80)}`;
+}
+
+/**
+ * Check if a similar message was sent recently (within dedup window)
+ */
+function wasSentRecently(fingerprint) {
+  const log = loadSentLog();
+  const cutoff = Date.now() - DEDUP_WINDOW_MS;
+  return log.some(entry => entry.fp === fingerprint && entry.at > cutoff);
+}
+
+/**
+ * Record that a message was sent
+ */
+function recordSent(fingerprint, message) {
+  const log = loadSentLog();
+  log.push({
+    fp: fingerprint,
+    preview: message.slice(0, 100),
+    at: Date.now(),
+  });
+  saveSentLog(log);
+}
+
 // ── Pending Questions (track what we asked the user) ─────────
 
 /**
@@ -186,8 +241,17 @@ function updateDataFromAnswer(target, context, answer) {
 
 // ── Rate Limiting ────────────────────────────────────────────
 
+// Track server start time — suppress non-critical notifications for first 2 minutes
+const SERVER_START_TIME = Date.now();
+const STARTUP_QUIET_MS = 2 * 60 * 1000; // 2 minutes of quiet after server boot
+
 function canSendNow() {
   const now = Date.now();
+
+  // Startup quiet period — don't spam the user when server restarts
+  if (now - SERVER_START_TIME < STARTUP_QUIET_MS) {
+    return { allowed: false, reason: "startup quiet period" };
+  }
 
   // Reset hourly counter
   if (now - hourlyResetTime > 60 * 60 * 1000) {
@@ -232,6 +296,15 @@ export async function sendWhatsApp(message, options = {}) {
     }
   }
 
+  // Dedup check — don't send the same info twice within 4 hours
+  if (!options.skipDedup) {
+    const fp = messageFingerprint(message, options);
+    if (wasSentRecently(fp)) {
+      console.log(`[Outreach] Dedup — already sent recently: ${fp}`);
+      return { success: false, error: "duplicate notification suppressed" };
+    }
+  }
+
   try {
     const notif = getWhatsAppNotifications();
     if (!notif.enabled) {
@@ -245,6 +318,10 @@ export async function sendWhatsApp(message, options = {}) {
 
     if (result?.success) {
       recordOutreach();
+
+      // Record for dedup — prevents re-sending on restart
+      const fp = messageFingerprint(message, options);
+      recordSent(fp, message);
 
       // Log to unified message log
       const log = getUnifiedMessageLog();

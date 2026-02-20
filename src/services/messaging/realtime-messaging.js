@@ -709,6 +709,17 @@ export class RealtimeMessaging extends EventEmitter {
         // Private messages should still be processed, but not shown in UI
         message._silent = message.private === true || message.showInApp === false;
 
+        // Global dedup — skip if poller/webhook already handling this
+        try {
+          const { claim } = await import("./message-dedup.js");
+          const dedupKey = message.twilioMessageId || messageId;
+          if (!claim(dedupKey, "realtime")) {
+            console.log(`[RealtimeMessaging] Message ${messageId} already claimed, skipping`);
+            this.processedMessageIds.add(messageId);
+            continue;
+          }
+        } catch {}
+
         // Found a new message - switch to active polling mode
         this.activatePolling();
 

@@ -48,9 +48,9 @@ let observationTargets = [];
 
 // Observation config
 const OBSERVATION_WINDOW = {
-  startMinutesSinceOpen: 0,   // Start sampling at 9:30 (market open)
-  minMinutesBeforeBuy: 5,     // Earliest buy at 9:35 (5 min of data)
-  endMinutesSinceOpen: 10,    // Stop observation mode at 9:40
+  startMinutesSinceOpen: 5,   // Start sampling at 9:35 (let market settle first 5 min)
+  minMinutesBeforeBuy: 15,    // Earliest buy at 9:45 (15 min of data)
+  endMinutesSinceOpen: 20,    // Stop observation mode at 9:50
   sampleIntervalMs: 10 * 1000, // Sample every 10 seconds
   shortMaSamples: 6,          // Last 6 samples (~1 min) for short MA
   // Buy triggers
@@ -482,11 +482,30 @@ const analyzeObservation = (symbol, isWindowEnding) => {
  * @returns {{ allow: boolean, reason: string, details: object }}
  */
 const checkSpyDirection = async (dailyChangePercent) => {
-  // If SPY daily is green, always allow
+  // If SPY daily is green — still check it's not rolling over
   if (dailyChangePercent >= 0) {
+    // Even on green days, check short-term trend isn't collapsing
+    const bars = await fetchSpyIntradayBars();
+    if (bars && bars.length > 10) {
+      const currentPrice = bars[bars.length - 1].c;
+      const fiveMinAgo = bars[Math.max(0, bars.length - 6)].c;
+      const tenMinAgo = bars[Math.max(0, bars.length - 11)].c;
+      const fiveMinChg = ((currentPrice - fiveMinAgo) / fiveMinAgo) * 100;
+      const tenMinChg = ((currentPrice - tenMinAgo) / tenMinAgo) * 100;
+
+      // If both 5m and 10m are negative AND dropping more than -0.15%, market is rolling over
+      if (fiveMinChg < -0.15 && tenMinChg < -0.15) {
+        return {
+          allow: false,
+          reason: `SPY +${dailyChangePercent.toFixed(2)}% daily but ROLLING OVER (5m:${fiveMinChg.toFixed(2)}%, 10m:${tenMinChg.toFixed(2)}%) — wait for stabilization`,
+          details: { daily: dailyChangePercent, fiveMinChg, tenMinChg, method: "green_rollover_block" }
+        };
+      }
+    }
+
     return {
       allow: true,
-      reason: `SPY +${dailyChangePercent.toFixed(2)}% (green)`,
+      reason: `SPY +${dailyChangePercent.toFixed(2)}% (green, stable)`,
       details: { daily: dailyChangePercent, method: "daily_green" }
     };
   }
@@ -494,11 +513,11 @@ const checkSpyDirection = async (dailyChangePercent) => {
   // SPY is red — check intraday timeframes
   const bars = await fetchSpyIntradayBars();
   if (!bars || bars.length < 5) {
-    // Can't get intraday data — allow (fail open)
+    // Can't get intraday data — BLOCK buys (fail safe, not fail open)
     return {
-      allow: true,
-      reason: `SPY ${dailyChangePercent.toFixed(2)}% (no intraday data, allowing)`,
-      details: { daily: dailyChangePercent, method: "no_data_allow" }
+      allow: false,
+      reason: `SPY ${dailyChangePercent.toFixed(2)}% and no intraday data — blocking buys (fail safe)`,
+      details: { daily: dailyChangePercent, method: "no_data_block" }
     };
   }
 
@@ -506,12 +525,12 @@ const checkSpyDirection = async (dailyChangePercent) => {
   const { hours, minutes } = getEasternTime();
   const minutesSinceOpen = (hours * 60 + minutes) - (9 * 60 + 30);
 
-  if (minutesSinceOpen < 5) {
-    // Too early to judge
+  if (minutesSinceOpen < 15) {
+    // Too early — market hasn't settled, don't buy into negative momentum
     return {
-      allow: true,
-      reason: `SPY ${dailyChangePercent.toFixed(2)}% (too early, ${minutesSinceOpen}m since open)`,
-      details: { daily: dailyChangePercent, method: "too_early" }
+      allow: false,
+      reason: `SPY ${dailyChangePercent.toFixed(2)}% — too early to buy (${minutesSinceOpen}m since open, need 15m)`,
+      details: { daily: dailyChangePercent, method: "too_early_block" }
     };
   }
 
@@ -565,22 +584,28 @@ const checkSpyDirection = async (dailyChangePercent) => {
   const totalTimeframes = Object.keys(tfDetails).length;
   const isConsistentlyUp = positiveTimeframes >= Math.ceil(totalTimeframes * 0.6); // 60%+ of timeframes positive
 
-  // STRICT RULE: SPY negative daily → only allow if CONSISTENTLY moving up
-  // "Consistently up" means:
-  // 1. Weighted average is POSITIVE (not just flat)
-  // 2. At least 60% of timeframes are positive
-  // 3. Current 5m trend is positive
-  if (weightedAvg > 0.05 && isConsistentlyUp && fiveMinChange > 0) {
+  // STRICT RULE: SPY negative daily → only allow if STRONGLY and CONSISTENTLY recovering
+  // Requirements for allowing buys when SPY is negative:
+  // 1. Weighted average must be clearly positive (> 0.10%, not just barely above zero)
+  // 2. ALL short timeframes (5m, 10m) must be positive (market actively moving up)
+  // 3. At least 70% of all timeframes must be positive
+  // 4. Range position must be in upper half (price near day high, not near low)
+  const tenMinChange = tfDetails["10m"] || 0;
+  const shortTermsPositive = fiveMinChange > 0 && tenMinChange > 0;
+  const strongConsistency = positiveTimeframes >= Math.ceil(totalTimeframes * 0.7); // 70%+ positive
+
+  if (weightedAvg > 0.10 && shortTermsPositive && strongConsistency && rangePosition > 0.5) {
     allow = true;
-    reason = `SPY ${dailyChangePercent.toFixed(2)}% daily but CONSISTENTLY recovering (wAvg +${weightedAvg.toFixed(3)}%, ${positiveTimeframes}/${totalTimeframes} TFs positive)`;
-  } else if (isRecovering && weightedAvg > 0) {
-    // Strong recovery: range position good AND weighted avg positive AND 5m up
-    allow = true;
-    reason = `SPY ${dailyChangePercent.toFixed(2)}% daily, strong recovery (range ${(rangePosition * 100).toFixed(0)}%, wAvg +${weightedAvg.toFixed(3)}%)`;
+    reason = `SPY ${dailyChangePercent.toFixed(2)}% daily but STRONGLY recovering (wAvg +${weightedAvg.toFixed(3)}%, 5m:+${fiveMinChange.toFixed(2)}%, 10m:+${tenMinChange.toFixed(2)}%, range ${(rangePosition * 100).toFixed(0)}%, ${positiveTimeframes}/${totalTimeframes} TFs up)`;
   } else {
-    // SPY is negative and NOT consistently moving up → BLOCK ALL BUYS
+    // SPY is negative and NOT convincingly recovering → BLOCK ALL BUYS
     allow = false;
-    reason = `SPY ${dailyChangePercent.toFixed(2)}% daily, NOT consistently up (wAvg ${weightedAvg >= 0 ? "+" : ""}${weightedAvg.toFixed(3)}%, ${positiveTimeframes}/${totalTimeframes} TFs positive) — blocking buys`;
+    const blockedReasons = [];
+    if (weightedAvg <= 0.10) blockedReasons.push(`wAvg too low (${weightedAvg >= 0 ? "+" : ""}${weightedAvg.toFixed(3)}%, need >+0.10%)`);
+    if (!shortTermsPositive) blockedReasons.push(`short-term not positive (5m:${fiveMinChange >= 0 ? "+" : ""}${fiveMinChange.toFixed(2)}%, 10m:${tenMinChange >= 0 ? "+" : ""}${tenMinChange.toFixed(2)}%)`);
+    if (!strongConsistency) blockedReasons.push(`only ${positiveTimeframes}/${totalTimeframes} TFs positive (need 70%+)`);
+    if (rangePosition <= 0.5) blockedReasons.push(`range position ${(rangePosition * 100).toFixed(0)}% (need >50%)`);
+    reason = `SPY ${dailyChangePercent.toFixed(2)}% daily — BLOCKED: ${blockedReasons.join(", ")}`;
   }
 
   return {
@@ -1174,10 +1199,24 @@ const executeBuyImmediate = async (symbol, price, reason) => {
     return { success: false, error: "Auto-trading not enabled" };
   }
 
-  // Enforce market hours
+  // Enforce market hours — NO pre-market orders
   const marketStatus = isMarketOpen();
   if (!marketStatus.open) {
-    return { success: false, error: `Market closed: ${marketStatus.reason}` };
+    return { success: false, error: `Market closed — no pre-market orders: ${marketStatus.reason}` };
+  }
+
+  // Double-check SPY before executing — market could have turned since queueing
+  const isDefensive = isBadMarketItem(symbol);
+  if (!isDefensive) {
+    const spyBars = await fetchSpyIntradayBars();
+    if (spyBars && spyBars.length > 1) {
+      const spyDailyChange = ((spyBars[spyBars.length - 1]?.c - spyBars[0]?.c) / spyBars[0]?.c) * 100;
+      const spyDir = await checkSpyDirection(spyDailyChange);
+      if (!spyDir.allow) {
+        console.log(`[AutoTrader] BLOCKED at execution: ${symbol} — SPY negative: ${spyDir.reason}`);
+        return { success: false, error: `SPY check failed at execution: ${spyDir.reason}` };
+      }
+    }
   }
 
   const canTradeResult = canTrade(symbol);
@@ -1292,17 +1331,43 @@ const executeBuyImmediate = async (symbol, price, reason) => {
 export const executeBuy = async (symbol, price, reason, options = {}) => {
   const { spyPositive = null, skipDelay = false, fromObservation = false } = options;
 
+  // RULE: Market must be OPEN — no pre-market orders, no after-hours orders
+  const marketStatus = isMarketOpen();
+  if (!marketStatus.open) {
+    console.log(`[AutoTrader] BLOCKED PRE-MARKET BUY: ${symbol} — ${marketStatus.reason}`);
+    return {
+      success: false,
+      blocked: true,
+      error: `No pre-market orders. ${marketStatus.reason}`
+    };
+  }
+
+  // RULE: No buying in the first 15 minutes (9:30-9:45 ET) — let market settle
+  // Exception: observation system handles this window separately
+  const { hours, minutes: mins } = getEasternTime();
+  const minutesSinceOpen = (hours * 60 + mins) - (9 * 60 + 30);
+  if (minutesSinceOpen < 15 && !fromObservation) {
+    console.log(`[AutoTrader] BLOCKED EARLY BUY: ${symbol} — only ${minutesSinceOpen}m since open, need 15m`);
+    return {
+      success: false,
+      blocked: true,
+      error: `Too early to buy — ${minutesSinceOpen}m since open, waiting for market to settle (15m minimum)`
+    };
+  }
+
   // Check if this is a bad market item
   const isDefensive = isBadMarketItem(symbol);
 
-  // Get current SPY direction if not provided
+  // Get current SPY direction if not provided — use full checkSpyDirection (strict)
   let marketPositive = spyPositive;
   if (marketPositive === null) {
     const spyBars = await fetchSpyIntradayBars();
     if (spyBars && spyBars.length > 1) {
-      marketPositive = spyBars[spyBars.length - 1]?.c > spyBars[0]?.c;
+      const spyDailyChange = ((spyBars[spyBars.length - 1]?.c - spyBars[0]?.c) / spyBars[0]?.c) * 100;
+      const spyDir = await checkSpyDirection(spyDailyChange);
+      marketPositive = spyDir.allow;
     } else {
-      marketPositive = true; // Default to allow if can't determine
+      marketPositive = false; // Default to BLOCK if can't determine (fail safe)
     }
   }
 
@@ -2052,6 +2117,16 @@ export const monitorAndTrade = async (tickers, positions = []) => {
   } else {
     results.reasoning.push(`RESULT: Executed ${results.executed.length} trade(s) — ${results.executed.map(t => `${t.side.toUpperCase()} ${t.symbol}`).join(", ")}`);
   }
+
+  // ── LIVE MARKET ALERTS — notify user of big moves ──
+  try {
+    const { checkMarketAlerts } = await import("../messaging/live-alerts.js");
+    const account = positions[0]?.account || {};
+    const dayPL = positions.reduce((sum, p) => sum + parseFloat(p.unrealized_intraday_pl || 0), 0);
+    const totalEquity = positions.reduce((sum, p) => sum + parseFloat(p.market_value || 0), 0);
+    const dayPLPercent = totalEquity > 0 ? (dayPL / totalEquity) * 100 : 0;
+    await checkMarketAlerts({ positions, dayPLPercent, totalEquity });
+  } catch {}
 
   return results;
 };

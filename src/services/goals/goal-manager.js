@@ -104,6 +104,9 @@ export class GoalManager extends EventEmitter {
     this.goalTasks = new Map();         // goalId -> subtasks array
     this.onHoldTasks = new Map();       // taskId -> { reason, reviewAt, notes }
     this.onHoldGoals = new Map();       // goalId -> { reason, reviewAt, notes }
+
+    // Attempt tracking — prevents re-picking same goal within cooldown
+    this.goalAttempts = new Map();      // goalId -> { count, lastAttemptedAt, totalTimeMs }
   }
 
   /**
@@ -227,8 +230,93 @@ export class GoalManager extends EventEmitter {
   }
 
   /**
-   * Select the next goal to work on based on priority and context
-   * Priority order: urgent > time-sensitive > high-priority > regular
+   * Record an attempt on a goal (called by autonomous engine after each execution)
+   */
+  recordAttempt(goalId, durationMs = 0) {
+    const existing = this.goalAttempts.get(goalId) || { count: 0, lastAttemptedAt: 0, totalTimeMs: 0 };
+    existing.count++;
+    existing.lastAttemptedAt = Date.now();
+    existing.totalTimeMs += durationMs;
+    this.goalAttempts.set(goalId, existing);
+    return existing;
+  }
+
+  /**
+   * Get attempt info for a goal
+   */
+  getAttemptInfo(goalId) {
+    return this.goalAttempts.get(goalId) || { count: 0, lastAttemptedAt: 0, totalTimeMs: 0 };
+  }
+
+  /**
+   * Check if a goal is on cooldown (2-hour window after each attempt)
+   */
+  isOnCooldown(goalId) {
+    const info = this.goalAttempts.get(goalId);
+    if (!info) return false;
+    const COOLDOWN_MS = 2 * 60 * 60 * 1000; // 2 hours
+    return (Date.now() - info.lastAttemptedAt) < COOLDOWN_MS;
+  }
+
+  /**
+   * Get time remaining on cooldown (ms), or 0 if not on cooldown
+   */
+  getCooldownRemaining(goalId) {
+    const info = this.goalAttempts.get(goalId);
+    if (!info) return 0;
+    const COOLDOWN_MS = 2 * 60 * 60 * 1000;
+    const remaining = COOLDOWN_MS - (Date.now() - info.lastAttemptedAt);
+    return Math.max(0, remaining);
+  }
+
+  /**
+   * Check if a goal with similar title/topic already exists in active goals.
+   * Uses keyword overlap to detect duplicates like "hit 8000 steps today" vs "complete 8000 steps daily".
+   * @returns {object|null} The existing goal if duplicate found
+   */
+  _findDuplicateGoal(title, category, activeGoals) {
+    if (!title || !activeGoals || activeGoals.length === 0) return null;
+
+    const titleLower = title.toLowerCase();
+    const titleWords = titleLower.replace(/[^a-z0-9\s]/g, " ").split(/\s+/)
+      .filter(w => w.length > 2 && !["the", "and", "for", "with", "from", "into", "this", "that",
+        "your", "has", "have", "been", "will", "can", "are", "was", "not", "get", "set",
+        "hit", "make", "take", "run", "day", "days", "today", "now", "new", "000",
+        "daily", "consecutive", "immediately", "completing", "taking", "adding",
+        "establishing", "deploying", "raising", "fixing", "toward", "target"].includes(w));
+
+    if (titleWords.length === 0) return null;
+
+    for (const existing of activeGoals) {
+      // Same category required
+      if (category && existing.category && category !== existing.category) continue;
+
+      const existingWords = (existing.title || "").toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/)
+        .filter(w => w.length > 2);
+
+      // Count keyword overlap
+      const overlap = titleWords.filter(w => existingWords.includes(w)).length;
+      const overlapRatio = overlap / Math.max(titleWords.length, 1);
+
+      // If 50%+ keyword overlap in same category, it's a duplicate
+      if (overlapRatio >= 0.5 && overlap >= 2) {
+        return existing;
+      }
+
+      // Exact substring match
+      const existingLower = (existing.title || "").toLowerCase();
+      if (titleLower.includes(existingLower.slice(0, 30)) || existingLower.includes(titleLower.slice(0, 30))) {
+        return existing;
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Select the next goal to work on based on priority, cooldown, and context
+   * Skips goals on cooldown (2hr after each attempt), ON_HOLD goals, and escalated goals.
+   * If all are on cooldown, picks the one whose cooldown expires soonest.
    */
   selectNextGoal() {
     const goals = this.getActiveGoals();
@@ -237,25 +325,62 @@ export class GoalManager extends EventEmitter {
       return null;
     }
 
-    // Sort by priority (lower number = higher priority)
-    const prioritized = goals.sort((a, b) => {
-      // First by priority
-      const priorityDiff = (a.priority || 5) - (b.priority || 5);
-      if (priorityDiff !== 0) return priorityDiff;
-
-      // Then by urgency
-      const urgencyOrder = { high: 0, medium: 1, low: 2 };
-      const aUrgency = urgencyOrder[a.urgency] ?? 2;
-      const bUrgency = urgencyOrder[b.urgency] ?? 2;
-      if (aUrgency !== bUrgency) return aUrgency - bUrgency;
-
-      // Then by creation date (oldest first)
-      const aDate = new Date(a.createdAt || 0);
-      const bDate = new Date(b.createdAt || 0);
-      return aDate - bDate;
+    // Filter out ON_HOLD goals
+    const available = goals.filter(g => {
+      const holdInfo = this.onHoldGoals.get(g.id);
+      if (holdInfo) {
+        // Check if hold expired
+        if (holdInfo.reviewAt && new Date(holdInfo.reviewAt) < new Date()) {
+          this.onHoldGoals.delete(g.id);
+          return true;
+        }
+        return false;
+      }
+      return true;
     });
 
-    return prioritized[0] || null;
+    if (available.length === 0) return null;
+
+    // Separate into ready (off cooldown) and cooling
+    const ready = available.filter(g => !this.isOnCooldown(g.id));
+    const pool = ready.length > 0 ? ready : available; // fallback: pick soonest-to-expire
+
+    // Score each goal
+    const scored = pool.map(g => {
+      const attempts = this.getAttemptInfo(g.id);
+      let score = 0;
+
+      // Priority weight (priority 1 = +50, priority 5 = +10)
+      score += Math.max(10, 60 - ((g.priority || 5) * 10));
+
+      // Urgency boost
+      if (g.urgency === "high") score += 30;
+      else if (g.urgency === "medium") score += 15;
+
+      // WhatsApp/user-requested boost
+      if (g.source === "whatsapp" || g.source === "dashboard") score += 25;
+
+      // Freshness bonus (newer goals get a boost)
+      const ageHours = (Date.now() - new Date(g.createdAt || 0).getTime()) / (1000 * 60 * 60);
+      if (ageHours < 1) score += 20;
+      else if (ageHours < 4) score += 10;
+
+      // Attempt penalty (more attempts = lower score)
+      score -= attempts.count * 15;
+
+      // If on cooldown, penalize by remaining time (only when all are on cooldown)
+      if (ready.length === 0) {
+        const remaining = this.getCooldownRemaining(g.id);
+        score -= remaining / (60 * 1000); // penalize by minutes remaining
+      }
+
+      return { goal: g, score, attempts };
+    });
+
+    // Sort by score (highest first)
+    scored.sort((a, b) => b.score - a.score);
+
+    return scored[0]?.goal || null;
   }
 
   /**
@@ -1403,9 +1528,17 @@ Respond in JSON:
       return null;
     }
 
+    // DEDUP: Check if an equivalent active goal already exists
     const tracker = getGoalTracker();
+    const activeGoals = tracker.getActive();
+    const duplicate = this._findDuplicateGoal(goal.title, goal.category, activeGoals);
+    if (duplicate) {
+      console.log(`[GoalManager] Dedup — reusing existing goal "${duplicate.title}" instead of creating "${goal.title}"`);
+      if (setAsCurrent) await this.setCurrentGoal(duplicate);
+      return duplicate;
+    }
 
-    // Add to tracker
+    // Add to tracker — persist source/from/originalMessage so engine can prioritize user-requested goals
     const createdGoal = tracker.createGoal({
       title: goal.title,
       category: goal.category || GOAL_CATEGORY.GROWTH,
@@ -1413,7 +1546,12 @@ Respond in JSON:
       targetValue: goal.targetValue || 100,
       startValue: goal.startValue || 0,
       currentValue: goal.currentValue || 0,
-      unit: goal.unit || "%"
+      unit: goal.unit || "%",
+      description: goal.description || "",
+      source: goal.source || null,
+      from: goal.from || null,
+      originalMessage: goal.originalMessage || null,
+      deliveryAction: goal.deliveryAction || null,
     });
 
     if (setAsCurrent) {

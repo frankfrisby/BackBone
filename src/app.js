@@ -3241,15 +3241,8 @@ Example: "Got it. I'll put *${currentWork}* on pause. You want me to focus on [w
         waState.lastDigest = "";
         startupEngineStreamingRef.current = false;
         setActionStreamingTitle("Startup work");
-        sendColleagueWhatsAppUpdate(
-          "*Backbone update*\nI'm starting a focused work pass now and will send progress updates as I go.",
-          {
-            force: true,
-            minIntervalMs: 0,
-            allowRepeat: false,
-            identifier: `startup_begin_${waState.runId}`
-          }
-        );
+        // No WhatsApp notification on startup — the user doesn't need to know we booted.
+        // They'll get results when work completes, not play-by-play of startup.
       }
     };
 
@@ -3262,18 +3255,8 @@ Example: "Got it. I'll put *${currentWork}* on pause. You want me to focus on [w
         setCliStreaming(true);
         setActionStreamingTitle(codexLabel);
         engineState.setStatus("executing", codexLabel);
-        if (waState.lastTool !== "codex") {
-          waState.lastTool = "codex";
-          sendColleagueWhatsAppUpdate(
-            `I'm working with *Codex ${model || "latest"}* (${reasoning || "xhigh"} reasoning).`,
-            {
-              force: true,
-              minIntervalMs: 0,
-              allowRepeat: false,
-              identifier: `startup_tool_${waState.runId}_codex`
-            }
-          );
-        }
+        waState.lastTool = "codex";
+        // No WhatsApp — tool switching is internal detail, not user-facing
       } else if (tool === "claude" || tool === "claude-agent-sdk") {
         resetActionStream("Claude Code CLI");
         startupEngineStreamingRef.current = true;
@@ -3281,18 +3264,8 @@ Example: "Got it. I'll put *${currentWork}* on pause. You want me to focus on [w
         setClaudeRuntimeModelInfo(TASK_TYPES.AGENTIC);
         setActionStreamingTitle("Claude Code CLI");
         engineState.setStatus("executing", "Claude Code CLI");
-        if (waState.lastTool !== "claude") {
-          waState.lastTool = "claude";
-          sendColleagueWhatsAppUpdate(
-            "I'm working with *Claude Code CLI* now.",
-            {
-              force: true,
-              minIntervalMs: 0,
-              allowRepeat: false,
-              identifier: `startup_tool_${waState.runId}_claude`
-            }
-          );
-        }
+        waState.lastTool = "claude";
+        // No WhatsApp — tool switching is internal detail, not user-facing
       }
     };
 
@@ -3311,7 +3284,8 @@ Example: "Got it. I'll put *${currentWork}* on pause. You want me to focus on [w
       appendActionStream(chunk);
       extractToolEvents(chunk, "startup-engine");
 
-      // Heartbeat to WhatsApp every ~2 minutes with latest meaningful snippet.
+      // Update heartbeat state for internal tracking only — no WhatsApp mid-work spam.
+      // The user will get a notification when work actually completes with real results.
       const waState = startupWhatsAppStateRef.current;
       const now = Date.now();
       if ((now - (waState.lastHeartbeatAt || 0)) >= 120000) {
@@ -3319,21 +3293,11 @@ Example: "Got it. I'll put *${currentWork}* on pause. You want me to focus on [w
         if (snippet && snippet !== waState.lastHeartbeatSnippet) {
           waState.lastHeartbeatAt = now;
           waState.lastHeartbeatSnippet = snippet;
-          sendColleagueWhatsAppUpdate(
-            `Quick update: still working.\n\nLatest note:\n_${snippet}_`,
-            {
-              force: true,
-              minIntervalMs: 0,
-              allowRepeat: false,
-              identifier: `startup_progress_${waState.runId}_${Math.floor(now / 120000)}`
-            }
-          );
         }
       }
     };
 
     const handleWorkComplete = (result) => {
-      const waState = startupWhatsAppStateRef.current;
       if (result?.tool === "codex") {
         const codexLabel = setCodexRuntimeModelInfo(result.model, result.reasoning || "xhigh", TASK_TYPES.AGENTIC);
         setActionStreamingTitle(`${codexLabel} complete`);
@@ -3344,52 +3308,25 @@ Example: "Got it. I'll put *${currentWork}* on pause. You want me to focus on [w
       startupEngineStreamingRef.current = false;
       setCliStreaming(false);
       engineState.setStatus("idle");
-
-      const output = String(result?.output || "").replace(/\s+/g, " ").trim();
-      const summary = output ? output.slice(0, 360) : "Initial startup pass finished.";
-      sendColleagueWhatsAppUpdate(
-        `*Startup pass complete.*\n${summary ? `\n${summary}\n` : ""}\nI'll keep curating and bring up important items as they develop.`,
-        {
-          force: true,
-          minIntervalMs: 0,
-          allowRepeat: true,
-          identifier: `startup_complete_${waState.runId}_${Date.now()}`
-        }
-      );
+      // No WhatsApp on startup completion — goal-level completion notifications
+      // handle user-facing updates with actual findings. Startup pass is internal.
     };
 
     const handleWorkError = (error) => {
-      const waState = startupWhatsAppStateRef.current;
       const message = error?.message || String(error || "Startup work failed");
       setActionStreamingTitle("Startup work error");
       setActionStreamingText((prev) => `${prev ? `${prev}\n` : ""}[Startup] ${message}`);
       startupEngineStreamingRef.current = false;
       setCliStreaming(false);
       engineState.setStatus("idle");
-      sendColleagueWhatsAppUpdate(
-        `*Startup work hit an issue.*\n${message}\n\nI'll retry and keep you posted.`,
-        {
-          force: true,
-          minIntervalMs: 0,
-          allowRepeat: true,
-          priority: NOTIFICATION_PRIORITY.HIGH,
-          identifier: `startup_error_${waState.runId}_${Date.now()}`
-        }
-      );
+      // No WhatsApp for startup errors — these are internal retries.
+      // Only escalate to user after 3+ failures via the engine's escalation path.
+      console.log("[App] Startup work error (silent):", message);
     };
 
     const handleCliNotReady = () => {
       setActionStreamingTitle("Startup: Claude not ready, using Codex");
-      const waState = startupWhatsAppStateRef.current;
-      sendColleagueWhatsAppUpdate(
-        "Claude is unavailable right now, so I switched to Codex to keep work moving.",
-        {
-          force: true,
-          minIntervalMs: 0,
-          allowRepeat: false,
-          identifier: `startup_fallback_${waState.runId || "pre"}`
-        }
-      );
+      // No WhatsApp — tool fallback is an internal detail
     };
 
     startupEngine.on("phase-changed", handlePhaseChanged);
@@ -3452,20 +3389,7 @@ Example: "Got it. I'll put *${currentWork}* on pause. You want me to focus on [w
       setActionStreamingText("Engine is working...\n");
       setCliStreaming(true);
 
-      const wa = engineWhatsAppStateRef.current;
-      const now = Date.now();
-      if ((now - (wa.lastStartedAt || 0)) >= 45 * 60 * 1000) {
-        wa.lastStartedAt = now;
-        sendColleagueWhatsAppUpdate(
-          "*Backbone update*\nI'm starting another autonomous work cycle now.",
-          {
-            force: true,
-            minIntervalMs: 0,
-            allowRepeat: false,
-            identifier: `engine_cycle_start_${Math.floor(now / (45 * 60 * 1000))}`
-          }
-        );
-      }
+      // No WhatsApp on cycle start — user doesn't need to know about every engine cycle
     };
 
     const onStatus = (statusText) => {
@@ -3502,18 +3426,8 @@ Example: "Got it. I'll put *${currentWork}* on pause. You want me to focus on [w
         const now = Date.now();
         if ((now - (wa.lastProgressAt || 0)) >= 15 * 60 * 1000) {
           wa.lastProgressAt = now;
-          const snippet = trimmed.replace(/\s+/g, " ").trim().slice(0, 220);
-          if (snippet) {
-            sendColleagueWhatsAppUpdate(
-              `Still working in background.\n\nLatest:\n_${snippet}_`,
-              {
-                force: true,
-                minIntervalMs: 0,
-                allowRepeat: false,
-                identifier: `engine_progress_${Math.floor(now / (15 * 60 * 1000))}`
-              }
-            );
-          }
+          // No WhatsApp for background engine progress — raw CLI output is garbled.
+          // Goal completion notifications in autonomous-engine.js handle user-facing updates.
         }
       }
     };
@@ -3528,41 +3442,12 @@ Example: "Got it. I'll put *${currentWork}* on pause. You want me to focus on [w
         setClaudeCodeAlert(result.error || "Claude Code auth error");
       } else if (result.success) {
         setActionStreamingTitle("Work completed");
-        const wa = engineWhatsAppStateRef.current;
-        const now = Date.now();
-        if ((now - (wa.lastCompletedAt || 0)) >= 60 * 60 * 1000) {
-          wa.lastCompletedAt = now;
-          const summaryRaw = String(result.output || result.summary || "Completed a full background work cycle.");
-          const summary = summaryRaw.replace(/\s+/g, " ").trim().slice(0, 280);
-          sendColleagueWhatsAppUpdate(
-            `*Background cycle complete.*\n${summary}`,
-            {
-              force: true,
-              minIntervalMs: 0,
-              allowRepeat: false,
-              identifier: `engine_complete_${Math.floor(now / (60 * 60 * 1000))}`
-            }
-          );
-        }
         setActionStreamingText((prev) => prev + "\n✓ Work done. Next run in 10 minutes.\n\nCheck memory/current-work.md for details.");
+        // No WhatsApp here — goal-level completion in autonomous-engine.js sends findings
       } else {
         setActionStreamingTitle("Work failed");
-        const wa = engineWhatsAppStateRef.current;
-        const now = Date.now();
-        if ((now - (wa.lastErrorAt || 0)) >= 5 * 60 * 1000) {
-          wa.lastErrorAt = now;
-          sendColleagueWhatsAppUpdate(
-            `*Background cycle failed.*\n${result.error || `Failed with code ${result.code}`}\n\nI'll keep trying and report back.`,
-            {
-              force: true,
-              minIntervalMs: 0,
-              allowRepeat: true,
-              priority: NOTIFICATION_PRIORITY.HIGH,
-              identifier: `engine_error_${Math.floor(now / (5 * 60 * 1000))}`
-            }
-          );
-        }
         setActionStreamingText((prev) => prev + `\n✗ Failed with code ${result.code}\n`);
+        // No WhatsApp for individual cycle failures — engine handles escalation after 3 attempts
       }
       setCliStreaming(false);
     };
@@ -3573,14 +3458,14 @@ Example: "Got it. I'll put *${currentWork}* on pause. You want me to focus on [w
       setActionStreamingText((prev) => prev + `\n✗ ${data.error}\n`);
       setClaudeCodeAlert(data.error);
       setCliStreaming(false);
+      // Auth errors ARE user-actionable — but only send once per hour
       sendColleagueWhatsAppUpdate(
-        `*Engine auth issue.*\n${data.error}\n\nRun \`claude login\` and I'll resume full-speed work.`,
+        `Need you to run \`claude login\` — auth expired.`,
         {
-          force: true,
-          minIntervalMs: 0,
-          allowRepeat: true,
-          priority: NOTIFICATION_PRIORITY.HIGH,
-          identifier: `engine_auth_${Math.floor(Date.now() / (5 * 60 * 1000))}`
+          force: false,
+          minIntervalMs: 60 * 60 * 1000, // max once per hour
+          allowRepeat: false,
+          identifier: `engine_auth`
         }
       );
     };
@@ -3589,21 +3474,8 @@ Example: "Got it. I'll put *${currentWork}* on pause. You want me to focus on [w
       console.error("[ClaudeEngine] Error:", error);
       setActionStreamingText((prev) => prev + `\n[Error] ${error.error}\n`);
       setCliStreaming(false);
-      const wa = engineWhatsAppStateRef.current;
-      const now = Date.now();
-      if ((now - (wa.lastErrorAt || 0)) >= 5 * 60 * 1000) {
-        wa.lastErrorAt = now;
-        sendColleagueWhatsAppUpdate(
-          `*Engine error.*\n${error?.error || "Unexpected background engine error."}\n\nI'll retry automatically.`,
-          {
-            force: true,
-            minIntervalMs: 0,
-            allowRepeat: true,
-            priority: NOTIFICATION_PRIORITY.HIGH,
-            identifier: `engine_runtime_error_${Math.floor(now / (5 * 60 * 1000))}`
-          }
-        );
-      }
+      // No WhatsApp for runtime errors — engine retries automatically.
+      // Escalation to user happens after 3 failed attempts via autonomous-engine.js.
     };
 
     const onStopped = () => {

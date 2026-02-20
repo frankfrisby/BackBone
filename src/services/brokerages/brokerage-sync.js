@@ -136,10 +136,13 @@ async function refreshBrokerage(brokerageId) {
   if (!fs.existsSync(authPath)) return { success: false, message: "No saved auth" };
 
   const auth = JSON.parse(fs.readFileSync(authPath, "utf-8"));
-  if (!auth.cookies?.length) return { success: false, message: "No saved cookies" };
 
-  if (isExpired(brokerageId)) {
-    return { success: false, message: "Session expired — re-login required", expired: true };
+  // Empower doesn't need cookies — it uses the PersonalCapital service
+  if (brokerageId !== "empower") {
+    if (!auth.cookies?.length) return { success: false, message: "No saved cookies" };
+    if (isExpired(brokerageId)) {
+      return { success: false, message: "Session expired — re-login required", expired: true };
+    }
   }
 
   // ── Robinhood: use API with saved token ──
@@ -147,7 +150,35 @@ async function refreshBrokerage(brokerageId) {
     return refreshRobinhoodViaAPI(auth, authPath);
   }
 
-  // ── Browser-based brokerages (Empower, Fidelity) ──
+  // ── Empower: use PersonalCapital service data (triangulated scraper) ──
+  if (brokerageId === "empower") {
+    try {
+      const { getPersonalCapitalService } = await import("../integrations/personal-capital.js");
+      const svc = getPersonalCapitalService();
+      if (svc.data?.lastUpdated) {
+        const accounts = (svc.data.accounts || []).map(a => ({
+          name: a.name, type: String(a.type || ""), balance: a.balance || 0,
+          institution: a.institution || "Empower",
+        }));
+        const holdings = (svc.data.holdings || []).map(h => ({
+          symbol: h.ticker || h.symbol || "", name: h.name || "",
+          shares: h.quantity || h.shares || 0, price: h.price || 0,
+          value: h.value || 0,
+        }));
+        const netWorth = svc.data.netWorth?.total || null;
+        if (accounts.length > 0 || holdings.length > 0 || netWorth) {
+          console.log(`${TAG} [empower] Using PersonalCapital service data: ${accounts.length} accounts, ${holdings.length} holdings, NW=$${netWorth}`);
+          return { success: true, message: `${holdings.length} holdings, ${accounts.length} accounts (from service)`, accounts, holdings, netWorth };
+        }
+      }
+    } catch (e) {
+      console.log(`${TAG} [empower] PersonalCapital service not available: ${e.message}`);
+    }
+    // Fall back to auth file cache
+    return returnCachedData(brokerageId, auth, "No fresh service data");
+  }
+
+  // ── Browser-based brokerages (Fidelity, etc.) ──
   let chromium;
   try {
     const pw = await import("playwright");

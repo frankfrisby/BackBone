@@ -1,4 +1,4 @@
-import { createEntity } from './Entity.js';
+import { createEntity } from './EntityRegistry.js';
 
 export class UndoManager {
   constructor(doc) {
@@ -6,6 +6,11 @@ export class UndoManager {
     this.stack = [];
     this.redoStack = [];
     this.maxSize = 100;
+  }
+
+  clear() {
+    this.stack = [];
+    this.redoStack = [];
   }
 
   record(action) {

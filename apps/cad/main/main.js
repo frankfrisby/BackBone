@@ -14,7 +14,7 @@ function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
-    frame: false,
+    frame: true,
     backgroundColor: '#1e1e1e',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -25,9 +25,11 @@ function createWindow() {
 
   mainWindow.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
 
-  if (process.argv.includes('--dev')) {
-    mainWindow.webContents.openDevTools();
-  }
+  mainWindow.webContents.openDevTools({ mode: 'bottom' });
+
+  mainWindow.webContents.on('console-message', (e, level, msg, line, sourceId) => {
+    console.log(`[Renderer] ${msg} (${sourceId}:${line})`);
+  });
 }
 
 app.whenReady().then(() => {

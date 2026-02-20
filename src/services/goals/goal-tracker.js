@@ -179,7 +179,11 @@ export class GoalTracker extends EventEmitter {
     unit = "",
     milestones = [],
     project = null,
-    description = ""
+    description = "",
+    source = null,
+    from = null,
+    originalMessage = null,
+    deliveryAction = null
   }) {
     const goal = {
       id: `goal_${category}_${Date.now()}`,
@@ -194,6 +198,10 @@ export class GoalTracker extends EventEmitter {
       unit,
       project: project || category, // Default project to category if not specified
       description,
+      source,               // "whatsapp", "dashboard", "engine", etc.
+      from,                 // sender identifier (phone number for WhatsApp)
+      originalMessage,      // verbatim user request text
+      deliveryAction,       // "email", "document", "whatsapp"
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     };

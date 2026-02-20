@@ -120,10 +120,19 @@ class CADApp {
   _bindCanvasEvents() {
     const c = this.canvas;
     let panning = false;
+    let panButton = -1;
     let lastMouse = { x: 0, y: 0 };
 
     c.addEventListener('mousedown', (e) => {
-      if (e.button === 1) { panning = true; lastMouse = { x: e.clientX, y: e.clientY }; e.preventDefault(); return; }
+      // Middle-click or right-click to pan
+      if (e.button === 1 || e.button === 2) {
+        panning = true;
+        panButton = e.button;
+        lastMouse = { x: e.clientX, y: e.clientY };
+        c.style.cursor = 'grabbing';
+        e.preventDefault();
+        return;
+      }
       const world = this.renderer2d.camera.screenToWorld(e.offsetX, e.offsetY);
       const snapped = this.renderer2d.snap.snap(world.x, world.y, this.renderer2d.camera);
       this.toolCtrl.onMouseDown(e, snapped.x, snapped.y);
@@ -143,10 +152,24 @@ class CADApp {
     });
 
     c.addEventListener('mouseup', (e) => {
-      if (e.button === 1) { panning = false; return; }
+      if (panning && (e.button === panButton)) {
+        panning = false;
+        panButton = -1;
+        c.style.cursor = '';
+        return;
+      }
       const world = this.renderer2d.camera.screenToWorld(e.offsetX, e.offsetY);
       const snapped = this.renderer2d.snap.snap(world.x, world.y, this.renderer2d.camera);
       this.toolCtrl.onMouseUp(e, snapped.x, snapped.y);
+    });
+
+    // Stop panning if mouse leaves canvas
+    c.addEventListener('mouseleave', () => {
+      if (panning) {
+        panning = false;
+        panButton = -1;
+        c.style.cursor = '';
+      }
     });
 
     c.addEventListener('wheel', (e) => {
@@ -325,3 +348,22 @@ class CADApp {
 // Boot
 const app = new CADApp();
 app.init();
+
+// Load a demo drawing so the app doesn't look empty
+if (app.doc.entities.size === 0) {
+  const ops = [
+    { type: 'rectangle', x: -200, y: -150, width: 400, height: 300 },
+    { type: 'line', x1: -200, y1: 0, x2: 200, y2: 0 },
+    { type: 'line', x1: 0, y1: -150, x2: 0, y2: 150 },
+    { type: 'circle', cx: -100, cy: 75, radius: 40 },
+    { type: 'circle', cx: 100, cy: 75, radius: 40 },
+    { type: 'circle', cx: -100, cy: -75, radius: 40 },
+    { type: 'circle', cx: 100, cy: -75, radius: 40 },
+    { type: 'text', x: -180, y: -170, text: 'BACKBONE CAD', height: 20 },
+  ];
+  for (const entity of ops) {
+    app.doc.executeOperation({ action: 'add_entity', entity });
+  }
+  app.doc.undo.clear();
+  app.zoomFit();
+}

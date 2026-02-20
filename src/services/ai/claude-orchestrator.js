@@ -36,7 +36,7 @@ import { getActivityNarrator, ACTION_STATUS } from "../ui/activity-narrator.js";
 import { getGoalManager, TASK_STATE } from "../goals/goal-manager.js";
 import { isClaudeAgentSdkInstalled, runClaudeAgentSdkTask } from "./claude-agent-sdk.js";
 
-import { dataFile, getBackboneRoot } from "../paths.js";
+import { dataFile, getBackboneRoot, getProjectsDir } from "../paths.js";
 /**
  * Orchestration states
  */
@@ -277,11 +277,24 @@ SECURITY RULES:
       ? `## AGENT IDENTITY\n${agentIdentity}\n\n---\n\n`
       : "";
 
+    // Determine project directory for saving findings
+    const projectName = goal.project || title.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 40);
+    let projectDir = "";
+    try {
+      projectDir = path.join(getProjectsDir(), projectName);
+    } catch {
+      projectDir = `projects/${projectName}`;
+    }
+
+    // Include original user message if available (critical for context)
+    const originalMessage = goal.originalMessage || description || title;
+
     return `${agentSection}You are BACKBONE's autonomous engine, working on a goal for the user.
 
 GOAL: "${title}"
 
 ${description ? `DESCRIPTION:\n${description}\n` : ""}
+${goal.originalMessage ? `ORIGINAL USER REQUEST (verbatim):\n"${goal.originalMessage}"\n` : ""}
 ${context ? `CONTEXT:\n${context}\n` : ""}
 ${userContextSection}
 ${criteriaSection}
@@ -289,19 +302,26 @@ ${tasksSection}
 ${dataSourcesSection}
 ${directoryContext}
 
-IMPORTANT INSTRUCTIONS:
-1. Work autonomously to achieve this goal
-2. Use available tools: Read, Write, Edit, Bash, WebSearch, Fetch, Grep, Glob
-3. RESPECT DIRECTORY RESTRICTIONS - only access allowed directories
-4. Follow the EXECUTION PLAN if provided, checking off tasks as you complete them
-5. VERIFY each completion criterion is met before declaring the goal complete
-6. Report progress clearly - state which task you're working on
-7. If you need clarification, ask specific questions
-8. Use the USER CONTEXT below to make informed decisions — the user's beliefs, health, portfolio, and conversations give you the full picture
-9. When the goal is complete, clearly state "GOAL COMPLETE" with a summary of:
-   - Which criteria were met
-   - Which tasks were completed
-   - Any files created or modified
+EXECUTION INSTRUCTIONS:
+1. Work autonomously to achieve this goal — DO THE ACTUAL WORK, don't just plan it
+2. AVAILABLE TOOLS — use them aggressively:
+   - **WebSearch** — search the web for information (USE THIS for any research task)
+   - **WebFetch** — fetch and read web pages
+   - **Read/Write/Edit** — read and create files
+   - **Bash** — run commands, install tools, process data
+   - **Grep/Glob** — search files and codebases
+3. RESPECT DIRECTORY RESTRICTIONS — only access allowed directories
+4. SAVE ALL FINDINGS to: ${projectDir}/findings.md
+   - Create this file with your research results, analysis, and conclusions
+   - Use markdown formatting with headers and bullet points
+   - Include sources and links where applicable
+5. For research tasks: search multiple sources, cross-reference, synthesize
+6. For creation tasks: actually create the deliverable (document, code, plan)
+7. When the goal is complete, clearly state "GOAL COMPLETE" with a summary
+
+CRITICAL: The user is counting on you to DO the work, not describe what could be done.
+If this involves finding information online, USE WebSearch and WebFetch NOW.
+Save everything you find to the project directory.
 
 Begin working on this goal now.`;
   }
@@ -314,6 +334,16 @@ Begin working on this goal now.`;
     if (!ctx || Object.keys(ctx).length === 0) return "";
 
     const sections = [];
+
+    // User identity — WHO is the user (name, background, details)
+    if (ctx.profile && typeof ctx.profile === "string" && ctx.profile.length > 20) {
+      sections.push(`WHO THE USER IS:\n${ctx.profile.slice(0, 800)}`);
+    }
+
+    // Family — names, relationships, personal details
+    if (ctx.family && typeof ctx.family === "string" && ctx.family.length > 20) {
+      sections.push(`USER'S FAMILY:\n${ctx.family.slice(0, 800)}`);
+    }
 
     // Core beliefs
     if (ctx.beliefs && Array.isArray(ctx.beliefs) && ctx.beliefs.length > 0) {
@@ -698,7 +728,90 @@ ${sourcesList}
   }
 
   /**
-   * Evaluate Claude's progress using GPT-5.2
+   * Collect evidence of goal completion from Claude's output and work artifacts
+   */
+  collectCompletionEvidence() {
+    const evidence = { signals: [], score: 0 };
+    const output = this.outputBuffer || "";
+    const recentOutput = this.getRecentOutput(5000);
+
+    // 1. Completion phrases in Claude's output (strong signal)
+    const completionPhrases = [
+      /goal\s+(?:is\s+)?complete/i,
+      /task\s+(?:is\s+)?(?:complete|done|finished)/i,
+      /(?:all|everything)\s+(?:is\s+)?(?:done|complete|finished)/i,
+      /successfully\s+(?:completed|finished|created|built|delivered)/i,
+      /I(?:'ve| have)\s+(?:completed|finished|done)\s+(?:the|this|all)/i,
+      /(?:research|analysis|report|document)\s+(?:is\s+)?(?:ready|complete|done)/i,
+      /wrapping\s+up/i,
+      /that\s+(?:covers|completes|wraps)\s+(?:everything|it|the)/i,
+    ];
+
+    for (const phrase of completionPhrases) {
+      if (phrase.test(recentOutput)) {
+        evidence.signals.push(`completion-phrase: ${phrase.source}`);
+        evidence.score += 25;
+        break; // One phrase is enough
+      }
+    }
+
+    // 2. File creation evidence (work product exists)
+    if (this.toolCalls.length > 0) {
+      const writeTools = this.toolCalls.filter(t =>
+        t.tool === "Write" || t.tool === "Edit" || t.tool === "NotebookEdit"
+      );
+      if (writeTools.length > 0) {
+        evidence.signals.push(`files-created: ${writeTools.length}`);
+        evidence.score += 15;
+      }
+
+      // Web research completed
+      const webTools = this.toolCalls.filter(t =>
+        t.tool === "WebSearch" || t.tool === "WebFetch"
+      );
+      if (webTools.length >= 2) {
+        evidence.signals.push(`web-research: ${webTools.length} searches`);
+        evidence.score += 10;
+      }
+    }
+
+    // 3. Turn count nearing max (natural completion)
+    if (this.turnCount >= this.maxTurns - 1) {
+      evidence.signals.push(`turns-exhausted: ${this.turnCount}/${this.maxTurns}`);
+      evidence.score += 30;
+    } else if (this.turnCount >= this.maxTurns * 0.7) {
+      evidence.signals.push(`turns-high: ${this.turnCount}/${this.maxTurns}`);
+      evidence.score += 10;
+    }
+
+    // 4. No new tool calls in recent output (Claude stopped working)
+    const recentTools = this.toolCalls.filter(t =>
+      t.timestamp && (Date.now() - t.timestamp) < 30000
+    );
+    if (this.turnCount > 3 && recentTools.length === 0) {
+      evidence.signals.push("no-recent-tools");
+      evidence.score += 15;
+    }
+
+    // 5. Error/failure signals (negative — NOT complete)
+    const failurePhrases = [
+      /(?:error|failed|cannot|unable|couldn't|can't)\s/i,
+      /I\s+(?:need|require)\s+(?:more|additional|further)/i,
+      /blocked\s+(?:by|on|because)/i,
+    ];
+    for (const phrase of failurePhrases) {
+      if (phrase.test(recentOutput.slice(-1000))) {
+        evidence.signals.push(`failure-signal: ${phrase.source}`);
+        evidence.score -= 20;
+        break;
+      }
+    }
+
+    return evidence;
+  }
+
+  /**
+   * Evaluate Claude's progress — evidence-based with optional GPT boost
    */
   async evaluateProgress() {
     this.state = ORCHESTRATION_STATE.EVALUATING;
@@ -707,11 +820,53 @@ ${sourcesList}
     // First, update progress tracking based on recent output
     await this.updateProgress(this.outputBuffer);
 
+    // ── EVIDENCE-BASED COMPLETION ──
+    // Primary mechanism: check output + artifacts for completion signals
+    const evidence = this.collectCompletionEvidence();
+
+    if (evidence.score >= 50) {
+      // Strong evidence of completion — mark complete without GPT
+      const decision = {
+        timestamp: Date.now(),
+        turnCount: this.turnCount,
+        decision: EVALUATION_DECISION.COMPLETE,
+        reasoning: `Evidence-based completion (score: ${evidence.score}): ${evidence.signals.join(", ")}`,
+        message: "",
+        completedTasks: [],
+        metCriteria: [],
+        confidence: Math.min(evidence.score / 100, 1.0)
+      };
+      this.decisions.push(decision);
+      this.emit("decision", decision);
+      this.narrator.observe(`Evidence-based completion (${evidence.score}): ${evidence.signals.slice(0, 3).join(", ")}`);
+      this.state = ORCHESTRATION_STATE.RUNNING;
+      return decision;
+    }
+
+    // ── OPTIONAL GPT EVALUATION ──
+    // If GPT is available, use it as a bonus evaluator for ambiguous cases
     try {
       const config = getMultiAIConfig();
       if (!config.gptInstant?.ready && !config.gptThinking?.ready) {
-        // No GPT available, continue by default
-        return { decision: EVALUATION_DECISION.CONTINUE };
+        // No GPT — use evidence score to decide
+        if (evidence.score >= 30) {
+          // Moderate evidence — lean toward completion
+          const decision = {
+            timestamp: Date.now(),
+            turnCount: this.turnCount,
+            decision: EVALUATION_DECISION.COMPLETE,
+            reasoning: `Moderate evidence (${evidence.score}), no GPT: ${evidence.signals.join(", ")}`,
+            message: "",
+            completedTasks: [],
+            metCriteria: [],
+            confidence: evidence.score / 100
+          };
+          this.decisions.push(decision);
+          this.emit("decision", decision);
+          this.state = ORCHESTRATION_STATE.RUNNING;
+          return decision;
+        }
+        return { decision: EVALUATION_DECISION.CONTINUE, reasoning: `Evidence score ${evidence.score} — continuing` };
       }
 
       // Get progress summary
@@ -725,6 +880,8 @@ ${this.currentGoal?.description ? `\nDESCRIPTION: ${this.currentGoal.description
 
 ${progressSummary}
 
+EVIDENCE SIGNALS: ${evidence.signals.join(", ")} (score: ${evidence.score})
+
 RECENT OUTPUT FROM CLAUDE:
 ${this.getRecentOutput(3000)}
 
@@ -737,21 +894,15 @@ Evaluate Claude's progress and decide what to do:
 
 1. CONTINUE - Claude is making good progress, let it keep working
 2. REPLY - Send a follow-up message to Claude (include the message)
-3. COMPLETE - ALL criteria are met and goal is achieved, stop execution
+3. COMPLETE - Goal is achieved (evidence + output confirm it), stop execution
 4. REDIRECT - Claude is off-track, send a correction (include the correction)
 5. ESCALATE - There's a problem that needs human attention
-
-IMPORTANT: Only mark COMPLETE if ALL criteria are verified as met.
-If tasks remain incomplete but criteria are met, still mark COMPLETE.
-If criteria cannot be verified, use REPLY to ask Claude to verify them.
 
 Return JSON only:
 {
   "decision": "continue|reply|complete|redirect|escalate",
   "reasoning": "brief explanation",
   "message": "message to send if reply/redirect",
-  "completedTasks": [1, 2, 3],  // task numbers Claude completed (if any)
-  "metCriteria": [1, 2],        // criteria numbers verified as met (if any)
   "confidence": 0.0-1.0
 }`;
 
@@ -770,35 +921,6 @@ Return JSON only:
         parsed = { decision: EVALUATION_DECISION.CONTINUE, reasoning: "Parse error, continuing" };
       }
 
-      // Update goal manager with GPT's assessment of completed items
-      if (parsed.completedTasks?.length) {
-        const goalManager = getGoalManager();
-        const goalId = this.currentGoal?.id || this.currentGoal?.goalId;
-        const tasks = goalId ? goalManager.getTasks(goalId) : [];
-
-        for (const taskNum of parsed.completedTasks) {
-          const taskIndex = taskNum - 1;
-          if (tasks[taskIndex] && tasks[taskIndex].state !== TASK_STATE.COMPLETED) {
-            goalManager.completeTask(goalId, tasks[taskIndex].id, {
-              completedBy: "gpt-evaluation",
-              evaluation: parsed.reasoning
-            });
-          }
-        }
-      }
-
-      if (parsed.metCriteria?.length) {
-        const goalManager = getGoalManager();
-        const goalId = this.currentGoal?.id || this.currentGoal?.goalId;
-
-        for (const criterionNum of parsed.metCriteria) {
-          goalManager.markCriterionMet(goalId, criterionNum - 1, {
-            verifiedBy: "gpt-evaluation",
-            evaluation: parsed.reasoning
-          });
-        }
-      }
-
       // Record decision
       const decision = {
         timestamp: Date.now(),
@@ -815,13 +937,17 @@ Return JSON only:
       this.emit("decision", decision);
 
       // Update narrator
-      this.narrator.observe(`GPT-5.2 Evaluation: ${decision.decision} - ${decision.reasoning}`);
+      this.narrator.observe(`GPT Evaluation: ${decision.decision} - ${decision.reasoning}`);
 
       this.state = ORCHESTRATION_STATE.RUNNING;
       return decision;
 
     } catch (error) {
       console.error("[ClaudeOrchestrator] Evaluation error:", error.message);
+      // Fallback to evidence on GPT error
+      if (evidence.score >= 30) {
+        return { decision: EVALUATION_DECISION.COMPLETE, reasoning: `GPT error, evidence score ${evidence.score}` };
+      }
       return { decision: EVALUATION_DECISION.CONTINUE, reasoning: "Evaluation error" };
     }
   }

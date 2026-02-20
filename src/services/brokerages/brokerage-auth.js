@@ -72,8 +72,18 @@ export function getBrokerageStatuses() {
   const statuses = {};
   for (const [id, config] of Object.entries(BROKERAGES)) {
     const auth = loadAuth(id);
-    const connected = !!auth?.cookies?.length;
-    const expired = connected && isExpired(id);
+    // Empower is "connected" if it has cookies OR if personal-capital.json has data
+    let connected = !!auth?.cookies?.length;
+    if (!connected && id === "empower") {
+      try {
+        const pcPath = path.join(getDataDirNow(), "personal-capital.json");
+        if (fs.existsSync(pcPath)) {
+          const pc = JSON.parse(fs.readFileSync(pcPath, "utf-8"));
+          connected = !!pc.authenticated;
+        }
+      } catch {}
+    }
+    const expired = connected && auth?.cookies?.length && isExpired(id);
     statuses[id] = {
       label: config.label,
       connected,

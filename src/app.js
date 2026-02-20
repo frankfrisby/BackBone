@@ -5876,6 +5876,29 @@ Execute this task and provide concrete results.`);
         engineState.setStatus("building", "Managing projects...");
       }
 
+      // /restart - Restart the background server (picks up code changes)
+      if (resolved === "/restart") {
+        appendOutput("\n⟳ Restarting server...\n");
+        try {
+          const { restartApiServer } = await import("./services/api-server-client.js");
+          const ok = await restartApiServer();
+          appendOutput(ok ? "✓ Server restarted.\n" : "✗ Server failed to restart.\n");
+        } catch (err) {
+          appendOutput(`✗ Restart error: ${err.message}\n`);
+        }
+        return;
+      }
+
+      // /exit - Stop everything and exit
+      if (resolved === "/exit" || resolved === "/quit") {
+        appendOutput("\nShutting down...\n");
+        try {
+          const { stopApiServer } = await import("./services/api-server-client.js");
+          await stopApiServer();
+        } catch {}
+        process.exit(0);
+      }
+
       // /progress - Show overall progress score and goal completion status
       if (resolved === "/progress") {
         const tracker = getGoalTracker();

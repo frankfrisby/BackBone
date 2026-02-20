@@ -2328,12 +2328,12 @@ Be contextual. Be warm. Be useful. DO things, don't explain why you can't.`;
         console.log("[WhatsApp Webhook] Sent response to", userPhone, `(${chunks.length} chunks)`);
       } else {
         console.error("[WhatsApp Webhook] No response text from agentic CLI:", agenticError);
-        await whatsapp.sendMessage(userPhone, "ran into a snag processing that. try again in a sec?");
+        await whatsapp.sendMessage(userPhone, "🦴 ran into a snag processing that. try again in a sec?");
       }
     } catch (aiErr) {
       progress.stop();
       console.error("[WhatsApp Webhook] AI processing failed:", aiErr.message);
-      await whatsapp.sendMessage(userPhone, "something went wrong on my end. try again?");
+      await whatsapp.sendMessage(userPhone, "🦴 something went wrong on my end. try again?");
     }
   } catch (err) {
     console.error("[WhatsApp Webhook] Error:", err.message);

@@ -454,7 +454,7 @@ class WhatsAppPoller {
       } catch (err) {
         stopTyping();
         console.error("[WhatsAppPoller] Handler error:", err.message);
-        await this._sendResponse(from, "something went wrong on my end. try again?");
+        await this._sendResponse(from, "🦴 something went wrong on my end. try again?");
       }
       return;
     }

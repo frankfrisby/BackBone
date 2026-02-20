@@ -104,10 +104,11 @@ class ChatActionsManager extends EventEmitter {
     const lower = text.toLowerCase();
     if (!text) return null;
 
+    // Only intercept structured actions — NOT general AI requests like "build me a video"
+    // General requests should go through the full AI pipeline, not the action flow
     const actionSignals = [
-      "book", "reserve", "schedule", "send", "call", "search", "find", "look up",
-      "open", "create", "write", "update", "modify", "delete", "download",
-      "install", "run", "build", "use"
+      "book", "reserve", "schedule", "set a reminder", "add to calendar",
+      "delete event", "cancel event", "remove event"
     ];
     const isActionable = actionSignals.some(token => lower.includes(token));
     if (!isActionable) return { isActionable: false };

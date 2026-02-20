@@ -118,7 +118,9 @@ export function createProgressReporter(to, userMessage, opts = {}) {
   const sendRaw = async (text) => {
     if (stopped) return;
     try {
-      await wa.sendMessage(to, text);
+      // Prefix with 🦴 so user can distinguish AI from themselves (Baileys sends as user)
+      const prefixed = text.startsWith("🦴") ? text : `🦴 ${text}`;
+      await wa.sendMessage(to, prefixed);
     } catch (err) {
       console.log("[Progress] Send failed:", err.message);
     }

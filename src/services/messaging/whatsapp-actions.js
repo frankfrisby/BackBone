@@ -14,7 +14,8 @@ const safeSendProgress = async (sendProgress, text) => {
   const msg = toText(text);
   if (!msg) return;
   try {
-    await sendProgress(msg);
+    // Prefix with 🦴 so user can distinguish AI from themselves (Baileys sends as user)
+    await sendProgress(msg.startsWith("🦴") ? msg : `🦴 ${msg}`);
   } catch {}
 };
 

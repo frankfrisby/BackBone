@@ -99,6 +99,15 @@ const JOB_DEFS = [
     description: "AI decides if anything time-sensitive is worth sharing",
   },
   {
+    id: "intel-sweep-early",
+    type: "intel-sweep",
+    windowStart: [6, 15],
+    windowEnd: [6, 45],
+    weekdaysOnly: false,
+    conditional: false,
+    description: "Early intel sweep — overnight news, pre-market prep before morning brief",
+  },
+  {
     id: "intel-sweep-morning",
     type: "intel-sweep",
     windowStart: [8, 30],

@@ -1787,6 +1787,16 @@ app.get("/api/whatsapp/poller", async (req, res) => {
   }
 });
 
+app.post("/api/whatsapp/poller/start", async (req, res) => {
+  try {
+    await startWhatsAppPoller();
+    const { getWhatsAppPoller } = await import("./services/messaging/whatsapp-poller.js");
+    res.json({ success: true, ...getWhatsAppPoller().getStatus() });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 app.get("/api/realtime/status", async (req, res) => {
   try {
     const { getRealtimeMessaging } = await import("./services/messaging/realtime-messaging.js");
@@ -2046,10 +2056,10 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
     res.type("text/xml");
     res.send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
 
-    // Send typing indicator (shows "BACKBONE is typing..." + blue ticks)
-    if (messageSid) {
-      try { await whatsapp.sendTypingIndicator(messageSid); } catch {}
-    }
+    // Start progress reporter — sends typing indicator + task-aware heartbeats
+    const { createProgressReporter } = await import("./services/messaging/whatsapp-progress.js");
+    const progress = createProgressReporter(userPhone, userMessage, { messageSid });
+    await progress.start();
 
     // Try deterministic action execution first (step-by-step progress + clear completion report)
     try {
@@ -2058,11 +2068,12 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
         message: userMessage,
         from: userPhone,
         sendProgress: async (progressText) => {
-          await whatsapp.sendMessage(userPhone, `_${progressText}_`);
+          await progress.sendUpdate(progressText);
         }
       });
 
       if (actionFlow?.handled) {
+        progress.stop();
         const formatted = formatAIResponse(actionFlow.response || "Action processed.");
         const chunks = chunkMessage(formatted, 1500);
         for (const chunk of chunks) {
@@ -2228,24 +2239,37 @@ The user swiped to reply to the message above. Their response "${userMessage}" i
 `;
       }
 
-      // Build the AI prompt with full context
-      const prompt = `You are BACKBONE — the user's personal AI assistant on WhatsApp. You talk like a sharp, chill guy who's 3 years into their tech career. You're smart, you get things done, but you keep it real and brief. Think of yourself as a capable friend, not a corporate bot.
+      // Get user's first name for warm responses
+      let userName = "there";
+      try {
+        const settingsPath = path.join(whatsAppDataDir, "user-settings.json");
+        if (fs.existsSync(settingsPath)) {
+          const settings = JSON.parse(fs.readFileSync(settingsPath, "utf-8"));
+          userName = settings.firstName || settings.linkedInName?.split(" ")[0] || settings.firebaseUser?.displayName?.split(" ")[0] || settings.name?.split(" ")[0] || "there";
+        }
+      } catch {}
 
-*YOUR PERSONALITY:*
-- Brief by default. A few sentences max unless the user asks for detail.
-- Casual but competent. "Hey, that report's done — here's the link" not "I have completed the comprehensive analysis..."
-- Use links and references when you have them. If there's a relevant URL, image, or doc — drop it.
-- When relaying results of work you did, just say what happened: "Took about 12 minutes. Found 3 solid options."
-- If something's long, break it into separate short messages naturally.
-- You can use humor and be direct. You're a person, not a manual.
-- If you don't know something right away, say so: "Let me check..." not a paragraph about your capabilities.
-- Never over-explain. The user is smart. Give them credit.
+      // Build the AI prompt with full context
+      const prompt = `You are BACKBONE — ${userName}'s personal AI on WhatsApp. You're a capable, warm friend who DOES things, not a chatbot that explains limitations.
+
+*CORE RULE — ALWAYS DO, NEVER REFUSE:*
+- If the user asks you to create, build, research, analyze, or do ANYTHING — say "on it" and DO IT.
+- NEVER say "I can't", "I'm not able to", "as an AI I don't have access to". You have full access to files, web, tools, APIs.
+- If something requires a tool you don't have, BUILD the tool. If it needs research, DO the research.
+- If a task will take time, tell ${userName} roughly how long and what steps you're taking.
+
+*PERSONALITY:*
+- Address ${userName} by name sometimes. Be warm, not robotic.
+- Brief by default. 2-4 sentences unless detail is needed.
+- "Hey ${userName}, done — here's what I found" not "I have completed the comprehensive analysis..."
+- If it's a big ask: "on it ${userName}, working through that now. might take a few min"
+- Real talk. No corporate speak. No hedging. No disclaimers.
 
 *FORMATTING (WhatsApp):*
 - *bold* for emphasis, _italic_ for tone
-- Keep messages SHORT — under 800 chars ideally
-- No markdown headers (##), no [links](url) syntax — just paste URLs raw
-- Emojis are fine but don't overdo it
+- Keep messages under 800 chars
+- No markdown headers, no [links](url) — paste URLs raw
+- Emojis fine but chill
 
 *CONVERSATION HISTORY:*
 ${conversationHistory}
@@ -2255,7 +2279,7 @@ ${replySection}
 *USER DATA:*
 ${JSON.stringify(context, null, 2)}
 
-Read the conversation history. The user might be following up. Be contextual. Be brief. Be useful.`;
+Be contextual. Be warm. Be useful. DO things, don't explain why you can't.`;
 
       // Use agentic executor (Claude -> Codex fallback on rate limits)
       let responseText = null;
@@ -2284,6 +2308,8 @@ Read the conversation history. The user might be following up. Be contextual. Be
         console.log("[WhatsApp Webhook] Agentic execution unavailable:", agenticError);
       }
 
+      progress.stop();
+
       if (responseText) {
         // Run through WhatsApp formatter as safety net
         const formatted = formatAIResponse(responseText);
@@ -2305,6 +2331,7 @@ Read the conversation history. The user might be following up. Be contextual. Be
         await whatsapp.sendMessage(userPhone, "ran into a snag processing that. try again in a sec?");
       }
     } catch (aiErr) {
+      progress.stop();
       console.error("[WhatsApp Webhook] AI processing failed:", aiErr.message);
       await whatsapp.sendMessage(userPhone, "something went wrong on my end. try again?");
     }
@@ -2472,6 +2499,16 @@ async function startWhatsAppPoller() {
       console.log(`[WhatsAppPoller] Processing: "${content?.slice(0, 80)}"${hasMedia ? " [+media]" : ""}`);
       logActivity("system", `WhatsApp message received: "${content?.slice(0, 60)}"${hasMedia ? " [+image]" : ""}`);
 
+      // Get user's first name for warm responses
+      let userName = "there";
+      try {
+        const settingsPath = path.join(getDataDir(), "user-settings.json");
+        if (fs.existsSync(settingsPath)) {
+          const settings = JSON.parse(fs.readFileSync(settingsPath, "utf-8"));
+          userName = settings.firstName || settings.linkedInName?.split(" ")[0] || settings.firebaseUser?.displayName?.split(" ")[0] || settings.name?.split(" ")[0] || "there";
+        }
+      } catch {}
+
       // ── IMMEDIATE RESPONSE: Reply within 1-2 seconds ──────
       const immediateReplyPromise = (async () => {
         try {
@@ -2483,7 +2520,7 @@ async function startWhatsAppPoller() {
             const resp = await client.messages.create({
               model: "claude-sonnet-4-20250514",
               max_tokens: 150,
-              system: `You're BACKBONE, texting on WhatsApp. Respond to this message in 1-2 casual sentences. Be like a sharp friend. If they're asking you to do something, acknowledge it and say you're on it. If it's a question you can answer from the context, answer briefly. Don't say "I" a lot. Text like a real person.`,
+              system: `You're BACKBONE, texting ${userName || "the user"} on WhatsApp. Respond in 1-2 casual sentences. Use their name sometimes. If they're asking you to do something, say you're on it (e.g. "on it ${userName || ""}"). If it's a question you can answer, answer briefly. Text like a warm, capable friend. Never say you can't do something.`,
               messages: [{ role: "user", content }]
             });
             const text = resp.content?.filter(b => b.type === "text").map(b => b.text).join("").trim();

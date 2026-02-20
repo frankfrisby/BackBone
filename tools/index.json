@@ -252,6 +252,24 @@
       ]
     },
     {
+      "id": "chart-analyzer",
+      "name": "TradingView Chart Analyzer",
+      "description": "Visual chart analysis — screenshots TradingView charts, scrapes financials/technicals, uses AI vision to assess patterns and adjust convictions",
+      "category": "trading",
+      "file": "chart-analyzer.js",
+      "inputs": {
+        "count": { "type": "number", "default": 5, "description": "Top N tickers to analyze" },
+        "symbols": { "type": "string", "description": "Comma-separated override list (e.g., NVDA,AAPL)" },
+        "headless": { "type": "boolean", "default": true, "description": "Run browser headless" },
+        "adjustScores": { "type": "boolean", "default": true, "description": "Auto-adjust convictions based on analysis" }
+      },
+      "examples": [
+        { "count": 5 },
+        { "symbols": "NVDA,AAPL,MSFT", "headless": false },
+        { "count": 3, "adjustScores": false }
+      ]
+    },
+    {
       "id": "enrich-linkedin-profile",
       "name": "Enrich LinkedIn Profile",
       "description": "Enrich any user's LinkedIn profile from public web sources. Two-phase: plan (get search queries) then enrich (save results).",

@@ -709,6 +709,17 @@ export class RealtimeMessaging extends EventEmitter {
         // Private messages should still be processed, but not shown in UI
         message._silent = message.private === true || message.showInApp === false;
 
+        // Skip WhatsApp messages early — let the poller handle them
+        // MUST happen before dedup claim, otherwise we claim it here and poller can't process it
+        const isWhatsApp = message.channel?.includes("whatsapp") ||
+                           message.source?.includes("whatsapp") ||
+                           message.channel === "twilio_whatsapp";
+        if (isWhatsApp) {
+          console.log(`[RealtimeMessaging] WhatsApp message — deferring to poller: "${(message.content || "").slice(0, 60)}"`);
+          this.processedMessageIds.add(messageId);
+          continue;
+        }
+
         // Global dedup — skip if poller/webhook already handling this
         try {
           const { claim, claimByContent } = await import("./message-dedup.js");

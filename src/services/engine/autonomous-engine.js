@@ -17,6 +17,7 @@ import { getSkillDiscovery } from "./skill-discovery.js";
 import { matchGoalToAgent } from "./agent-dispatcher.js";
 import { notifyProgress, notifyBlocked, sendWhatsApp, askUser } from "../messaging/proactive-outreach.js";
 import { advancePipeline, getPipeline, getDeliveryAction } from "./task-pipeline.js";
+import { detectCapabilityNeed } from "./tool-forge-agent.js";
 
 import { getDataDir, dataFile } from "../paths.js";
 /**
@@ -1308,6 +1309,39 @@ export class AutonomousEngine extends EventEmitter {
 
               // Escalation after 3 failed attempts — ask user whether to continue or drop
               if (!result.success && attemptInfo.count >= 3) {
+                // ── Tool Forge: detect capability gaps before escalating ──
+                const isToolForgeGoal = this.currentGoal?.agentId === "tool-forge";
+                if (!isToolForgeGoal && attemptInfo.count >= 2) {
+                  try {
+                    const capNeed = detectCapabilityNeed(result.output || result.error);
+                    if (capNeed) {
+                      console.log(`[AutonomousEngine] Capability gap detected: ${capNeed.description}`);
+                      // Create a tool-forge goal to build the missing tool
+                      if (this.goalManager) {
+                        const forgeGoalId = `goal_forge_${Date.now()}`;
+                        this.goalManager.addGoal?.({
+                          id: forgeGoalId,
+                          title: `Build tool: ${capNeed.description}`,
+                          category: "personal",
+                          priority: 1,
+                          status: "active",
+                          agentId: "tool-forge",
+                          _forgeContext: {
+                            originalGoalId: goalId,
+                            originalGoalTitle: this.currentGoal.title,
+                            description: capNeed.description,
+                            errorOutput: (result.output || result.error || "").slice(0, 500),
+                          },
+                          createdAt: new Date().toISOString(),
+                        });
+                        console.log(`[AutonomousEngine] Created tool-forge goal: ${forgeGoalId}`);
+                      }
+                    }
+                  } catch (forgeErr) {
+                    console.error(`[AutonomousEngine] Tool forge detection error: ${forgeErr.message}`);
+                  }
+                }
+
                 console.log(`[AutonomousEngine] 3+ failed attempts — escalating to user`);
                 askUser(
                   `I've tried "${this.currentGoal.title}" ${attemptInfo.count} times without success. Should I keep trying or drop it?`,

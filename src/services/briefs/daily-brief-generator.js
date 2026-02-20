@@ -1501,7 +1501,9 @@ function saveBriefState(state) {
  * @param {string} type - "morning" or "evening"
  */
 export async function generateAndDeliverBrief(type = "morning") {
-  const today = new Date().toISOString().split("T")[0];
+  // Use local date (not UTC) so evening briefs don't block next morning's brief
+  const now = new Date();
+  const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
 
   // Check if already sent today for this type
   const state = loadBriefState();

@@ -375,7 +375,8 @@ class WhatsAppNotifications extends EventEmitter {
    * @param {Object} [options] - { mediaUrl } for chart image attachment
    */
   async sendMorningBrief(briefOrText, options = {}) {
-    const today = new Date().toISOString().split("T")[0];
+    const now = new Date();
+    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
 
     // Only send once per day
     if (this.lastMorningBrief === today) {
@@ -425,7 +426,8 @@ class WhatsAppNotifications extends EventEmitter {
    * @param {Object} [options] - { mediaUrl } for chart image attachment
    */
   async sendEveningBrief(messageText, options = {}) {
-    const today = new Date().toISOString().split("T")[0];
+    const now = new Date();
+    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
 
     if (this.lastEveningBrief === today) {
       return { success: false, error: "Already sent today", duplicate: true };

@@ -48,6 +48,12 @@
         "src/mcp/projects-server.js"
       ]
     },
+    "backbone-tools": {
+      "command": "node",
+      "args": [
+        "src/mcp/tools-server.js"
+      ]
+    },
     "backbone-trading": {
       "command": "node",
       "args": [

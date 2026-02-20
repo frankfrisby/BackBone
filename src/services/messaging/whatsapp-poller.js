@@ -418,55 +418,13 @@ class WhatsAppPoller {
     this.stats.lastMessage = { from, content: content.slice(0, 100), time: new Date().toISOString() };
     this.stats.processed++;
 
-    // Typing indicator — try Twilio API but don't rely on it
-    const wa = getTwilioWhatsApp();
+    // Progress reporter — typing indicator + task-aware heartbeats
+    const { createProgressReporter } = await import("./whatsapp-progress.js");
+    const progress = createProgressReporter(from, content, { messageSid: sid });
+    await progress.start();
 
-    const startTyping = async () => {
-      try { await wa.sendTypingIndicator(sid); } catch {}
-    };
-
-    await startTyping();
-
-    // Heartbeat: typing indicator → pause → message → typing indicator → repeat
-    // Looks like the AI is composing, then sends a status, then keeps typing
-    const heartbeatStart = Date.now();
-    let heartbeatCount = 0;
-    const heartbeats = [
-      "_thinking..._",
-      "_still working on it..._",
-      "_almost there..._",
-    ];
-    const heartbeatInterval = setInterval(async () => {
-      const elapsed = Date.now() - heartbeatStart;
-      if (heartbeatCount >= 3) {
-        // After all heartbeats sent, just keep refreshing typing indicator
-        await startTyping();
-        return;
-      }
-      if (heartbeatCount === 0 && elapsed < 15000) {
-        // Keep refreshing typing indicator until first heartbeat
-        await startTyping();
-        return;
-      }
-      if (heartbeatCount > 0 && elapsed < 15000 + heartbeatCount * 20000) {
-        await startTyping();
-        return;
-      }
-      // Time for a heartbeat: show typing → send message → show typing again
-      try {
-        await startTyping();
-        await new Promise(r => setTimeout(r, 1500)); // Pause like composing
-        await this._sendRawMessage(from, heartbeats[heartbeatCount] || "_still on it..._");
-        heartbeatCount++;
-        await new Promise(r => setTimeout(r, 500));
-        await startTyping(); // Back to typing after the message
-      } catch {}
-    }, 3000);
-    if (typeof heartbeatInterval.unref === "function") heartbeatInterval.unref();
-
-    const stopTyping = () => {
-      clearInterval(heartbeatInterval);
-    };
+    const startTyping = progress.startTyping;
+    const stopTyping = progress.stop;
 
     // If we have a custom message handler, use it
     if (this.messageHandler) {
@@ -483,6 +441,7 @@ class WhatsAppPoller {
           // Pass typing control to handler so it can restart typing after sending messages
           startTyping,
           stopTyping,
+          sendUpdate: progress.sendUpdate,
         });
         stopTyping();
 

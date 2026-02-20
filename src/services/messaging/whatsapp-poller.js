@@ -427,8 +427,8 @@ class WhatsAppPoller {
 
     await startTyping();
 
-    // Heartbeat: send periodic status messages so user knows we're alive
-    // Twilio typing indicator caps at ~15s, so real messages are the only reliable signal
+    // Heartbeat: typing indicator → pause → message → typing indicator → repeat
+    // Looks like the AI is composing, then sends a status, then keeps typing
     const heartbeatStart = Date.now();
     let heartbeatCount = 0;
     const heartbeats = [
@@ -438,16 +438,30 @@ class WhatsAppPoller {
     ];
     const heartbeatInterval = setInterval(async () => {
       const elapsed = Date.now() - heartbeatStart;
-      // First heartbeat at 20s, then every 25s, max 3
-      if (heartbeatCount >= 3) return;
-      if (heartbeatCount === 0 && elapsed < 20000) return;
-      if (heartbeatCount > 0 && elapsed < 20000 + heartbeatCount * 25000) return;
+      if (heartbeatCount >= 3) {
+        // After all heartbeats sent, just keep refreshing typing indicator
+        await startTyping();
+        return;
+      }
+      if (heartbeatCount === 0 && elapsed < 15000) {
+        // Keep refreshing typing indicator until first heartbeat
+        await startTyping();
+        return;
+      }
+      if (heartbeatCount > 0 && elapsed < 15000 + heartbeatCount * 20000) {
+        await startTyping();
+        return;
+      }
+      // Time for a heartbeat: show typing → send message → show typing again
       try {
+        await startTyping();
+        await new Promise(r => setTimeout(r, 1500)); // Pause like composing
         await this._sendRawMessage(from, heartbeats[heartbeatCount] || "_still on it..._");
         heartbeatCount++;
-        await startTyping(); // Try to restart typing after each message
+        await new Promise(r => setTimeout(r, 500));
+        await startTyping(); // Back to typing after the message
       } catch {}
-    }, 5000);
+    }, 3000);
     if (typeof heartbeatInterval.unref === "function") heartbeatInterval.unref();
 
     const stopTyping = () => {

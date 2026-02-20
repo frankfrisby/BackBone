@@ -99,6 +99,33 @@ const JOB_DEFS = [
     description: "AI decides if anything time-sensitive is worth sharing",
   },
   {
+    id: "intel-sweep-morning",
+    type: "intel-sweep",
+    windowStart: [8, 30],
+    windowEnd: [9, 15],
+    weekdaysOnly: false,
+    conditional: false,
+    description: "Morning intel sweep — news on portfolio, tickers, goals, beliefs",
+  },
+  {
+    id: "intel-sweep-midday",
+    type: "intel-sweep",
+    windowStart: [12, 30],
+    windowEnd: [13, 30],
+    weekdaysOnly: false,
+    conditional: false,
+    description: "Midday intel sweep — market moves, goal-relevant developments",
+  },
+  {
+    id: "intel-sweep-evening",
+    type: "intel-sweep",
+    windowStart: [17, 30],
+    windowEnd: [18, 30],
+    weekdaysOnly: false,
+    conditional: false,
+    description: "Evening intel sweep — after-hours news, next-day prep",
+  },
+  {
     id: "context-sync-morning",
     type: "context-sync",
     windowStart: [7, 0],
@@ -392,6 +419,9 @@ class ProactiveScheduler extends EventEmitter {
         case "brokerage":
           result = await this._executeBrokerageSync(job.def);
           break;
+        case "intel-sweep":
+          result = await this._executeIntelSweep(job.def);
+          break;
         default:
           result = { success: false, error: `Unknown type: ${job.def.type}` };
       }
@@ -399,8 +429,8 @@ class ProactiveScheduler extends EventEmitter {
       job.lastResult = result;
 
       if (result.success) {
-        // Context sync and brokerage sync don't send chat messages — don't count against daily cap
-        if (job.def.type !== "context-sync" && job.def.type !== "brokerage") {
+        // Silent jobs don't send chat messages — don't count against daily cap
+        if (job.def.type !== "context-sync" && job.def.type !== "brokerage" && job.def.type !== "intel-sweep") {
           this.dailyMessageCount++;
         }
         this.emit("job-fired", { jobId: id, type: job.def.type, result });
@@ -858,6 +888,33 @@ Return ONLY the message text or "SKIP".`;
       return { success: false, error: result.message };
     } catch (err) {
       console.error(`${TAG} Brokerage sync error:`, err.message);
+      return { success: false, error: err.message };
+    }
+  }
+
+  // ── Intel Sweep execution (silent — no messages) ────────────
+
+  async _executeIntelSweep(def) {
+    try {
+      const { runIntelSweep } = await import("../engine/intel-sweep.js");
+      const result = await runIntelSweep();
+
+      if (result.skipped) {
+        return { success: false, skipped: true, reason: "No topics to search" };
+      }
+
+      // Signal the engine that new intel is available
+      if (result.success && result.findingsCount > 0) {
+        try {
+          const { getAutonomousEngine } = await import("../engine/autonomous-engine.js");
+          const engine = getAutonomousEngine();
+          if (engine) engine.signalChange("intel-sweep");
+        } catch {}
+      }
+
+      return result;
+    } catch (err) {
+      console.error(`${TAG} Intel sweep error:`, err.message);
       return { success: false, error: err.message };
     }
   }

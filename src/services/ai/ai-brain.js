@@ -659,16 +659,31 @@ Is the goal complete? Answer with JSON only:
     try {
       const context = await this.gatherContext();
 
+      // Pull in fresh intel if available
+      let intelSection = "";
+      try {
+        const { getActionableIntel, getLatestIntel } = await import("../engine/intel-sweep.js");
+        const intel = getLatestIntel(12 * 60 * 60 * 1000); // last 12 hours
+        if (intel.findings && intel.findings.length > 0) {
+          const relevant = intel.findings.slice(-10).map(f =>
+            `- [${f.type}] ${f.headline || f.query}${f.actionable ? " ⚡" : ""}${f.detail ? ": " + f.detail.slice(0, 150) : ""}`
+          ).join("\n");
+          intelSection = `\n\nRECENT INTEL (from today's web searches):\n${relevant}`;
+        }
+      } catch {}
+
       const prompt = `Analyze the user's data and suggest 2-3 specific, actionable goals.
 
 User Context:
-${JSON.stringify(context, null, 2)}
+${JSON.stringify(context, null, 2)}${intelSection}
 
-Generate goals that:
-1. Are specific and measurable
-2. Can be worked on autonomously
-3. Align with the user's current situation
-4. Are achievable with the available tools (WebSearch, Read, Write, Bash, SendWhatsApp)
+CRITICAL RULES:
+1. NEVER change or question the user's core beliefs or existing goals — they are sacred
+2. Generate NEW goals that SUPPORT and ADVANCE the user's existing beliefs and goals
+3. Use the recent intel above to create timely, relevant goals (e.g., earnings coming up → research that stock)
+4. Goals must be specific, measurable, and achievable with available tools (WebSearch, Read, Write, Bash, SendWhatsApp)
+5. Prioritize goals that respond to NEW information (intel findings marked ⚡ are actionable)
+6. If nothing new warrants action, return an empty goals array — don't invent busywork
 
 Return JSON only:
 {

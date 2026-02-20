@@ -2740,118 +2740,106 @@ Put these at the END of your message. Ask if details are missing.
 
 Don't force multiple messages if one short one works.`;
 
-      // ── Immediate contextual ack — user knows we're alive ──
+      // ── Determine if this needs deep work or just a quick reply ──
       const hasUrl = /https?:\/\/[^\s]+/i.test(content);
-      const needsTools = hasUrl || /search|look up|find out|research|buy|sell|trade|create|schedule|send|email|check the|what'?s (happening|going on)|latest news|analyze|report|compare|deep dive/i.test(content);
-      const isCreation = /create|make|build|generate|write|design|produce/i.test(content);
-      const isQuestion = /\?|what|how|why|when|where|who|tell me|show me/i.test(content);
+      const needsTools = hasUrl || /search|look up|find out|research|buy|sell|trade|create|schedule|send|email|check the|what'?s (happening|going on)|latest news|analyze|report|compare|deep dive|make me|build me|generate/i.test(content);
 
-      // Pick a contextual ack based on what they asked
-      let ack;
-      if (isCreation) {
-        const createAcks = [
-          "yeah I can do that, gimme a min",
-          "on it — let me put that together",
-          "bet, working on it now",
-          "got it, building that out rn",
-        ];
-        ack = createAcks[Math.floor(Math.random() * createAcks.length)];
-      } else if (hasUrl) {
-        ack = "lemme check that link out";
-      } else if (needsTools) {
-        const toolAcks = ["lemme look into that", "checking now...", "one sec, pulling that up", "digging into it rn"];
-        ack = toolAcks[Math.floor(Math.random() * toolAcks.length)];
-      } else if (isQuestion) {
-        const qAcks = ["hmm let me think", "one sec", "good question, lemme check"];
-        ack = qAcks[Math.floor(Math.random() * qAcks.length)];
-      } else {
-        ack = null; // Simple greetings/chat — no ack needed, fast path handles it
-      }
-
-      if (ack) {
-        try {
-          const { getTwilioWhatsApp } = await import("./services/messaging/twilio-whatsapp.js");
-          const wa = getTwilioWhatsApp();
-          if (wa.initialized) await wa.sendMessage(from, ack);
-        } catch {}
-      }
-
-      // FAST PATH: Use direct Anthropic API for conversational responses (2-5s)
-      // SLOW PATH: Use CLI only when tools are needed (web search, file ops, trading)
+      // ALWAYS respond fast first — use direct API to generate an intelligent reply
+      // If deep work is needed, this becomes the "ack" and CLI runs in background
       let finalResponse = null;
+      let fastResponse = null;
 
-      if (!needsTools) {
-        // Fast path — direct API call, no CLI spawn
-        try {
-          const { getClaudeConfig } = await import("./services/ai/claude.js");
-          const config = getClaudeConfig();
-          if (config.ready) {
-            const Anthropic = (await import("@anthropic-ai/sdk")).default;
-            const client = new Anthropic({ apiKey: config.apiKey });
-            const startMs = Date.now();
-            const apiMessages = [{ role: "user", content: extraContext ? `${content}\n${extraContext}` : content }];
-            const response = await client.messages.create({
-              model: "claude-sonnet-4-20250514",
-              max_tokens: 800,
-              system: prompt,
-              messages: apiMessages
-            });
-            const text = response.content?.filter(b => b.type === "text").map(b => b.text).join("\n").trim();
-            if (text) {
+      try {
+        const { getClaudeConfig } = await import("./services/ai/claude.js");
+        const config = getClaudeConfig();
+        if (config.ready) {
+          const Anthropic = (await import("@anthropic-ai/sdk")).default;
+          const client = new Anthropic({ apiKey: config.apiKey });
+          const startMs = Date.now();
+
+          // If needs tools, tell the AI to acknowledge and say what it'll do
+          // If simple chat, just answer normally
+          const fastPrompt = needsTools
+            ? `${prompt}\n\nIMPORTANT: The user's request needs deeper work (research, creation, web lookup, etc). You CAN'T do that work right now — just respond naturally acknowledging what they asked and let them know you're on it. Be specific about WHAT you're going to do, not generic. Example: "yo yeah I can put together that video about AI — gimme like 5-10 min to get it done". Keep it to 1-2 sentences max.`
+            : prompt;
+
+          const apiMessages = [{ role: "user", content: extraContext ? `${content}\n${extraContext}` : content }];
+          const response = await client.messages.create({
+            model: "claude-sonnet-4-20250514",
+            max_tokens: needsTools ? 200 : 800,
+            system: fastPrompt,
+            messages: apiMessages
+          });
+          const text = response.content?.filter(b => b.type === "text").map(b => b.text).join("\n").trim();
+          if (text) {
+            fastResponse = text;
+            console.log(`[WhatsAppPoller] Fast API response in ${Date.now() - startMs}ms`);
+
+            if (!needsTools) {
+              // Simple chat — fast response IS the final response
               finalResponse = text;
-              console.log(`[WhatsAppPoller] Fast API response in ${Date.now() - startMs}ms`);
             }
           }
-        } catch (apiErr) {
-          console.log(`[WhatsAppPoller] Fast API failed, falling back to CLI: ${apiErr.message}`);
         }
+      } catch (apiErr) {
+        console.log(`[WhatsAppPoller] Fast API failed: ${apiErr.message}`);
       }
 
-      // Slow path — CLI with tools (only if fast path didn't work or tools needed)
-      if (!finalResponse) {
+      // If needs tools: send fast response immediately, then do the real work
+      if (needsTools) {
+        // Send the intelligent ack right away
+        if (fastResponse) {
+          try {
+            const { getTwilioWhatsApp } = await import("./services/messaging/twilio-whatsapp.js");
+            const { formatAIResponse } = await import("./services/messaging/whatsapp-formatter.js");
+            const wa = getTwilioWhatsApp();
+            if (wa.initialized) await wa.sendMessage(from, formatAIResponse(fastResponse));
+            messageLog.addAssistantMessage(fastResponse, MESSAGE_CHANNEL.WHATSAPP);
+          } catch {}
+        }
+
+        // Now do the real work via CLI
         try {
           const { executeAgenticTask, getAgenticCapabilities } = await import("./services/ai/multi-ai.js");
           const capabilities = await getAgenticCapabilities();
           if (capabilities.available) {
-            // Build a TASK prompt — tells CLI to DO the work, not just chat about it
             const taskPrompt = `You are BACKBONE, an autonomous AI agent. The user sent this request via WhatsApp:
 
 "${content}"
 ${extraContext ? `\nAdditional context:\n${extraContext}` : ""}
 ${conversationHistory ? `\nRecent conversation:\n${conversationHistory}` : ""}
 
+You already told the user: "${fastResponse || "working on it"}"
+Now DO the actual work.
+
 INSTRUCTIONS:
 1. Actually DO what the user is asking. You have full access to the filesystem, web, CLI tools, and MCP servers.
 2. If they ask to create something (video, document, code, file) — create it. Use the tools on this machine.
 3. If they ask to research something — do the research using web search, file reads, APIs.
 4. If they ask to check/analyze something — run the analysis and provide real results.
-5. You know this user well (see context below). If the request is clear enough, just go do it autonomously. Don't hesitate. Make reasonable assumptions based on what you know about them.
-6. If the request is genuinely ambiguous and you'd produce the wrong thing without clarification, ask ONE short question at the start of your response, then say what you'll do in the meantime.
-7. After completing the work, write a SHORT casual summary of what you did and any results.
+5. You know this user well (see context below). Just go do it autonomously. Make reasonable assumptions.
+6. After completing the work, write a SHORT casual follow-up summary of what you did and any results/links.
    - Talk like a normal person texting. Not corporate. Not AI-sounding.
-   - Example: "done — made a 3 min video script and saved it to projects/ai-video/. want me to generate the voiceover too?"
-8. Keep the summary under 4 sentences unless the results need more detail.
+   - Example: "aight done — made a 3 min video script and saved it to projects/ai-video/. want me to generate the voiceover too?"
+7. Keep the follow-up under 4 sentences unless the results need more detail.
 ${JSON.stringify(context, null, 2) !== "{}" ? `\nUser context:\n${JSON.stringify(context, null, 2)}` : ""}`;
 
             // Stream progress updates to WhatsApp during long work
             let lastProgressAt = Date.now();
             let progressCount = 0;
             const onProgress = (event) => {
-              if (!event?.text || progressCount >= 3) return; // max 3 progress updates
+              if (!event?.text || progressCount >= 3) return;
               const now = Date.now();
-              if (now - lastProgressAt < 15000) return; // no more than one every 15s
+              if (now - lastProgressAt < 15000) return;
               const text = event.text || "";
-              // Only send updates for meaningful tool actions
               const toolMatch = text.match(/^\[Tool\] (\w+):/);
               if (toolMatch) {
                 const toolName = toolMatch[1];
                 const updates = {
                   WebSearch: "searching the web...",
                   WebFetch: "pulling that page up...",
-                  Read: "reading some files...",
                   Write: "writing something up...",
                   Bash: "running something...",
-                  Grep: "digging through the code...",
                 };
                 const msg = updates[toolName];
                 if (msg) {
@@ -2878,8 +2866,14 @@ ${JSON.stringify(context, null, 2) !== "{}" ? `\nUser context:\n${JSON.stringify
         }
       }
 
-      if (!finalResponse) {
+      if (!finalResponse && !fastResponse) {
         finalResponse = "Hmm, hit a wall on that one. Try again in a sec?";
+      } else if (!finalResponse && fastResponse && needsTools) {
+        // Fast ack was already sent, CLI failed — let user know
+        finalResponse = "ran into an issue trying to get that done. wanna try again or give me more details?";
+      } else if (!finalResponse && fastResponse) {
+        // Fast response was the final answer (shouldn't happen but just in case)
+        return fastResponse;
       }
 
       // Process calendar action tags

@@ -326,8 +326,8 @@ class WhatsAppPoller {
 
     // Global dedup — prevent webhook/realtime from also processing this message
     try {
-      const { claim } = await import("./message-dedup.js");
-      if (!claim(sid, "poller")) {
+      const { claim, claimByContent } = await import("./message-dedup.js");
+      if (!claim(sid, "poller") || !claimByContent(content, "poller")) {
         console.log(`[WhatsAppPoller] Message ${sid} already claimed by another processor, skipping`);
         return;
       }
@@ -418,37 +418,45 @@ class WhatsAppPoller {
     this.stats.lastMessage = { from, content: content.slice(0, 100), time: new Date().toISOString() };
     this.stats.processed++;
 
-    // Send typing indicator and keep it alive while processing
+    // Persistent typing indicator — refreshes every 5s so it never drops
     const wa = getTwilioWhatsApp();
-    let sentTyping = false;
-    try {
-      const typingResult = await wa.sendTypingIndicator(sid);
-      sentTyping = typingResult.success;
-    } catch {}
+    const baileys = wa.baileysService;
+    const userPhone = from;
 
-    if (!sentTyping && !this._isActiveConversation()) {
+    // Start typing immediately
+    const startTyping = async () => {
       try {
-        const ack = this._pickThinkingMessage();
-        await this._sendRawMessage(from, `_${ack}_`);
+        if (baileys?.connected) {
+          await baileys.sendTypingIndicator(userPhone, -1); // -1 = persistent, no auto-pause
+        } else {
+          await wa.sendTypingIndicator(sid);
+        }
       } catch {}
-    }
+    };
 
-    // Keep typing indicator alive every 8s + send "still working" after 30s
+    await startTyping();
+
+    // Refresh typing every 5s to keep it visible
     const typingStart = Date.now();
     let sentStillWorking = false;
     const typingInterval = setInterval(async () => {
-      try {
-        await wa.sendTypingIndicator(sid);
-      } catch {}
-      // After 30s, send a brief nudge (once)
+      await startTyping();
+      // After 30s, let user know we're still on it (once)
       if (!sentStillWorking && Date.now() - typingStart > 30000) {
         sentStillWorking = true;
-        try { await this._sendRawMessage(from, "_Still working on it..._"); } catch {}
+        try { await this._sendRawMessage(from, "_Still on it..._"); } catch {}
+        await startTyping(); // Re-show typing after sending the message
       }
-    }, 8000);
+    }, 5000);
     if (typeof typingInterval.unref === "function") typingInterval.unref();
 
-    const stopTyping = () => clearInterval(typingInterval);
+    const stopTyping = () => {
+      clearInterval(typingInterval);
+      // Explicitly stop the indicator
+      if (baileys?.connected) {
+        baileys.stopTypingIndicator(userPhone).catch(() => {});
+      }
+    };
 
     // If we have a custom message handler, use it
     if (this.messageHandler) {
@@ -769,6 +777,15 @@ Read the conversation history. The user might be following up. Be contextual. Be
     try {
       const wa = getTwilioWhatsApp();
       if (!wa.initialized) return;
+
+      // Show typing briefly before response so user sees "about to reply"
+      try {
+        const baileys = wa.baileysService;
+        if (baileys?.connected) {
+          await baileys.sendTypingIndicator(to, 2000);
+        }
+      } catch {}
+      await new Promise(r => setTimeout(r, 800)); // Brief natural pause
 
       const formatted = formatAIResponse(text);
       const chunks = chunkMessage(formatted, 1500);

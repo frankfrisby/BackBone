@@ -2024,8 +2024,10 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
 
     // Global dedup — prevent poller/realtime from also processing this message
     try {
-      const { claim } = await import("./services/messaging/message-dedup.js");
-      if (!claim(messageSid || userMessage, "webhook")) {
+      const { claim, claimByContent } = await import("./services/messaging/message-dedup.js");
+      const idClaimed = messageSid ? claim(messageSid, "webhook") : true;
+      const contentClaimed = claimByContent(userMessage, "webhook");
+      if (!idClaimed || !contentClaimed) {
         console.log("[WhatsApp Webhook] Already claimed by another processor, skipping");
         res.type("text/xml");
         res.send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');

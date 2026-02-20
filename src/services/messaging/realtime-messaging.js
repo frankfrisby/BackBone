@@ -711,9 +711,11 @@ export class RealtimeMessaging extends EventEmitter {
 
         // Global dedup — skip if poller/webhook already handling this
         try {
-          const { claim } = await import("./message-dedup.js");
+          const { claim, claimByContent } = await import("./message-dedup.js");
           const dedupKey = message.twilioMessageId || messageId;
-          if (!claim(dedupKey, "realtime")) {
+          const idOk = claim(dedupKey, "realtime");
+          const contentOk = claimByContent(message.content, "realtime");
+          if (!idOk || !contentOk) {
             console.log(`[RealtimeMessaging] Message ${messageId} already claimed, skipping`);
             this.processedMessageIds.add(messageId);
             continue;

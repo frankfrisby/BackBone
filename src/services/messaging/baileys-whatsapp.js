@@ -435,17 +435,45 @@ class BaileysWhatsAppService extends EventEmitter {
     if (!jid) return { success: false, error: "Invalid phone number" };
 
     try {
+      // Cancel any previous auto-pause timer so it doesn't kill our new "composing"
+      if (this._typingPauseTimer) {
+        clearTimeout(this._typingPauseTimer);
+        this._typingPauseTimer = null;
+      }
+
       await this.socket.sendPresenceUpdate("composing", jid);
+
+      // If persistent flag is set, don't auto-pause (caller manages it)
+      if (durationMs === -1) {
+        return { success: true, provider: "baileys", persistent: true };
+      }
+
       const waitMs = Math.max(1000, Math.min(Number(durationMs) || 3500, 10000));
-      const pauseTimer = setTimeout(() => {
+      this._typingPauseTimer = setTimeout(() => {
         this.socket?.sendPresenceUpdate("paused", jid).catch(() => {});
+        this._typingPauseTimer = null;
       }, waitMs);
-      if (typeof pauseTimer.unref === "function") {
-        pauseTimer.unref();
+      if (typeof this._typingPauseTimer.unref === "function") {
+        this._typingPauseTimer.unref();
       }
       return { success: true, provider: "baileys" };
     } catch (err) {
       return { success: false, error: toError(err) };
+    }
+  }
+
+  /**
+   * Stop typing indicator immediately.
+   */
+  async stopTypingIndicator(to) {
+    if (this._typingPauseTimer) {
+      clearTimeout(this._typingPauseTimer);
+      this._typingPauseTimer = null;
+    }
+    if (!this.socket || !this.connected) return;
+    const jid = this.toJid(to);
+    if (jid) {
+      try { await this.socket.sendPresenceUpdate("paused", jid); } catch {}
     }
   }
 

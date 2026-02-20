@@ -2788,7 +2788,25 @@ Don't force multiple messages if one short one works.`;
           const { executeAgenticTask, getAgenticCapabilities } = await import("./services/ai/multi-ai.js");
           const capabilities = await getAgenticCapabilities();
           if (capabilities.available) {
-            const agentResult = await executeAgenticTask(prompt, process.cwd(), null, {
+            // Build a TASK prompt — tells CLI to DO the work, not just chat about it
+            const taskPrompt = `You are BACKBONE, an autonomous AI agent. The user sent this request via WhatsApp:
+
+"${content}"
+${extraContext ? `\nAdditional context:\n${extraContext}` : ""}
+${conversationHistory ? `\nRecent conversation:\n${conversationHistory}` : ""}
+
+INSTRUCTIONS:
+1. Actually DO what the user is asking. You have full access to the filesystem, web, CLI tools, and MCP servers.
+2. If they ask to create something (video, document, code, file) — create it. Use the tools on this machine.
+3. If they ask to research something — do the research using web search, file reads, APIs.
+4. If they ask to check/analyze something — run the analysis and provide real results.
+5. After completing the work, write a SHORT casual summary of what you did and any results.
+   - Talk like a normal person texting. Not corporate. Not AI-sounding.
+   - Example: "done — made a 3 min video script and saved it to projects/ai-video/. want me to generate the voiceover too?"
+6. Keep the summary under 4 sentences unless the results need more detail.
+${JSON.stringify(context, null, 2) !== "{}" ? `\nUser context:\n${JSON.stringify(context, null, 2)}` : ""}`;
+
+            const agentResult = await executeAgenticTask(taskPrompt, process.cwd(), null, {
               alwaysTryClaude: true,
               claudeTimeoutMs: 120000
             });

@@ -2468,12 +2468,11 @@ async function startWhatsAppPoller() {
 
     // Set the message handler — routes through unified intake pipeline
     poller.setMessageHandler(async (messageData) => {
-      const { from, content, hasMedia, mediaList } = messageData;
+      const { from, content, hasMedia, mediaList, startTyping, stopTyping } = messageData;
       console.log(`[WhatsAppPoller] Processing: "${content?.slice(0, 80)}"${hasMedia ? " [+media]" : ""}`);
       logActivity("system", `WhatsApp message received: "${content?.slice(0, 60)}"${hasMedia ? " [+image]" : ""}`);
 
       // ── IMMEDIATE RESPONSE: Reply within 1-2 seconds ──────
-      // Fire-and-forget: don't await, let processing continue in parallel
       const immediateReplyPromise = (async () => {
         try {
           const { getClaudeConfig } = await import("./services/ai/claude.js");
@@ -2494,6 +2493,8 @@ async function startWhatsAppPoller() {
               const wa = getTwilioWhatsApp();
               if (wa.initialized) await wa.sendMessage(from, formatAIResponse(text));
               messageLog.addAssistantMessage(text, MESSAGE_CHANNEL.WHATSAPP);
+              // Restart typing indicator after sending message
+              if (startTyping) await startTyping();
               return text;
             }
           }
@@ -2503,6 +2504,8 @@ async function startWhatsAppPoller() {
           const { getTwilioWhatsApp } = await import("./services/messaging/twilio-whatsapp.js");
           const wa = getTwilioWhatsApp();
           if (wa.initialized) await wa.sendMessage(from, "got it, one sec...");
+          // Restart typing indicator after sending message
+          if (startTyping) await startTyping();
         } catch {}
         return null;
       })();
@@ -2844,7 +2847,11 @@ Keep it short (2-4 sentences). Text like a real person. Use data when you have i
               progressCount++;
               import("./services/messaging/twilio-whatsapp.js").then(({ getTwilioWhatsApp }) => {
                 const wa = getTwilioWhatsApp();
-                if (wa.initialized) wa.sendMessage(from, `_${msg}_`).catch(() => {});
+                if (wa.initialized) {
+                  wa.sendMessage(from, `_${msg}_`).then(() => {
+                    if (startTyping) startTyping();  // Restart typing after progress message
+                  }).catch(() => {});
+                }
               }).catch(() => {});
             }
           }

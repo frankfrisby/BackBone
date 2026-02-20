@@ -470,16 +470,22 @@ class WhatsAppPoller {
           hasMedia,
           mediaList,
           repliedToContext,
+          // Pass typing control to handler so it can restart typing after sending messages
+          startTyping,
+          stopTyping,
         });
         stopTyping();
 
         if (responseText) {
+          // Restart typing briefly before sending final response
+          await startTyping();
+          await new Promise(r => setTimeout(r, 500));
           await this._sendResponse(from, responseText);
         }
       } catch (err) {
         stopTyping();
         console.error("[WhatsAppPoller] Handler error:", err.message);
-        await this._sendResponse(from, `Hit a snag processing that: _${err.message.slice(0, 100)}_\nTry again in a moment.`);
+        await this._sendResponse(from, "something went wrong on my end. try again?");
       }
       return;
     }

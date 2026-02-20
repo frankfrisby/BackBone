@@ -2472,6 +2472,41 @@ async function startWhatsAppPoller() {
       console.log(`[WhatsAppPoller] Processing: "${content?.slice(0, 80)}"${hasMedia ? " [+media]" : ""}`);
       logActivity("system", `WhatsApp message received: "${content?.slice(0, 60)}"${hasMedia ? " [+image]" : ""}`);
 
+      // ── IMMEDIATE RESPONSE: Reply within 1-2 seconds ──────
+      // Fire-and-forget: don't await, let processing continue in parallel
+      const immediateReplyPromise = (async () => {
+        try {
+          const { getClaudeConfig } = await import("./services/ai/claude.js");
+          const config = getClaudeConfig();
+          if (config.ready) {
+            const Anthropic = (await import("@anthropic-ai/sdk")).default;
+            const client = new Anthropic({ apiKey: config.apiKey });
+            const resp = await client.messages.create({
+              model: "claude-sonnet-4-20250514",
+              max_tokens: 150,
+              system: `You're BACKBONE, texting on WhatsApp. Respond to this message in 1-2 casual sentences. Be like a sharp friend. If they're asking you to do something, acknowledge it and say you're on it. If it's a question you can answer from the context, answer briefly. Don't say "I" a lot. Text like a real person.`,
+              messages: [{ role: "user", content }]
+            });
+            const text = resp.content?.filter(b => b.type === "text").map(b => b.text).join("").trim();
+            if (text) {
+              const { getTwilioWhatsApp } = await import("./services/messaging/twilio-whatsapp.js");
+              const { formatAIResponse } = await import("./services/messaging/whatsapp-formatter.js");
+              const wa = getTwilioWhatsApp();
+              if (wa.initialized) await wa.sendMessage(from, formatAIResponse(text));
+              messageLog.addAssistantMessage(text, MESSAGE_CHANNEL.WHATSAPP);
+              return text;
+            }
+          }
+        } catch {}
+        // Fallback: no API key — send canned ack
+        try {
+          const { getTwilioWhatsApp } = await import("./services/messaging/twilio-whatsapp.js");
+          const wa = getTwilioWhatsApp();
+          if (wa.initialized) await wa.sendMessage(from, "got it, one sec...");
+        } catch {}
+        return null;
+      })();
+
       // ── Log incoming message to unified history ──────────────
       messageLog.addUserMessage(content, MESSAGE_CHANNEL.WHATSAPP, { from });
 
@@ -2742,80 +2777,30 @@ Put these at the END of your message. Ask if details are missing.
 
 Don't force multiple messages if one short one works.`;
 
-      // ── Determine if this needs deep work or just a quick reply ──
+      // ── Wait for the immediate reply we fired at the top ──
+      const immediateReply = await immediateReplyPromise;
+
+      // ── Determine if deeper work is needed beyond the immediate reply ──
       const hasUrl = /https?:\/\/[^\s]+/i.test(content);
-      const needsTools = hasUrl || /search|look up|find out|research|buy|sell|trade|create|schedule|send|email|check the|what'?s (happening|going on)|latest news|analyze|report|compare|deep dive|make me|build me|generate/i.test(content);
+      const needsDeepWork = hasUrl || /search|look up|find out|research|buy|sell|trade|create|schedule|send|email|check the|what'?s (happening|going on)|latest news|analyze|report|compare|deep dive|make me|build me|generate/i.test(content);
 
-      // Check if fast API path is available (needs ANTHROPIC_API_KEY)
       let finalResponse = null;
-      let fastResponse = null;
-      let hasApiKey = false;
 
-      try {
-        const { getClaudeConfig } = await import("./services/ai/claude.js");
-        hasApiKey = getClaudeConfig().ready;
-      } catch {}
-
-      // ── FAST PATH: Direct API (only if API key is available) ──
-      if (hasApiKey) {
-        try {
-          const { getClaudeConfig } = await import("./services/ai/claude.js");
-          const config = getClaudeConfig();
-          const Anthropic = (await import("@anthropic-ai/sdk")).default;
-          const client = new Anthropic({ apiKey: config.apiKey });
-          const startMs = Date.now();
-
-          const fastPrompt = needsTools
-            ? `${prompt}\n\nIMPORTANT: The user's request needs deeper work (research, creation, web lookup, etc). You CAN'T do that work right now — just respond naturally acknowledging what they asked and let them know you're on it. Be specific about WHAT you're going to do, not generic. Example: "yo yeah I can put together that video about AI — gimme like 5-10 min to get it done". Keep it to 1-2 sentences max.`
-            : prompt;
-
-          const apiMessages = [{ role: "user", content: extraContext ? `${content}\n${extraContext}` : content }];
-          const response = await client.messages.create({
-            model: "claude-sonnet-4-20250514",
-            max_tokens: needsTools ? 200 : 800,
-            system: fastPrompt,
-            messages: apiMessages
-          });
-          const text = response.content?.filter(b => b.type === "text").map(b => b.text).join("\n").trim();
-          if (text) {
-            fastResponse = text;
-            if (!needsTools) finalResponse = text;
-            console.log(`[WhatsAppPoller] Fast API response in ${Date.now() - startMs}ms`);
-          }
-        } catch (apiErr) {
-          console.log(`[WhatsAppPoller] Fast API failed: ${apiErr.message}`);
-        }
+      // If simple chat and we already sent an immediate reply — we're done
+      if (!needsDeepWork && immediateReply) {
+        return immediateReply;
       }
 
-      // ── If needs deep work OR fast path unavailable → use CLI ──
-      if (!finalResponse) {
-        // Send ack first (fast API response if available, otherwise a quick canned one)
-        if (fastResponse) {
-          try {
-            const { getTwilioWhatsApp } = await import("./services/messaging/twilio-whatsapp.js");
-            const { formatAIResponse } = await import("./services/messaging/whatsapp-formatter.js");
-            const wa = getTwilioWhatsApp();
-            if (wa.initialized) await wa.sendMessage(from, formatAIResponse(fastResponse));
-            messageLog.addAssistantMessage(fastResponse, MESSAGE_CHANNEL.WHATSAPP);
-          } catch {}
-        } else if (needsTools) {
-          // No API key for smart ack — send quick canned ack
-          try {
-            const { getTwilioWhatsApp } = await import("./services/messaging/twilio-whatsapp.js");
-            const wa = getTwilioWhatsApp();
-            if (wa.initialized) await wa.sendMessage(from, "got it, working on that now...");
-          } catch {}
-        }
-
-        // Build task prompt — tells CLI to DO the work
-        const taskPrompt = needsTools
+      // ── Deep work: use CLI to actually do things ──
+      {
+        const taskPrompt = needsDeepWork
           ? `You are BACKBONE, an autonomous AI agent. The user sent this request via WhatsApp:
 
 "${content}"
 ${extraContext ? `\nAdditional context:\n${extraContext}` : ""}
 ${conversationHistory ? `\nRecent conversation:\n${conversationHistory}` : ""}
 
-${fastResponse ? `You already told the user: "${fastResponse}"\nNow DO the actual work.` : ""}
+${immediateReply ? `You already told the user: "${immediateReply}"\nNow DO the actual work.` : ""}
 
 INSTRUCTIONS:
 1. Actually DO what the user is asking. You have full access to the filesystem, web, CLI tools, and MCP servers.
@@ -2829,7 +2814,7 @@ INSTRUCTIONS:
 7. Keep the summary under 4 sentences unless the results need more detail.
 ${JSON.stringify(context, null, 2) !== "{}" ? `\nUser context:\n${JSON.stringify(context, null, 2)}` : ""}`
 
-          : `You are BACKBONE, the user's AI assistant. Respond to this WhatsApp message casually and helpfully. You're like a sharp guy 3 years into their tech career — brief, real, no corporate speak.
+          : `You are BACKBONE, the user's AI assistant. Respond to this WhatsApp message casually and helpfully.
 
 Conversation:
 ${conversationHistory || "(first message)"}
@@ -2845,21 +2830,15 @@ Keep it short (2-4 sentences). Text like a real person. Use data when you have i
         // Stream progress updates to WhatsApp during long work
         let lastProgressAt = Date.now();
         let progressCount = 0;
-        const onProgress = (event) => {
+        const onProgress = needsDeepWork ? (event) => {
           if (!event?.text || progressCount >= 3) return;
           const now = Date.now();
           if (now - lastProgressAt < 15000) return;
           const text = event.text || "";
           const toolMatch = text.match(/^\[Tool\] (\w+):/);
           if (toolMatch) {
-            const toolName = toolMatch[1];
-            const updates = {
-              WebSearch: "searching the web...",
-              WebFetch: "pulling that page up...",
-              Write: "writing something up...",
-              Bash: "running something...",
-            };
-            const msg = updates[toolName];
+            const updates = { WebSearch: "searching the web...", WebFetch: "pulling that page up...", Write: "writing something up...", Bash: "running something..." };
+            const msg = updates[toolMatch[1]];
             if (msg) {
               lastProgressAt = now;
               progressCount++;
@@ -2869,7 +2848,7 @@ Keep it short (2-4 sentences). Text like a real person. Use data when you have i
               }).catch(() => {});
             }
           }
-        };
+        } : null;
 
         try {
           const { executeAgenticTask, getAgenticCapabilities } = await import("./services/ai/multi-ai.js");
@@ -2877,8 +2856,8 @@ Keep it short (2-4 sentences). Text like a real person. Use data when you have i
           if (capabilities.available) {
             const agentResult = await executeAgenticTask(taskPrompt, process.cwd(), onProgress, {
               alwaysTryClaude: true,
-              forceTool: "claude",  // Skip Codex/GPT — just use Claude CLI
-              claudeTimeoutMs: needsTools ? 180000 : 60000  // 3min for deep work, 1min for chat
+              forceTool: "claude",
+              claudeTimeoutMs: needsDeepWork ? 180000 : 60000
             });
             if (agentResult.success && agentResult.output) {
               finalResponse = agentResult.output.trim();
@@ -2889,8 +2868,8 @@ Keep it short (2-4 sentences). Text like a real person. Use data when you have i
         }
       }
 
-      if (!finalResponse && fastResponse) {
-        // Fast ack was sent but CLI failed — send a casual error follow-up
+      if (!finalResponse && immediateReply) {
+        // Already sent an immediate reply, CLI failed — send error follow-up
         finalResponse = "ran into a snag on that one. wanna try again or give me more details?";
       } else if (!finalResponse) {
         finalResponse = "hmm hit a wall on that. try again in a sec?";

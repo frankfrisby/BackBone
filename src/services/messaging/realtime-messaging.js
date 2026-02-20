@@ -820,8 +820,17 @@ export class RealtimeMessaging extends EventEmitter {
         };
       }
 
-      // Send the response — set sendToWhatsApp:true for WhatsApp messages
-      // This triggers the Firebase Function to send via Twilio as a backup
+      // If handler said to skip (e.g., WhatsApp handled by poller), just mark done
+      if (response?.skip || !response?.content) {
+        await this.updateMessageStatus(messageId, MESSAGE_STATUS.COMPLETED, null, {
+          processedBy: "skipped"
+        });
+        this.processedMessageIds.add(messageId);
+        this.saveState();
+        return;
+      }
+
+      // Send the response
       const sent = await this.sendMessage(response.content, {
         type: response.type || MESSAGE_TYPE.AI,
         replyTo: messageId,

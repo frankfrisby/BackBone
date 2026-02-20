@@ -418,44 +418,40 @@ class WhatsAppPoller {
     this.stats.lastMessage = { from, content: content.slice(0, 100), time: new Date().toISOString() };
     this.stats.processed++;
 
-    // Persistent typing indicator — refreshes every 5s so it never drops
+    // Typing indicator — try Twilio API but don't rely on it
     const wa = getTwilioWhatsApp();
-    const baileys = wa.baileysService;
-    const userPhone = from;
 
-    // Start typing immediately
     const startTyping = async () => {
-      try {
-        if (baileys?.connected) {
-          await baileys.sendTypingIndicator(userPhone, -1); // -1 = persistent, no auto-pause
-        } else {
-          await wa.sendTypingIndicator(sid);
-        }
-      } catch {}
+      try { await wa.sendTypingIndicator(sid); } catch {}
     };
 
     await startTyping();
 
-    // Refresh typing every 5s to keep it visible
-    const typingStart = Date.now();
-    let sentStillWorking = false;
-    const typingInterval = setInterval(async () => {
-      await startTyping();
-      // After 30s, let user know we're still on it (once)
-      if (!sentStillWorking && Date.now() - typingStart > 30000) {
-        sentStillWorking = true;
-        try { await this._sendRawMessage(from, "_Still on it..._"); } catch {}
-        await startTyping(); // Re-show typing after sending the message
-      }
+    // Heartbeat: send periodic status messages so user knows we're alive
+    // Twilio typing indicator caps at ~15s, so real messages are the only reliable signal
+    const heartbeatStart = Date.now();
+    let heartbeatCount = 0;
+    const heartbeats = [
+      "_thinking..._",
+      "_still working on it..._",
+      "_almost there..._",
+    ];
+    const heartbeatInterval = setInterval(async () => {
+      const elapsed = Date.now() - heartbeatStart;
+      // First heartbeat at 20s, then every 25s, max 3
+      if (heartbeatCount >= 3) return;
+      if (heartbeatCount === 0 && elapsed < 20000) return;
+      if (heartbeatCount > 0 && elapsed < 20000 + heartbeatCount * 25000) return;
+      try {
+        await this._sendRawMessage(from, heartbeats[heartbeatCount] || "_still on it..._");
+        heartbeatCount++;
+        await startTyping(); // Try to restart typing after each message
+      } catch {}
     }, 5000);
-    if (typeof typingInterval.unref === "function") typingInterval.unref();
+    if (typeof heartbeatInterval.unref === "function") heartbeatInterval.unref();
 
     const stopTyping = () => {
-      clearInterval(typingInterval);
-      // Explicitly stop the indicator
-      if (baileys?.connected) {
-        baileys.stopTypingIndicator(userPhone).catch(() => {});
-      }
+      clearInterval(heartbeatInterval);
     };
 
     // If we have a custom message handler, use it

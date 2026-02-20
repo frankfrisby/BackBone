@@ -2541,11 +2541,55 @@ async function startWhatsAppPoller() {
         }
       }
 
+      // ── Detect and fetch URLs in the message ─────────────────
+      let urlContext = "";
+      try {
+        const urlRegex = /https?:\/\/[^\s<>"{}|\\^`\[\]]+/gi;
+        const urls = content.match(urlRegex);
+        if (urls && urls.length > 0) {
+          for (const url of urls.slice(0, 2)) {
+            try {
+              const controller = new AbortController();
+              const timeout = setTimeout(() => controller.abort(), 8000);
+              const resp = await fetch(url, {
+                signal: controller.signal,
+                headers: { "User-Agent": "Mozilla/5.0 (compatible; BACKBONE/1.0)" }
+              });
+              clearTimeout(timeout);
+              if (resp.ok) {
+                const ct = resp.headers.get("content-type") || "";
+                if (ct.includes("text/html") || ct.includes("text/plain") || ct.includes("application/json")) {
+                  let text = await resp.text();
+                  // Strip HTML tags for a rough text extraction
+                  if (ct.includes("html")) {
+                    text = text.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
+                      .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
+                      .replace(/<[^>]+>/g, " ")
+                      .replace(/\s{2,}/g, " ")
+                      .trim();
+                  }
+                  if (text.length > 3000) text = text.slice(0, 3000) + "...";
+                  urlContext += `\n[URL content from ${url}]:\n${text}\n[/URL content]`;
+                  console.log(`[WhatsAppPoller] Fetched URL: ${url} (${text.length} chars)`);
+                } else if (ct.includes("image")) {
+                  urlContext += `\n[URL ${url} is an image (${ct})]`;
+                }
+              }
+            } catch (urlErr) {
+              console.log(`[WhatsAppPoller] URL fetch failed for ${url}: ${urlErr.message}`);
+            }
+          }
+        }
+      } catch {}
+
+      // Combine extra context
+      const extraContext = [imageContext, urlContext].filter(Boolean).join("\n");
+
       // ── Route through unified intake pipeline ──────────────
       const { process: intakeProcess } = await import("./services/intake.js");
       const intakeResult = await intakeProcess({
         source: "whatsapp",
-        content: imageContext ? `${content}\n${imageContext}` : content,
+        content: extraContext ? `${content}\n${extraContext}` : content,
         from,
         mediaList,
         replyFn: async (text) => {
@@ -2668,7 +2712,7 @@ CONVERSATION:
 ${conversationHistory || "(first message)"}
 
 Message: "${content}"
-${imageContext ? `\nMEDIA:${imageContext}\n` : ""}
+${extraContext ? `\nMEDIA/CONTEXT:${extraContext}\n` : ""}
 DATA:
 ${JSON.stringify(context, null, 2)}
 ${projectFindings}
@@ -2696,39 +2740,69 @@ Put these at the END of your message. Ask if details are missing.
 
 Don't force multiple messages if one short one works.`;
 
-      // Use agentic executor
-      let responseText = null;
-      let agenticError = null;
-      try {
-        const { executeAgenticTask, getAgenticCapabilities } = await import("./services/ai/multi-ai.js");
-        const capabilities = await getAgenticCapabilities();
-        if (capabilities.available) {
-          const agentResult = await executeAgenticTask(prompt, process.cwd(), null, {
-            alwaysTryClaude: true,
-            claudeTimeoutMs: 300000
-          });
-          if (agentResult.success && agentResult.output) {
-            responseText = agentResult.output.trim();
-          } else {
-            agenticError = agentResult.error || "Agentic CLI returned no output";
+      // FAST PATH: Use direct Anthropic API for conversational responses (2-5s)
+      // SLOW PATH: Use CLI only when tools are needed (web search, file ops, trading)
+      const hasUrl = /https?:\/\/[^\s]+/i.test(content);
+      const needsTools = hasUrl || /search|look up|find out|research|buy|sell|trade|create|schedule|send|email|check the|what'?s (happening|going on)|latest news|analyze|report|compare|deep dive/i.test(content);
+
+      let finalResponse = null;
+
+      if (!needsTools) {
+        // Fast path — direct API call, no CLI spawn
+        try {
+          const { getClaudeConfig } = await import("./services/ai/claude.js");
+          const config = getClaudeConfig();
+          if (config.ready) {
+            const Anthropic = (await import("@anthropic-ai/sdk")).default;
+            const client = new Anthropic({ apiKey: config.apiKey });
+            const startMs = Date.now();
+            const apiMessages = [{ role: "user", content: extraContext ? `${content}\n${extraContext}` : content }];
+            const response = await client.messages.create({
+              model: "claude-sonnet-4-20250514",
+              max_tokens: 800,
+              system: prompt,
+              messages: apiMessages
+            });
+            const text = response.content?.filter(b => b.type === "text").map(b => b.text).join("\n").trim();
+            if (text) {
+              finalResponse = text;
+              console.log(`[WhatsAppPoller] Fast API response in ${Date.now() - startMs}ms`);
+            }
           }
-        } else {
-          agenticError = "No CLI agent tools available";
+        } catch (apiErr) {
+          console.log(`[WhatsAppPoller] Fast API failed, falling back to CLI: ${apiErr.message}`);
         }
-      } catch (cliErr) {
-        agenticError = cliErr.message || "Agentic CLI unavailable";
       }
 
-      let finalResponse = responseText;
+      // Slow path — CLI with tools (only if fast path didn't work or tools needed)
       if (!finalResponse) {
-        const fallbacks = [
-          "Got it — let me work on that and get back to you shortly.",
-          "Give me a moment on this one. I'll dig in and follow up.",
-          "I'm on it. Let me pull things together and circle back.",
-          "Working on that now — I'll hit you back with the details.",
-        ];
-        finalResponse = fallbacks[Math.floor(Math.random() * fallbacks.length)];
-        console.log(`[WhatsAppPoller] Using natural fallback (agentic error: ${String(agenticError || "unknown").slice(0, 100)})`);
+        // Send quick ack so user isn't waiting in silence
+        const acks = ["on it, gimme a sec", "lemme look into that", "checking now...", "one sec, pulling that up", "digging into it rn"];
+        const ack = acks[Math.floor(Math.random() * acks.length)];
+        try {
+          const { getTwilioWhatsApp } = await import("./services/messaging/twilio-whatsapp.js");
+          const wa = getTwilioWhatsApp();
+          if (wa.initialized) await wa.sendMessage(from, ack);
+        } catch {}
+        try {
+          const { executeAgenticTask, getAgenticCapabilities } = await import("./services/ai/multi-ai.js");
+          const capabilities = await getAgenticCapabilities();
+          if (capabilities.available) {
+            const agentResult = await executeAgenticTask(prompt, process.cwd(), null, {
+              alwaysTryClaude: true,
+              claudeTimeoutMs: 120000
+            });
+            if (agentResult.success && agentResult.output) {
+              finalResponse = agentResult.output.trim();
+            }
+          }
+        } catch (cliErr) {
+          console.log(`[WhatsAppPoller] CLI failed: ${cliErr.message}`);
+        }
+      }
+
+      if (!finalResponse) {
+        finalResponse = "Hmm, hit a wall on that one. Try again in a sec?";
       }
 
       // Process calendar action tags

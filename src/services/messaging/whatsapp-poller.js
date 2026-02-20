@@ -32,9 +32,9 @@ const PROCESSED_SIDS_PATH = path.join(DATA_DIR, "whatsapp-processed-sids.json");
 const MAX_STORED_SIDS = 500;
 
 // Adaptive polling intervals (milliseconds)
-const POLL_INTERVAL_ACTIVE = 10_000;  // 10s when user recently messaged
-const POLL_INTERVAL_PEAK = 30_000;    // 30s during peak hours
-const POLL_INTERVAL_DEFAULT = 60_000; // 60s off-peak
+const POLL_INTERVAL_ACTIVE = 5_000;   // 5s when user recently messaged
+const POLL_INTERVAL_PEAK = 15_000;    // 15s during peak hours
+const POLL_INTERVAL_DEFAULT = 30_000; // 30s off-peak
 
 // Peak hours (user's local time)
 const PEAK_WINDOWS = [

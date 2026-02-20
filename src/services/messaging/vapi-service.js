@@ -651,6 +651,11 @@ export class VapiService extends EventEmitter {
           duration: report.duration || report.durationSeconds,
           summary: report.summary,
         });
+
+        // Post-call: summarize conversation, send WhatsApp recap, kick off work
+        this._processPostCall(report, callId).catch(err => {
+          console.error("[Vapi] Post-call processing error:", err.message);
+        });
         break;
       }
 
@@ -658,6 +663,71 @@ export class VapiService extends EventEmitter {
         this.emit("call-error", { error: "Call disconnected unexpectedly" });
         break;
       }
+    }
+  }
+
+  /**
+   * Post-call processing: summarize conversation, send WhatsApp recap, create tasks
+   */
+  async _processPostCall(report, callId) {
+    const transcript = this.callTranscript || [];
+    if (transcript.length < 2) return; // Too short to summarize
+
+    const durationSec = report.duration || report.durationSeconds || 0;
+    const durationStr = durationSec > 60
+      ? `${Math.round(durationSec / 60)} min`
+      : `${durationSec}s`;
+
+    // Build transcript text
+    const transcriptText = transcript
+      .map(t => `${t.role === "assistant" ? "Cole" : "User"}: ${t.content}`)
+      .join("\n");
+
+    // Use CLI to summarize and extract action items
+    try {
+      const { executeAgenticTask, getAgenticCapabilities } = await import("../ai/multi-ai.js");
+      const capabilities = await getAgenticCapabilities();
+      if (!capabilities.available) return;
+
+      const taskPrompt = `You just finished a voice call with the user (${durationStr}). Here's the transcript:
+
+${transcriptText.slice(0, 4000)}
+
+Do TWO things:
+
+1. Send a WhatsApp recap message using the backbone-whatsapp MCP tool (send_whatsapp).
+   - Keep it casual and brief: "hey just wrapped up our call — here's what we talked about:"
+   - Bullet the key points (3-5 max)
+   - If there are action items, list them and say you're on it
+   - End with something like "I'll get started on [X] and hit you back when it's done"
+
+2. If there were any action items or tasks discussed, create goals using the backbone-life MCP tool (add_goal).
+   - Only create goals for things the user explicitly asked to be done
+   - Use clear, actionable titles
+
+Be casual. You're Cole, the user's AI assistant.`;
+
+      await executeAgenticTask(taskPrompt, process.cwd(), null, {
+        forceTool: "claude",
+        claudeTimeoutMs: 60000
+      });
+
+      console.log(`[Vapi] Post-call processing complete for call ${callId}`);
+    } catch (err) {
+      console.error("[Vapi] Post-call task failed:", err.message);
+      // Fallback: send basic summary via WhatsApp
+      try {
+        const { getTwilioWhatsApp } = await import("./twilio-whatsapp.js");
+        const wa = getTwilioWhatsApp();
+        if (wa.initialized && report.summary) {
+          const msg = `just wrapped up our call (${durationStr}). quick recap:\n\n${report.summary}`;
+          const { getDataDir } = await import("../paths.js");
+          const settings = JSON.parse(fs.readFileSync(path.join(getDataDir(), "user-settings.json"), "utf-8"));
+          if (settings.phoneNumber) {
+            await wa.sendMessage(settings.phoneNumber, msg);
+          }
+        }
+      } catch {}
     }
   }
 

@@ -40,7 +40,7 @@ const HANDOFF_FILE = path.join(DATA_DIR, "engine-handoff.json");
 const REST_AFTER_SUCCESS = 15 * 60 * 1000;     // 15 min after successful work
 const REST_AFTER_RATE_LIMIT = 30 * 60 * 1000;  // 30 min after rate limit
 const REST_QUIET_HOURS = 60 * 60 * 1000;       // 60 min during quiet hours (22:00-07:00)
-const REST_NO_WORK = 30 * 60 * 1000;           // 30 min when no work available
+const REST_NO_WORK = 45 * 60 * 1000;           // 45 min when no work available (was 30, conserve tokens)
 const REST_COUNTDOWN_INTERVAL = 30 * 1000;      // Emit countdown every 30s
 
 // Action statuses
@@ -200,6 +200,11 @@ export class AutonomousEngine extends EventEmitter {
     this.lastGoalGeneration = 0;
     this.goalGenerationCooldownMs = 10 * 60 * 1000; // 10 minutes between generation attempts
 
+    // Change detection — only spend tokens when something meaningful changed
+    this._lastContextFingerprint = null;
+    this._noChangeCount = 0; // consecutive cycles with no change
+    this._MAX_NO_CHANGE_BEFORE_SKIP = 2; // after 2 no-change cycles, skip goal generation
+
     // Work-rest cycle (long-horizon continuous operation)
     // Rest period is DYNAMIC based on data completeness score:
     //   < 15%  → 15 min  (new system, work hard to build foundation)
@@ -241,6 +246,46 @@ export class AutonomousEngine extends EventEmitter {
     } catch {
       return 30 * 60 * 1000; // fallback 30 min
     }
+  }
+
+  /**
+   * Compute a lightweight fingerprint of what matters.
+   * Only returns a different value when something meaningful changed.
+   */
+  _computeContextFingerprint() {
+    try {
+      const goalsPath = dataFile("goals.json");
+      const goalsData = fs.existsSync(goalsPath) ? JSON.parse(fs.readFileSync(goalsPath, "utf8")) : {};
+      const activeGoals = (goalsData.goals || []).filter(g => g.status === "active");
+      const goalFingerprint = activeGoals.map(g => `${g.id}:${g.progress || 0}`).join("|");
+
+      // Check for recent user messages (last 30 min)
+      let recentMessageCount = 0;
+      try {
+        const msgLogPath = dataFile("unified-message-log.json");
+        if (fs.existsSync(msgLogPath)) {
+          const log = JSON.parse(fs.readFileSync(msgLogPath, "utf8"));
+          const thirtyMinAgo = Date.now() - 30 * 60 * 1000;
+          recentMessageCount = (log.messages || []).filter(m =>
+            m.role === "user" && new Date(m.timestamp).getTime() > thirtyMinAgo
+          ).length;
+        }
+      } catch {}
+
+      return `goals:${goalFingerprint}|msgs:${recentMessageCount}|cycle:${this.cycleCount}`;
+    } catch {
+      return `cycle:${this.cycleCount}`;
+    }
+  }
+
+  /**
+   * Signal that something meaningful changed (user message, goal event, etc.)
+   * Resets the no-change counter so the engine will think on next cycle.
+   */
+  signalChange(reason = "external") {
+    this._noChangeCount = 0;
+    this._lastContextFingerprint = null;
+    console.log(`[AutonomousEngine] Change signaled: ${reason}`);
   }
 
   /**
@@ -353,6 +398,7 @@ export class AutonomousEngine extends EventEmitter {
    * Wake from rest early — called when user sends a message
    */
   wakeFromRest() {
+    this.signalChange("user-activity"); // Reset no-change counter
     if (this.isResting && this.restWakeResolve) {
       console.log("[AutonomousEngine] Woken from rest (user activity)");
       if (this.narrator) this.narrator.observe("Woken from rest — user needs attention");
@@ -1137,9 +1183,21 @@ export class AutonomousEngine extends EventEmitter {
           }
 
           if (!this.currentGoal) {
-            // No goals available — THINK and GENERATE new ones
+            // No goals available — check if anything meaningful changed before spending tokens
+            const fingerprint = this._computeContextFingerprint();
+            const contextChanged = !this._lastContextFingerprint || fingerprint !== this._lastContextFingerprint;
+            this._lastContextFingerprint = fingerprint;
+
+            if (!contextChanged) {
+              this._noChangeCount++;
+            } else {
+              this._noChangeCount = 0;
+            }
+
+            const shouldThink = contextChanged || this._noChangeCount < this._MAX_NO_CHANGE_BEFORE_SKIP;
+
             const timeSinceLastGen = Date.now() - this.lastGoalGeneration;
-            if (this.aiBrain && timeSinceLastGen > this.goalGenerationCooldownMs) {
+            if (this.aiBrain && timeSinceLastGen > this.goalGenerationCooldownMs && shouldThink) {
               this.setEngineState("thinking");
               if (this.narrator) {
                 this.narrator.setState("THINKING");
@@ -1181,6 +1239,13 @@ export class AutonomousEngine extends EventEmitter {
                 await this.wait(30000);
                 continue;
               }
+            } else if (!shouldThink) {
+              // Nothing changed — heartbeat only, save tokens
+              console.log(`[AutonomousEngine] No changes detected (streak: ${this._noChangeCount}) — heartbeat only, skipping goal generation`);
+              if (this.heartbeat) this.heartbeat.beat("idle-no-change");
+              this.setEngineState("idle");
+              await this.restBetweenCycles("no changes — conserving tokens", REST_NO_WORK);
+              continue;
             } else {
               // Cooldown active — just wait
               this.setEngineState("idle");

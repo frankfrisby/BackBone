@@ -2447,6 +2447,22 @@ server.listen(PORT, async () => {
     console.warn("[Vault] Migration skipped:", e.message);
   }
 
+  // Load AI API keys from Firebase (Anthropic + OpenAI)
+  try {
+    const { fetchAnthropicConfig, fetchOpenAIConfig } = await import("./services/firebase/firebase-config.js");
+    const [anthropicCfg, openaiCfg] = await Promise.all([fetchAnthropicConfig(), fetchOpenAIConfig()]);
+    if (anthropicCfg?.apiKey && !process.env.ANTHROPIC_API_KEY) {
+      process.env.ANTHROPIC_API_KEY = anthropicCfg.apiKey;
+      console.log("[Server] Loaded ANTHROPIC_API_KEY from Firebase");
+    }
+    if (openaiCfg?.apiKey && !process.env.OPENAI_API_KEY) {
+      process.env.OPENAI_API_KEY = openaiCfg.apiKey;
+      console.log("[Server] Loaded OPENAI_API_KEY from Firebase");
+    }
+  } catch (e) {
+    console.warn("[Server] AI key fetch from Firebase failed:", e.message);
+  }
+
   // Start WhatsApp message poller (polls Twilio API for incoming messages)
   startWhatsAppPoller();
 

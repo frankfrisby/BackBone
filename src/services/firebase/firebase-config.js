@@ -265,6 +265,51 @@ export const fetchVapiConfig = async () => {
 };
 
 /**
+ * Fetch Anthropic configuration from Firebase (system-level)
+ * Document: config/config_anthropic
+ * Expected fields: apiKey
+ */
+export const fetchAnthropicConfig = async () => {
+  const config = await fetchConfigWithFallback("config_anthropic", {
+    apiKey: process.env.ANTHROPIC_API_KEY || process.env.CLAUDE_API_KEY
+  });
+
+  // Handle common field name variations
+  if (config) {
+    if (config.api_key && !config.apiKey) {
+      config.apiKey = config.api_key;
+    }
+    if (config.key && !config.apiKey) {
+      config.apiKey = config.key;
+    }
+  }
+
+  return config;
+};
+
+/**
+ * Fetch OpenAI configuration from Firebase (system-level)
+ * Document: config/config_openai
+ * Expected fields: apiKey
+ */
+export const fetchOpenAIConfig = async () => {
+  const config = await fetchConfigWithFallback("config_openai", {
+    apiKey: process.env.OPENAI_API_KEY
+  });
+
+  if (config) {
+    if (config.api_key && !config.apiKey) {
+      config.apiKey = config.api_key;
+    }
+    if (config.key && !config.apiKey) {
+      config.apiKey = config.key;
+    }
+  }
+
+  return config;
+};
+
+/**
  * Fetch all app configuration from Firebase
  */
 export const fetchAppConfig = async () => {

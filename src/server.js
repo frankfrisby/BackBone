@@ -2740,11 +2740,44 @@ Put these at the END of your message. Ask if details are missing.
 
 Don't force multiple messages if one short one works.`;
 
-      // FAST PATH: Use direct Anthropic API for conversational responses (2-5s)
-      // SLOW PATH: Use CLI only when tools are needed (web search, file ops, trading)
+      // ── Immediate contextual ack — user knows we're alive ──
       const hasUrl = /https?:\/\/[^\s]+/i.test(content);
       const needsTools = hasUrl || /search|look up|find out|research|buy|sell|trade|create|schedule|send|email|check the|what'?s (happening|going on)|latest news|analyze|report|compare|deep dive/i.test(content);
+      const isCreation = /create|make|build|generate|write|design|produce/i.test(content);
+      const isQuestion = /\?|what|how|why|when|where|who|tell me|show me/i.test(content);
 
+      // Pick a contextual ack based on what they asked
+      let ack;
+      if (isCreation) {
+        const createAcks = [
+          "yeah I can do that, gimme a min",
+          "on it — let me put that together",
+          "bet, working on it now",
+          "got it, building that out rn",
+        ];
+        ack = createAcks[Math.floor(Math.random() * createAcks.length)];
+      } else if (hasUrl) {
+        ack = "lemme check that link out";
+      } else if (needsTools) {
+        const toolAcks = ["lemme look into that", "checking now...", "one sec, pulling that up", "digging into it rn"];
+        ack = toolAcks[Math.floor(Math.random() * toolAcks.length)];
+      } else if (isQuestion) {
+        const qAcks = ["hmm let me think", "one sec", "good question, lemme check"];
+        ack = qAcks[Math.floor(Math.random() * qAcks.length)];
+      } else {
+        ack = null; // Simple greetings/chat — no ack needed, fast path handles it
+      }
+
+      if (ack) {
+        try {
+          const { getTwilioWhatsApp } = await import("./services/messaging/twilio-whatsapp.js");
+          const wa = getTwilioWhatsApp();
+          if (wa.initialized) await wa.sendMessage(from, ack);
+        } catch {}
+      }
+
+      // FAST PATH: Use direct Anthropic API for conversational responses (2-5s)
+      // SLOW PATH: Use CLI only when tools are needed (web search, file ops, trading)
       let finalResponse = null;
 
       if (!needsTools) {
@@ -2776,14 +2809,6 @@ Don't force multiple messages if one short one works.`;
 
       // Slow path — CLI with tools (only if fast path didn't work or tools needed)
       if (!finalResponse) {
-        // Send quick ack so user isn't waiting in silence
-        const acks = ["on it, gimme a sec", "lemme look into that", "checking now...", "one sec, pulling that up", "digging into it rn"];
-        const ack = acks[Math.floor(Math.random() * acks.length)];
-        try {
-          const { getTwilioWhatsApp } = await import("./services/messaging/twilio-whatsapp.js");
-          const wa = getTwilioWhatsApp();
-          if (wa.initialized) await wa.sendMessage(from, ack);
-        } catch {}
         try {
           const { executeAgenticTask, getAgenticCapabilities } = await import("./services/ai/multi-ai.js");
           const capabilities = await getAgenticCapabilities();

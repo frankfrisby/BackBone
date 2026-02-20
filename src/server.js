@@ -2825,13 +2825,47 @@ INSTRUCTIONS:
 2. If they ask to create something (video, document, code, file) — create it. Use the tools on this machine.
 3. If they ask to research something — do the research using web search, file reads, APIs.
 4. If they ask to check/analyze something — run the analysis and provide real results.
-5. After completing the work, write a SHORT casual summary of what you did and any results.
+5. You know this user well (see context below). If the request is clear enough, just go do it autonomously. Don't hesitate. Make reasonable assumptions based on what you know about them.
+6. If the request is genuinely ambiguous and you'd produce the wrong thing without clarification, ask ONE short question at the start of your response, then say what you'll do in the meantime.
+7. After completing the work, write a SHORT casual summary of what you did and any results.
    - Talk like a normal person texting. Not corporate. Not AI-sounding.
    - Example: "done — made a 3 min video script and saved it to projects/ai-video/. want me to generate the voiceover too?"
-6. Keep the summary under 4 sentences unless the results need more detail.
+8. Keep the summary under 4 sentences unless the results need more detail.
 ${JSON.stringify(context, null, 2) !== "{}" ? `\nUser context:\n${JSON.stringify(context, null, 2)}` : ""}`;
 
-            const agentResult = await executeAgenticTask(taskPrompt, process.cwd(), null, {
+            // Stream progress updates to WhatsApp during long work
+            let lastProgressAt = Date.now();
+            let progressCount = 0;
+            const onProgress = (event) => {
+              if (!event?.text || progressCount >= 3) return; // max 3 progress updates
+              const now = Date.now();
+              if (now - lastProgressAt < 15000) return; // no more than one every 15s
+              const text = event.text || "";
+              // Only send updates for meaningful tool actions
+              const toolMatch = text.match(/^\[Tool\] (\w+):/);
+              if (toolMatch) {
+                const toolName = toolMatch[1];
+                const updates = {
+                  WebSearch: "searching the web...",
+                  WebFetch: "pulling that page up...",
+                  Read: "reading some files...",
+                  Write: "writing something up...",
+                  Bash: "running something...",
+                  Grep: "digging through the code...",
+                };
+                const msg = updates[toolName];
+                if (msg) {
+                  lastProgressAt = now;
+                  progressCount++;
+                  import("./services/messaging/twilio-whatsapp.js").then(({ getTwilioWhatsApp }) => {
+                    const wa = getTwilioWhatsApp();
+                    if (wa.initialized) wa.sendMessage(from, `_${msg}_`).catch(() => {});
+                  }).catch(() => {});
+                }
+              }
+            };
+
+            const agentResult = await executeAgenticTask(taskPrompt, process.cwd(), onProgress, {
               alwaysTryClaude: true,
               claudeTimeoutMs: 120000
             });

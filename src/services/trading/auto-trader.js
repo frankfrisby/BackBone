@@ -1,7 +1,7 @@
 import fetch from "node-fetch";
 import fs from "fs";
 import path from "path";
-import { getAlpacaConfig, fetchAccount } from "./alpaca.js";
+import { getAlpacaConfig, fetchAccount, getTradingSettings } from "./alpaca.js";
 import { TRADING_CONFIG, TRADING_RULES, isGoodMomentum, isProtectedPosition, getActionFromScore } from "./trading-algorithms.js";
 import { SCORE_THRESHOLDS, getSignalFromScore } from "./score-engine.js";
 import { showNotificationTitle } from "../ui/terminal-resize.js";
@@ -58,6 +58,39 @@ const OBSERVATION_WINDOW = {
   bounceRecoverPercent: 0.3,  // Must recover 0.3% from low to trigger bounce buy
   timeoutNearLowPercent: 0.5, // At timeout, buy if within 0.5% of observation low
 };
+
+// Sector mapping for correlation guard — don't hold 2 positions in the same sector
+// This prevents concentrated risk (e.g., both NVDA and AMD tanking together)
+const SECTOR_MAP = {
+  // Semiconductors
+  NVDA: "semis", AMD: "semis", INTC: "semis", AVGO: "semis", QCOM: "semis", MU: "semis", MRVL: "semis", SOXL: "semis", SOXS: "semis",
+  // Big Tech
+  AAPL: "big-tech", MSFT: "big-tech", GOOG: "big-tech", GOOGL: "big-tech", META: "big-tech", AMZN: "big-tech",
+  // Cloud/SaaS
+  SNOW: "cloud", CRM: "cloud", DDOG: "cloud", CFLT: "cloud", NET: "cloud", ZS: "cloud", PLTR: "cloud",
+  // EV/Auto
+  TSLA: "ev", RIVN: "ev", NIO: "ev", LCID: "ev", XPEV: "ev",
+  // E-commerce/Retail
+  CHWY: "ecom", W: "ecom", MELI: "ecom", JMIA: "ecom", CVNA: "ecom", ETSY: "ecom", SHOP: "ecom",
+  // Streaming/Media
+  NFLX: "media", ROKU: "media", SPOT: "media", PINS: "media", SNAP: "media", ZM: "media",
+  // Fintech
+  COIN: "fintech", HOOD: "fintech", SOFI: "fintech", UPST: "fintech", SQ: "fintech", PYPL: "fintech",
+  // Crypto-adjacent
+  MARA: "crypto", RIOT: "crypto", CLSK: "crypto", BITF: "crypto", MSTR: "crypto",
+  // Biotech
+  CRSP: "biotech", MRNA: "biotech",
+  // Solar
+  FSLR: "solar", ENPH: "solar", SPWR: "solar",
+  // Meme/Speculative
+  AMC: "meme", GME: "meme", CLOV: "meme", SNDL: "meme",
+  // Aerospace
+  RKLB: "aero", BA: "aero",
+  // AI
+  AI: "ai-sw", BBAI: "ai-sw",
+};
+
+const getSector = (symbol) => SECTOR_MAP[symbol] || null;
 
 // Bad market items - inverse ETFs and defensive positions that DO WELL when market is DOWN
 // These are the ONLY items allowed to be bought when SPY is negative
@@ -594,18 +627,20 @@ const checkSpyDirection = async (dailyChangePercent) => {
   const shortTermsPositive = fiveMinChange > 0 && tenMinChange > 0;
   const strongConsistency = positiveTimeframes >= Math.ceil(totalTimeframes * 0.7); // 70%+ positive
 
-  if (weightedAvg > 0.10 && shortTermsPositive && strongConsistency && rangePosition > 0.5) {
-    allow = true;
-    reason = `SPY ${dailyChangePercent.toFixed(2)}% daily but STRONGLY recovering (wAvg +${weightedAvg.toFixed(3)}%, 5m:+${fiveMinChange.toFixed(2)}%, 10m:+${tenMinChange.toFixed(2)}%, range ${(rangePosition * 100).toFixed(0)}%, ${positiveTimeframes}/${totalTimeframes} TFs up)`;
-  } else {
-    // SPY is negative and NOT convincingly recovering → BLOCK ALL BUYS
+  // SPY is negative for the day — block buys unless barely red and strongly recovering
+  // Hard block when SPY < -0.3% (meaningful red day)
+  // Barely red (-0.3% to 0%): allow only if ALL recovery conditions are met
+  if (dailyChangePercent < -0.3) {
+    // Meaningful red day — hard block, no exceptions
     allow = false;
-    const blockedReasons = [];
-    if (weightedAvg <= 0.10) blockedReasons.push(`wAvg too low (${weightedAvg >= 0 ? "+" : ""}${weightedAvg.toFixed(3)}%, need >+0.10%)`);
-    if (!shortTermsPositive) blockedReasons.push(`short-term not positive (5m:${fiveMinChange >= 0 ? "+" : ""}${fiveMinChange.toFixed(2)}%, 10m:${tenMinChange >= 0 ? "+" : ""}${tenMinChange.toFixed(2)}%)`);
-    if (!strongConsistency) blockedReasons.push(`only ${positiveTimeframes}/${totalTimeframes} TFs positive (need 70%+)`);
-    if (rangePosition <= 0.5) blockedReasons.push(`range position ${(rangePosition * 100).toFixed(0)}% (need >50%)`);
-    reason = `SPY ${dailyChangePercent.toFixed(2)}% daily — BLOCKED: ${blockedReasons.join(", ")}`;
+    reason = `SPY ${dailyChangePercent.toFixed(2)}% daily — BLOCKED: market is red (> -0.3%), no buys until SPY turns positive`;
+  } else if (weightedAvg > 0.15 && shortTermsPositive && strongConsistency && rangePosition > 0.6) {
+    // Barely red (-0.3% to 0%) AND strongly recovering on all timeframes — allow cautiously
+    allow = true;
+    reason = `SPY ${dailyChangePercent.toFixed(2)}% daily, barely red — ALLOWING (strong recovery: wAvg:+${weightedAvg.toFixed(3)}%, range:${(rangePosition * 100).toFixed(0)}%, ${positiveTimeframes}/${totalTimeframes} TFs up)`;
+  } else {
+    allow = false;
+    reason = `SPY ${dailyChangePercent.toFixed(2)}% daily — BLOCKED: barely red but recovery not convincing (wAvg:${weightedAvg >= 0 ? "+" : ""}${weightedAvg.toFixed(3)}%, range:${(rangePosition * 100).toFixed(0)}%)`;
   }
 
   return {
@@ -829,7 +864,7 @@ const DEFAULT_CONFIG = {
   mode: "paper",                    // paper or live
   buyThreshold: 8.0,                // Score >= this triggers buy evaluation (SPY negative)
   buyThresholdSPYPositive: 7.1,     // Lower threshold when SPY is positive
-  sellThreshold: 4.0,               // Score <= this triggers sell evaluation
+  sellThreshold: 4.5,               // Score <= this triggers sell evaluation (was 4.0, too lenient — held losers too long)
   extremeBuyThreshold: 9.0,         // Auto-execute buy immediately
   extremeSellThreshold: 1.5,        // Auto-execute sell immediately
   technicalOverrideThreshold: 2.7,  // Sell protected positions if technicals drop here
@@ -838,8 +873,9 @@ const DEFAULT_CONFIG = {
   requireBullishMACD: false,        // Don't require bullish MACD (rely on score)
   requireBearishMACD: false,        // Don't require bearish MACD (rely on score)
   requireHighVolume: false,         // Require above-average volume
-  maxPositionSize: 1000,            // Max $ per position
-  maxTotalPositions: 2,             // Max number of positions (BackBoneApp: 2)
+  maxPositionSize: 1000,            // Max $ per position (fallback if equity unknown)
+  maxPositionPercent: 0.30,         // 30% of account equity per position (dynamic sizing)
+  maxTotalPositions: 3,             // Max number of positions (was 2 — too few, idle capital)
   maxDailyTrades: 10,               // Max trades per day
   maxDayTrades: 3,                  // Max day trades in 5-day window (PDT rule)
   dayTradeWindow: 5,                // 5-day rolling window for day trades
@@ -859,12 +895,30 @@ const DEFAULT_CONFIG = {
 const MIN_HOLD_PERIOD_MS = 3 * 24 * 60 * 60 * 1000; // 3 days = 72 hours
 const MAX_ROTATIONS_PER_WEEK = 4; // Max sell+buy cycles in a 7-day window
 
+// Wash sale prevention: 30-day window (IRS rule)
+// If a stock was sold at a loss within the last 30 days, do NOT rebuy it
+// A wash sale disallows the tax deduction on the loss, effectively making you pay MORE taxes
+const WASH_SALE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000; // 30 calendar days
+
+// Repeat loser detection: if a symbol has lost money N+ times in the last 60 days, auto-blacklist it
+// CHWY lost 7/7 trades, HOOD lost 10/10 — the system kept going back to the same bad stocks
+const REPEAT_LOSER_WINDOW_MS = 60 * 24 * 60 * 60 * 1000; // 60 days
+const REPEAT_LOSER_THRESHOLD = 2; // 2+ consecutive losses = blocked
+const REPEAT_LOSER_COOLDOWN_MS = 90 * 24 * 60 * 60 * 1000; // Block for 90 days after repeat losses
+
 // In-memory state
 let config = { ...DEFAULT_CONFIG };
 let tradesLog = [];
 let lastTradeTime = {};
 let dailyTradeCount = 0;
 let lastTradeDate = null;
+
+// Daily drawdown circuit breaker
+// If the account drops more than this % in a single day, pause all new buys
+const MAX_DAILY_DRAWDOWN_PERCENT = 3.0;
+let dailyStartEquity = null;
+let dailyStartDate = null;
+let drawdownBreaker = false;
 
 /**
  * Load configuration
@@ -994,6 +1048,146 @@ const checkRotationFrequency = () => {
 };
 
 /**
+ * Check wash sale rule — blocks buying a ticker that was sold at a loss within 30 days.
+ * IRS wash sale rule: if you sell at a loss and rebuy within 30 days, the loss is DISALLOWED
+ * for tax purposes. This means you effectively pay MORE taxes than you should.
+ *
+ * @param {string} symbol - Ticker to check
+ * @returns {{ allowed: boolean, reason: string, lastLossSale?: object }}
+ */
+const checkWashSale = (symbol) => {
+  const thirtyDaysAgo = Date.now() - WASH_SALE_WINDOW_MS;
+
+  // Find all sells of this symbol in the last 30 days
+  const recentSells = tradesLog.filter(t =>
+    t.symbol === symbol &&
+    t.side === "sell" &&
+    new Date(t.timestamp).getTime() > thirtyDaysAgo
+  );
+
+  if (recentSells.length === 0) {
+    return { allowed: true, reason: "No recent sells" };
+  }
+
+  // For each recent sell, check if it was at a loss
+  // We determine loss by finding the corresponding buy and comparing prices
+  for (const sell of recentSells) {
+    const sellPrice = parseFloat(sell.price) || 0;
+    const sellTime = new Date(sell.timestamp).getTime();
+
+    // Find the most recent buy BEFORE this sell
+    const correspondingBuy = [...tradesLog]
+      .reverse()
+      .find(t =>
+        t.symbol === symbol &&
+        t.side === "buy" &&
+        new Date(t.timestamp).getTime() < sellTime
+      );
+
+    if (correspondingBuy) {
+      const buyPrice = parseFloat(correspondingBuy.price) || 0;
+
+      if (sellPrice < buyPrice) {
+        // This was a LOSS sale — wash sale risk!
+        const lossAmount = (buyPrice - sellPrice) * (parseFloat(sell.quantity) || 1);
+        const lossPercent = ((sellPrice - buyPrice) / buyPrice * 100).toFixed(1);
+        const daysAgo = ((Date.now() - sellTime) / (24 * 60 * 60 * 1000)).toFixed(0);
+        const daysUntilClear = Math.ceil((sellTime + WASH_SALE_WINDOW_MS - Date.now()) / (24 * 60 * 60 * 1000));
+
+        return {
+          allowed: false,
+          reason: `WASH SALE BLOCK: ${symbol} sold at loss (${lossPercent}%, -$${lossAmount.toFixed(2)}) ${daysAgo} days ago. Cannot rebuy for ${daysUntilClear} more days.`,
+          lastLossSale: {
+            sellPrice,
+            buyPrice,
+            lossPercent: parseFloat(lossPercent),
+            lossAmount,
+            sellDate: sell.timestamp,
+            daysUntilClear
+          }
+        };
+      }
+    }
+  }
+
+  return { allowed: true, reason: "Recent sells were not at a loss" };
+};
+
+/**
+ * Check repeat loser rule — blocks buying a ticker that has lost money 2+ times recently.
+ * Backtesting showed CHWY (7 losses), HOOD (10 losses), TSLA (5 losses) etc. — the system
+ * kept going back to the same losing stocks. After 2+ consecutive losses on a symbol,
+ * block it for 90 days to break the cycle.
+ *
+ * @param {string} symbol - Ticker to check
+ * @returns {{ allowed: boolean, reason: string }}
+ */
+const checkRepeatLoser = (symbol) => {
+  const lookbackMs = REPEAT_LOSER_WINDOW_MS;
+  const cutoff = Date.now() - lookbackMs;
+
+  // Get all completed round-trips for this symbol (buy followed by sell)
+  const symbolTrades = tradesLog.filter(t =>
+    t.symbol === symbol &&
+    new Date(t.timestamp).getTime() > cutoff
+  );
+
+  // Count consecutive losses (most recent first)
+  const sells = symbolTrades
+    .filter(t => t.side === "sell")
+    .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+
+  let consecutiveLosses = 0;
+  let lastLossDate = null;
+
+  for (const sell of sells) {
+    const sellPrice = parseFloat(sell.price) || 0;
+    const buyPrice = parseFloat(sell.buyPrice) || 0;
+
+    // If we have explicit buyPrice (new format), use it
+    if (buyPrice > 0) {
+      if (sellPrice < buyPrice) {
+        consecutiveLosses++;
+        if (!lastLossDate) lastLossDate = new Date(sell.timestamp);
+      } else {
+        break; // A win breaks the streak
+      }
+    } else {
+      // Old format: find corresponding buy
+      const sellTime = new Date(sell.timestamp).getTime();
+      const correspondingBuy = [...tradesLog]
+        .reverse()
+        .find(t => t.symbol === symbol && t.side === "buy" && new Date(t.timestamp).getTime() < sellTime);
+
+      if (correspondingBuy) {
+        const cbPrice = parseFloat(correspondingBuy.price) || 0;
+        if (sellPrice < cbPrice) {
+          consecutiveLosses++;
+          if (!lastLossDate) lastLossDate = new Date(sell.timestamp);
+        } else {
+          break; // A win breaks the streak
+        }
+      }
+    }
+  }
+
+  if (consecutiveLosses >= REPEAT_LOSER_THRESHOLD) {
+    const daysUntilClear = lastLossDate
+      ? Math.ceil((lastLossDate.getTime() + REPEAT_LOSER_COOLDOWN_MS - Date.now()) / (24 * 60 * 60 * 1000))
+      : 90;
+
+    if (daysUntilClear > 0) {
+      return {
+        allowed: false,
+        reason: `REPEAT LOSER: ${symbol} has ${consecutiveLosses} consecutive losses in the last 60 days. Blocked for ${daysUntilClear} more days.`
+      };
+    }
+  }
+
+  return { allowed: true, reason: "No repeat loser pattern" };
+};
+
+/**
  * Check if trade is allowed (cooldown, daily limit)
  */
 const canTrade = (symbol) => {
@@ -1078,7 +1272,30 @@ export const evaluateBuySignal = (ticker, options = {}) => {
     }
   }
 
-  // Check MACD if required
+  // Check wash sale rule — don't rebuy a ticker sold at a loss within 30 days
+  const washCheck = checkWashSale(ticker.symbol);
+  if (!washCheck.allowed) {
+    shouldBuy = false;
+    isExtreme = false;
+    signals.push(washCheck.reason);
+  }
+
+  // Check repeat loser — don't keep buying the same losing stock
+  const repeatCheck = checkRepeatLoser(ticker.symbol);
+  if (!repeatCheck.allowed) {
+    shouldBuy = false;
+    isExtreme = false;
+    signals.push(repeatCheck.reason);
+  }
+
+  // MACD sanity check: don't buy into actively bearish MACD unless extreme
+  // Many losing trades had bearish MACD at entry — the score was high but momentum was wrong
+  if (ticker.macd?.trend === "bearish" && !isExtreme) {
+    shouldBuy = false;
+    signals.push(`MACD bearish (${ticker.macd?.trend}) — not buying against momentum`);
+  }
+
+  // Check MACD if required (legacy config option)
   if (config.requireBullishMACD) {
     if (ticker.macd?.trend === "bullish") {
       signals.push("MACD bullish");
@@ -1229,34 +1446,54 @@ const executeBuyImmediate = async (symbol, price, reason) => {
     return { success: false, error: "Alpaca not configured" };
   }
 
-  // Calculate quantity based on max position size
-  let quantity = Math.floor(config.maxPositionSize / price);
-  if (quantity < 1) {
-    return { success: false, error: "Position size too small" };
-  }
+  // Dynamic position sizing: use % of equity, fall back to fixed maxPositionSize
+  let positionBudget = config.maxPositionSize; // fallback
+  let quantity;
 
-  // Check buying power before placing order
   try {
     const account = await fetchAccount(alpacaConfig);
+    const equity = parseFloat(account.equity) || 0;
     const buyingPower = parseFloat(account.buying_power) || 0;
-    const orderCost = quantity * price;
 
     if (buyingPower < price) {
       return { success: false, error: `Insufficient buying power ($${buyingPower.toFixed(2)} available, need $${price.toFixed(2)} minimum)` };
     }
 
-    // Reduce quantity to fit buying power (leave $10 buffer)
+    // Dynamic sizing: maxPositionPercent of total equity (e.g., 30%)
+    if (equity > 0 && config.maxPositionPercent) {
+      positionBudget = Math.min(equity * config.maxPositionPercent, buyingPower - 10);
+      positionBudget = Math.max(positionBudget, 100); // minimum $100
+    }
+
+    quantity = Math.floor(positionBudget / price);
+    if (quantity < 1) {
+      return { success: false, error: `Position size too small (budget $${positionBudget.toFixed(2)}, price $${price.toFixed(2)})` };
+    }
+
+    // Final buying power check
+    const orderCost = quantity * price;
     if (orderCost > buyingPower - 10) {
       quantity = Math.floor((buyingPower - 10) / price);
       if (quantity < 1) {
         return { success: false, error: `Insufficient buying power ($${buyingPower.toFixed(2)} available, order would cost $${orderCost.toFixed(2)})` };
       }
     }
+
+    // MINIMUM QUANTITY: Don't buy just 1 share — the risk/reward is terrible
+    // (1 share of a $200 stock = $200 position, if it drops 3% you lose $6, if it rises 3% you gain $6)
+    // Need at least 2 shares OR position size >= $100 for meaningful gains
+    if (quantity < 2 && price > 50) {
+      return { success: false, error: `Position too small: only ${quantity} share of $${price.toFixed(2)} stock (need 2+ shares or cheaper entry)` };
+    }
   } catch (acctErr) {
     return { success: false, error: `Failed to check buying power: ${acctErr.message}` };
   }
 
   try {
+    // Use LIMIT orders instead of market orders to reduce slippage
+    // Set limit price 0.1% above current price — gets filled almost always but avoids bad fills
+    const limitPrice = +(price * 1.001).toFixed(2);
+
     const response = await fetch(`${alpacaConfig.baseUrl}/v2/orders`, {
       method: "POST",
       headers: {
@@ -1268,7 +1505,8 @@ const executeBuyImmediate = async (symbol, price, reason) => {
         symbol,
         qty: quantity.toString(),
         side: "buy",
-        type: "market",
+        type: "limit",
+        limit_price: limitPrice.toString(),
         time_in_force: "day"
       })
     });
@@ -1342,16 +1580,18 @@ export const executeBuy = async (symbol, price, reason, options = {}) => {
     };
   }
 
-  // RULE: No buying in the first 15 minutes (9:30-9:45 ET) — let market settle
-  // Exception: observation system handles this window separately
+  // RULE: No buying before 10:00 AM ET — let morning volatility settle
+  // Backtesting showed 8-9 AM buys have 36% win rate and lost $431.
+  // 10 AM+ buys have 51-67% win rates and are profitable.
+  // Exception: observation system handles the open window separately
   const { hours, minutes: mins } = getEasternTime();
   const minutesSinceOpen = (hours * 60 + mins) - (9 * 60 + 30);
-  if (minutesSinceOpen < 15 && !fromObservation) {
-    console.log(`[AutoTrader] BLOCKED EARLY BUY: ${symbol} — only ${minutesSinceOpen}m since open, need 15m`);
+  if (minutesSinceOpen < 30 && !fromObservation) {
+    console.log(`[AutoTrader] BLOCKED EARLY BUY: ${symbol} — only ${minutesSinceOpen}m since open, need 30m (10:00 AM ET)`);
     return {
       success: false,
       blocked: true,
-      error: `Too early to buy — ${minutesSinceOpen}m since open, waiting for market to settle (15m minimum)`
+      error: `Too early to buy — ${minutesSinceOpen}m since open, waiting until 10:00 AM ET (morning buys lose money)`
     };
   }
 
@@ -1368,6 +1608,58 @@ export const executeBuy = async (symbol, price, reason, options = {}) => {
       marketPositive = spyDir.allow;
     } else {
       marketPositive = false; // Default to BLOCK if can't determine (fail safe)
+    }
+  }
+
+  // CIRCUIT BREAKER: Account drawdown limit
+  if (drawdownBreaker && !isBadMarketItem(symbol)) {
+    console.log(`[AutoTrader] CIRCUIT BREAKER: ${symbol} — account drawdown limit hit, no new buys today`);
+    return {
+      success: false,
+      blocked: true,
+      error: `Daily drawdown circuit breaker active (-${MAX_DAILY_DRAWDOWN_PERCENT}%+ today). No new buys except inverse ETFs.`
+    };
+  }
+
+  // WASH SALE CHECK: Don't rebuy a ticker sold at a loss within 30 days
+  const washCheck = checkWashSale(symbol);
+  if (!washCheck.allowed) {
+    console.log(`[AutoTrader] WASH SALE BLOCKED: ${symbol} — ${washCheck.reason}`);
+    return { success: false, blocked: true, error: washCheck.reason };
+  }
+
+  // REPEAT LOSER CHECK: Don't keep buying the same losing stock
+  const repeatCheck = checkRepeatLoser(symbol);
+  if (!repeatCheck.allowed) {
+    console.log(`[AutoTrader] REPEAT LOSER BLOCKED: ${symbol} — ${repeatCheck.reason}`);
+    return { success: false, blocked: true, error: repeatCheck.reason };
+  }
+
+  // SECTOR CORRELATION: Don't hold 2 positions in the same sector
+  // This is basic portfolio diversification — if semis crash, you lose on both NVDA and AMD
+  const buySector = getSector(symbol);
+  if (buySector) {
+    try {
+      const alpCfg = getAlpacaConfig();
+      if (alpCfg.ready) {
+        const posResp = await fetch(`${alpCfg.baseUrl}/v2/positions`, {
+          headers: { "APCA-API-KEY-ID": alpCfg.key, "APCA-API-SECRET-KEY": alpCfg.secret }
+        });
+        if (posResp.ok) {
+          const currentPositions = await posResp.json();
+          const sameSecPos = currentPositions.find(p => getSector(p.symbol) === buySector);
+          if (sameSecPos) {
+            console.log(`[AutoTrader] SECTOR BLOCKED: ${symbol} (${buySector}) — already holding ${sameSecPos.symbol} in same sector`);
+            return {
+              success: false,
+              blocked: true,
+              error: `Sector concentration: already holding ${sameSecPos.symbol} in ${buySector} sector. Diversify.`
+            };
+          }
+        }
+      }
+    } catch (err) {
+      // Don't let sector check failure block trading
     }
   }
 
@@ -1435,7 +1727,8 @@ export const executeBuy = async (symbol, price, reason, options = {}) => {
  * Execute sell order via Alpaca
  * Enforces market hours (9:30 AM - 4:00 PM ET)
  */
-export const executeSell = async (symbol, price, quantity, reason) => {
+export const executeSell = async (symbol, price, quantity, reason, options = {}) => {
+  const { costBasis = null } = options;
   if (!config.enabled) {
     return { success: false, error: "Auto-trading not enabled" };
   }
@@ -1463,6 +1756,10 @@ export const executeSell = async (symbol, price, quantity, reason) => {
   }
 
   try {
+    // Use LIMIT orders for sells too — set 0.1% below current price to avoid bad fills
+    // while still getting executed quickly
+    const limitPrice = +(price * 0.999).toFixed(2);
+
     const response = await fetch(`${alpacaConfig.baseUrl}/v2/orders`, {
       method: "POST",
       headers: {
@@ -1474,7 +1771,8 @@ export const executeSell = async (symbol, price, quantity, reason) => {
         symbol,
         qty: qty.toString(),
         side: "sell",
-        type: "market",
+        type: "limit",
+        limit_price: limitPrice.toString(),
         time_in_force: "day"
       })
     });
@@ -1486,13 +1784,26 @@ export const executeSell = async (symbol, price, quantity, reason) => {
 
     const order = await response.json();
 
-    // Log trade
+    // Determine cost basis for wash sale tracking
+    let buyPrice = costBasis;
+    if (!buyPrice) {
+      // Look up the buy price from trades log
+      const correspondingBuy = [...tradesLog].reverse().find(t => t.symbol === symbol && t.side === "buy");
+      if (correspondingBuy) buyPrice = parseFloat(correspondingBuy.price) || null;
+    }
+
+    const isLoss = buyPrice ? price < buyPrice : false;
+
+    // Log trade (include buyPrice so wash sale checker can determine loss)
     const trade = {
       id: order.id,
       symbol,
       side: "sell",
       quantity,
       price,
+      buyPrice: buyPrice || undefined,
+      pnl: buyPrice ? +((price - buyPrice) * quantity).toFixed(2) : undefined,
+      isLoss,
       reason,
       status: order.status,
       timestamp: new Date().toISOString(),
@@ -1672,6 +1983,35 @@ export const monitorAndTrade = async (tickers, positions = []) => {
     };
   }
 
+  // Daily drawdown circuit breaker — track account equity at start of day
+  try {
+    const today = new Date().toDateString();
+    if (dailyStartDate !== today) {
+      // New day — reset breaker and record starting equity
+      const alpacaConfig = getAlpacaConfig();
+      if (alpacaConfig.ready) {
+        const acct = await fetchAccount(alpacaConfig);
+        dailyStartEquity = parseFloat(acct.equity) || null;
+        dailyStartDate = today;
+        drawdownBreaker = false;
+      }
+    } else if (dailyStartEquity && !drawdownBreaker) {
+      // Check current equity vs start of day
+      const alpacaConfig = getAlpacaConfig();
+      if (alpacaConfig.ready) {
+        const acct = await fetchAccount(alpacaConfig);
+        const currentEquity = parseFloat(acct.equity) || 0;
+        const drawdownPercent = ((dailyStartEquity - currentEquity) / dailyStartEquity) * 100;
+        if (drawdownPercent >= MAX_DAILY_DRAWDOWN_PERCENT) {
+          drawdownBreaker = true;
+          console.log(`[AutoTrader] CIRCUIT BREAKER: Account down ${drawdownPercent.toFixed(1)}% today ($${dailyStartEquity.toFixed(0)} → $${currentEquity.toFixed(0)}). No new buys.`);
+        }
+      }
+    }
+  } catch (err) {
+    // Don't let drawdown check failure block trading
+  }
+
   // Process any pending buys that have passed the 5-minute delay
   const pendingBuysResult = await processPendingBuys();
   if (pendingBuysResult.processed > 0) {
@@ -1816,56 +2156,10 @@ export const monitorAndTrade = async (tickers, positions = []) => {
     console.error("Momentum drift check error:", error.message);
   }
 
-  // STEP 0.6: Check for stagnant tickers (<0.25% range over 60min, near-zero change)
-  // These are positions that aren't moving and tying up capital
-  try {
-    const md = await getMomentumDrift();
-
-    for (const position of positions) {
-      // Skip if already sold
-      const alreadySold = results.executed.some(t => t.side === "sell" && t.symbol === position.symbol);
-      if (alreadySold) continue;
-
-      const ticker = sortedTickers.find(t => t.symbol === position.symbol);
-      if (!ticker) continue;
-
-      // Check if stagnant AND score is not strong (< 7.0)
-      // Don't sell stagnant tickers with high scores - they might be consolidating before a move
-      if (md.isStagnantTicker(ticker) && ticker.score < 7.0) {
-        // ANTI-CHURN: Check hold period before stagnant sell
-        const holdCheck = checkHoldPeriod(position.symbol, false, false);
-        if (!holdCheck.canSell) {
-          results.reasoning.push(`HOLD ${position.symbol}: stagnant detected BUT ${holdCheck.reason}`);
-          continue;
-        }
-
-        results.sellSignals.push({
-          action: "STAGNANT",
-          symbol: position.symbol,
-          score: ticker.score,
-          signals: ["STAGNANT: <0.25% range over 60min, capital locked"],
-          isStagnant: true
-        });
-
-        const sellResult = await executeSell(
-          position.symbol,
-          ticker.price || position.current_price || position.currentPrice,
-          parseFloat(position.qty || position.shares),
-          `STAGNANT: <0.25% movement, score ${ticker.score?.toFixed(1)} - freeing capital`
-        );
-
-        if (sellResult.success) {
-          results.executed.push(sellResult.trade);
-          results.reasoning.push(`EXECUTED SELL ${position.symbol}: stagnant (<0.25% range), score ${ticker.score?.toFixed(1)}`);
-        } else {
-          results.skipped.push({ symbol: position.symbol, reason: sellResult.error });
-          results.reasoning.push(`FAILED SELL ${position.symbol} (stagnant): ${sellResult.error}`);
-        }
-      }
-    }
-  } catch (error) {
-    console.error("Stagnant ticker check error:", error.message);
-  }
+  // STEP 0.6: Stagnant ticker check — DISABLED
+  // Selling stocks for low intraday movement causes unnecessary churn, wash sales,
+  // and kills positions that are consolidating before breakouts. Midday (11am-2pm)
+  // naturally has low range. Let score-based sells and trailing stops handle exits.
 
   // STEP 1: Evaluate ALL positions for sell signals first
   // Skip positions already sold via trailing stop, momentum drift, or stagnant
@@ -2105,6 +2399,46 @@ export const monitorAndTrade = async (tickers, positions = []) => {
     }
   }
 
+  // STEP 3: Options trading (if strategy includes options)
+  try {
+    const tradingSettings = getTradingSettings();
+    if (tradingSettings.strategy === "options" || tradingSettings.strategy === "both") {
+      const { evaluateOptionsOpportunities, manageOptionPositions } = await import("./options-trader.js");
+
+      const alpacaConfig = getAlpacaConfig();
+      let equity = 0;
+      if (alpacaConfig.ready) {
+        try {
+          const acct = await fetchAccount(alpacaConfig);
+          equity = parseFloat(acct.equity) || 0;
+        } catch {}
+      }
+
+      if (equity > 0) {
+        // Manage existing positions first (exits)
+        const exitResults = await manageOptionPositions(alpacaConfig, sortedTickers);
+        for (const exit of exitResults.exits) {
+          results.executed.push({ side: "sell", symbol: exit.symbol, type: "option", reason: exit.reason });
+          results.reasoning.push(`OPTIONS EXIT ${exit.underlying}: ${exit.reason}`);
+        }
+
+        // Evaluate new opportunities (only if SPY allows and no drawdown breaker)
+        if (spyCheck.allow && !drawdownBreaker) {
+          const optResults = await evaluateOptionsOpportunities(sortedTickers, equity, positions, spyCheck);
+          results.reasoning.push(...optResults.reasoning);
+          for (const buy of optResults.bought) {
+            results.executed.push({ side: "buy", symbol: buy.symbol, type: "option", reason: buy.reason });
+          }
+        } else {
+          results.reasoning.push("OPTIONS: Skipped new buys — SPY blocked or drawdown breaker active");
+        }
+      }
+    }
+  } catch (optErr) {
+    console.error("[AutoTrader] Options error:", optErr.message);
+    results.reasoning.push(`OPTIONS ERROR: ${optErr.message}`);
+  }
+
   // --- REASONING: Final summary ---
   if (results.executed.length === 0) {
     const sellCount = results.sellSignals.length;
@@ -2186,7 +2520,7 @@ export const setTradingEnabled = (enabled) => {
 /**
  * Get hold period status for a position (exported for MCP/UI)
  */
-export { checkHoldPeriod, checkRotationFrequency };
+export { checkHoldPeriod, checkRotationFrequency, checkWashSale, checkRepeatLoser };
 
 /**
  * Get observation window status (exported for MCP/UI)

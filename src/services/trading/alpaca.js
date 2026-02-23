@@ -312,6 +312,32 @@ export const getAsset = async (config, symbol) => {
  * @param {string[]} symbols - Array of ticker symbols to validate
  * @param {{ tradeableOnly?: boolean, concurrency?: number }} options
  */
+/**
+ * Fetch option contracts from Alpaca
+ * @param {Object} config - Alpaca config
+ * @param {Object} params - Query params (underlying_symbols, type, expiration_date_gte/lte, strike_price_gte/lte)
+ */
+export const fetchOptionContracts = async (config, params) => {
+  const qs = new URLSearchParams(params).toString();
+  const data = await fetchJson(`${config.baseUrl}/v2/options/contracts?${qs}`, {
+    headers: buildHeaders(config)
+  });
+  return data.option_contracts || data || [];
+};
+
+/**
+ * Fetch option snapshots (greeks, quotes, IV) for an underlying
+ * @param {Object} config - Alpaca config
+ * @param {string} underlying - Underlying symbol (e.g. "AAPL")
+ */
+export const fetchOptionSnapshots = async (config, underlying) => {
+  const data = await fetchJson(
+    `${config.dataUrl}/v1beta1/options/snapshots/${encodeURIComponent(underlying)}?feed=indicative`,
+    { headers: buildHeaders(config) }
+  );
+  return data.snapshots || data || {};
+};
+
 export const validateTickers = async (config, symbols, options = {}) => {
   const { tradeableOnly = true, concurrency = 10 } = options;
   const valid = [];

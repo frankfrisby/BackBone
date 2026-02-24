@@ -2,14 +2,11 @@
 import "dotenv/config";
 import { createElement } from "react";
 import { render } from "ink";
-import { exec, spawn } from "child_process";
+import { exec, execSync, spawn } from "child_process";
 import fs from "fs";
 import path from "path";
 import { format as formatValue } from "util";
-import App from "../src/app.js";
-import { loadLinkedInProfile } from "../src/services/integrations/linkedin-scraper.js";
 import { Writable } from "stream";
-import { checkForUpdates, consumeUpdateState } from "../src/services/setup/auto-updater.js";
 import { ensureUserDirs, dataFile, memoryFile, getDataDir, getBackboneHome, getBackboneRoot, getEngineRoot, getActiveUserId, getActiveUser, migrateToUserScoped, isLegacyInstall } from "../src/services/paths.js";
 import { mountAllExtensions } from "../src/services/mount-user-extensions.js";
 
@@ -28,14 +25,30 @@ const acquireLock = () => {
         const lockData = JSON.parse(fs.readFileSync(LOCK_FILE, "utf-8"));
         const pid = lockData.pid;
 
-        // Check if the process is still running
+        // Check if the process is still running AND is actually a node process
+        // (Windows reuses PIDs aggressively, so a stale lock can match an unrelated process)
         if (pid) {
+          let isBackboneAlive = false;
           try {
             process.kill(pid, 0); // Signal 0 = check if process exists
-            // Process is still alive — exit silently, no output, no window
-            process.exit(0);
+            // PID is alive — verify it's actually node, not a recycled PID
+            if (process.platform === "win32") {
+              try {
+                const result = execSync(`powershell -NoProfile -Command "(Get-Process -Id ${pid} -ErrorAction SilentlyContinue).ProcessName"`, { encoding: "utf-8", timeout: 3000 }).trim().toLowerCase();
+                isBackboneAlive = result === "node";
+              } catch {
+                // Can't verify — assume stale
+              }
+            } else {
+              // On Unix, PIDs recycle less aggressively; trust the signal check
+              isBackboneAlive = true;
+            }
           } catch {
-            // Process is dead — stale lock, we can take over
+            // Process is dead — stale lock
+          }
+
+          if (isBackboneAlive) {
+            process.exit(0);
           }
         }
       } catch {
@@ -125,6 +138,14 @@ const ensureFirstRun = () => {
 };
 
 ensureFirstRun();
+
+// ── CLI subcommands — run before TUI if args match ───────────────
+const cliArgs = process.argv.slice(2);
+if (cliArgs.length > 0) {
+  const { handleCliSubcommand } = await import("../src/cli/index.js");
+  const handled = await handleCliSubcommand(cliArgs);
+  if (handled) process.exit(0);
+}
 
 // Acquire lock before anything else
 acquireLock();
@@ -340,7 +361,11 @@ const ensureServerRunning = async () => {
   const { spawn } = await import("child_process");
   const serverPath = path.join(getEngineRoot(), "src", "server.js");
 
-  const env = { ...process.env, BACKBONE_NO_BROWSER: "1" };
+  const env = {
+    ...process.env,
+    BACKBONE_NO_BROWSER: "1",
+    BACKBONE_PARENT_PID: String(process.pid),
+  };
   const serverProc = spawn(process.execPath, [serverPath], {
     cwd: getEngineRoot(),
     detached: true,
@@ -377,7 +402,11 @@ const startServerWatchdog = async () => {
   const restartServer = async () => {
     const { spawn } = await import("child_process");
     const serverPath = path.join(getEngineRoot(), "src", "server.js");
-    const env = { ...process.env, BACKBONE_NO_BROWSER: "1" };
+    const env = {
+      ...process.env,
+      BACKBONE_NO_BROWSER: "1",
+      BACKBONE_PARENT_PID: String(process.pid),
+    };
     const serverProc = spawn(process.execPath, [serverPath], {
       cwd: getEngineRoot(),
       detached: true,
@@ -638,9 +667,10 @@ const setConsoleTitle = (title) => {
 };
 
 // Get user's first name for title display
-const getUserFirstName = () => {
+const getUserFirstName = async () => {
   // Try LinkedIn profile first (most reliable)
   try {
+    const { loadLinkedInProfile } = await import("../src/services/integrations/linkedin-scraper.js");
     const profile = loadLinkedInProfile();
     const fullName = profile?.profile?.name;
     if (fullName) return fullName.split(" ")[0];
@@ -664,7 +694,7 @@ const getUserFirstName = () => {
   return null;
 };
 
-const userName = getUserFirstName();
+const userName = await getUserFirstName();
 // Title format: BACKBONE · [FirstName]
 // Singleton checks in launchers match on "BACKBONE" in the window title
 setConsoleTitle(userName ? `BACKBONE · ${userName}` : "BACKBONE");
@@ -680,6 +710,7 @@ if (process.env.BACKBONE_UPDATED !== "1") {
     // Show brief status on the raw terminal before Ink takes over
     process.stdout.write("\x1b[2J\x1b[H"); // clear + home
     process.stdout.write("\x1b[90mChecking for updates...\x1b[0m\r");
+    const { checkForUpdates } = await import("../src/services/setup/auto-updater.js");
     await checkForUpdates({ silent: true });
     // If we get here, no update was applied (checkForUpdates exits on success)
     process.stdout.write("\x1b[2K"); // clear the line
@@ -690,6 +721,7 @@ if (process.env.BACKBONE_UPDATED !== "1") {
 }
 
 // Check for post-update notification
+const { consumeUpdateState } = await import("../src/services/setup/auto-updater.js");
 const _updateState = consumeUpdateState();
 
 const stdin = process.stdin;
@@ -697,6 +729,9 @@ if (!stdin.isTTY) {
   // Keep the process alive in non-TTY environments (e.g. when launched via wrappers).
   stdin.resume();
 }
+
+// Lazy-load App (heavy import tree) only when TUI is needed
+const { default: App } = await import("../src/app.js");
 
 // Render with optimized settings for smooth updates
 const { unmount, clear } = render(createElement(App, { updateConsoleTitle, updateState: _updateState }), {

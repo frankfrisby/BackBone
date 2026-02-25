@@ -1,0 +1,24 @@
+# Dev only
+dev/
+apps/
+.agents/
+.pi/
+.github/
+installer/
+
+# Temp files
+tmp-*
+_gen.cjs
+*.png
+*.log
+
+# Config
+.env
+.env.*
+.mcp-engine.json
+
+# Data (user data lives in ~/.backbone/)
+data/
+memory/
+projects/
+screenshots/

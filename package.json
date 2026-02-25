@@ -1,5 +1,5 @@
 {
-  "name": "@backbone-ai/engine",
+  "name": "@frankfrisby/backbone",
   "version": "3.0.0",
   "description": "Autonomous life management CLI powered by Claude AI",
   "main": "bin/backbone.js",
@@ -7,15 +7,25 @@
   "bin": {
     "backbone": "bin/backbone.js"
   },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com",
+    "access": "restricted"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/frankfrisby/BackBone.git"
+  },
   "engines": {
     "node": ">=20.0.0"
   },
   "files": [
     "bin/",
     "src/",
+    "tools/",
     "skills/",
     "package.json",
-    ".mcp.json"
+    ".mcp.json",
+    ".npmrc"
   ],
   "scripts": {
     "prestart": "node bin/bootstrap-runtime.cjs",

@@ -33,6 +33,7 @@ import { runServer } from "./server.js";
 import { runDo } from "./do.js";
 import { runEmpower } from "./empower.js";
 import { runChannel } from "./channel.js";
+import { runUpdate } from "./update.js";
 
 const COMMANDS = {
   doctor: runDoctor,
@@ -50,6 +51,7 @@ const COMMANDS = {
   empower: runEmpower,
   channel: runChannel,
   channels: runChannel,
+  update: runUpdate,
 };
 
 const HELP_TEXT = `
@@ -72,6 +74,7 @@ Commands:
   do              Control your computer (open apps, type, click, browse)
   empower         Empower financial data (scrape, accounts, holdings)
   channel         Manage messaging channels (list, add, enable, config)
+  update          Check for and install updates (--check to just check)
 
 Run backbone without arguments to launch the interactive TUI.
 Run backbone <command> --help for command-specific help.

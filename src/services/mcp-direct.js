@@ -86,16 +86,35 @@ const SERVER_REGISTRY = {
             return (Array.isArray(trades) ? trades : []).slice(-(args.limit || 20));
           } catch { return []; }
         }
-        case "get_trading_signals":
-        case "get_prediction_stats":
-        case "get_ticker_analysis":
+        case "get_trading_signals": {
+          const scores = scoreEngine.loadTickerScores?.();
+          if (!scores) return { buys: [], sells: [], total: 0 };
+          const ranked = scoreEngine.rankTickers?.(scores) || [];
+          const buys = ranked.filter(t => t.effectiveScore >= (scoreEngine.SCORE_THRESHOLDS?.BUY || 7));
+          const sells = ranked.filter(t => t.effectiveScore <= (scoreEngine.SCORE_THRESHOLDS?.SELL || 3));
+          return { buys: buys.slice(0, 10), sells: sells.slice(0, 10), total: ranked.length };
+        }
+        case "get_prediction_stats": return scoreEngine.getPredictionStats?.() || {};
+        case "get_ticker_analysis": {
+          if (!args.symbol) throw new Error("symbol required");
+          const breakdown = scoreEngine.getTickerScoreBreakdown?.(args.symbol);
+          return breakdown || { error: `No data for ${args.symbol}` };
+        }
         case "analyze_position":
-        case "explain_why_position_held":
+        case "explain_why_position_held": {
+          if (!args.symbol) throw new Error("symbol required");
+          // Provide score breakdown + position info as analysis
+          const pos = (await fetchPositions(config)).find(p => p.symbol === args.symbol);
+          const bd = scoreEngine.getTickerScoreBreakdown?.(args.symbol);
+          return {
+            symbol: args.symbol,
+            position: pos ? { qty: parseFloat(pos.qty), avgEntry: parseFloat(pos.avg_entry_price), unrealizedPL: parseFloat(pos.unrealized_pl), unrealizedPLPercent: parseFloat(pos.unrealized_plpc) * 100 } : null,
+            scoreBreakdown: bd || null,
+            note: pos ? `Held because effective score (${bd?.effectiveScore?.toFixed(1) || "?"}) is above sell threshold` : "No position found",
+          };
+        }
         case "enable_auto_trading":
-          // These require the auto-trader which has complex dependencies
-          // Fall back to score engine where possible
-          if (name === "get_prediction_stats") return scoreEngine.getPredictionStats?.();
-          throw new Error(`Tool ${name} requires full trading server — use MCP instead`);
+          throw new Error("enable_auto_trading requires user confirmation — use MCP or auto-trader directly");
         default: throw new Error(`Unknown trading tool: ${name}`);
       }
     };
@@ -175,23 +194,73 @@ const SERVER_REGISTRY = {
   // These servers are less commonly needed for quick_answer.
   // They throw a clear error directing to use the full MCP server instead.
   "backbone-google": async () => {
+    // Try to delegate to the google MCP server's handler
+    try {
+      const mod = await import("../mcp/google-mail-calendar-server.js");
+      if (mod.handleTool) return mod.handleTool;
+    } catch {}
     return async (name, args) => {
       throw new Error(`Google tool "${name}" requires full MCP server`);
     };
   },
   "backbone-contacts": async () => {
+    const fs = await import("fs");
+    const { dataFile } = await import("./paths.js");
     return async (name, args) => {
-      throw new Error(`Contacts tool "${name}" requires full MCP server`);
+      const contactsFile = dataFile("contacts.json");
+      const loadContacts = () => {
+        try {
+          const raw = JSON.parse(fs.readFileSync(contactsFile, "utf-8"));
+          return Array.isArray(raw) ? raw : (raw?.contacts || []);
+        } catch { return []; }
+      };
+      switch (name) {
+        case "get_contacts": {
+          let list = loadContacts();
+          if (args?.category) list = list.filter(c => c.category === args.category);
+          return list.slice(0, args?.limit || 50);
+        }
+        case "search_contacts": {
+          const q = (args?.query || "").toLowerCase();
+          return loadContacts().filter(c =>
+            (c.name || "").toLowerCase().includes(q) ||
+            (c.company || "").toLowerCase().includes(q)
+          );
+        }
+        default: throw new Error(`Contacts tool "${name}" requires full MCP server`);
+      }
     };
   },
   "backbone-news": async () => {
+    const fs = await import("fs");
+    const { dataFile } = await import("./paths.js");
     return async (name, args) => {
-      throw new Error(`News tool "${name}" requires full MCP server`);
+      switch (name) {
+        case "get_market_summary": {
+          try {
+            const cached = JSON.parse(fs.readFileSync(dataFile("news-cache.json"), "utf-8"));
+            return cached?.marketSummary || cached;
+          } catch { return { error: "No cached news" }; }
+        }
+        default: throw new Error(`News tool "${name}" requires full MCP server for active fetching`);
+      }
     };
   },
   "backbone-projects": async () => {
+    const fs = await import("fs");
+    const path = await import("path");
+    const { getProjectsDir } = await import("./paths.js");
     return async (name, args) => {
-      throw new Error(`Projects tool "${name}" requires full MCP server`);
+      switch (name) {
+        case "list_projects": {
+          const dir = getProjectsDir();
+          if (!fs.existsSync(dir)) return [];
+          return fs.readdirSync(dir).filter(d =>
+            fs.existsSync(path.join(dir, d, "PROJECT.md"))
+          ).map(d => ({ name: d }));
+        }
+        default: throw new Error(`Projects tool "${name}" requires full MCP server`);
+      }
     };
   },
   "backbone-linkedin": async () => {

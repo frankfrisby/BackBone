@@ -30,28 +30,28 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TAG = "[BrowserAgent]";
 const MAX_STEPS = 25;
 
-// Load API key
-function ensureApiKey() {
-  if (!process.env.ANTHROPIC_API_KEY) {
-    try {
-      const dotenvPath = path.resolve(__dirname, "..", ".env");
-      if (fs.existsSync(dotenvPath)) {
-        const content = fs.readFileSync(dotenvPath, "utf-8");
-        for (const line of content.split("\n")) {
-          const match = line.match(/^ANTHROPIC_API_KEY=(.+)/);
-          if (match) { process.env.ANTHROPIC_API_KEY = match[1].trim(); break; }
-        }
+// Load API key from vault, .env, or process.env
+async function ensureApiKey() {
+  if (process.env.ANTHROPIC_API_KEY) return;
+
+  // Try credential vault first (server sets this on startup)
+  try {
+    const { getCredential } = await import(path.resolve(__dirname, "..", "src", "services", "credential-vault.js"));
+    const key = await getCredential("ANTHROPIC_API_KEY");
+    if (key) { process.env.ANTHROPIC_API_KEY = key; return; }
+  } catch {}
+
+  // Fallback: read .env file directly
+  try {
+    const dotenvPath = path.resolve(__dirname, "..", ".env");
+    if (fs.existsSync(dotenvPath)) {
+      const content = fs.readFileSync(dotenvPath, "utf-8");
+      for (const line of content.split("\n")) {
+        const match = line.match(/^ANTHROPIC_API_KEY=(.+)/);
+        if (match) { process.env.ANTHROPIC_API_KEY = match[1].trim(); return; }
       }
-    } catch {}
-    // Try vault
-    if (!process.env.ANTHROPIC_API_KEY) {
-      try {
-        const home = process.env.HOME || process.env.USERPROFILE;
-        const vaultPin = path.join(home, ".backbone", "users");
-        // The key should be in env by the time server starts — this is fallback
-      } catch {}
     }
-  }
+  } catch {}
 }
 
 function getOutputDir() {
@@ -86,7 +86,10 @@ async function askAI(systemPrompt, userPrompt, screenshotBase64 = null) {
   } catch {}
 
   // For image tasks or fallback: use Anthropic SDK directly
-  ensureApiKey();
+  await ensureApiKey();
+  if (!process.env.ANTHROPIC_API_KEY) {
+    throw new Error("No ANTHROPIC_API_KEY found. Run 'backbone doctor' to check credentials, or set ANTHROPIC_API_KEY in .env");
+  }
   const { default: Anthropic } = await import("@anthropic-ai/sdk");
   const client = new Anthropic();
 
@@ -172,7 +175,7 @@ Create a plan to accomplish this using a web browser.`;
 /**
  * Launch browser with user's Chrome cookies (temp copy to avoid lock conflicts).
  */
-async function launchBrowser(headless = false) {
+async function launchBrowser(headless = true) {
   const home = process.env.HOME || process.env.USERPROFILE;
   const chromeDefaultDir = path.join(home, "AppData", "Local", "Google", "Chrome", "User Data", "Default");
   const chromeUserDataDir = path.join(home, "AppData", "Local", "Google", "Chrome", "User Data");
@@ -217,7 +220,7 @@ async function launchBrowser(headless = false) {
  * Takes screenshots at each step. Stops before risky actions.
  */
 async function executePlan(plan, options = {}) {
-  const { maxSteps = MAX_STEPS, headless = false, onStep } = options;
+  const { maxSteps = MAX_STEPS, headless = true, onStep } = options;
   const outputDir = getOutputDir();
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
   const sessionFolder = path.join(outputDir, `session_${timestamp}`);
@@ -228,37 +231,82 @@ async function executePlan(plan, options = {}) {
   const stepLog = [];
   let finalResult = null;
 
-  const systemPrompt = `You are a browser automation agent executing a plan.
+  const systemPrompt = `You are a browser automation agent executing a plan. You have VISION — you can see screenshots of the page. Use the screenshot to understand what's on screen, not just the text.
 
 PLAN: ${JSON.stringify(plan)}
 
 You see a screenshot and page text. Decide the SINGLE next action.
 
 RESPOND IN THIS EXACT FORMAT:
-ACTION: click | type | press | scroll | navigate | wait | read | done
-SELECTOR: CSS selector or visible text (for click/type)
+ACTION: click | type | press | scroll | navigate | wait | read | done | dismiss
+SELECTOR: CSS selector or visible text (for click/type/dismiss)
 VALUE: text to type or key to press (for type/press)
 URL: full URL (for navigate)
 RESULT: information gathered or summary (for read/done)
 REASON: why this action
+
+VISION GUIDANCE:
+- LOOK AT THE SCREENSHOT CAREFULLY. It shows the actual page state.
+- The page text may not capture everything — buttons, icons, modals, and overlays are often invisible in text.
+- Trust what you SEE in the screenshot over what the text says.
+
+OBSTACLE HANDLING — Handle these BEFORE attempting the main task:
+- **Template/layout pickers**: Click "Blank document", "Blank", "New", or the first empty template option.
+- **Welcome screens / splash pages**: Click "Get Started", "Continue", "Skip", "Close", or the X button.
+- **Cookie consent banners**: Click "Accept", "Accept All", "Decline", or "Reject All" (prefer declining).
+- **Login prompts**: If the user should be logged in via cookies, try clicking "Sign in" or note that login is needed.
+- **Permission popups**: Click "Allow" or "Block" as appropriate.
+- **App loading screens**: Use ACTION: wait if the page is still loading.
+- **"Choose a plan" / upsell modals**: Look for "Skip", "Maybe later", "X", or "Close".
+- Do NOT get stuck on the same screen. If your last action didn't change anything, try a different approach.
 
 RULES:
 - ONE action per response
 - Use simple selectors: input[name="email"], button:has-text("Sign In")
 - If you see a login page and the user should already be logged in, note it
 - For ANY payment/purchase/submit: use ACTION: done and explain what you found — DO NOT click submit
-- When you have the information the user wanted, use ACTION: done with RESULT`;
+- When you have the information the user wanted, use ACTION: done with RESULT
+- If you're stuck on the SAME page for 3+ steps, try pressing Escape, clicking elsewhere, or scrolling
+- ALWAYS describe what you see in the screenshot in your REASON`;
 
   try {
     // Navigate to starting URL
+    // Install proactive popup dismisser (kills cookie banners, modals, overlays automatically)
+    try {
+      const { installPopupDismisser, dismissPopups, getSiteConfig } = await import("../src/services/browser/popup-dismisser.js");
+      await installPopupDismisser(page);
+    } catch (e) {
+      console.log(`${TAG} Popup dismisser not available: ${e.message}`);
+    }
+
     if (plan.website) {
       await page.goto(plan.website, { waitUntil: "domcontentloaded", timeout: 20000 });
       await page.waitForTimeout(2000);
+
+      // Dismiss any popups that appeared on load
+      try {
+        const { dismissPopups, getSiteConfig } = await import("../src/services/browser/popup-dismisser.js");
+        const siteConfig = getSiteConfig(plan.website);
+        if (siteConfig?.waitAfterLoad) {
+          await page.waitForTimeout(siteConfig.waitAfterLoad);
+        }
+        const result = await dismissPopups(page);
+        if (result.dismissed > 0) {
+          console.log(`${TAG} Auto-dismissed ${result.dismissed} popup(s) on load`);
+        }
+      } catch {}
+
       stepLog.push({ step: 0, action: `Navigated to ${plan.website}`, success: true });
       if (onStep) await onStep({ step: 0, action: `Opened ${plan.website}` });
     }
 
     for (let step = 0; step < maxSteps; step++) {
+      // Proactively dismiss popups before each step
+      try {
+        const { dismissPopups } = await import("../src/services/browser/popup-dismisser.js");
+        await dismissPopups(page);
+      } catch {}
+
       // Screenshot
       const screenshotPath = path.join(sessionFolder, `step_${step + 1}.png`);
       const screenshotBuffer = await page.screenshot({ path: screenshotPath });
@@ -272,8 +320,15 @@ RULES:
 
       const history = stepLog.map((s, i) => `${i + 1}. ${s.action} → ${s.success ? "OK" : "FAILED"}`).join("\n");
 
+      // Detect if stuck on same page
+      const lastUrl = stepLog.length > 0 ? stepLog[stepLog.length - 1]?.url : null;
+      const stuckCount = stepLog.filter(s => s.url === pageUrl && !s.success).length;
+      const stuckHint = stuckCount >= 2
+        ? `\n\n⚠ WARNING: You appear STUCK on this page (${stuckCount} failed attempts). Try a DIFFERENT approach: press Escape, click a different element, scroll, or look for an alternative path in the screenshot.`
+        : "";
+
       const aiResponse = await askAI(systemPrompt,
-        `Page: ${pageTitle} (${pageUrl})\n\nVisible text (first 3000 chars):\n${pageText.slice(0, 3000)}\n\nPrevious steps:\n${history || "None"}\n\nNext action?`,
+        `Page: ${pageTitle} (${pageUrl})\n\nVisible text (first 3000 chars):\n${pageText.slice(0, 3000)}\n\nPrevious steps:\n${history || "None"}${stuckHint}\n\nLook at the screenshot carefully. What do you see? What is the next action?`,
         screenshotBase64
       );
 
@@ -299,15 +354,41 @@ RULES:
       try {
         switch (actionType) {
           case "click":
+          case "dismiss":
+            // Multi-strategy click: CSS selector → text match → role match → Escape fallback
             try { await page.click(actionMap.selector, { timeout: 5000 }); success = true; }
             catch {
-              try { await page.getByText(actionMap.selector?.replace(/['"]/g, ""), { exact: false }).first().click({ timeout: 5000 }); success = true; }
-              catch { success = false; }
+              const sel = actionMap.selector?.replace(/['"]/g, "") || "";
+              try { await page.getByText(sel, { exact: false }).first().click({ timeout: 5000 }); success = true; }
+              catch {
+                try { await page.getByRole("button", { name: sel }).first().click({ timeout: 5000 }); success = true; }
+                catch {
+                  try { await page.getByRole("link", { name: sel }).first().click({ timeout: 5000 }); success = true; }
+                  catch {
+                    // Last resort for dismiss: press Escape
+                    if (actionType === "dismiss") {
+                      await page.keyboard.press("Escape");
+                      success = true;
+                    }
+                  }
+                }
+              }
             }
             break;
           case "type":
+            // Try fill first, then click + keyboard type as fallback
             try { await page.fill(actionMap.selector, actionMap.value || "", { timeout: 5000 }); success = true; }
-            catch { success = false; }
+            catch {
+              try {
+                await page.click(actionMap.selector, { timeout: 3000 });
+                await page.keyboard.type(actionMap.value || "", { delay: 30 });
+                success = true;
+              } catch {
+                // Last resort: just type without targeting (assumes focus is correct)
+                try { await page.keyboard.type(actionMap.value || "", { delay: 30 }); success = true; }
+                catch { success = false; }
+              }
+            }
             break;
           case "press":
             await page.keyboard.press(actionMap.value || "Enter"); success = true;
@@ -326,7 +407,7 @@ RULES:
         console.log(`${TAG}   Failed: ${e.message}`);
       }
 
-      stepLog.push({ step: step + 1, action: `${actionType}: ${actionMap.selector || actionMap.url || ""}`, success });
+      stepLog.push({ step: step + 1, action: `${actionType}: ${actionMap.selector || actionMap.url || ""}`, success, url: pageUrl });
       await page.waitForTimeout(1500);
     }
 
@@ -375,7 +456,7 @@ RULES:
  * @param {boolean} [opts.headless] - Run browser without GUI
  */
 export async function browserAgent(opts) {
-  const { request, onPlan, onStep, onNeedInfo, context = {}, autoApprove = false, headless = false } = opts;
+  const { request, onPlan, onStep, onNeedInfo, context = {}, autoApprove = false, headless = true } = opts;
 
   console.log(`${TAG} Request: "${request}"`);
 

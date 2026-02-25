@@ -215,6 +215,15 @@ const JOB_DEFS = [
     conditional: false,
     description: "Evening email digest — top useful emails",
   },
+  {
+    id: "claude-update",
+    type: "claude-update",
+    windowStart: [3, 0],
+    windowEnd: [4, 0],
+    weekdaysOnly: false,
+    conditional: false,
+    description: "Daily Claude Code CLI update check",
+  },
 ];
 
 // ── Helpers ─────────────────────────────────────────────────────
@@ -343,10 +352,29 @@ class ProactiveScheduler extends EventEmitter {
 
   // ── Manual trigger (for testing) ────────────────────────────
 
-  async triggerJob(jobId) {
+  async triggerJob(jobId, opts = {}) {
     const job = this.jobs.get(jobId);
     if (!job) return { success: false, error: `Unknown job: ${jobId}` };
-    return this._executeJob(job);
+    return this._executeJob(job, opts);
+  }
+
+  _isCollectorModeEnabled() {
+    const raw = String(process.env.BACKBONE_PROACTIVE_COLLECTOR_MODE || "1").trim().toLowerCase();
+    return !["0", "false", "off", "no"].includes(raw);
+  }
+
+  _isCollectorOnlyType(type) {
+    return ["brief", "market", "goals", "projects", "adhoc", "email"].includes(String(type || "").trim());
+  }
+
+  _buildCollectorOnlyResult(def) {
+    return {
+      success: true,
+      collectorOnly: true,
+      deferred: true,
+      type: def?.type || "unknown",
+      reason: "collector-mode",
+    };
   }
 
   // ── Internal tick ───────────────────────────────────────────
@@ -376,74 +404,85 @@ class ProactiveScheduler extends EventEmitter {
 
   // ── Execute a job ───────────────────────────────────────────
 
-  async _executeJob(job) {
+  async _executeJob(job, opts = {}) {
     const id = job.def.id;
     job.firedToday = true;
+    const forceCollectorMode = typeof opts.forceCollectorMode === "boolean" ? opts.forceCollectorMode : null;
+    const collectorOnly = forceCollectorMode === true ||
+      (forceCollectorMode !== false && this._isCollectorModeEnabled() && this._isCollectorOnlyType(job.def.type));
 
     // Check daily cap
-    if (this.dailyMessageCount >= this.maxDailyMessages) {
+    if (!collectorOnly && this.dailyMessageCount >= this.maxDailyMessages) {
       const result = { success: false, error: "Daily message cap reached", skipped: true };
       job.lastResult = result;
       this._saveState();
-      console.log(`${TAG} ${id} — skipped (daily cap ${this.maxDailyMessages})`);
+      console.log(`${TAG} ${id} - skipped (daily cap ${this.maxDailyMessages})`);
       return result;
     }
 
     // Check CLI cooldown
-    if (Date.now() < this.cliCooldownUntil) {
+    if (!collectorOnly && Date.now() < this.cliCooldownUntil) {
       const result = { success: false, error: "CLI cooldown active", skipped: true };
       job.lastResult = result;
       this._saveState();
-      console.log(`${TAG} ${id} — skipped (CLI cooldown)`);
+      console.log(`${TAG} ${id} - skipped (CLI cooldown)`);
       return result;
     }
 
-    console.log(`${TAG} Executing: ${id}`);
+    console.log(`${TAG} Executing: ${id}${collectorOnly ? " (collector-only)" : ""}`);
 
     try {
       let result;
 
-      switch (job.def.type) {
-        case "brief":
-          result = await this._executeBrief(job.def);
-          break;
-        case "market":
-          result = await this._executeMarket(job.def);
-          break;
-        case "goals":
-          result = await this._executeGoalCheck(job.def);
-          break;
-        case "projects":
-          result = await this._executeProjectNudge(job.def);
-          break;
-        case "adhoc":
-          result = await this._executeAdhocIntel(job.def);
-          break;
-        case "email":
-          result = await this._executeEmailDigest(job.def);
-          break;
-        case "context-sync":
-          result = await this._executeContextSync(job.def);
-          break;
-        case "brokerage":
-          result = await this._executeBrokerageSync(job.def);
-          break;
-        case "intel-sweep":
-          result = await this._executeIntelSweep(job.def);
-          break;
-        default:
-          result = { success: false, error: `Unknown type: ${job.def.type}` };
+      if (collectorOnly) {
+        result = this._buildCollectorOnlyResult(job.def);
+      } else {
+        switch (job.def.type) {
+          case "brief":
+            result = await this._executeBrief(job.def);
+            break;
+          case "market":
+            result = await this._executeMarket(job.def);
+            break;
+          case "goals":
+            result = await this._executeGoalCheck(job.def);
+            break;
+          case "projects":
+            result = await this._executeProjectNudge(job.def);
+            break;
+          case "adhoc":
+            result = await this._executeAdhocIntel(job.def);
+            break;
+          case "email":
+            result = await this._executeEmailDigest(job.def);
+            break;
+          case "context-sync":
+            result = await this._executeContextSync(job.def);
+            break;
+          case "brokerage":
+            result = await this._executeBrokerageSync(job.def);
+            break;
+          case "intel-sweep":
+            result = await this._executeIntelSweep(job.def);
+            break;
+          case "claude-update":
+            result = await this._executeClaudeUpdate(job.def);
+            break;
+          default:
+            result = { success: false, error: `Unknown type: ${job.def.type}` };
+        }
       }
 
       job.lastResult = result;
 
       if (result.success) {
         // Silent jobs don't send chat messages — don't count against daily cap
-        if (job.def.type !== "context-sync" && job.def.type !== "brokerage" && job.def.type !== "intel-sweep") {
+        if (!collectorOnly && job.def.type !== "context-sync" && job.def.type !== "brokerage" && job.def.type !== "intel-sweep" && job.def.type !== "claude-update") {
           this.dailyMessageCount++;
         }
         this.emit("job-fired", { jobId: id, type: job.def.type, result });
-        console.log(`${TAG} ${id} — ${job.def.type === "context-sync" ? "synced" : "sent"} (${this.dailyMessageCount}/${this.maxDailyMessages} today)`);
+        const actionLabel = collectorOnly ? "collected" : (job.def.type === "context-sync" || job.def.type === "brokerage" || job.def.type === "intel-sweep" || job.def.type === "claude-update" ? "synced" : "sent");
+        console.log(`${TAG} ${id} - ${actionLabel} (${this.dailyMessageCount}/${this.maxDailyMessages} today)`);
       } else if (result.skipped) {
         console.log(`${TAG} ${id} — skipped: ${result.reason || result.error}`);
       } else {
@@ -928,6 +967,29 @@ Return ONLY the message text or "SKIP".`;
     }
   }
 
+  async _executeClaudeUpdate(_def) {
+    try {
+      const { execSync } = await import("child_process");
+      const output = execSync("claude update", {
+        timeout: 120_000,
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      console.log(`${TAG} Claude update output: ${(output || "").trim()}`);
+      return { success: true, output: (output || "").trim() };
+    } catch (err) {
+      // Exit code 0 with stderr is normal (e.g. "already up to date")
+      const stderr = err.stderr ? err.stderr.trim() : "";
+      const stdout = err.stdout ? err.stdout.trim() : "";
+      if (err.status === 0 || stdout.includes("up to date") || stderr.includes("up to date")) {
+        console.log(`${TAG} Claude already up to date`);
+        return { success: true, output: stdout || stderr || "Already up to date" };
+      }
+      console.error(`${TAG} Claude update error:`, err.message);
+      return { success: false, error: err.message };
+    }
+  }
+
   // ── Content generation via Claude Code CLI ──────────────────
 
   async _generateContent(prompt) {
@@ -997,6 +1059,8 @@ Return ONLY the message text or "SKIP".`;
       lastSaved: new Date().toISOString(),
     };
     try {
+      const dir = path.dirname(this.statePath);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
       fs.writeFileSync(this.statePath, JSON.stringify(this.state, null, 2));
     } catch (err) {
       console.error(`${TAG} Failed to save state:`, err.message);

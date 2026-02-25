@@ -219,9 +219,41 @@
       ]
     },
     {
+      "id": "open-url",
+      "name": "Open URL",
+      "description": "Open a URL in the user's default browser. No API keys needed. Use this for simple 'open X' requests — just launches the browser and navigates.",
+      "category": "web",
+      "file": "open-url.js",
+      "inputs": {
+        "url": { "type": "string", "required": true, "description": "URL to open (e.g., live.com, https://google.com)" }
+      },
+      "examples": [
+        { "url": "live.com" },
+        { "url": "https://outlook.live.com" },
+        { "url": "https://finance.yahoo.com" }
+      ]
+    },
+    {
+      "id": "browse",
+      "name": "Browse Website",
+      "description": "Open any website using the user's real Chrome browser with saved cookies and passwords. NO API keys needed. The user is already logged in to Gmail, Outlook, banks, etc. Just opens the page and returns the text content. Use this for 'go to X' or 'check my email' requests.",
+      "category": "web",
+      "file": "browse.js",
+      "inputs": {
+        "url": { "type": "string", "required": true, "description": "URL to open (e.g., https://mail.google.com, https://outlook.live.com)" },
+        "headless": { "type": "boolean", "default": false, "description": "Run without visible browser window" },
+        "wait": { "type": "number", "default": 3000, "description": "Wait time in ms for page to load" }
+      },
+      "examples": [
+        { "url": "https://mail.google.com" },
+        { "url": "https://outlook.live.com" },
+        { "url": "https://www.chase.com" }
+      ]
+    },
+    {
       "id": "browser-agent",
       "name": "Browser Agent",
-      "description": "AI-driven browser agent that navigates any website, reads content, clicks buttons, fills forms, and extracts information. Uses the user's real Chrome profile (all logins preserved).",
+      "description": "AI-driven browser agent that navigates any website, reads content, clicks buttons, fills forms, and extracts information. Uses the user's real Chrome profile (all logins preserved). Requires ANTHROPIC_API_KEY for the AI planning. For simple 'just open a page' tasks, use the 'browse' tool instead.",
       "category": "web",
       "file": "browser-agent.js",
       "inputs": {
@@ -291,6 +323,136 @@
         { "action": "auto" },
         { "action": "enrich", "name": "Jane Doe", "about": "AI Engineer at...", "skills": [{"name": "Python"}] }
       ]
+    },
+    {
+      "id": "evening-brief",
+      "name": "Generate Evening Brief",
+      "description": "Generate evening recap: accomplishments, portfolio P&L, health, tomorrow's calendar",
+      "category": "daily",
+      "file": "evening-brief.js",
+      "inputs": {
+        "deliver": { "type": "boolean", "default": false, "description": "Whether to deliver via WhatsApp" }
+      }
+    },
+    {
+      "id": "net-worth",
+      "name": "Net Worth Snapshot",
+      "description": "Get net worth breakdown from Empower (cash, investment, credit, loan)",
+      "category": "finance",
+      "file": "net-worth.js",
+      "inputs": {}
+    },
+    {
+      "id": "recession-check",
+      "name": "Recession Check",
+      "description": "Get current recession probability score (0-10) with component breakdown",
+      "category": "trading",
+      "file": "recession-check.js",
+      "inputs": {}
+    },
+    {
+      "id": "create-goal",
+      "name": "Create Goal",
+      "description": "Create a new trackable goal with category and optional tasks",
+      "category": "goals",
+      "file": "create-goal.js",
+      "inputs": {
+        "title": { "type": "string", "required": true, "description": "Goal title" },
+        "category": { "type": "string", "required": true, "description": "Category: health, finance, career, learning, personal, social" },
+        "priority": { "type": "number", "default": 3, "description": "Priority 1-5 (1=highest)" },
+        "tasks": { "type": "array", "description": "List of task strings" }
+      },
+      "examples": [
+        { "title": "Run 5K this week", "category": "health", "priority": 2 },
+        { "title": "Review Q1 portfolio allocation", "category": "finance", "tasks": ["Analyze current positions", "Research rebalancing options"] }
+      ]
+    },
+    {
+      "id": "set-reminder",
+      "name": "Set Reminder",
+      "description": "Schedule a WhatsApp reminder for a future time (absolute or relative)",
+      "category": "messaging",
+      "file": "set-reminder.js",
+      "inputs": {
+        "message": { "type": "string", "required": true, "description": "Reminder message" },
+        "when": { "type": "string", "required": true, "description": "When to send: ISO datetime, or relative (30m, 2h, 1d, tomorrow 9am)" }
+      },
+      "examples": [
+        { "message": "Check on NVDA earnings call", "when": "2h" },
+        { "message": "Morning workout", "when": "tomorrow 7am" }
+      ]
+    },
+    {
+      "id": "news-digest",
+      "name": "News Digest",
+      "description": "Get latest news headlines from cache with optional category filter",
+      "category": "world",
+      "file": "news-digest.js",
+      "inputs": {
+        "category": { "type": "string", "default": "all", "description": "Filter: markets, tech, business, all" }
+      }
+    },
+    {
+      "id": "backup-now",
+      "name": "Backup Now",
+      "description": "Trigger Firebase Storage backup of all user data (projects, memory, goals, spreadsheets)",
+      "category": "system",
+      "file": "backup-now.js",
+      "inputs": {}
+    },
+    {
+      "id": "contact-lookup",
+      "name": "Contact Lookup",
+      "description": "Search contacts by name, company, or role",
+      "category": "social",
+      "file": "contact-lookup.js",
+      "inputs": {
+        "query": { "type": "string", "required": true, "description": "Search query (name, company, role)" }
+      },
+      "examples": [
+        { "query": "Google" },
+        { "query": "engineer" }
+      ]
+    },
+    {
+      "id": "life-scores",
+      "name": "Life Scores",
+      "description": "Get life dimension scores (health, wealth, career, relationships, etc.)",
+      "category": "health",
+      "file": "life-scores.js",
+      "inputs": {}
+    },
+    {
+      "id": "web-research",
+      "name": "Web Research",
+      "description": "Generate a structured research plan with search queries for any topic",
+      "category": "research",
+      "file": "web-research.js",
+      "inputs": {
+        "topic": { "type": "string", "required": true, "description": "Topic to research" },
+        "depth": { "type": "string", "default": "standard", "description": "Research depth: quick, standard, deep" }
+      },
+      "examples": [
+        { "topic": "AI chip market trends", "depth": "deep" },
+        { "topic": "longevity science breakthroughs" }
+      ]
+    },
+    {
+      "id": "computer-use",
+      "name": "Computer Use",
+      "description": "Full desktop control — launch apps, click, type, scroll, take screenshots. Uses vision to see the screen and decide actions. Give it a goal like 'open Word and type hello' and it handles everything: launching the app, dismissing dialogs, clicking, typing.",
+      "category": "system",
+      "file": "computer-use.js",
+      "inputs": {
+        "goal": { "type": "string", "required": true, "description": "What to accomplish (e.g., 'open Word and type I love working on software')" },
+        "maxSteps": { "type": "number", "default": 15, "description": "Maximum actions before stopping" }
+      },
+      "examples": [
+        { "goal": "open Notepad and type Hello World" },
+        { "goal": "open Word and write a letter to my mom" },
+        { "goal": "open Calculator and calculate 42 * 17" },
+        { "goal": "take a screenshot of the desktop" }
+      ]
     }
   ],
   "categories": {
@@ -304,6 +466,9 @@
     "documents": "Document generation — LaTeX, PDF, Word, Excel",
     "media": "Media processing — video analysis, audio transcription, image processing",
     "profile": "User profile management — LinkedIn enrichment, identity",
-    "web": "Browser automation — open websites, capture content, scrape pages"
+    "web": "Browser automation — open websites, capture content, scrape pages",
+    "finance": "Financial overview — net worth, accounts, budgets",
+    "system": "System maintenance — backups, sync, diagnostics",
+    "social": "Social and contacts — people lookup, networking"
   }
 }

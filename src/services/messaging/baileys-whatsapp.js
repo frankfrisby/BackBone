@@ -8,6 +8,79 @@ import { ensureRuntimeDependency, isModuleNotFoundError } from "../runtime/depen
 
 const DATA_DIR = getDataDir();
 const AUTH_DIR = path.join(DATA_DIR, "whatsapp-baileys-auth");
+const CREDS_FILE = path.join(AUTH_DIR, "creds.json");
+const CREDS_BACKUP = path.join(AUTH_DIR, "creds.json.bak");
+
+/**
+ * Atomic write — writes to a temp file then renames.
+ * Prevents 0-byte creds.json if the process crashes mid-write.
+ */
+function atomicWriteFileSync(filePath, data) {
+  const tmp = filePath + ".tmp";
+  fs.writeFileSync(tmp, data);
+  fs.renameSync(tmp, filePath);
+}
+
+/**
+ * Wraps Baileys' useMultiFileAuthState saveCreds with:
+ * 1. Atomic writes (write to .tmp then rename)
+ * 2. Backup before each save (creds.json → creds.json.bak)
+ * 3. Auto-restore from backup if creds.json is empty/missing
+ */
+function wrapSaveCredsWithProtection(originalSaveCreds) {
+  return async () => {
+    // Back up current valid creds before overwriting
+    try {
+      if (fs.existsSync(CREDS_FILE)) {
+        const current = fs.readFileSync(CREDS_FILE, "utf-8");
+        if (current.length > 10) {
+          fs.writeFileSync(CREDS_BACKUP, current);
+        }
+      }
+    } catch {}
+
+    // Call Baileys' original saveCreds
+    await originalSaveCreds();
+
+    // Post-write check: if creds.json got corrupted, restore from backup
+    try {
+      const written = fs.readFileSync(CREDS_FILE, "utf-8");
+      if (written.length < 10) {
+        console.warn("[WhatsApp:Baileys] creds.json corrupted after save — restoring from backup");
+        if (fs.existsSync(CREDS_BACKUP)) {
+          const backup = fs.readFileSync(CREDS_BACKUP, "utf-8");
+          if (backup.length > 10) {
+            fs.writeFileSync(CREDS_FILE, backup);
+          }
+        }
+      }
+    } catch {}
+  };
+}
+
+/**
+ * Restore creds.json from backup if it's empty/missing.
+ * Called before initializing the socket.
+ */
+function restoreCredsIfCorrupted() {
+  try {
+    const credsExists = fs.existsSync(CREDS_FILE);
+    const credsSize = credsExists ? fs.statSync(CREDS_FILE).size : 0;
+
+    if (credsSize < 10 && fs.existsSync(CREDS_BACKUP)) {
+      const backup = fs.readFileSync(CREDS_BACKUP, "utf-8");
+      if (backup.length > 10) {
+        console.log("[WhatsApp:Baileys] Restoring creds.json from backup (was empty/missing)");
+        fs.writeFileSync(CREDS_FILE, backup);
+        return true;
+      }
+    }
+  } catch (err) {
+    console.error("[WhatsApp:Baileys] Failed to restore creds:", err.message);
+  }
+  return false;
+}
+
 const INBOUND_SCOPE = {
   SELF: "self",
   CONTACTS: "contacts",
@@ -59,8 +132,13 @@ class BaileysWhatsAppService extends EventEmitter {
       }
 
       this.module = baileysMod;
+
+      // Restore creds from backup if the file got corrupted (0-byte)
+      restoreCredsIfCorrupted();
+
       const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
-      this.saveCreds = saveCreds;
+      // Wrap saveCreds with backup + corruption detection
+      this.saveCreds = wrapSaveCredsWithProtection(saveCreds);
 
       let version;
       try {
@@ -71,7 +149,10 @@ class BaileysWhatsAppService extends EventEmitter {
       this.socket = makeWASocket({
         auth: state,
         version,
-        printQRInTerminal: true,
+        // We render our own compact QR (`small: true`) in `_printQr()`.
+        // Leaving Baileys terminal printing on causes a second large QR that can
+        // overlap the UI/log output and become unreadable.
+        printQRInTerminal: false,
         markOnlineOnConnect: true,
         syncFullHistory: false,
         browser: ["BACKBONE", "Desktop", "1.0.0"]
@@ -326,7 +407,9 @@ class BaileysWhatsAppService extends EventEmitter {
     }
 
     // Default privacy mode: process only self-chat messages.
-    return fromMe && isSelfChat;
+    // In self-chat, messages from the phone arrive with fromMe=true (same account).
+    // Messages sent by BACKBONE are filtered out by sentMessageIds check above.
+    return isSelfChat;
   }
 
   trackSentMessageId(messageId) {

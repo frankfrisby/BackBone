@@ -14,8 +14,9 @@
 import fs from "fs";
 import path from "path";
 import http from "http";
+import https from "https";
 import { execSync } from "child_process";
-import { ensureUserDirs, dataFile, memoryFile, getDataDir, getBackboneHome, getEngineRoot, getActiveUserId } from "../services/paths.js";
+import { ensureUserDirs, dataFile, memoryFile, getDataDir, getMemoryDir, getBackboneHome, getEngineRoot, getActiveUserId } from "../services/paths.js";
 import { section, label, ok, fail, warn, info, theme, symbols } from "./theme.js";
 
 const HELP = `
@@ -24,6 +25,7 @@ backbone doctor — Health check & diagnostics
 Usage: backbone doctor [options]
 
 Options:
+  --deep      Run comprehensive deep diagnostics
   --fix       Attempt to fix detected issues
   --json      Output machine-readable JSON
   --help      Show this help
@@ -157,6 +159,7 @@ export async function runDoctor(args) {
   }
 
   const jsonMode = args.includes("--json");
+  const deepMode = args.includes("--deep");
   const fixMode = args.includes("--fix");
   const results = {};
 
@@ -275,12 +278,203 @@ export async function runDoctor(args) {
     }
   }
 
+
+  // Deep diagnostics
+  let deepIssues = 0;
+  if (deepMode) {
+    const deepStart = Date.now();
+
+    // MCP Server Health
+    if (!jsonMode) console.log(section("Deep: MCP Server Health"));
+    if (mcp.exists && mcp.servers.length > 0) {
+      const mcpConfig = JSON.parse(fs.readFileSync(path.join(getEngineRoot(), ".mcp.json"), "utf-8"));
+      for (const s of mcp.servers) {
+        try {
+          const srv = mcpConfig.mcpServers[s];
+          if (srv && srv.args && srv.args.length > 0) {
+            const scriptPath = path.resolve(getEngineRoot(), srv.args[0]);
+            if (fs.existsSync(scriptPath)) {
+              if (!jsonMode) console.log(ok(`${s} — entry point exists`));
+            } else {
+              if (!jsonMode) console.log(fail(`${s} — entry point missing: ${srv.args[0]}`));
+              deepIssues++;
+            }
+          } else {
+            if (!jsonMode) console.log(warn(`${s} — no args configured`));
+          }
+        } catch {
+          if (!jsonMode) console.log(warn(`${s} — could not read config`));
+        }
+      }
+    } else {
+      if (!jsonMode) console.log(info("No MCP servers to check"));
+    }
+
+    // Memory File Freshness
+    if (!jsonMode) console.log(section("Deep: Memory Freshness"));
+    const memDir = getMemoryDir();
+    if (fs.existsSync(memDir)) {
+      const mdFiles = fs.readdirSync(memDir).filter(f => f.endsWith(".md"));
+      const now = Date.now();
+      const SEVEN_DAYS = 7 * 24 * 60 * 60 * 1000;
+      for (const f of mdFiles) {
+        try {
+          const stat = fs.statSync(path.join(memDir, f));
+          const age = now - stat.mtimeMs;
+          const days = (age / (24 * 60 * 60 * 1000)).toFixed(1);
+          if (age > SEVEN_DAYS) {
+            if (!jsonMode) console.log(warn(`${f} — last modified ${days} days ago`));
+            deepIssues++;
+          } else {
+            if (!jsonMode) console.log(ok(`${f} — ${days} days old`));
+          }
+        } catch {}
+      }
+    }
+
+    // Credential Vault Keys
+    if (!jsonMode) console.log(section("Deep: Credential Keys"));
+    const essentialKeys = ["ANTHROPIC_API_KEY", "ALPACA_API_KEY", "OURA_TOKEN"];
+    for (const key of essentialKeys) {
+      if (process.env[key]) {
+        if (!jsonMode) console.log(ok(`${key} — set in environment`));
+      } else {
+        if (!jsonMode) console.log(warn(`${key} — not found in environment`));
+        deepIssues++;
+      }
+    }
+
+    // Disk Usage
+    if (!jsonMode) console.log(section("Deep: Disk Usage"));
+    const diskDirs = [
+      ["data", getDataDir()],
+      ["memory", getMemoryDir()],
+      ["projects", path.join(path.dirname(getDataDir()), "projects")],
+    ];
+    for (const [name, dir] of diskDirs) {
+      if (fs.existsSync(dir)) {
+        try {
+          let totalSize = 0;
+          const walk = (d) => {
+            for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
+              const full = path.join(d, entry.name);
+              if (entry.isDirectory()) walk(full);
+              else try { totalSize += fs.statSync(full).size; } catch {}
+            }
+          };
+          walk(dir);
+          const mb = (totalSize / (1024 * 1024)).toFixed(2);
+          if (!jsonMode) console.log(ok(`${name}/ — ${mb} MB`));
+        } catch {
+          if (!jsonMode) console.log(warn(`${name}/ — could not calculate size`));
+        }
+      } else {
+        if (!jsonMode) console.log(info(`${name}/ — not found`));
+      }
+    }
+
+    // Tool Validation
+    if (!jsonMode) console.log(section("Deep: Tool Validation"));
+    const toolIndexPath = path.join(getEngineRoot(), "tools", "index.json");
+    if (fs.existsSync(toolIndexPath)) {
+      try {
+        const toolIndex = JSON.parse(fs.readFileSync(toolIndexPath, "utf-8"));
+        const tools = toolIndex.tools || toolIndex;
+        const toolList = Array.isArray(tools) ? tools : Object.values(tools);
+        let toolOk = 0, toolFail = 0;
+        for (const tool of toolList) {
+          const toolFile = tool.file || tool.path || (tool.id + ".js");
+          const toolPath = path.join(getEngineRoot(), "tools", toolFile);
+          if (fs.existsSync(toolPath)) {
+            toolOk++;
+          } else {
+            if (!jsonMode) console.log(fail("Missing: tools/" + toolFile));
+            toolFail++;
+            deepIssues++;
+          }
+        }
+        if (!jsonMode) console.log(ok(`${toolOk} tools found` + (toolFail ? `, ${toolFail} missing` : "")));
+      } catch (e) {
+        if (!jsonMode) console.log(warn("Could not parse tools/index.json: " + e.message));
+      }
+    } else {
+      if (!jsonMode) console.log(warn("tools/index.json not found"));
+    }
+
+    // Skills Validation
+    if (!jsonMode) console.log(section("Deep: Skills Validation"));
+    const skillsDir = path.join(getEngineRoot(), "skills");
+    if (fs.existsSync(skillsDir)) {
+      const entries = fs.readdirSync(skillsDir, { withFileTypes: true });
+      let skillOk = 0, skillFail = 0;
+      for (const entry of entries) {
+        if (entry.isFile() && entry.name.endsWith(".md")) {
+          try { fs.readFileSync(path.join(skillsDir, entry.name), "utf-8"); skillOk++; } catch { skillFail++; deepIssues++; }
+        } else if (entry.isDirectory()) {
+          const skillMd = path.join(skillsDir, entry.name, "SKILL.md");
+          if (fs.existsSync(skillMd)) {
+            try { fs.readFileSync(skillMd, "utf-8"); skillOk++; } catch { skillFail++; deepIssues++; }
+          }
+        }
+      }
+      if (!jsonMode) console.log(ok(`${skillOk} skills readable` + (skillFail ? `, ${skillFail} unreadable` : "")));
+    } else {
+      if (!jsonMode) console.log(warn("skills/ directory not found"));
+    }
+
+    // Engine Status
+    if (!jsonMode) console.log(section("Deep: Engine Status"));
+    const workLogPath = memoryFile("engine-work-log.md");
+    if (fs.existsSync(workLogPath)) {
+      try {
+        const stat = fs.statSync(workLogPath);
+        const ageHours = ((Date.now() - stat.mtimeMs) / (60 * 60 * 1000)).toFixed(1);
+        if (parseFloat(ageHours) > 24) {
+          if (!jsonMode) console.log(warn(`Engine work log last updated ${ageHours} hours ago`));
+          deepIssues++;
+        } else {
+          if (!jsonMode) console.log(ok(`Engine active — last update ${ageHours} hours ago`));
+        }
+        if (!jsonMode) console.log(label("Log size", (stat.size / 1024).toFixed(1) + " KB"));
+      } catch {
+        if (!jsonMode) console.log(warn("Could not read engine work log"));
+      }
+    } else {
+      if (!jsonMode) console.log(info("No engine work log yet"));
+    }
+
+    // Network Connectivity
+    if (!jsonMode) console.log(section("Deep: Network Connectivity"));
+    const endpoints = [
+      { name: "Anthropic API", url: "https://api.anthropic.com" },
+      { name: "Alpaca API", url: "https://api.alpaca.markets" },
+    ];
+    for (const ep of endpoints) {
+      const reachable = await new Promise((resolve) => {
+        const req = https.get(ep.url, { timeout: 5000 }, (res) => {
+          res.resume();
+          resolve(true);
+        });
+        req.on("error", () => resolve(false));
+        req.on("timeout", () => { req.destroy(); resolve(false); });
+      });
+      if (!jsonMode) console.log(reachable ? ok(`${ep.name} — reachable`) : fail(`${ep.name} — unreachable`));
+      if (!reachable) deepIssues++;
+    }
+
+    // Deep timing
+    const deepTime = ((Date.now() - deepStart) / 1000).toFixed(1);
+    if (!jsonMode) console.log("\n" + theme.muted(`  Deep diagnostics completed in ${deepTime}s`));
+    results.deep = { issues: deepIssues, timeMs: Date.now() - deepStart };
+  }
+
+
   // Summary
   if (!jsonMode) {
     const issues = [
       !node.ok, !server.up, lock.stale,
       ...data.filter(d => !d.exists || !d.valid).map(() => true),
-    ].filter(Boolean).length;
+    ].filter(Boolean).length + (deepMode ? deepIssues : 0);
     console.log("");
     if (issues === 0) {
       console.log(theme.success("  All checks passed.\n"));

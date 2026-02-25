@@ -45,6 +45,7 @@ export const ACTION_CATEGORY = {
   MODIFY: "modify",           // Edit, update things
   DELETE: "delete",           // Remove, cancel things
   RESEARCH: "research",       // In-depth research tasks
+  COMPUTER_USE: "computer_use", // Desktop control — open apps, click, type
   GENERAL: "general"          // Conversational, questions
 };
 
@@ -106,6 +107,31 @@ class ChatActionsManager extends EventEmitter {
 
     // Only intercept structured actions — NOT general AI requests like "build me a video"
     // General requests should go through the full AI pipeline, not the action flow
+    // Computer use detection — desktop app control
+    const computerUseSignals = [
+      "open word", "open excel", "open notepad", "open calculator", "open paint",
+      "open outlook", "open powerpoint", "open teams", "open vscode", "open code",
+      "open terminal", "launch ", "type in ", "click on ", "open the app",
+      "open an app", "write in word", "write in notepad", "on my desktop",
+      "on my computer", "on my screen"
+    ];
+    const isComputerUse = computerUseSignals.some(s => lower.includes(s));
+    if (isComputerUse) {
+      return {
+        isActionable: true,
+        category: ACTION_CATEGORY.COMPUTER_USE,
+        riskLevel: RISK_LEVEL.MEDIUM,
+        summary: text.length > 120 ? `${text.slice(0, 117)}...` : text,
+        requiresConfirmation: false,
+        suggestedPriority: 1,
+        priorityReason: "Direct computer use request",
+        shouldAskPriority: false,
+        extractedDetails: { otherDetails: {} },
+        suggestedTools: ["computer-use"],
+        steps: ["Launch computer use agent with vision", "Execute goal"]
+      };
+    }
+
     const actionSignals = [
       "book", "reserve", "schedule", "set a reminder", "add to calendar",
       "delete event", "cancel event", "remove event"
@@ -308,7 +334,7 @@ User message: "${message}"
 Respond with JSON only:
 {
   "isActionable": true/false,
-  "category": "search|browse|purchase|book|send_message|create|modify|delete|research|general",
+  "category": "search|browse|purchase|book|send_message|create|modify|delete|research|computer_use|general",
   "riskLevel": "low|medium|high|critical",
   "summary": "Brief summary of what user wants",
   "requiresConfirmation": true/false,
@@ -327,9 +353,13 @@ Respond with JSON only:
   "steps": ["ordered list of steps to complete this"]
 }
 
+Category Guide:
+- computer_use: Opening desktop apps (Word, Excel, Notepad, Calculator), typing in apps, clicking things on screen, any request that needs controlling the computer desktop directly. Use this for "open X app", "type in X", "click on X", etc.
+- browse: Navigating WEBSITES in a browser (Gmail, news sites, etc.)
+
 Risk Level Guide:
-- low: Reading, searching, gathering information
-- medium: Creating content, writing files
+- low: Reading, searching, gathering information, opening apps
+- medium: Creating content, writing files, typing in apps
 - high: Sending messages, making reservations
 - critical: Financial transactions, purchases, irreversible actions
 
@@ -598,6 +628,10 @@ If the message is a question or conversation (not asking to DO something), retur
         case ACTION_CATEGORY.PURCHASE:
         case ACTION_CATEGORY.BOOK:
           results.push(await this.executeComplexWebAction(action, analysis, report, pending.id));
+          break;
+
+        case ACTION_CATEGORY.COMPUTER_USE:
+          results.push(await this.executeComputerUse(action, analysis, report));
           break;
 
         default:
@@ -880,6 +914,49 @@ Include confirmation points before any irreversible actions (submitting payments
       results,
       summary: `Completed ${results.length} steps`
     };
+  }
+
+  /**
+   * Execute a computer use action — desktop control via vision + actions
+   */
+  async executeComputerUse(action, analysis, report) {
+    this.addExecutionStep(report, {
+      status: "in_progress",
+      label: `Computer Use: ${analysis.summary}`,
+      details: { goal: analysis.summary }
+    });
+
+    try {
+      const { execute } = await import("../../tools/computer-use.js");
+      const result = await execute({
+        goal: action.originalMessage || analysis.summary,
+        maxSteps: 15,
+      });
+
+      this.addExecutionStep(report, {
+        status: result.success ? "completed" : "failed",
+        label: result.success ? `Done: ${result.summary}` : `Failed: ${result.error}`,
+        details: {
+          stepsCompleted: result.stepsCompleted,
+          history: result.history?.map(h => ({ step: h.step, action: h.action?.action, result: h.result })),
+        }
+      });
+
+      return {
+        type: "computer_use",
+        success: result.success,
+        summary: result.summary || result.error,
+        stepsCompleted: result.stepsCompleted,
+        lastScreenshot: result.lastScreenshot,
+      };
+    } catch (err) {
+      this.addExecutionStep(report, {
+        status: "failed",
+        label: "Computer use failed",
+        error: err.message,
+      });
+      return { type: "computer_use", success: false, error: err.message };
+    }
   }
 
   /**

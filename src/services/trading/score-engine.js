@@ -138,7 +138,7 @@ export const calculateEffectiveScore = (inputs) => {
   }
 
   // Apply defaults for 0 values (technical only)
-  const adjTechnical = technicalScore === 0 ? 6.0 : technicalScore;
+  const adjTechnical = technicalScore === 0 ? 5.0 : technicalScore; // Neutral default (was 6.0, caused positive bias for missing data)
   const adjPrediction = predictionScore;
 
   // NEW BASE: (technical + prediction + marketHealth) / 3

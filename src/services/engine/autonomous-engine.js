@@ -18,6 +18,7 @@ import { matchGoalToAgent } from "./agent-dispatcher.js";
 import { notifyProgress, notifyBlocked, sendWhatsApp, askUser } from "../messaging/proactive-outreach.js";
 import { advancePipeline, getPipeline, getDeliveryAction } from "./task-pipeline.js";
 import { detectCapabilityNeed } from "./tool-forge-agent.js";
+import { getCapabilityResolver } from "./capability-resolver.js";
 
 import { getDataDir, dataFile } from "../paths.js";
 /**
@@ -1355,7 +1356,7 @@ export class AutonomousEngine extends EventEmitter {
           this._goalStartTime = Date.now();
           const GOAL_TIMEOUT = 15 * 60 * 1000;
           const result = await Promise.race([
-            orchestrator.executeGoal(this.currentGoal, { workDir: process.cwd(), userContext, agentIdentity }),
+            orchestrator.executeGoal(this.currentGoal, { workDir: process.cwd(), userContext, agentIdentity, engineMode: true }),
             new Promise((_, reject) =>
               setTimeout(() => reject(new Error("Goal execution timeout (15min)")), GOAL_TIMEOUT)
             )
@@ -1374,36 +1375,48 @@ export class AutonomousEngine extends EventEmitter {
 
               // Escalation after 3 failed attempts — ask user whether to continue or drop
               if (!result.success && attemptInfo.count >= 3) {
-                // ── Tool Forge: detect capability gaps before escalating ──
+                // ── Capability Resolver: smart fallback chain before escalating ──
                 const isToolForgeGoal = this.currentGoal?.agentId === "tool-forge";
                 if (!isToolForgeGoal && attemptInfo.count >= 2) {
                   try {
                     const capNeed = detectCapabilityNeed(result.output || result.error);
                     if (capNeed) {
                       console.log(`[AutonomousEngine] Capability gap detected: ${capNeed.description}`);
-                      // Create a tool-forge goal to build the missing tool
-                      if (this.goalManager) {
-                        const forgeGoalId = `goal_forge_${Date.now()}`;
-                        this.goalManager.addGoal?.({
-                          id: forgeGoalId,
-                          title: `Build tool: ${capNeed.description}`,
-                          category: "personal",
-                          priority: 1,
-                          status: "active",
-                          agentId: "tool-forge",
-                          _forgeContext: {
-                            originalGoalId: goalId,
-                            originalGoalTitle: this.currentGoal.title,
-                            description: capNeed.description,
-                            errorOutput: (result.output || result.error || "").slice(0, 500),
-                          },
-                          createdAt: new Date().toISOString(),
-                        });
-                        console.log(`[AutonomousEngine] Created tool-forge goal: ${forgeGoalId}`);
+                      // Try the smart resolver first (tool → skill → install → forge)
+                      const resolver = getCapabilityResolver();
+                      const resolved = await resolver.resolve(capNeed.description, {
+                        goalId,
+                        goalTitle: this.currentGoal?.title,
+                        errorOutput: (result.output || result.error || "").slice(0, 500),
+                      });
+                      if (resolved.found) {
+                        console.log(`[AutonomousEngine] Resolved via ${resolved.type}: ${resolved.id}`);
+                        // Capability found — retry the goal (don't escalate yet)
+                      } else {
+                        // Nothing found — create a tool-forge goal as last resort
+                        if (this.goalManager) {
+                          const forgeGoalId = `goal_forge_${Date.now()}`;
+                          this.goalManager.addGoal?.({
+                            id: forgeGoalId,
+                            title: `Build tool: ${capNeed.description}`,
+                            category: "personal",
+                            priority: 1,
+                            status: "active",
+                            agentId: "tool-forge",
+                            _forgeContext: {
+                              originalGoalId: goalId,
+                              originalGoalTitle: this.currentGoal.title,
+                              description: capNeed.description,
+                              errorOutput: (result.output || result.error || "").slice(0, 500),
+                            },
+                            createdAt: new Date().toISOString(),
+                          });
+                          console.log(`[AutonomousEngine] Created tool-forge goal: ${forgeGoalId}`);
+                        }
                       }
                     }
                   } catch (forgeErr) {
-                    console.error(`[AutonomousEngine] Tool forge detection error: ${forgeErr.message}`);
+                    console.error(`[AutonomousEngine] Capability resolver error: ${forgeErr.message}`);
                   }
                 }
 

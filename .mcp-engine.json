@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "claude-in-chrome": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@anthropic-ai/claude-code-mcp-in-chrome"
+      ]
+    }
+  }
+}

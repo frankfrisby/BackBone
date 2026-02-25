@@ -123,7 +123,8 @@ const runCommand = (command, args, options = {}) => {
     const proc = spawn(command, args, {
       shell: true,
       cwd: options.cwd || process.cwd(),
-      env: { ...getProcessEnvWithNpm(), ...options.env }
+      env: { ...getProcessEnvWithNpm(), ...options.env },
+      windowsHide: true,
     });
 
     let output = "";
@@ -720,7 +721,8 @@ export class ClaudeCodeBackend extends EventEmitter {
     return new Promise((resolve) => {
       const proc = spawn(command, args, {
         shell: true,
-        cwd: options.cwd || process.cwd()
+        cwd: options.cwd || process.cwd(),
+        windowsHide: true,
       });
 
       let output = "";

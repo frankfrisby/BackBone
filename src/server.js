@@ -56,6 +56,32 @@ const cleanupPidFile = () => {
 };
 process.on("exit", cleanupPidFile);
 
+// Smart background orchestration (heartbeat + budgets + user priority)
+let smartBackgroundOrchestrator = null;
+
+function getSmartBackground() {
+  return smartBackgroundOrchestrator;
+}
+
+function emitSmartSignal(domain, eventType = "change", payload = null, opts = {}) {
+  try {
+    smartBackgroundOrchestrator?.emitSignal?.(domain, eventType, payload, opts);
+  } catch {}
+}
+
+function notifySmartUserActivity(reason = "user-message", payload = {}) {
+  try {
+    smartBackgroundOrchestrator?.notifyUserActivity?.(reason, payload);
+  } catch {}
+}
+
+async function runWithUserPriority(label, fn, opts = {}) {
+  const orchestrator = smartBackgroundOrchestrator;
+  if (!orchestrator?.started) return await fn();
+  notifySmartUserActivity(label, { source: opts.source || "server", ...(opts.signalPayload || {}) });
+  return await orchestrator.runWithUserPriority(label, fn, { holdMs: opts.holdMs });
+}
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true })); // For Twilio webhooks (form data)
 
@@ -74,6 +100,19 @@ app.use((req, res, next) => {
 // ── Health ───────────────────────────────────────────────────
 app.get("/health", (req, res) => {
   res.json({ ok: true, status: "healthy", version: "1.0.0" });
+});
+
+app.get("/api/orchestrator/status", (req, res) => {
+  try {
+    const orchestrator = getSmartBackground();
+    if (!orchestrator) {
+      res.json({ ok: true, started: false, status: null });
+      return;
+    }
+    res.json({ ok: true, started: !!orchestrator.started, status: orchestrator.getStatus?.() || null });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
 });
 
 // ── User Profile ─────────────────────────────────────────────
@@ -1189,6 +1228,8 @@ app.post("/api/register-push", async (req, res) => {
 
 async function handleChat(message) {
   if (!message) return { role: "assistant", content: "No message provided.", timestamp: Date.now() };
+  notifySmartUserActivity("dashboard-chat", { source: "dashboard", contentSnippet: String(message).slice(0, 160) });
+  emitSmartSignal("messages", "dashboard-chat", { source: "dashboard", contentSnippet: String(message).slice(0, 160) }, { source: "dashboard" });
 
   let chatResult = null;
   let agenticError = null;
@@ -1217,9 +1258,11 @@ async function handleChat(message) {
 
       const prompt = `You are BACKBONE, a life optimization AI assistant. You help the user manage their portfolio, health, goals, and daily life. Be concise and actionable. Keep responses under 3 sentences for data queries, longer for analysis or advice.${contextSnippet}\n\nUser: ${message}`;
 
-      const result = await executeAgenticTask(prompt, process.cwd(), null, {
-        alwaysTryClaude: true
-      });
+      const result = await runWithUserPriority("dashboard-chat-agentic", async () => {
+        return await executeAgenticTask(prompt, process.cwd(), null, {
+          alwaysTryClaude: true
+        });
+      }, { source: "dashboard", signalPayload: { contentSnippet: String(message).slice(0, 160) } });
       if (result.success && result.output) {
         chatResult = { role: "assistant", content: result.output.trim(), timestamp: Date.now() };
       } else {
@@ -1975,6 +2018,37 @@ app.post("/api/proactive/trigger", async (req, res) => {
   }
 });
 
+// ── Channel Router API ────────────────────────────────────────
+app.get("/api/channels/status", async (req, res) => {
+  try {
+    const { getChannelRouter } = await import("./services/messaging/channel-router.js");
+    res.json(getChannelRouter().getStatus());
+  } catch (err) {
+    res.json({ started: false, error: err.message });
+  }
+});
+
+app.get("/api/channels/restart", async (req, res) => {
+  try {
+    const channelId = req.query.channel;
+    if (!channelId) return res.status(400).json({ error: "channel query param required" });
+    const { getChannelRouter } = await import("./services/messaging/channel-router.js");
+    const result = await getChannelRouter().restartChannel(channelId);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/api/channels/list", async (req, res) => {
+  try {
+    const { getChannelRouter } = await import("./services/messaging/channel-router.js");
+    res.json(getChannelRouter().listChannels());
+  } catch (err) {
+    res.json([]);
+  }
+});
+
 // ── Email Digest API ──────────────────────────────────────────
 app.get("/api/email-digest/status", async (req, res) => {
   try {
@@ -2281,6 +2355,13 @@ ${JSON.stringify(context, null, 2)}
 
 Be contextual. Be warm. Be useful. DO things, don't explain why you can't.`;
 
+      notifySmartUserActivity("whatsapp-webhook", { source: "whatsapp-webhook", contentSnippet: String(userMessage || "").slice(0, 160) });
+      emitSmartSignal("messages", "whatsapp-webhook", {
+        source: "whatsapp-webhook",
+        from: userPhone,
+        contentSnippet: String(userMessage || "").slice(0, 160)
+      }, { source: "whatsapp-webhook" });
+
       // Use agentic executor (Claude -> Codex fallback on rate limits)
       let responseText = null;
       let agenticError = null;
@@ -2288,10 +2369,15 @@ Be contextual. Be warm. Be useful. DO things, don't explain why you can't.`;
         const { executeAgenticTask, getAgenticCapabilities } = await import("./services/ai/multi-ai.js");
         const capabilities = await getAgenticCapabilities();
         if (capabilities.available) {
-          const agentResult = await executeAgenticTask(prompt, process.cwd(), null, {
-            alwaysTryClaude: true,
-            forceTool: "claude",
-            claudeTimeoutMs: 120000
+          const agentResult = await runWithUserPriority("whatsapp-webhook-agentic", async () => {
+            return await executeAgenticTask(prompt, process.cwd(), null, {
+              alwaysTryClaude: true,
+              forceTool: "claude",
+              claudeTimeoutMs: 120000
+            });
+          }, {
+            source: "whatsapp-webhook",
+            signalPayload: { from: userPhone, contentSnippet: String(userMessage || "").slice(0, 160) }
           });
           if (agentResult.success && agentResult.output) {
             responseText = agentResult.output.trim();
@@ -2450,6 +2536,49 @@ server.listen(PORT, async () => {
   // Start WhatsApp message poller (polls Twilio API for incoming messages)
   startWhatsAppPoller();
 
+  // Initialize multi-channel router (OpenClaw-style)
+  try {
+    const { getChannelRouter } = await import("./services/messaging/channel-router.js");
+    const router = getChannelRouter();
+
+    // Register WhatsApp channel adapter
+    try {
+      const { WhatsAppChannel } = await import("./services/messaging/channels/whatsapp-channel.js");
+      router.registerChannel(new WhatsAppChannel({ ownerPhone: process.env.OWNER_PHONE }));
+    } catch (e) { console.warn("[ChannelRouter] WhatsApp adapter skipped:", e.message); }
+
+    // Register Telegram if configured
+    try {
+      const fs = await import("fs");
+      const path = await import("path");
+      const { getDataDir } = await import("./services/paths.js");
+      const configPath = path.default.join(getDataDir(), "channel-configs.json");
+      const configs = fs.default.existsSync(configPath) ? JSON.parse(fs.default.readFileSync(configPath, "utf-8")) : {};
+
+      if (configs.telegram?.token) {
+        const { TelegramChannel } = await import("./services/messaging/channels/telegram-channel.js");
+        router.registerChannel(new TelegramChannel(configs.telegram));
+      }
+      if (configs.discord?.token) {
+        const { DiscordChannel } = await import("./services/messaging/channels/discord-channel.js");
+        router.registerChannel(new DiscordChannel(configs.discord));
+      }
+      if (configs.slack?.botToken && configs.slack?.appToken) {
+        const { SlackChannel } = await import("./services/messaging/channels/slack-channel.js");
+        router.registerChannel(new SlackChannel(configs.slack));
+      }
+    } catch (e) { console.warn("[ChannelRouter] Channel config load:", e.message); }
+
+    // Start all enabled channels
+    const channelResults = await router.startAll();
+    const connected = Object.entries(channelResults).filter(([, r]) => r.started).map(([id]) => id);
+    if (connected.length > 0) {
+      console.log(`[ChannelRouter] Active channels: ${connected.join(", ")}`);
+    }
+  } catch (e) {
+    console.warn("[ChannelRouter] Init skipped:", e.message);
+  }
+
   // Start proactive WhatsApp scheduler (randomized nudges throughout the day)
   startProactiveScheduler();
 
@@ -2478,8 +2607,19 @@ server.listen(PORT, async () => {
   // Initialize Firebase context sync (syncs user data to Firestore for cloud AI)
   startFirebaseContextSync();
 
+  // Start smart background orchestrator (heartbeat scheduler + budgets + priority preemption)
+  startSmartBackgroundOrchestrator();
+
   // Auto-start the autonomous engine (continuous loop, no manual start needed)
   startAutonomousEngine();
+
+  // Self-managing: watch for code changes + auto-pull updates + restart
+  try {
+    const { startLifecycleManager } = await import("./services/server-lifecycle.js");
+    startLifecycleManager();
+  } catch (e) {
+    console.warn("[Lifecycle] Could not start lifecycle manager:", e.message);
+  }
 });
 
 /**
@@ -2498,6 +2638,17 @@ async function startWhatsAppPoller() {
       const { from, content, hasMedia, mediaList, startTyping, stopTyping } = messageData;
       console.log(`[WhatsAppPoller] Processing: "${content?.slice(0, 80)}"${hasMedia ? " [+media]" : ""}`);
       logActivity("system", `WhatsApp message received: "${content?.slice(0, 60)}"${hasMedia ? " [+image]" : ""}`);
+      notifySmartUserActivity("whatsapp-message", {
+        source: "whatsapp",
+        from,
+        contentSnippet: String(content || "").slice(0, 160)
+      });
+      emitSmartSignal("messages", "whatsapp-inbound", {
+        source: "whatsapp",
+        from,
+        hasMedia: !!hasMedia,
+        contentSnippet: String(content || "").slice(0, 160)
+      }, { source: "whatsapp" });
 
       // Get user's first name for warm responses
       let userName = "there";
@@ -2510,7 +2661,24 @@ async function startWhatsAppPoller() {
       } catch {}
 
       // ── IMMEDIATE RESPONSE: Reply within 1-2 seconds ──────
-      const immediateReplyPromise = (async () => {
+      const messageText = String(content || "").trim();
+      const lowerMessage = messageText.toLowerCase();
+      const greetingOnly = /^(hey|hi|hello|yo|sup|what'?s up|gm|good morning|good evening|thanks|thank you|ok|okay|cool|nice|lol|haha|yes|no|yep|nah|nope)[!. ]*$/i.test(lowerMessage);
+      const explicitWorkIntent = /\b(research|look\s*(?:up|into)|find out|analy[sz]e|create|build|write|draft|make|generate|compare|investigate|review|summarize|calculate|dig into|figure out|check on|send|schedule|run|execute|fix|debug)\b/i.test(messageText);
+      const progressFollowUp = /\b(did you (?:do|start|finish)|have you (?:started|finished|done)|how far|what'?s the status|status(?: update)?|any updates?|progress|done yet|finished yet|where are you at)\b/i.test(messageText);
+      const recentWhatsAppMessages = messageLog.getWhatsAppMessages?.(12) || [];
+      const promiseLanguage = /\b(on it|working on it|starting now|i(?:')?ll (?:start|do|handle|work on|look into|dig into|get back)|let me (?:work on|look into) that)\b/i;
+      const recentAssistantPromisedWork = recentWhatsAppMessages
+        .slice(-8)
+        .some((m) => m?.role === "assistant" && promiseLanguage.test(String(m?.content || "")));
+      const followUpNeedsExecution = progressFollowUp && recentAssistantPromisedWork;
+
+      // Default to deep execution for WhatsApp unless explicitly disabled.
+      const forceDeepWork = String(process.env.WHATSAPP_FORCE_DEEP_WORK || "0") !== "0";
+      const shouldPreferDeepWork = (forceDeepWork && !greetingOnly) || explicitWorkIntent || followUpNeedsExecution;
+      const shouldSendImmediateAck = shouldPreferDeepWork || explicitWorkIntent || followUpNeedsExecution;
+
+      const immediateReplyPromise = shouldSendImmediateAck ? (async () => {
         try {
           const { getClaudeConfig } = await import("./services/ai/claude.js");
           const config = getClaudeConfig();
@@ -2545,7 +2713,7 @@ async function startWhatsAppPoller() {
           if (startTyping) await startTyping();
         } catch {}
         return null;
-      })();
+      })() : Promise.resolve(null);
 
       // ── Log incoming message to unified history ──────────────
       messageLog.addUserMessage(content, MESSAGE_CHANNEL.WHATSAPP, { from });
@@ -2669,13 +2837,23 @@ async function startWhatsAppPoller() {
         content: extraContext ? `${content}\n${extraContext}` : content,
         from,
         mediaList,
+        preferImmediateExecution: shouldPreferDeepWork,
         replyFn: async (text) => {
           messageLog.addAssistantMessage(text, MESSAGE_CHANNEL.WHATSAPP);
         }
       });
+      emitSmartSignal("messages", "intake-classified", {
+        source: "whatsapp",
+        type: intakeResult?.type || "unknown",
+        passthrough: !!intakeResult?.passthrough,
+        immediateExecution: !!intakeResult?.immediateExecution,
+      }, { source: "intake" });
 
-      // If intake handled it (quick_answer, task, follow_up, command with response), return that
-      if (intakeResult.response && !intakeResult.passthrough) {
+      const forceDeepFromIntake = intakeResult?.type === "task" || intakeResult?.type === "follow_up";
+      const shouldForceDeepExecution = shouldPreferDeepWork || followUpNeedsExecution || forceDeepFromIntake;
+
+      // If intake handled it and deep execution is not required, return immediately.
+      if (intakeResult.response && !intakeResult.passthrough && !shouldForceDeepExecution) {
         const finalResponse = intakeResult.response;
 
         // Process calendar action tags
@@ -2720,6 +2898,10 @@ async function startWhatsAppPoller() {
         }
 
         return messages[0];
+      }
+
+      if (intakeResult.response && !intakeResult.passthrough && shouldForceDeepExecution) {
+        console.log(`[WhatsAppPoller] Intake returned "${intakeResult.type}" but deep execution is required; continuing with agentic work.`);
       }
 
       // ── Passthrough: full agentic conversation (conversation type or fallback) ──
@@ -2822,7 +3004,10 @@ Don't force multiple messages if one short one works.`;
 
       // ── Determine if deeper work is needed beyond the immediate reply ──
       const hasUrl = /https?:\/\/[^\s]+/i.test(content);
-      const needsDeepWork = hasUrl || /search|look up|find out|research|buy|sell|trade|create|schedule|send|email|check the|what'?s (happening|going on)|latest news|analyze|report|compare|deep dive|make me|build me|generate/i.test(content);
+      const needsDeepWork =
+        shouldForceDeepExecution ||
+        hasUrl ||
+        /search|look up|find out|research|buy|sell|trade|create|schedule|send|email|check the|what'?s (happening|going on)|latest news|analyze|report|compare|deep dive|make me|build me|generate/i.test(content);
 
       let finalResponse = null;
 
@@ -2841,17 +3026,24 @@ ${extraContext ? `\nAdditional context:\n${extraContext}` : ""}
 ${conversationHistory ? `\nRecent conversation:\n${conversationHistory}` : ""}
 
 ${immediateReply ? `You already told the user: "${immediateReply}"\nNow DO the actual work.` : ""}
+${followUpNeedsExecution ? "The user is following up on work you previously said you would do. Execute that work now before replying.\n" : ""}
 
 INSTRUCTIONS:
 1. Actually DO what the user is asking. You have full access to the filesystem, web, CLI tools, and MCP servers.
 2. If they ask to create something (video, document, code, file) — create it. Use the tools on this machine.
 3. If they ask to research something — do the research using web search, file reads, APIs.
 4. If they ask to check/analyze something — run the analysis and provide real results.
-5. You know this user well (see context below). Just go do it autonomously. Make reasonable assumptions.
-6. After completing the work, write a SHORT casual summary of what you did and any results/links.
+5. If they describe a PROCESS or workflow they do regularly, BUILD IT:
+   - Create a skill file in their data/user-skills/ directory (markdown with process steps)
+   - If the process can be automated, also create a CLI tool in tools/ (JS module with execute())
+   - Register the tool in tools/index.json so it's discoverable
+   - Example: "every morning I check my stocks then my email then my calendar" → build a morning-routine skill + tool
+6. You know this user well (see context below). Just go do it autonomously. Make reasonable assumptions.
+7. After completing the work, write a SHORT casual summary of what you did and any results/links.
    - Talk like a normal person texting. Not corporate. Not AI-sounding.
    - Example: "aight done — made a 3 min video script and saved it to projects/ai-video/. want me to generate the voiceover too?"
-7. Keep the summary under 4 sentences unless the results need more detail.
+8. Keep the summary under 4 sentences unless the results need more detail.
+9. Do not say "I'll start now" unless you've already done concrete work in this run.
 ${JSON.stringify(context, null, 2) !== "{}" ? `\nUser context:\n${JSON.stringify(context, null, 2)}` : ""}`
 
           : `You are BACKBONE, the user's AI assistant. Respond to this WhatsApp message casually and helpfully.
@@ -2898,10 +3090,15 @@ Keep it short (2-4 sentences). Text like a real person. Use data when you have i
           const { executeAgenticTask, getAgenticCapabilities } = await import("./services/ai/multi-ai.js");
           const capabilities = await getAgenticCapabilities();
           if (capabilities.available) {
-            const agentResult = await executeAgenticTask(taskPrompt, process.cwd(), onProgress, {
-              alwaysTryClaude: true,
-              forceTool: "claude",
-              claudeTimeoutMs: needsDeepWork ? 180000 : 60000
+            const agentResult = await runWithUserPriority("whatsapp-deep-work", async () => {
+              return await executeAgenticTask(taskPrompt, process.cwd(), onProgress, {
+                alwaysTryClaude: true,
+                forceTool: "claude",
+                claudeTimeoutMs: needsDeepWork ? 180000 : 60000
+              });
+            }, {
+              source: "whatsapp",
+              signalPayload: { from, contentSnippet: String(content || "").slice(0, 160) }
             });
             if (agentResult.success && agentResult.output) {
               finalResponse = agentResult.output.trim();
@@ -2980,7 +3177,17 @@ Keep it short (2-4 sentences). Text like a real person. Use data when you have i
           if (first) seenBaileysMessageIds.delete(first);
         }
 
+        // Get baileys instance for UI status events
+        let baileysInstance = null;
         try {
+          const { getBaileysWhatsApp } = await import("./services/messaging/baileys-whatsapp.js");
+          baileysInstance = getBaileysWhatsApp();
+        } catch {}
+
+        try {
+          // Signal UI that we're processing a message
+          baileysInstance?.emit("message-processing");
+
           // Show "typing..." in WhatsApp immediately while work is running.
           if (data.from) {
             try {
@@ -3008,6 +3215,9 @@ Keep it short (2-4 sentences). Text like a real person. Use data when you have i
           }
         } catch (err) {
           console.error("[WhatsApp:Baileys] Message handling error:", err.message);
+        } finally {
+          // Signal UI that processing is done
+          baileysInstance?.emit("message-processed");
         }
       });
     } catch (baileysErr) {
@@ -3032,9 +3242,28 @@ async function startProactiveScheduler() {
     scheduler.on("job-fired", ({ jobId, type, result }) => {
       logActivity("system", `Proactive ${type}: ${jobId}`, { jobId, type, result });
       broadcastEvent("proactive-job", { jobId, type, result });
+      const proactiveDomain = ({
+        "intel-sweep": "news",
+        "market": "market",
+        "brokerage": "market",
+        "goals": "goals",
+        "projects": "projects",
+        "email": "memory",
+        "brief": "memory",
+        "adhoc": "news",
+        "context-sync": "memory",
+      })[type] || "alerts";
+      emitSmartSignal(proactiveDomain, "proactive-job", {
+        jobId,
+        type,
+        success: !!result?.success,
+        skipped: !!result?.skipped,
+        collectorOnly: !!result?.collectorOnly,
+      }, { source: "proactive-scheduler", storePayload: true });
     });
 
     scheduler.start();
+    emitSmartSignal("runtime", "proactive-scheduler-started", { started: true }, { source: "proactive-scheduler" });
     console.log("[Server] Proactive scheduler started");
   } catch (err) {
     console.log("[Server] Proactive scheduler not started:", err.message);
@@ -3054,6 +3283,7 @@ async function startMacroResearch() {
     if (needsRefresh()) {
       console.log("[Server] Running initial macro research...");
       await runMacroResearch();
+      emitSmartSignal("market", "macro-refresh", { initial: true }, { source: "macro-research" });
       console.log("[Server] Macro research complete");
     } else {
       console.log("[Server] Macro data is fresh, skipping initial fetch");
@@ -3065,6 +3295,7 @@ async function startMacroResearch() {
       try {
         console.log("[Server] Scheduled macro research refresh...");
         await runMacroResearch({ forceRefresh: true });
+        emitSmartSignal("market", "macro-refresh", { scheduled: true }, { source: "macro-research" });
       } catch (err) {
         console.error("[Server] Macro research refresh failed:", err.message);
       }
@@ -3111,6 +3342,11 @@ async function initializeRealtimeMessaging() {
         return { content: "", type: "system", skip: true };
       }
       console.log(`[RealtimeMessaging] Handling app message: "${content.slice(0, 80)}"`);
+      notifySmartUserActivity("app-message", { source: "app", contentSnippet: String(content || "").slice(0, 160) });
+      emitSmartSignal("messages", "app-inbound", {
+        source: "app",
+        contentSnippet: String(content || "").slice(0, 160)
+      }, { source: "realtime-messaging" });
 
       try {
         // Try WhatsApp action flow first (calendar, trades, etc.)
@@ -3172,7 +3408,9 @@ Address the user's actual question FIRST. Don't pivot to other topics.`;
         const { executeAgenticTask, getAgenticCapabilities } = await import("./services/ai/multi-ai.js");
         const capabilities = await getAgenticCapabilities();
         if (capabilities.available) {
-          const result = await executeAgenticTask(prompt, process.cwd(), null, { alwaysTryClaude: true });
+          const result = await runWithUserPriority("app-message-agentic", async () => {
+            return await executeAgenticTask(prompt, process.cwd(), null, { alwaysTryClaude: true });
+          }, { source: "app", signalPayload: { contentSnippet: String(content || "").slice(0, 160) } });
           if (result.success && result.output) {
             const response = result.output.trim();
             messageLog.addAssistantMessage(response, "whatsapp");
@@ -3397,6 +3635,38 @@ async function startFirebaseContextSync() {
 }
 
 /**
+ * Start the smart background orchestrator (heartbeat + dispatcher + budgets).
+ * Cheap checks continue in the background, while user work always takes priority.
+ */
+async function startSmartBackgroundOrchestrator() {
+  try {
+    const { getSmartBackgroundOrchestrator } = await import("./services/orchestrator/index.js");
+    const orchestrator = getSmartBackgroundOrchestrator();
+    if (!orchestrator.started) {
+      orchestrator.start();
+      orchestrator.on("heartbeat:jobs", ({ changedDomains, enqueued, observations }) => {
+        try {
+          broadcastEvent("orchestrator", { status: "heartbeat", changedDomains, enqueued, observations });
+        } catch {}
+      });
+      orchestrator.on("heartbeat:skip", ({ reason }) => {
+        try { broadcastEvent("orchestrator", { status: "skip", reason }); } catch {}
+      });
+      orchestrator.on("job-started", ({ job }) => {
+        try { logActivity("orchestrator", `Started ${job.kind} (${job.domain})`, { id: job.id }); } catch {}
+      });
+      orchestrator.on("job-completed", ({ job }) => {
+        try { logActivity("orchestrator", `Completed ${job.kind} (${job.domain})`, { id: job.id }); } catch {}
+      });
+    }
+    smartBackgroundOrchestrator = orchestrator;
+    console.log("[SmartBackground] Orchestrator ready");
+  } catch (err) {
+    console.log("[SmartBackground] Not started:", err.message);
+  }
+}
+
+/**
  * Auto-start the autonomous engine on server boot.
  * Runs as a continuous loop — work, rest, repeat — until CLI is closed.
  * Replaces the old manual POST /api/engine/start pattern.
@@ -3405,6 +3675,10 @@ async function startAutonomousEngine() {
   try {
     const { getAutonomousEngine } = await import("./services/engine/autonomous-engine.js");
     const engine = getAutonomousEngine();
+    try {
+      smartBackgroundOrchestrator?.registerEngine?.(engine);
+      emitSmartSignal("runtime", "engine-available", { running: !!engine.running }, { source: "engine" });
+    } catch {}
 
     if (engine.running) {
       console.log("[Engine] Already running");

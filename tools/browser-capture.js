@@ -39,7 +39,7 @@ function getCaptureDir() {
 }
 
 async function capture(url, options = {}) {
-  const { wait = 3000, headless = false } = options;
+  const { wait = 3000, headless = true } = options;
   const captureDir = getCaptureDir();
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
   const slug = new URL(url).hostname.replace(/\./g, "-");

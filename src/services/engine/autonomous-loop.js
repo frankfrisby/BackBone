@@ -438,7 +438,8 @@ Execute the task and report results. If you create files, list them. If you make
       ], {
         shell: true,
         cwd: process.cwd(),
-        timeout: CONFIG.MAX_TASK_DURATION_MS
+        timeout: CONFIG.MAX_TASK_DURATION_MS,
+        windowsHide: true,
       });
 
       let output = "";

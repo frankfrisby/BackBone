@@ -88,6 +88,31 @@ const isModernTerminal = () => {
   return process.env.TERM && process.env.TERM !== "dumb";
 };
 
+const BACKBONE_LOCAL_SERVER = process.env.BACKBONE_SERVER_URL || "http://localhost:3000";
+
+const fetchServerWhatsAppStatus = async ({ autoPair = false, phone = null } = {}) => {
+  const params = new URLSearchParams();
+  if (autoPair) params.set("autoPair", "1");
+  if (phone) params.set("phone", phone);
+  const query = params.toString();
+  const url = `${BACKBONE_LOCAL_SERVER}/api/whatsapp/status${query ? `?${query}` : ""}`;
+  const res = await fetch(url);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data?.error || "Could not load WhatsApp status");
+  return data;
+};
+
+const requestServerBaileysPairingCode = async (phoneNumber) => {
+  const res = await fetch(`${BACKBONE_LOCAL_SERVER}/api/whatsapp/baileys/pairing-code`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ phoneNumber }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data?.error || "Failed to generate pairing code.");
+  return data;
+};
+
 // Spinning B logo frames (bone-style ASCII art)
 const B_LOGO_FRAMES = [
   // Frame 0: Front view (full)
@@ -793,11 +818,7 @@ const PhoneVerificationStep = ({ onComplete, onError }) => {
 
       // Also treat an already-linked Baileys session as connected.
       try {
-        const wa = getTwilioWhatsApp();
-        if (!wa.initialized) {
-          await wa.initialize({ providerPreference: "baileys" });
-        }
-        const waStatus = wa.getStatus();
+        const waStatus = await fetchServerWhatsAppStatus();
         const linked = Boolean(waStatus?.providers?.baileys?.connected);
         if (linked) {
           const settings = loadUserSettings();
@@ -882,12 +903,8 @@ const PhoneVerificationStep = ({ onComplete, onError }) => {
 
       try {
         if (provider === PROVIDERS.BAILEYS) {
-          const wa = getTwilioWhatsApp();
-          if (!wa.initialized) {
-            await wa.initialize({ providerPreference: "baileys" });
-          }
-          const pairing = await wa.requestPairingCode(validation.normalized);
-          if (!pairing?.success) {
+          const pairing = await requestServerBaileysPairingCode(validation.normalized);
+          if (!pairing?.pairingCode) {
             const errorText = pairing?.error || "Failed to generate pairing code.";
             setStatus("error");
             setMessage(errorText);
@@ -990,12 +1007,7 @@ Just reply with a, b, or c - or tell me what's on your mind!`;
     setMessage("Checking Baileys connection...");
 
     try {
-      const wa = getTwilioWhatsApp();
-      if (!wa.initialized) {
-        await wa.initialize({ providerPreference: "baileys" });
-      }
-
-      const waStatus = wa.getStatus();
+      const waStatus = await fetchServerWhatsAppStatus();
       const linked = Boolean(waStatus?.providers?.baileys?.connected);
 
       if (!linked) {
@@ -1031,6 +1043,10 @@ I can help with:
 (c) home and life organization`;
 
       try {
+        const wa = getTwilioWhatsApp();
+        if (!wa.initialized) {
+          await wa.initialize({ providerPreference: "baileys" });
+        }
         await wa.sendMessage(phoneEntry, welcomeMessage, { forceProvider: "baileys" });
       } catch (sendErr) {
         // Non-fatal.
@@ -1344,15 +1360,7 @@ const CommunicationsWhatsAppStep = ({ phoneConnected, onComplete }) => {
     setLoading(true);
 
     try {
-      const wa = getTwilioWhatsApp();
-      if (!wa.initialized) {
-        const init = await wa.initialize({ providerPreference: "baileys" });
-        if (!init?.success) {
-          throw new Error(init?.error || "Failed to initialize WhatsApp service.");
-        }
-      }
-
-      let status = wa.getStatus();
+      let status = await fetchServerWhatsAppStatus({ autoPair: false, phone: normalizedPhone });
       let providerState = status?.providers?.baileys || {};
       setBaileysStatus(providerState);
 
@@ -1367,16 +1375,14 @@ const CommunicationsWhatsAppStep = ({ phoneConnected, onComplete }) => {
 
       let nextPairingCode = "";
       if (autoPair) {
-        const pairing = await wa.requestPairingCode(normalizedPhone);
-        if (pairing?.success && pairing.pairingCode) {
+        const pairing = await requestServerBaileysPairingCode(normalizedPhone);
+        if (pairing?.pairingCode) {
           nextPairingCode = pairing.pairingCode;
           setPairingCode(pairing.pairingCode);
-        } else {
-          setPairingCode("");
-        }
+        } else setPairingCode("");
       }
 
-      status = wa.getStatus();
+      status = await fetchServerWhatsAppStatus({ autoPair: false, phone: normalizedPhone });
       providerState = status?.providers?.baileys || {};
       setBaileysStatus(providerState);
 

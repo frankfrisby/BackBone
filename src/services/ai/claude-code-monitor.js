@@ -7,6 +7,7 @@
 
 import { EventEmitter } from "events";
 import { getClaudeCodeStatus } from "./claude-code-cli.js";
+import { hasValidCredentials as hasCodexCredentials } from "./codex-oauth.js";
 import { getWhatsAppService } from "../messaging/whatsapp-service.js";
 import fs from "fs";
 import path from "path";
@@ -94,6 +95,7 @@ class ClaudeCodeMonitor extends EventEmitter {
   async checkConnection() {
     try {
       const status = await getClaudeCodeStatus();
+      const codexAvailable = !!hasCodexCredentials();
       this.lastStatus = status;
 
       const wasConnected = this.isConnected;
@@ -128,9 +130,13 @@ class ClaudeCodeMonitor extends EventEmitter {
       } else if (!this.isConnected && !this.wasConnected) {
         // Never been connected
         if (!status.installed) {
-          this.statusMessage = "Claude Code CLI not installed";
+          this.statusMessage = codexAvailable
+            ? "Claude Code CLI not installed (Codex CLI fallback available)"
+            : "Claude Code CLI not installed";
         } else if (!status.loggedIn) {
-          this.statusMessage = "Claude Code not logged in - run 'claude' to connect";
+          this.statusMessage = codexAvailable
+            ? "Claude Code not logged in - Codex CLI fallback available"
+            : "Claude Code not logged in - run 'claude' to connect";
         }
       }
 

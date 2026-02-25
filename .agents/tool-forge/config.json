@@ -1,0 +1,30 @@
+{
+  "entrypoint": "src/services/engine/tool-forge-agent.js",
+  "type": "infrastructure",
+  "schedule": "on-demand",
+  "maxSessionMs": 600000,
+  "restBetweenCyclesMs": 1800000,
+  "goalCategories": ["career", "learning", "personal"],
+  "keywords": ["tool", "build tool", "capability", "missing", "forge", "create tool", "new tool", "automate"],
+  "permissions": {
+    "skills": ["api-integration", "task-automation"],
+    "mcp": ["backbone-tools", "backbone-life", "backbone-projects"],
+    "tools": ["*"],
+    "filesystem": {
+      "read": ["tools/", "src/mcp/", "data/"],
+      "write": ["tools/", "src/mcp/", "data/"]
+    }
+  },
+  "phases": {
+    "detect": { "order": 1, "description": "Parse what capability is needed from context" },
+    "design": { "order": 2, "description": "Generate tool spec using existing tools as templates" },
+    "build": { "order": 3, "description": "Create tool file and register in index.json" },
+    "validate": { "order": 4, "description": "Dry-run tool and verify it works" }
+  },
+  "guardrails": {
+    "maxToolsPerCycle": 3,
+    "noDuplicateIds": true,
+    "dryRunBeforeRegister": true,
+    "noRecursion": true
+  }
+}

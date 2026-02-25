@@ -37,6 +37,27 @@ import { getGoalManager, TASK_STATE } from "../goals/goal-manager.js";
 import { isClaudeAgentSdkInstalled, runClaudeAgentSdkTask } from "./claude-agent-sdk.js";
 
 import { dataFile, getBackboneRoot, getProjectsDir } from "../paths.js";
+
+// CLI tool catalog injected into engine-mode prompts (saves ~15K tokens of MCP schema overhead)
+const ENGINE_CLI_CATALOG = `
+You have access to BACKBONE tools via CLI. Call them with Bash:
+  node tools/backbone-cli.js <domain> <action> [--key=value]
+
+Domains & key actions:
+  trading   portfolio | positions | signals | quote --symbol=X | top | worst | score --symbol=X | research --symbol=X | convictions | recession | history
+  health    summary | sleep | readiness | activity
+  life      goals [--status=active] | beliefs | backlog | scores | thesis | add-goal --title="..." --category=health
+  portfolio networth | accounts | holdings | overview | status
+  news      latest | market
+  projects  list | create --name=X | status
+  messaging send --message="..." | notify --type=alert --message="..."
+  contacts  list | search --query=X | add --name=X --category=friends
+  calendar  today | upcoming
+  email     recent | unread | search --query=X
+
+IMPORTANT: Prefer using these CLI commands via Bash over MCP tools. They return JSON to stdout.
+`;
+
 /**
  * Orchestration states
  */
@@ -158,16 +179,16 @@ export class ClaudeOrchestrator extends EventEmitter {
     try {
       const useAgentSdk = await this._shouldUseAgentSdk();
 
+      const execOptions = {
+        workDir: options.workDir || this.workDir,
+        timeout: options.timeout || this.timeout,
+        model: options.model || null,
+        engineMode: options.engineMode || false,
+      };
+
       const result = useAgentSdk
-        ? await this.runClaudeWithAgentSdk(prompt, {
-            workDir: options.workDir || this.workDir,
-            timeout: options.timeout || this.timeout,
-            model: options.model || null,
-          })
-        : await this.runClaudeWithSupervision(prompt, {
-            workDir: options.workDir || this.workDir,
-            timeout: options.timeout || this.timeout
-          });
+        ? await this.runClaudeWithAgentSdk(prompt, execOptions)
+        : await this.runClaudeWithSupervision(prompt, execOptions);
 
       return result;
     } catch (error) {
@@ -474,7 +495,9 @@ ${sourcesList}
         "--verbose",
         "--dangerously-skip-permissions",
         ...(fs.existsSync(getBackboneRoot()) ? ["--add-dir", getBackboneRoot()] : []),
-        "--max-turns", String(this.maxTurns)
+        "--max-turns", String(this.maxTurns),
+        // Engine mode: use minimal MCP config (chrome only)
+        ...(options.engineMode ? ["--mcp-config", path.join(getBackboneRoot(), ".mcp-engine.json")] : []),
       ];
 
       // Resume session if we have one
@@ -493,7 +516,8 @@ ${sourcesList}
       const spawnOpts = {
         stdio: ["pipe", "pipe", "pipe"],
         cwd: options.workDir || this.workDir,
-        env: { ...process.env, FORCE_COLOR: "0" }
+        env: { ...process.env, FORCE_COLOR: "0" },
+        windowsHide: true,
       };
 
       debugLog(`Spawning: ${spawnCmd} ${spawnArgs.join(" ").slice(0, 200)}`);
@@ -503,9 +527,11 @@ ${sourcesList}
       this.claudeProcess = spawn(spawnCmd, spawnArgs, spawnOpts);
 
       // Send prompt via stdin for real-time stream-json output
-      this.claudeProcess.stdin.write(prompt);
+      // In engine mode, prepend CLI tool catalog so the engine uses backbone-cli.js via Bash
+      const finalPrompt = options.engineMode ? (ENGINE_CLI_CATALOG + "\n" + prompt) : prompt;
+      this.claudeProcess.stdin.write(finalPrompt);
       this.claudeProcess.stdin.end();
-      debugLog(`Prompt sent via stdin (${prompt.length} chars)`);
+      debugLog(`Prompt sent via stdin (${finalPrompt.length} chars)${options.engineMode ? " [ENGINE MODE]" : ""}`);
 
       let lineBuffer = "";
       let lastOutput = "";
@@ -1193,6 +1219,14 @@ ${taskStatus || "No tasks defined"}`;
     const timeoutMs = Number.isFinite(options.timeout) ? options.timeout : this.timeout;
 
     // Stream SDK output into the same events used by the UI.
+    // In engine mode, restrict MCP to chrome-only (engine uses backbone-cli.js via Bash)
+    const engineMcpServers = options.engineMode ? {
+      "claude-in-chrome": {
+        command: "npx",
+        args: ["-y", "@anthropic-ai/claude-code-mcp-in-chrome"],
+      },
+    } : undefined;
+
     const result = await runClaudeAgentSdkTask(
       prompt,
       workDir,
@@ -1258,6 +1292,7 @@ ${taskStatus || "No tasks defined"}`;
         permissionMode: process.env.BACKBONE_CLAUDE_PERMISSION_MODE || "bypassPermissions",
         model: options.model || null,
         settingSources: ["project", "user", "local"],
+        ...(engineMcpServers ? { mcpServers: engineMcpServers } : {}),
       }
     );
 

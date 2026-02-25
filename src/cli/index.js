@@ -2,15 +2,19 @@
 /**
  * BACKBONE CLI Subcommands
  *
- * Inspired by OpenClaw's CLI architecture. These run BEFORE the TUI launches.
+ * These run BEFORE the TUI launches.
  *
  * Usage:
  *   backbone doctor     — Health check & diagnostics
  *   backbone status     — System status overview
  *   backbone logs       — Tail runtime log
  *   backbone config     — Get/set configuration
- *   backbone cron       — View scheduled jobs
- *   backbone memory     — List/search memory files
+ *   backbone cron       — View/manage scheduled jobs
+ *   backbone memory     — Search & index memory files
+ *   backbone msg        — Send/read messages
+ *   backbone model      — AI model management
+ *   backbone skill      — Manage skills
+ *   backbone tool       — Manage tools
  *
  * Returns true if a subcommand was handled, false if the TUI should launch.
  */
@@ -21,6 +25,14 @@ import { runLogs } from "./logs.js";
 import { runConfig } from "./config.js";
 import { runCron } from "./cron.js";
 import { runMemory } from "./memory.js";
+import { runMsg } from "./msg.js";
+import { runModel } from "./model.js";
+import { runSkill } from "./skill.js";
+import { runToolCmd } from "./tool.js";
+import { runServer } from "./server.js";
+import { runDo } from "./do.js";
+import { runEmpower } from "./empower.js";
+import { runChannel } from "./channel.js";
 
 const COMMANDS = {
   doctor: runDoctor,
@@ -29,6 +41,15 @@ const COMMANDS = {
   config: runConfig,
   cron: runCron,
   memory: runMemory,
+  msg: runMsg,
+  model: runModel,
+  skill: runSkill,
+  tool: runToolCmd,
+  server: runServer,
+  do: runDo,
+  empower: runEmpower,
+  channel: runChannel,
+  channels: runChannel,
 };
 
 const HELP_TEXT = `
@@ -37,12 +58,20 @@ BACKBONE CLI
 Usage: backbone <command> [options]
 
 Commands:
-  doctor          Health check & diagnostics
+  doctor          Health check & diagnostics (--deep for comprehensive)
   status          System status overview
-  logs            Tail runtime diagnostic log
+  logs            Tail runtime diagnostic log (-f to follow)
   config          Get/set user configuration
-  cron            View scheduled proactive jobs
-  memory          List & search memory files
+  cron            View & manage scheduled jobs
+  memory          Search & index memory files
+  msg             Send & read WhatsApp messages
+  model           AI model status, switch, auth check
+  skill           Manage skills (list, show, create)
+  tool            Manage tools (list, run, forge)
+  server          Start, stop, restart the server
+  do              Control your computer (open apps, type, click, browse)
+  empower         Empower financial data (scrape, accounts, holdings)
+  channel         Manage messaging channels (list, add, enable, config)
 
 Run backbone without arguments to launch the interactive TUI.
 Run backbone <command> --help for command-specific help.

@@ -198,7 +198,8 @@ export class ClaudeCodeExecutor extends EventEmitter {
       const proc = spawn(CLAUDE_CMD, args, {
         shell: true,
         cwd: options.workDir || this.workDir,
-        env: cleanEnv
+        env: cleanEnv,
+        windowsHide: true,
       });
 
       let output = "";

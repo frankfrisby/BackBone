@@ -1,7 +1,64 @@
-import React, { useMemo } from "react";
+import React, { useMemo, useState, useEffect } from "react";
 import { Box, Text } from "ink";
 import { getProgressResearch } from "../services/research/progress-research.js";
 import { getROIDisplayData } from "../services/trading/roi-calculator.js";
+
+/**
+ * Hook to track Baileys WhatsApp connection + message processing state.
+ * Returns { connected: bool, processing: bool }
+ */
+let _baileysModule = undefined; // cached module promise result
+
+const useBaileysStatus = () => {
+  const [connected, setConnected] = useState(false);
+  const [processing, setProcessing] = useState(false);
+
+  useEffect(() => {
+    let baileys = null;
+    let interval = null;
+    let cleaned = false;
+
+    const setup = async () => {
+      try {
+        if (_baileysModule === undefined) {
+          const mod = await import("../services/messaging/baileys-whatsapp.js");
+          _baileysModule = mod.getBaileysWhatsApp();
+        }
+        if (!_baileysModule || cleaned) return;
+        baileys = _baileysModule;
+
+        // Initial state
+        setConnected(baileys.connected === true);
+
+        const onConnected = () => setConnected(true);
+        const onDisconnected = () => setConnected(false);
+        const onProcessing = () => !cleaned && setProcessing(true);
+        const onProcessed = () => !cleaned && setProcessing(false);
+
+        baileys.on("connected", onConnected);
+        baileys.on("disconnected", onDisconnected);
+        baileys.on("message-processing", onProcessing);
+        baileys.on("message-processed", onProcessed);
+
+        // Poll every 5s as fallback for connection state
+        interval = setInterval(() => {
+          if (!cleaned) setConnected(baileys.connected === true);
+        }, 5000);
+      } catch {
+        _baileysModule = null;
+      }
+    };
+
+    setup();
+
+    return () => {
+      cleaned = true;
+      if (interval) clearInterval(interval);
+    };
+  }, []);
+
+  return { connected, processing };
+};
 
 const e = React.createElement;
 
@@ -66,6 +123,9 @@ export const LifeScoresPanel = ({
   userGoals = [],
   privateMode = false
 }) => {
+  // WhatsApp Baileys connection status
+  const { connected: waConnected, processing: waProcessing } = useBaileysStatus();
+
   // Get real progress data from research service
   const progressData = useMemo(() => {
     try {
@@ -193,15 +253,29 @@ export const LifeScoresPanel = ({
       showComparisons && e(ScoreBar, { score: topFigure.score, width: 12, color: "#22c55e" })
     ),
 
-    // Average Person row (lighter text)
+    // Average Person row + WhatsApp status
     showComparisons && e(
       Box,
-      { flexDirection: "row", justifyContent: "center", marginTop: 1 },
-      e(Text, { color: "#374151" }, "Average Person"),
-      e(Text, { color: "#374151" }, " · "),
-      e(Text, { color: "#374151" }, `${avgPersonScore}`),
-      e(Text, { color: "#374151" }, "  "),
-      e(ScoreBar, { score: avgPersonScore, width: 6, color: "#1e293b" })
+      { flexDirection: "row", justifyContent: "space-between", marginTop: 1 },
+      // Left: Average Person score
+      e(
+        Box,
+        { flexDirection: "row" },
+        e(Text, { color: "#374151" }, "Average Person"),
+        e(Text, { color: "#374151" }, " · "),
+        e(Text, { color: "#374151" }, `${avgPersonScore}`),
+        e(Text, { color: "#374151" }, "  "),
+        e(ScoreBar, { score: avgPersonScore, width: 6, color: "#1e293b" })
+      ),
+      // Right: WhatsApp connection + processing indicator
+      e(
+        Box,
+        { flexDirection: "row", gap: 1 },
+        e(Text, { color: "#374151" }, "WA"),
+        waProcessing
+          ? e(Text, { color: "#3b82f6", bold: true }, "\u21BB")
+          : e(Text, { color: waConnected ? "#22c55e" : "#ef4444" }, waConnected ? "\u2713" : "\u2717")
+      )
     )
   );
 };

@@ -13,7 +13,7 @@ import fs from "fs";
 import path from "path";
 import { EventEmitter } from "events";
 import { runClaudeCodeStreaming, getClaudeCodeStatus } from "../ai/claude-code-cli.js";
-import { sendMessage, TASK_TYPES } from "../ai/multi-ai.js";
+import { executeAgenticTask } from "../ai/multi-ai.js";
 import { hasValidCredentials as hasCodexCredentials } from "../ai/codex-oauth.js";
 import { getActivityTracker } from "../ui/activity-tracker.js";
 import { getEngineHeartbeat } from "./engine-heartbeat.js";
@@ -603,21 +603,70 @@ Stop after 2 searches and any additions.`;
   async runCLI(prompt, callbacks = {}) {
     const tracker = getActivityTracker();
     this.streamBuffer = "";
+    const runCodexViaAgenticTask = async (reasonLabel = "Codex CLI") => {
+      this.emit("stream", `${reasonLabel}\n`);
+      try {
+        const result = await executeAgenticTask(
+          prompt,
+          process.cwd(),
+          (event) => {
+            if (!event || typeof event !== "object") return;
+            if (event.type === "tool") {
+              const toolPayload = {
+                tool: event.tool || "codex",
+                input: typeof event.input === "string" ? event.input : "",
+                model: event.model,
+                reasoning: event.reasoning,
+              };
+              tracker.action(String(toolPayload.tool || "TOOL").toUpperCase(), `${toolPayload.model || ""} ${toolPayload.reasoning || ""}`.trim());
+              this.emit("tool", toolPayload);
+              callbacks.onTool?.(toolPayload);
+              return;
+            }
+            if (event.type === "stdout" && typeof event.text === "string") {
+              this.streamBuffer += event.text;
+              this.emit("stream", event.text);
+              callbacks.onData?.(event.text);
+              return;
+            }
+            if (event.type === "stderr" && typeof event.text === "string") {
+              this.emit("stream", event.text);
+              return;
+            }
+            if (event.type === "error" && event.error) {
+              const err = new Error(String(event.error));
+              this.emit("error", err);
+              callbacks.onError?.(err);
+            }
+          },
+          { forceTool: "codex" }
+        );
+
+        if (result?.success === false) {
+          const err = new Error(result.error || "Codex CLI task failed");
+          this.emit("error", err);
+          callbacks.onError?.(err);
+          callbacks.onComplete?.(result);
+          return;
+        }
+
+        if (typeof result?.output === "string" && result.output && !this.streamBuffer.trim()) {
+          this.streamBuffer += result.output;
+          this.emit("stream", result.output);
+          callbacks.onData?.(result.output);
+        }
+        this.emit("complete", result);
+        callbacks.onComplete?.(result);
+      } catch (error) {
+        this.emit("error", error);
+        callbacks.onError?.(error);
+      }
+    };
 
     if (this.backend === CLI_BACKEND.CLAUDE_CODE) {
       const cliStatus = await getClaudeCodeStatus();
       if (!cliStatus.ready) {
-        this.emit("stream", "Claude Code not ready. Using Codex fallback...\n");
-        try {
-          const result = await sendMessage(prompt, {}, TASK_TYPES.AGENTIC);
-          const output = result?.response || "";
-          if (output) {
-            this.emit("stream", output);
-          }
-          callbacks.onComplete?.({ success: true, output });
-        } catch (error) {
-          callbacks.onError?.(error);
-        }
+        await runCodexViaAgenticTask("Claude Code not ready. Using Codex CLI fallback...");
         return;
       }
 
@@ -658,10 +707,7 @@ Stop after 2 searches and any additions.`;
         callbacks.onError?.(error);
       });
     } else if (this.backend === CLI_BACKEND.CODEX) {
-      // Codex CLI integration - similar pattern
-      // For now, emit not-implemented
-      this.emit("stream", "Codex CLI integration coming soon...\n");
-      callbacks.onComplete?.({ success: false, error: "Codex not yet implemented" });
+      await runCodexViaAgenticTask("Using Codex CLI backend...");
     }
   }
 

@@ -520,9 +520,17 @@ async function handleConversation(content, context = {}) {
  * @param {string} [opts.from] - Sender identifier (phone number for WhatsApp)
  * @param {Array}  [opts.mediaList] - Attached media (images)
  * @param {Function} [opts.replyFn] - Callback to send the reply
+ * @param {boolean} [opts.preferImmediateExecution] - If true, task intents pass through for immediate agentic execution
  * @returns {{ type, response, goalId?, taskId?, passthrough? }}
  */
-export async function process({ source = "unknown", content, from, mediaList, replyFn } = {}) {
+export async function process({
+  source = "unknown",
+  content,
+  from,
+  mediaList,
+  replyFn,
+  preferImmediateExecution = false
+} = {}) {
   if (!content || !content.trim()) {
     return { type: "empty", response: null };
   }
@@ -552,7 +560,13 @@ export async function process({ source = "unknown", content, from, mediaList, re
       break;
 
     case "task":
-      result = await handleTask(classification, content, from, source);
+      // Optional mode for channels (like WhatsApp) that should execute now
+      // instead of only queueing lightweight background tasks.
+      if (preferImmediateExecution) {
+        result = { type: "task", response: null, passthrough: true, immediateExecution: true };
+      } else {
+        result = await handleTask(classification, content, from, source);
+      }
       break;
 
     case "goal":

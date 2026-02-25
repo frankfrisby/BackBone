@@ -160,10 +160,18 @@ All `data/`, `memory/`, `projects/` paths below refer to `~/.backbone/users/<uid
 7. **WEB_RESEARCH** — User wants information from the web
    → Use WebSearch and WebFetch tools
 
-8. **SKILL_TASK** — Task matches a known skill (see Skills Catalog below)
+8. **BROWSE / OPEN WEBSITE** — User wants to open a website, check email, view a page
+   → **NEVER ask for API keys.** The user's Chrome browser has all their cookies and saved passwords.
+   → Use MCP backbone-tools `tool_browse` (just opens the page, returns text — no API key needed)
+   → Use MCP claude-in-chrome tools for interactive browsing (click, type, navigate)
+   → Use MCP backbone-tools `tool_open_url` to simply launch a URL in the default browser
+   → **Fallback chain:** If `backbone-google` MCP tools fail (no OAuth tokens), use `tool_browse` to open Gmail/Outlook in the browser instead. The user is already logged in.
+   → Examples: "check my email" → `tool_browse` with `url: "https://mail.google.com"`, "go to live.com" → `tool_browse` with `url: "https://live.com"`
+
+9. **SKILL_TASK** — Task matches a known skill (see Skills Catalog below)
    → Read the relevant skill file from `skills/` (in the repo) for detailed instructions
 
-9. **CONVERSATION** — General chat, opinions, advice
+10. **CONVERSATION** — General chat, opinions, advice
    → Respond naturally using context from `memory/` files
 
 ## Directory Map

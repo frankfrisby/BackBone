@@ -393,8 +393,11 @@ export function calculatePsychologicalAdjustment(percentChange) {
   const isPositive = percentChange > 0;
 
   // Zone 1: Normal momentum (0-15%)
+  // Winners: reduced penalty (0.25 instead of 0.5) — momentum stocks run, don't sell early
+  // Losers: keep full penalty to encourage exiting losers
   if (absPercent <= 15) {
-    const adjustment = (absPercent / 2) * 0.5;
+    const factor = isPositive ? 0.25 : 0.5; // Half the penalty for winners
+    const adjustment = (absPercent / 2) * factor;
     return isPositive ? -adjustment : adjustment;
   }
 
@@ -477,22 +480,33 @@ export function calculateEarningsScore(earningsDate) {
     const timeAdjustment = currentHourET < 16 ? 0.5 : 0;
     daysUntilEarnings -= timeAdjustment;
 
-    // Post-earnings penalty
+    // Post-earnings: slight penalty for 0-3 days after (volatility settling)
     if (daysUntilEarnings < 0) {
       const daysAgo = Math.abs(daysUntilEarnings);
-
       if (daysAgo <= 3) {
-        const hypotheticalScore = Math.pow((30 - Math.abs(daysUntilEarnings)) / 30, 2);
-        const fadeFactor = 1 - (daysAgo / 3);
-        return -hypotheticalScore * fadeFactor;
+        return -0.3 * (1 - daysAgo / 3); // Small fade, max -0.3
+      }
+      // 3-7 days after earnings: slight bonus (post-earnings drift is real)
+      if (daysAgo <= 7) {
+        return 0.2 * (1 - (daysAgo - 3) / 4); // Max +0.2
       }
       return 0;
     }
 
-    if (daysUntilEarnings > 30) return 0;
+    if (daysUntilEarnings > 14) return 0; // Only care about next 2 weeks
 
-    const score = Math.pow((30 - daysUntilEarnings) / 30, 2);
-    return Math.max(0, Math.min(1, score));
+    // INVERTED: Earnings approaching = PENALTY (holding into earnings is gambling)
+    // 1-2 days before: strongest penalty (-0.8 to -1.0)
+    // 3-7 days before: moderate penalty
+    // 7-14 days before: mild penalty
+    if (daysUntilEarnings <= 2) {
+      return -1.0 * (1 - daysUntilEarnings / 3); // Max -1.0 on earnings day
+    }
+    if (daysUntilEarnings <= 7) {
+      return -0.5 * (1 - (daysUntilEarnings - 2) / 5); // Fades from -0.5
+    }
+    // 7-14 days: mild warning
+    return -0.15 * (1 - (daysUntilEarnings - 7) / 7);
 
   } catch (error) {
     return 0;
@@ -519,12 +533,19 @@ export function calculatePricePositionScore(currentPrice, min60d, max60d) {
 
   const position = (currentPrice - min60d) / range;
 
-  if (position <= 0.1) return 1.5;   // Oversold
-  if (position >= 0.9) return -1.5;  // Overbought
+  // Near 60-day low: NEUTRAL (not bullish!) — falling knives are dangerous
+  // Without MACD confirmation, near-low is just as likely to keep falling
+  // Near 60-day high: slight negative (overbought, less upside)
+  if (position <= 0.1) return 0;     // Oversold = neutral (was +1.5, caused buying falling knives)
+  if (position >= 0.9) return -1.0;  // Overbought = moderate penalty (was -1.5)
 
-  // Linear interpolation between 0.1 and 0.9
-  const normalizedPosition = (position - 0.1) / 0.8;
-  return (1.0 - (normalizedPosition * 2.0)) * 1.5;
+  // Middle of range: slight positive for upper-middle (momentum)
+  // Stocks in the 60-80% range are trending up — that's bullish
+  if (position >= 0.6 && position < 0.9) return 0.5; // Trending up, not yet overbought
+
+  // Linear interpolation for 0.1-0.6 range
+  const normalizedPosition = (position - 0.1) / 0.5;
+  return normalizedPosition * 0.5; // 0 to +0.5
 }
 
 // ============================================================================
@@ -626,7 +647,11 @@ export function calculateEffectiveScore(inputs) {
     const now = new Date();
     const daysDiff = Math.floor((now.getTime() - predDate.getTime()) / (1000 * 60 * 60 * 24));
     daysOld = Math.max(0, Math.min(7, daysDiff));
-    timeDecayPenalty = daysOld * 0.6;
+    // Non-linear decay: gentle first 3 days, steeper after
+    // Was: 0.6/day (killed predictions in ~4 days). Now: slower ramp.
+    timeDecayPenalty = daysOld <= 3
+      ? daysOld * 0.2          // 0.2/day for first 3 days (max 0.6)
+      : 0.6 + (daysOld - 3) * 0.5; // 0.5/day after day 3
   }
 
   // STEP 7: MACD adjustment (priority: weighted > improved > slope > legacy)

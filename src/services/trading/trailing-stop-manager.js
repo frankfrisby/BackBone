@@ -40,17 +40,23 @@ import { isMarketOpen } from "./auto-trader.js";
  * @returns {number} Trailing stop percentage (always >= 1 for winners, 2 for losers)
  */
 export const calculateStopLossPercent = (gainPercent) => {
-  // Base 2% stop for losing or flat positions
+  // Base 3.5% stop for losing or flat positions — wider to survive intraday noise
+  // (2% was too tight; normal intraday volatility is 1-3%, causing premature stop-outs)
   if (gainPercent <= 0) {
-    return 2;
+    return 3.5;
+  }
+
+  // Small gains (0-5%): keep wider stop to let the trade develop
+  if (gainPercent < 5) {
+    return 3.0; // Don't tighten until we have a real winner
   }
 
   // Discretize raw gain to 2% steps, then take 50%
   const gainThreshold = Math.floor(gainPercent / 2) * 2;
   const stopPercent = gainThreshold * 0.5;
 
-  // Minimum 1% for any winning position
-  return Math.max(1, stopPercent);
+  // Minimum 2% for any winning position (was 1%, too tight)
+  return Math.max(2, stopPercent);
 };
 
 /**

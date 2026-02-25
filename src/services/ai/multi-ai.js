@@ -1297,7 +1297,8 @@ export const executeAgenticTask = async (task, workDir, onOutput, options = {}) 
         cwd,
         shell: true,
         stdio: ["pipe", "pipe", "pipe"],
-        env: { ...process.env, FORCE_COLOR: "0", CODEX_HOME: codexHome }
+        env: { ...process.env, FORCE_COLOR: "0", CODEX_HOME: codexHome },
+        windowsHide: true,
       });
 
       if (proc.stdin) {

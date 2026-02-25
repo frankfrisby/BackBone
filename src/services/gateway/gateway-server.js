@@ -84,6 +84,7 @@ export class GatewayServer extends EventEmitter {
     this.port = opts.port || DEFAULT_PORT;
     this.bind = opts.bind || "127.0.0.1"; // loopback only by default
     this.secret = opts.secret || process.env.BACKBONE_GATEWAY_SECRET || null;
+    this.requireSecret = opts.requireSecret ?? (String(process.env.BACKBONE_GATEWAY_REQUIRE_SECRET || "1") !== "0");
     this.clients = new Map();      // id → GatewayClient
     this.sessions = new Map();     // sessionId → session state
     this.activeAgents = new Map(); // sessionId → agent handle
@@ -168,7 +169,18 @@ export class GatewayServer extends EventEmitter {
       }));
     } else if (req.url === "/status") {
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(this.getStatus()));
+      if (this.requireSecret) {
+        res.end(JSON.stringify({
+          running: true,
+          port: this.port,
+          bind: this.bind,
+          uptime: process.uptime(),
+          authRequired: true,
+          pid: process.pid,
+        }));
+      } else {
+        res.end(JSON.stringify(this.getStatus()));
+      }
     } else {
       res.writeHead(404);
       res.end("Not found");
@@ -208,9 +220,11 @@ export class GatewayServer extends EventEmitter {
     ws.on("pong", () => { client.lastPing = Date.now(); });
 
     // Auto-auth if no secret configured (local-only mode)
-    if (!this.secret) {
+    if (!this.requireSecret && !this.secret) {
       client.authenticated = true;
       client.send(MSG.AUTH_OK, { clientId: id });
+    } else if (this.requireSecret && !this.secret) {
+      client.send(MSG.AUTH_FAIL, { message: "Gateway secret required" });
     }
   }
 

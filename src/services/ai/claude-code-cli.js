@@ -125,6 +125,7 @@ export const isClaudeCodeInstalledAsync = async () => {
       shell: true,
       stdio: ["pipe", "pipe", "pipe"],
       env: getClaudeProcessEnv(),
+      windowsHide: true,
     });
 
     let output = "";
@@ -462,6 +463,7 @@ export const runClaudeCodePrompt = async (prompt, options = {}) => {
       shell: true,
       cwd: options.cwd || process.cwd(),
       env: getClaudeProcessEnv(),
+      windowsHide: true,
     });
 
     let stdout = "";
@@ -587,6 +589,38 @@ const detectAuthError = (text) => {
 export { detectAuthError };
 
 /**
+ * Build engine-mode prompt: prepends CLI tool catalog so the engine
+ * uses `node tools/backbone-cli.js` via Bash instead of MCP tools.
+ * This saves ~15K tokens of MCP schema overhead per request.
+ */
+const ENGINE_CLI_CATALOG = `
+You have access to BACKBONE tools via CLI. Call them with Bash:
+  node tools/backbone-cli.js <domain> <action> [--key=value]
+
+Domains & key actions:
+  trading   portfolio | positions | signals | quote --symbol=X | top | worst | score --symbol=X | research --symbol=X | convictions | add-conviction --symbol=X --conviction=0.9 --reason="..." | recession | history
+  health    summary | sleep | readiness | activity
+  life      goals [--status=active] | beliefs | backlog | scores | thesis | add-goal --title="..." --category=health
+  portfolio networth | accounts | holdings | overview | status
+  news      latest | market
+  projects  list | create --name=X | status
+  messaging send --message="..." | notify --type=alert --message="..."
+  contacts  list | search --query=X | add --name=X --category=friends | profile --name=X
+  calendar  today | upcoming
+  email     recent | unread | search --query=X
+
+For the full tool registry:
+  node tools/cli.js list
+  node tools/cli.js run <tool-id> [--args]
+
+IMPORTANT: Prefer using these CLI commands via Bash over MCP tools. They return JSON to stdout.
+`;
+
+function buildEnginePrompt(prompt) {
+  return ENGINE_CLI_CATALOG + "\n" + prompt;
+}
+
+/**
  * Run Claude Code with streaming output
  * Returns an EventEmitter that emits 'data', 'tool', 'complete', and 'error' events
  *
@@ -636,20 +670,40 @@ export const runClaudeCodeStreaming = async (prompt, options = {}) => {
   const modelToUse = options.model || getCurrentModelInUse();
   const isUsingFallback = modelToUse === FALLBACK_MODEL;
 
+  // ── Engine Mode: CLI-first, minimal MCP ──
+  // When engineMode is set, we restrict MCP to chrome-only and prepend CLI tool catalog
+  // to the prompt so the engine uses Bash + backbone-cli.js instead of MCP tools (~15K token savings).
+  const engineMode = !!options.engineMode;
+  const enginePrompt = engineMode ? buildEnginePrompt(prompt) : prompt;
+
   // Prefer Claude Agent SDK when available (runs in-process, uses `.mcp.json` automatically).
   // Can be disabled with BACKBONE_CLAUDE_AGENT_SDK=0.
   try {
     const useAgentSdk = String(process.env.BACKBONE_CLAUDE_AGENT_SDK || "1") !== "0";
     if (useAgentSdk && (await isClaudeAgentSdkInstalled())) {
-      console.log(`[ClaudeCodeCLI] Using Claude Agent SDK (model: ${modelToUse})`);
-      return await runClaudeAgentSdkStreaming(prompt, {
+      console.log(`[ClaudeCodeCLI] Using Claude Agent SDK (model: ${modelToUse})${engineMode ? " [ENGINE MODE]" : ""}`);
+
+      // In engine mode, only load chrome MCP server (strictMcpConfig prevents auto-loading .mcp.json)
+      const sdkOptions = {
         cwd: options.cwd || process.cwd(),
         timeoutMs: options.timeoutMs || options.timeout || 5 * 60 * 1000,
         permissionMode: options.permissionMode || process.env.BACKBONE_CLAUDE_PERMISSION_MODE || "bypassPermissions",
         model: modelToUse,
         resume: options.resume || false,
         settingSources: options.settingSources || ["project", "user", "local"],
-      });
+      };
+
+      if (engineMode) {
+        // Only include chrome MCP; engine uses backbone-cli.js via Bash for everything else
+        sdkOptions.mcpServers = {
+          "claude-in-chrome": {
+            command: "npx",
+            args: ["-y", "@anthropic-ai/claude-code-mcp-in-chrome"],
+          },
+        };
+      }
+
+      return await runClaudeAgentSdkStreaming(enginePrompt, sdkOptions);
     }
   } catch (err) {
     // Fall back to spawning `claude` CLI below.
@@ -657,17 +711,18 @@ export const runClaudeCodeStreaming = async (prompt, options = {}) => {
   }
 
   // Build args with model selection, stream-json for structured output, and permissions bypass
-  // Auto-discover MCP tool prefixes from .mcp.json so new servers are never missed
+  // In engine mode, use .mcp-engine.json (chrome only); otherwise auto-discover from .mcp.json
+  const mcpConfigFile = engineMode ? ".mcp-engine.json" : ".mcp.json";
   let mcpTools = [];
   try {
-    const mcpJsonPath = path.join(getBackboneRoot(), ".mcp.json");
+    const mcpJsonPath = path.join(getBackboneRoot(), mcpConfigFile);
     if (fs.existsSync(mcpJsonPath)) {
       const mcpConfig = JSON.parse(fs.readFileSync(mcpJsonPath, "utf-8"));
       mcpTools = Object.keys(mcpConfig.mcpServers || {}).map(name => `mcp__${name}`);
     }
   } catch {}
-  // Fallback if .mcp.json is unreadable
-  if (mcpTools.length === 0) {
+  // Fallback if config is unreadable (only for non-engine mode)
+  if (mcpTools.length === 0 && !engineMode) {
     mcpTools = [
       "mcp__backbone-google", "mcp__backbone-linkedin", "mcp__backbone-contacts",
       "mcp__backbone-news", "mcp__backbone-life", "mcp__backbone-health",
@@ -679,16 +734,18 @@ export const runClaudeCodeStreaming = async (prompt, options = {}) => {
     "Read", "Glob", "Grep", "WebFetch", "WebSearch", "Task",
     "Write", "Edit", "Bash", ...mcpTools
   ];
-  const args = [
+  const cliArgs = [
     "--model", modelToUse, "--print",
     "--verbose", "--output-format", "stream-json",
     "--dangerously-skip-permissions",
     ...(fs.existsSync(getBackboneRoot()) ? ["--add-dir", getBackboneRoot()] : []),
-    "--allowedTools", allowedTools.join(",")
+    "--allowedTools", allowedTools.join(","),
+    // In engine mode, point to the minimal MCP config
+    ...(engineMode ? ["--mcp-config", path.join(getBackboneRoot(), ".mcp-engine.json")] : []),
   ];
 
-  console.log(`[ClaudeCodeCLI] Spawning: claude --model ${modelToUse} --print`);
-  console.log(`[ClaudeCodeCLI] Prompt length: ${prompt.length} chars`);
+  console.log(`[ClaudeCodeCLI] Spawning: claude --model ${modelToUse} --print${engineMode ? " [ENGINE MODE]" : ""}`);
+  console.log(`[ClaudeCodeCLI] Prompt length: ${enginePrompt.length} chars`);
   console.log(`[ClaudeCodeCLI] CWD: ${options.cwd || process.cwd()}`);
   console.log(`[ClaudeCodeCLI] Using ${isUsingFallback ? "FALLBACK (Sonnet)" : "PREFERRED (Opus 4.6)"} model`);
 
@@ -696,18 +753,19 @@ export const runClaudeCodeStreaming = async (prompt, options = {}) => {
   const cleanEnv = getClaudeProcessEnv();
   delete cleanEnv.ANTHROPIC_API_KEY;
 
-  const proc = spawn(CLAUDE_CMD, args, {
+  const proc = spawn(CLAUDE_CMD, cliArgs, {
     shell: true,
     cwd: options.cwd || process.cwd(),
     stdio: ["pipe", "pipe", "pipe"],
-    env: cleanEnv
+    env: cleanEnv,
+    windowsHide: true,
   });
 
   console.log(`[ClaudeCodeCLI] Process spawned, PID: ${proc.pid || "unknown"}`);
 
   // Write prompt to stdin and close it to signal end of input
   if (proc.stdin) {
-    proc.stdin.write(prompt);
+    proc.stdin.write(enginePrompt);
     proc.stdin.end();
     console.log(`[ClaudeCodeCLI] Prompt written to stdin, stream closed`);
   } else {

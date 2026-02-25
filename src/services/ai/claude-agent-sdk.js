@@ -154,6 +154,8 @@ export async function runClaudeAgentSdkTask(task, workDir, onOutput, opts = {}) 
     canUseTool,
     ...(model ? { model } : {}),
     ...(opts.resume !== undefined ? { resume: opts.resume } : {}),
+    // Engine mode: restrict MCP servers to reduce token overhead
+    ...(opts.mcpServers ? { mcpServers: opts.mcpServers, strictMcpConfig: true } : {}),
   };
 
   let iterator;
@@ -305,6 +307,7 @@ export const runClaudeAgentSdkStreaming = async (prompt, options = {}) => {
         settingSources: options.settingSources,
         tools: options.tools,
         systemPrompt: options.systemPrompt,
+        mcpServers: options.mcpServers,
       }
     );
 
